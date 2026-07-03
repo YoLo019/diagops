@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from enum import StrEnum
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing_extensions import TypeAliasType
 
 JsonPrimitive = str | int | float | bool | None
@@ -35,3 +36,21 @@ class EvidenceItem(BaseModel):
     summary: str
     payload: dict[str, JsonValue] = Field(default_factory=dict)
     confidence: float = Field(default=1.0, ge=0, le=1, allow_inf_nan=False)
+
+    @field_validator("payload")
+    @classmethod
+    def reject_non_finite_payload_floats(
+        cls, payload: dict[str, JsonValue]
+    ) -> dict[str, JsonValue]:
+        def validate_json_value(value: JsonValue) -> None:
+            if isinstance(value, float) and not math.isfinite(value):
+                raise ValueError("payload must not contain non-finite float values")
+            if isinstance(value, list):
+                for item in value:
+                    validate_json_value(item)
+            if isinstance(value, dict):
+                for item in value.values():
+                    validate_json_value(item)
+
+        validate_json_value(payload)
+        return payload

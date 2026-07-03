@@ -76,7 +76,7 @@ def test_incident_event_rejects_non_positive_time_window():
         )
 
 
-@pytest.mark.parametrize("confidence", [42, -0.1, float("nan")])
+@pytest.mark.parametrize("confidence", [42, -0.1, float("nan"), float("inf")])
 def test_evidence_item_rejects_invalid_confidence(confidence):
     with pytest.raises(ValidationError):
         EvidenceItem(
@@ -88,12 +88,13 @@ def test_evidence_item_rejects_invalid_confidence(confidence):
         )
 
 
-def test_hypothesis_rejects_invalid_confidence():
+@pytest.mark.parametrize("confidence", [42, float("nan")])
+def test_hypothesis_rejects_invalid_confidence(confidence):
     with pytest.raises(ValidationError):
         Hypothesis(
             cause_type=CauseType.DEPLOYMENT_REGRESSION,
             summary="Deployment likely introduced the error",
-            confidence=42,
+            confidence=confidence,
         )
 
 
@@ -105,4 +106,23 @@ def test_evidence_item_rejects_non_json_payload_value():
             timestamp=datetime.fromisoformat("2026-07-03T14:04:00+08:00"),
             summary="NullPointerException increased",
             payload={"bad": object()},
+        )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"x": float("nan")},
+        {"x": float("inf")},
+        {"nested": {"values": [1, float("-inf")]}},
+    ],
+)
+def test_evidence_item_rejects_non_finite_payload_float(payload):
+    with pytest.raises(ValidationError):
+        EvidenceItem(
+            provider=EvidenceProvider.LOG,
+            kind=EvidenceKind.LOG_PATTERN,
+            timestamp=datetime.fromisoformat("2026-07-03T14:04:00+08:00"),
+            summary="NullPointerException increased",
+            payload=payload,
         )
