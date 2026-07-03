@@ -36,7 +36,7 @@ Technology choices should follow these principles:
 | MVP orchestration | Custom diagnosis orchestrator | Keeps control clear and avoids premature framework complexity. |
 | RCA analyzer | Rule-based scoring first | Easier to test and explain than pure LLM reasoning. |
 | LLM usage | Optional report synthesis layer | LLM can polish explanations after facts and hypotheses are structured. |
-| Future agent framework | LangGraph or OpenAI Agents SDK | Add later if multi-step agent state, tool calls, and branching workflows become complex. |
+| Multi-agent execution layer | OpenAI Agents SDK first, LangGraph when workflow state becomes complex | Matches a coordinator-plus-specialists design while keeping the RCA workflow under project control. |
 | Tool abstraction | Provider interfaces | Keeps observability tools replaceable. |
 
 ### Frontend
@@ -344,7 +344,122 @@ Future LLM capabilities:
 4. Code diff explanation.
 5. Runbook recommendation.
 
-## 6. What Not To Add In The MVP
+## 6. Multi-Agent Framework Selection
+
+The project should use OpenDerisk as an architectural reference, but not copy its full complexity in the MVP.
+
+OpenDerisk is best understood as a domain-specific multi-agent RCA framework rather than a generic role-playing agent framework. Its useful ideas are:
+
+1. A coordinator-style SRE agent that manages the investigation.
+2. Specialist agents for data, code, reporting, visualization, and diagnosis support.
+3. A reasoning layer that works over collected evidence.
+4. A knowledge layer that connects logs, metrics, traces, code, historical cases, and service metadata.
+5. A tool or MCP-style integration layer for external systems.
+6. Evidence chains and visual protocols so conclusions can be inspected and trusted.
+
+The project should therefore use this shape:
+
+```text
+DiagnosisCoordinator
+  -> LogAgent
+  -> MetricAgent
+  -> DeployAgent
+  -> DependencyAgent
+  -> RcaAgent
+  -> ReportAgent
+  -> VisAgent
+```
+
+However, the business model remains owned by this project:
+
+1. Incident events.
+2. Evidence items.
+3. Provider interfaces.
+4. Hypotheses and confidence.
+5. RCA reports.
+6. Golden case evaluation.
+
+The multi-agent SDK should be an execution layer, not the source of the product architecture.
+
+### Final Decision
+
+Use a three-layer approach:
+
+```text
+Layer 1: Project-owned SRE/RCA framework
+  - Domain models
+  - Provider interfaces
+  - Evidence model
+  - Diagnosis workflow
+  - Rule-based RCA analyzer
+  - Report and evaluation model
+
+Layer 2: Agent execution SDK
+  - Agent calls
+  - Tool calls
+  - Handoffs
+  - Guardrails
+  - Tracing
+
+Layer 3: Replaceable runtime adapters
+  - OpenAI Agents SDK
+  - LangGraph if workflow state becomes complex
+  - Other frameworks only if they fit the RCA model
+```
+
+### MVP Choice
+
+The MVP should use a custom `DiagnosisOrchestrator` and not introduce a full multi-agent framework yet.
+
+Reason:
+
+1. The first risk is whether the RCA evidence loop is useful, not whether agents can talk to each other.
+2. Rule-based analysis is easier to evaluate with golden cases.
+3. Provider interfaces and evidence schemas need to stabilize before agent abstractions are added.
+4. A simple orchestrator keeps debugging and testing direct.
+
+### Multi-Agent V1 Choice
+
+Use OpenAI Agents SDK as the first real multi-agent execution layer.
+
+Recommended pattern:
+
+1. `DiagnosisCoordinator` stays in control of the full investigation.
+2. Specialist agents are exposed as tools or controlled handoffs.
+3. Guardrails prevent agents from inventing evidence or remediation actions.
+4. Tracing records which agent used which tool and which evidence it cited.
+
+This fits the OpenDerisk-inspired coordinator-plus-specialists structure without surrendering the RCA workflow to a black-box agent runtime.
+
+### Complex Workflow V2 Choice
+
+Consider LangGraph if the diagnosis process grows into a stateful workflow with:
+
+1. Parallel diagnosis branches.
+2. Retries and fallback paths.
+3. Human approval checkpoints.
+4. Long-running investigations.
+5. Resume and recovery requirements.
+6. Explicit graph visualization of diagnosis states.
+
+LangGraph should be introduced only when the workflow actually needs graph-level state control.
+
+### CrewAI Position
+
+CrewAI should not be the core framework for this project.
+
+It is useful for quickly demonstrating role-based agent collaboration, but this project needs stronger control over:
+
+1. Evidence schemas.
+2. Provider interfaces.
+3. Deterministic RCA scoring.
+4. Auditability.
+5. Replayable investigation sessions.
+6. Golden case evaluation.
+
+CrewAI can be used for experiments or demos, but the production architecture should not depend on it.
+
+## 7. What Not To Add In The MVP
 
 Avoid these until the evidence loop is useful:
 
@@ -359,7 +474,7 @@ Avoid these until the evidence loop is useful:
 
 These may become useful later, but they are not needed to prove the first RCA workflow.
 
-## 7. Suggested Repository Layout
+## 8. Suggested Repository Layout
 
 ```text
 backend/
@@ -400,7 +515,7 @@ docs/
     plans/
 ```
 
-## 8. First Implementation Recommendation
+## 9. First Implementation Recommendation
 
 Start with the backend only:
 
@@ -415,4 +530,3 @@ Start with the backend only:
 After the backend loop works, add the frontend detail page and simulated incident launcher.
 
 This keeps the first version focused: prove that an event can enter the system and produce a useful, evidence-backed RCA report.
-
