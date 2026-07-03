@@ -1,0 +1,14 @@
+{
+  "source": "simulated",
+  "service": "report-service",
+  "environment": "prod",
+  "severity": "warning",
+  "title": "Report queries became slow",
+  "description": "report-service endpoints slowed down because database query latency increased",
+  "started_at": "2026-07-03T17:30:00+08:00",
+  "time_window_minutes": 30,
+  "signals": {
+    "latency": "high",
+    "database": "slow"
+  }
+}
