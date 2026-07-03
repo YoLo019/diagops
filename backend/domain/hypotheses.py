@@ -17,7 +17,7 @@ class Hypothesis(BaseModel):
     id: str = Field(default_factory=lambda: f"hyp-{uuid4().hex}")
     cause_type: CauseType
     summary: str
-    confidence: float
+    confidence: float = Field(ge=0, le=1, allow_inf_nan=False)
     supporting_evidence_ids: list[str] = Field(default_factory=list)
     contradicting_evidence_ids: list[str] = Field(default_factory=list)
     next_actions: list[str] = Field(default_factory=list)

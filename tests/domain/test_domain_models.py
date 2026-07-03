@@ -1,5 +1,8 @@
 from datetime import datetime
 
+import pytest
+from pydantic import ValidationError
+
 from backend.domain.events import IncidentEvent, IncidentSource, Severity
 from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
 from backend.domain.hypotheses import CauseType, Hypothesis
@@ -57,3 +60,49 @@ def test_report_contains_markdown_and_hypotheses():
     )
 
     assert report.markdown == "# RCA Report"
+
+
+def test_incident_event_rejects_non_positive_time_window():
+    with pytest.raises(ValidationError):
+        IncidentEvent(
+            source=IncidentSource.SIMULATED,
+            service="payment-service",
+            environment="prod",
+            severity=Severity.CRITICAL,
+            title="5xx error rate increased",
+            description="payment-service started returning 500 errors",
+            started_at=datetime.fromisoformat("2026-07-03T14:03:00+08:00"),
+            time_window_minutes=-5,
+        )
+
+
+@pytest.mark.parametrize("confidence", [42, -0.1, float("nan")])
+def test_evidence_item_rejects_invalid_confidence(confidence):
+    with pytest.raises(ValidationError):
+        EvidenceItem(
+            provider=EvidenceProvider.LOG,
+            kind=EvidenceKind.LOG_PATTERN,
+            timestamp=datetime.fromisoformat("2026-07-03T14:04:00+08:00"),
+            summary="NullPointerException increased",
+            confidence=confidence,
+        )
+
+
+def test_hypothesis_rejects_invalid_confidence():
+    with pytest.raises(ValidationError):
+        Hypothesis(
+            cause_type=CauseType.DEPLOYMENT_REGRESSION,
+            summary="Deployment likely introduced the error",
+            confidence=42,
+        )
+
+
+def test_evidence_item_rejects_non_json_payload_value():
+    with pytest.raises(ValidationError):
+        EvidenceItem(
+            provider=EvidenceProvider.LOG,
+            kind=EvidenceKind.LOG_PATTERN,
+            timestamp=datetime.fromisoformat("2026-07-03T14:04:00+08:00"),
+            summary="NullPointerException increased",
+            payload={"bad": object()},
+        )

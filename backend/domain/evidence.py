@@ -1,8 +1,14 @@
+from __future__ import annotations
+
 from datetime import datetime
 from enum import StrEnum
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
+from typing_extensions import TypeAliasType
+
+JsonPrimitive = str | int | float | bool | None
+JsonValue = TypeAliasType("JsonValue", JsonPrimitive | list["JsonValue"] | dict[str, "JsonValue"])
 
 
 class EvidenceProvider(StrEnum):
@@ -27,5 +33,5 @@ class EvidenceItem(BaseModel):
     kind: EvidenceKind
     timestamp: datetime
     summary: str
-    payload: dict[str, object] = Field(default_factory=dict)
-    confidence: float = 1.0
+    payload: dict[str, JsonValue] = Field(default_factory=dict)
+    confidence: float = Field(default=1.0, ge=0, le=1, allow_inf_nan=False)

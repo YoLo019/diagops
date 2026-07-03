@@ -24,5 +24,5 @@ class IncidentEvent(BaseModel):
     title: str
     description: str
     started_at: datetime
-    time_window_minutes: int = 30
+    time_window_minutes: int = Field(default=30, gt=0)
     signals: dict[str, str] = Field(default_factory=dict)
