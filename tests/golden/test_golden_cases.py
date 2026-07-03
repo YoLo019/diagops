@@ -113,6 +113,7 @@ def test_golden_case_primary_cause_and_report_evidence(
     hypotheses = RcaAnalyzer().analyze(event, evidence)
     report = ReportGenerator().generate(f"inv-{case_id}", event, evidence, hypotheses)
     top = hypotheses[0]
+    report_top = report.hypotheses[0]
     expected_evidence = find_evidence(
         evidence,
         provider=evidence_provider,
@@ -123,9 +124,9 @@ def test_golden_case_primary_cause_and_report_evidence(
     supporting_section = extract_section(report.markdown, "支持该结论的证据")
 
     assert top.cause_type == expected_cause
-    assert expected_evidence.id in top.supporting_evidence_ids
+    assert report_top == top
+    assert expected_evidence.id in report_top.supporting_evidence_ids
     assert expected_evidence.summary in supporting_section
-    assert report.hypotheses[0].cause_type == top.cause_type
     assert report.summary == top.summary
     assert f"`{top.cause_type}`" in report.markdown
     assert top.summary in report.markdown
