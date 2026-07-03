@@ -22,3 +22,27 @@ Health check:
 ```bash
 curl http://127.0.0.1:8000/health
 ```
+
+## Trigger A Simulated Incident
+
+```bash
+curl -X POST http://127.0.0.1:8000/events/simulated/deployment_regression
+```
+
+## Send A Webhook Event
+
+```bash
+curl -X POST http://127.0.0.1:8000/events \
+  -H "Content-Type: application/json" \
+  -d @docs/examples/webhook-event.json
+```
+
+## List Investigations
+
+```bash
+curl http://127.0.0.1:8000/investigations
+```
+
+## MVP Boundaries
+
+The MVP does not automatically modify production systems. It only collects evidence, ranks hypotheses, and generates an RCA report for engineer review.
