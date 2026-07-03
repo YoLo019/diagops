@@ -16,4 +16,17 @@ class AppContainer:
         )
 
 
-container = AppContainer()
+_container: AppContainer | None = None
+
+
+def get_container() -> AppContainer:
+    global _container
+    if _container is None:
+        _container = AppContainer()
+    return _container
+
+
+def reset_container() -> AppContainer:
+    global _container
+    _container = AppContainer()
+    return _container

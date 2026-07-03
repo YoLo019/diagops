@@ -1,6 +1,22 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from backend.main import app
+from backend.services.container import reset_container
+
+
+@pytest.fixture(autouse=True)
+def reset_api_container():
+    reset_container()
+
+
+def test_list_investigations_starts_empty():
+    client = TestClient(app)
+
+    response = client.get("/investigations")
+
+    assert response.status_code == 200
+    assert response.json() == []
 
 
 def test_get_investigation_after_simulated_event():
