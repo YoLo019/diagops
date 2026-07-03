@@ -88,7 +88,7 @@ def test_evidence_item_rejects_invalid_confidence(confidence):
         )
 
 
-@pytest.mark.parametrize("confidence", [42, float("nan")])
+@pytest.mark.parametrize("confidence", [42, -0.1, float("nan"), float("inf"), float("-inf")])
 def test_hypothesis_rejects_invalid_confidence(confidence):
     with pytest.raises(ValidationError):
         Hypothesis(
