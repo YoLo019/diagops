@@ -1,0 +1,15 @@
+{
+  "source": "simulated",
+  "service": "profile-service",
+  "environment": "prod",
+  "severity": "warning",
+  "title": "One instance has abnormal error rate",
+  "description": "profile-service has one instance with high CPU and many errors",
+  "started_at": "2026-07-03T18:40:00+08:00",
+  "time_window_minutes": 30,
+  "signals": {
+    "error_rate": "medium",
+    "instance": "abnormal",
+    "cpu": "high"
+  }
+}

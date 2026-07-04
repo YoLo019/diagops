@@ -1,0 +1,15 @@
+{
+  "source": "simulated",
+  "service": "payment-service",
+  "environment": "prod",
+  "severity": "critical",
+  "title": "5xx error rate increased after deployment",
+  "description": "payment-service started returning many 500 responses after v1.8.2 deployment",
+  "started_at": "2026-07-03T14:03:00+08:00",
+  "time_window_minutes": 30,
+  "signals": {
+    "error_rate": "high",
+    "latency": "normal",
+    "qps": "normal"
+  }
+}

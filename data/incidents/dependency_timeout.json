@@ -1,0 +1,15 @@
+{
+  "source": "simulated",
+  "service": "order-service",
+  "environment": "prod",
+  "severity": "critical",
+  "title": "Order API timeout increased",
+  "description": "order-service timeout increased when inventory-service became slow",
+  "started_at": "2026-07-03T16:20:00+08:00",
+  "time_window_minutes": 30,
+  "signals": {
+    "error_rate": "high",
+    "latency": "high",
+    "dependency": "inventory-service"
+  }
+}
