@@ -52,7 +52,11 @@ class RecommendedAction(BaseModel):
     def validate_action_contract(self) -> "RecommendedAction":
         if not self.supporting_evidence_ids:
             raise ValueError("supporting_evidence_ids must not be empty")
-        if self.risk_level in {ActionRiskLevel.MEDIUM, ActionRiskLevel.HIGH} and not self.requires_approval:
+        needs_approval = self.risk_level in {
+            ActionRiskLevel.MEDIUM,
+            ActionRiskLevel.HIGH,
+        }
+        if needs_approval and not self.requires_approval:
             raise ValueError("medium and high risk actions require approval")
         return self
 
