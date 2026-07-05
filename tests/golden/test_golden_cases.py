@@ -1,5 +1,6 @@
 import pytest
 
+from backend.diagnosis.action_planner import ActionPlanner
 from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
 from backend.domain.hypotheses import CauseType
 from backend.providers.registry import build_mock_provider_registry
@@ -111,7 +112,15 @@ def test_golden_case_primary_cause_and_report_evidence(
     event = load_incident_case(case_id)
     evidence = build_mock_provider_registry().collect_all(event)
     hypotheses = RcaAnalyzer().analyze(event, evidence)
-    report = ReportGenerator().generate(f"inv-{case_id}", event, evidence, hypotheses)
+    actions, verifications = ActionPlanner().plan(event, evidence, hypotheses)
+    report = ReportGenerator().generate(
+        f"inv-{case_id}",
+        event,
+        evidence,
+        hypotheses,
+        actions=actions,
+        verification_suggestions=verifications,
+    )
     top = hypotheses[0]
     report_top = report.hypotheses[0]
     expected_evidence = find_evidence(
@@ -131,6 +140,22 @@ def test_golden_case_primary_cause_and_report_evidence(
     assert f"`{top.cause_type}`" in report.markdown
     assert top.summary in report.markdown
     assert f"{top.confidence:.2f}" in report.markdown
+    assert report.action_ids == [action.id for action in actions]
+    assert report.verification_suggestion_ids == [
+        suggestion.id for suggestion in verifications
+    ]
+    assert actions
+    assert verifications
+    assert all(action.supporting_evidence_ids for action in actions)
+    evidence_ids = {item.id for item in evidence}
+    for action in actions:
+        assert set(action.supporting_evidence_ids) <= evidence_ids
+        if action.risk_level in {"medium", "high"}:
+            assert action.requires_approval is True
+    assert "建议动作" in report.markdown
+    assert "需要审批的动作" in report.markdown
+    assert "验证建议" in report.markdown
+    assert "V2 未执行该动作" in report.markdown
     assert "事实与推断" in report.markdown
     assert "观察到的事实" in report.markdown
     assert "推断结论/不确定性" in report.markdown
