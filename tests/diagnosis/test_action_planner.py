@@ -58,3 +58,26 @@ def test_unknown_generates_manual_follow_up_action():
     assert actions[0].requires_approval is False
     assert actions[0].supporting_evidence_ids
     assert verifications[0].expected_signal == "new evidence is collected"
+
+
+def test_empty_evidence_generates_manual_follow_up_even_with_hypothesis_ids():
+    event = load_incident_case("deployment_regression")
+    actions, verifications = ActionPlanner().plan(
+        event,
+        evidence=[],
+        hypotheses=[
+            Hypothesis(
+                cause_type=CauseType.DEPLOYMENT_REGRESSION,
+                summary="Deployment looks suspicious.",
+                confidence=0.8,
+                supporting_evidence_ids=["ev-stale"],
+                contradicting_evidence_ids=[],
+                next_actions=["Check deployment."],
+            ),
+        ],
+    )
+
+    assert actions[0].action_type == ActionType.MANUAL_FOLLOW_UP
+    assert actions[0].risk_level == ActionRiskLevel.LOW
+    assert actions[0].requires_approval is False
+    assert verifications[0].expected_signal == "new evidence is collected"

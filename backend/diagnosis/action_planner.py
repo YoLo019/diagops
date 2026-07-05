@@ -18,6 +18,8 @@ class ActionPlanner:
     ) -> tuple[list[RecommendedAction], list[VerificationSuggestion]]:
         if not hypotheses:
             return self._manual_follow_up("No hypotheses were generated.")
+        if not evidence:
+            return self._manual_follow_up("No evidence was available.")
 
         top = hypotheses[0]
         supporting_ids = top.supporting_evidence_ids or [item.id for item in evidence[:1]]
