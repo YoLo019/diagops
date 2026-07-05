@@ -70,4 +70,7 @@ def test_provider_registry_logs_provider_status(caplog):
 
     messages = "\n".join(item.message for item in caplog.records)
     assert "provider completed" in messages
+    assert "provider=" in messages
+    assert "status=success" in messages
     assert "duration_ms" in messages
+    assert "evidence_count=" in messages
