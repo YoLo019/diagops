@@ -4,6 +4,8 @@ import pytest
 
 from backend.db.models import InvestigationRecord, InvestigationStatus
 from backend.db.repositories import InMemoryInvestigationRepository
+from backend.diagnosis.action_planner import ActionPlanner
+from backend.diagnosis.coordinator import DiagnosisCoordinator
 from backend.diagnosis.orchestrator import DiagnosisOrchestrator
 from backend.domain.actions import (
     ActionRiskLevel,
@@ -16,6 +18,24 @@ from backend.providers.registry import build_mock_provider_registry
 from backend.rca.analyzer import RcaAnalyzer
 from backend.reports.generator import ReportGenerator
 from backend.services.incident_cases import load_incident_case
+
+
+def build_v2_orchestrator(
+    repository=None,
+    providers=None,
+    analyzer=None,
+    report_generator=None,
+):
+    repository = repository or InMemoryInvestigationRepository()
+    providers = providers or build_mock_provider_registry()
+    return DiagnosisOrchestrator(
+        repository=repository,
+        providers=providers,
+        analyzer=analyzer or RcaAnalyzer(),
+        report_generator=report_generator or ReportGenerator(),
+        coordinator=DiagnosisCoordinator(providers),
+        action_planner=ActionPlanner(),
+    )
 
 
 def test_orchestrator_creates_investigation_with_report():
@@ -34,6 +54,45 @@ def test_orchestrator_creates_investigation_with_report():
     assert stored.report is not None
     assert stored.hypotheses[0].cause_type == CauseType.DEPLOYMENT_REGRESSION
     assert "最可能根因" in stored.report.markdown
+
+
+def test_orchestrator_persists_completed_record_with_actions_and_verifications():
+    repository = InMemoryInvestigationRepository()
+    orchestrator = build_v2_orchestrator(repository=repository)
+    event = load_incident_case("deployment_regression")
+
+    record = orchestrator.run(event)
+    saved = repository.get(record.id)
+
+    assert saved.status == InvestigationStatus.COMPLETED
+    assert saved.evidence
+    assert saved.hypotheses
+    assert saved.report is not None
+    assert saved.actions
+    assert saved.verification_suggestions
+    assert saved.completed_at is not None
+
+
+def test_orchestrator_persists_failed_record_when_report_generation_fails():
+    class BrokenReportGenerator:
+        def generate(self, *args, **kwargs):
+            raise RuntimeError("markdown exploded")
+
+    repository = InMemoryInvestigationRepository()
+    orchestrator = build_v2_orchestrator(
+        repository=repository,
+        report_generator=BrokenReportGenerator(),
+    )
+    event = load_incident_case("deployment_regression")
+
+    record = orchestrator.run(event)
+    saved = repository.get(record.id)
+
+    assert record.status == InvestigationStatus.FAILED
+    assert saved.status == InvestigationStatus.FAILED
+    assert saved.failure_reason == "markdown exploded"
+    assert saved.evidence
+    assert saved.hypotheses
 
 
 def test_repository_rejects_unknown_investigation_id():
