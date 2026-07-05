@@ -42,12 +42,19 @@ class DiagnosisOrchestrator:
         try:
             context = self.coordinator.collect(event)
             evidence = context.evidence
+            record.evidence = evidence
+            record.updated_at = datetime.now(UTC)
+            self.repository.save(record)
+
             hypotheses = self.analyzer.analyze(event, evidence)
+            record.hypotheses = hypotheses
+            record.updated_at = datetime.now(UTC)
+            self.repository.save(record)
+
             actions, verifications = self.action_planner.plan(event, evidence, hypotheses)
             evidence = self._ensure_action_evidence(evidence, actions)
 
             record.evidence = evidence
-            record.hypotheses = hypotheses
             record.actions = actions
             record.verification_suggestions = verifications
             report = self.report_generator.generate(

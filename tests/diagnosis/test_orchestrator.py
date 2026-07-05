@@ -95,6 +95,33 @@ def test_orchestrator_persists_failed_record_when_report_generation_fails():
     assert saved.hypotheses
 
 
+def test_orchestrator_preserves_context_when_action_planner_fails():
+    class BrokenActionPlanner:
+        def plan(self, *args, **kwargs):
+            raise RuntimeError("planner exploded")
+
+    repository = InMemoryInvestigationRepository()
+    providers = build_mock_provider_registry()
+    orchestrator = DiagnosisOrchestrator(
+        repository=repository,
+        providers=providers,
+        analyzer=RcaAnalyzer(),
+        report_generator=ReportGenerator(),
+        coordinator=DiagnosisCoordinator(providers),
+        action_planner=BrokenActionPlanner(),
+    )
+    event = load_incident_case("deployment_regression")
+
+    record = orchestrator.run(event)
+    saved = repository.get(record.id)
+
+    assert saved.status == InvestigationStatus.FAILED
+    assert saved.failure_reason == "planner exploded"
+    assert saved.evidence
+    assert saved.hypotheses
+    assert saved.actions == []
+
+
 def test_repository_rejects_unknown_investigation_id():
     repository = InMemoryInvestigationRepository()
 
