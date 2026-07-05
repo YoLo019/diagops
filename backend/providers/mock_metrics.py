@@ -2,16 +2,19 @@ from datetime import timedelta
 
 from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
+from backend.providers.results import ProviderResult
 
 
 class MockMetricProvider:
-    def collect(self, event: IncidentEvent) -> list[EvidenceItem]:
+    provider = EvidenceProvider.METRIC
+
+    def collect(self, event: IncidentEvent) -> ProviderResult:
         evidence: list[EvidenceItem] = []
 
         if event.signals.get("qps") == "high":
             evidence.append(
                 EvidenceItem(
-                    provider=EvidenceProvider.METRIC,
+                    provider=self.provider,
                     kind=EvidenceKind.METRIC_TREND,
                     timestamp=event.started_at - timedelta(minutes=2),
                     summary="QPS increased sharply before latency and errors increased",
@@ -21,7 +24,7 @@ class MockMetricProvider:
         elif event.service == "payment-service":
             evidence.append(
                 EvidenceItem(
-                    provider=EvidenceProvider.METRIC,
+                    provider=self.provider,
                     kind=EvidenceKind.METRIC_TREND,
                     timestamp=event.started_at,
                     summary="QPS stayed within normal range while 5xx increased",
@@ -32,7 +35,7 @@ class MockMetricProvider:
         if event.signals.get("cpu") == "high":
             evidence.append(
                 EvidenceItem(
-                    provider=EvidenceProvider.METRIC,
+                    provider=self.provider,
                     kind=EvidenceKind.METRIC_TREND,
                     timestamp=event.started_at,
                     summary="One instance has high CPU and abnormal error rate",
@@ -47,7 +50,7 @@ class MockMetricProvider:
         if event.signals.get("database") == "slow":
             evidence.append(
                 EvidenceItem(
-                    provider=EvidenceProvider.METRIC,
+                    provider=self.provider,
                     kind=EvidenceKind.METRIC_TREND,
                     timestamp=event.started_at - timedelta(minutes=1),
                     summary=(
@@ -58,4 +61,4 @@ class MockMetricProvider:
                 )
             )
 
-        return evidence
+        return ProviderResult(provider=self.provider, evidence_items=evidence)
