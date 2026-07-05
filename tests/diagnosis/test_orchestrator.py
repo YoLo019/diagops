@@ -5,6 +5,12 @@ import pytest
 from backend.db.models import InvestigationRecord, InvestigationStatus
 from backend.db.repositories import InMemoryInvestigationRepository
 from backend.diagnosis.orchestrator import DiagnosisOrchestrator
+from backend.domain.actions import (
+    ActionRiskLevel,
+    ActionType,
+    RecommendedAction,
+    VerificationSuggestion,
+)
 from backend.domain.hypotheses import CauseType
 from backend.providers.registry import build_mock_provider_registry
 from backend.rca.analyzer import RcaAnalyzer
@@ -57,3 +63,62 @@ def test_repository_lists_records_by_created_at_descending():
     repository.save(newer)
 
     assert repository.list() == [newer, older]
+
+
+def test_repository_updates_status_and_failure_reason():
+    repository = InMemoryInvestigationRepository()
+    event = load_incident_case("deployment_regression")
+    record = repository.save(InvestigationRecord(event=event))
+
+    updated = repository.update_status(
+        record.id,
+        InvestigationStatus.FAILED,
+        failure_reason="report generation failed",
+    )
+
+    assert updated.status == InvestigationStatus.FAILED
+    assert updated.failure_reason == "report generation failed"
+    assert updated.updated_at >= record.created_at
+
+
+def test_repository_updates_action_and_verification_status():
+    repository = InMemoryInvestigationRepository()
+    event = load_incident_case("deployment_regression")
+    action = RecommendedAction(
+        action_type=ActionType.ROLLBACK_SUGGESTION,
+        title="Evaluate rollback",
+        description="Deployment regression likely.",
+        risk_level=ActionRiskLevel.HIGH,
+        requires_approval=True,
+        supporting_evidence_ids=["ev-1"],
+    )
+    verification = VerificationSuggestion(
+        title="Check 5xx",
+        description="Confirm error rate recovery.",
+        expected_signal="5xx below 1%",
+    )
+    record = repository.save(
+        InvestigationRecord(
+            event=event,
+            actions=[action],
+            verification_suggestions=[verification],
+        )
+    )
+
+    updated_action = repository.update_action_status(
+        record.id,
+        action.id,
+        status="approved",
+        note="owner approved",
+    )
+    updated_verification = repository.update_verification_status(
+        record.id,
+        verification.id,
+        status="passed",
+        result_note="5xx is normal",
+    )
+
+    assert updated_action.status == "approved"
+    assert updated_action.note == "owner approved"
+    assert updated_verification.status == "passed"
+    assert updated_verification.result_note == "5xx is normal"
