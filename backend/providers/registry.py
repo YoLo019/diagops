@@ -33,13 +33,16 @@ class ProviderRegistry:
             results.append(result)
         return results
 
-    def collect_all(self, event: IncidentEvent) -> list[EvidenceItem]:
+    def evidence_from_results(self, results: list[ProviderResult]) -> list[EvidenceItem]:
         evidence: list[EvidenceItem] = []
-        for result in self.collect_results(event):
+        for result in results:
             evidence.extend(result.evidence_items)
             if result.status in {ProviderStatus.FAILED, ProviderStatus.PARTIAL}:
                 evidence.append(result.to_error_evidence())
         return sorted(evidence, key=lambda item: item.timestamp)
+
+    def collect_all(self, event: IncidentEvent) -> list[EvidenceItem]:
+        return self.evidence_from_results(self.collect_results(event))
 
 
 def build_mock_provider_registry() -> ProviderRegistry:
