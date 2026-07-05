@@ -1,3 +1,4 @@
+import logging
 from datetime import UTC, datetime
 
 from backend.db.models import InvestigationRecord, InvestigationStatus
@@ -14,6 +15,8 @@ from backend.domain.evidence import (
 from backend.providers.registry import ProviderRegistry
 from backend.rca.analyzer import RcaAnalyzer
 from backend.reports.generator import ReportGenerator
+
+logger = logging.getLogger(__name__)
 
 
 class DiagnosisOrchestrator:
@@ -37,6 +40,7 @@ class DiagnosisOrchestrator:
         record = self.repository.save(
             InvestigationRecord(event=event, status=InvestigationStatus.PENDING)
         )
+        logger.info("investigation started id=%s service=%s", record.id, event.service)
         self.repository.update_status(record.id, InvestigationStatus.RUNNING)
 
         try:
@@ -68,8 +72,18 @@ class DiagnosisOrchestrator:
             record.report = report
             record.updated_at = datetime.now(UTC)
             self.repository.save(record)
-            return self.repository.update_status(record.id, InvestigationStatus.COMPLETED)
+            completed = self.repository.update_status(record.id, InvestigationStatus.COMPLETED)
+            logger.info(
+                "investigation completed id=%s evidence_count=%s "
+                "action_count=%s verification_count=%s",
+                completed.id,
+                len(completed.evidence),
+                len(completed.actions),
+                len(completed.verification_suggestions),
+            )
+            return completed
         except Exception as exc:
+            logger.exception("investigation failed id=%s reason=%s", record.id, exc)
             record.failure_reason = str(exc)
             record.updated_at = datetime.now(UTC)
             self.repository.save(record)

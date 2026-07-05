@@ -1,3 +1,4 @@
+import logging
 from time import perf_counter
 
 from backend.domain.events import IncidentEvent
@@ -10,6 +11,8 @@ from backend.providers.mock_metrics import MockMetricProvider
 from backend.providers.mock_related_alerts import MockRelatedAlertProvider
 from backend.providers.mock_service_catalog import MockServiceCatalogProvider
 from backend.providers.results import ProviderResult, ProviderStatus
+
+logger = logging.getLogger(__name__)
 
 
 class ProviderRegistry:
@@ -30,6 +33,13 @@ class ProviderRegistry:
                     error_message=str(exc),
                     duration_ms=int((perf_counter() - started) * 1000),
                 )
+            logger.info(
+                "provider completed provider=%s status=%s duration_ms=%s evidence_count=%s",
+                result.provider,
+                result.status,
+                result.duration_ms,
+                len(result.evidence_items),
+            )
             results.append(result)
         return results
 

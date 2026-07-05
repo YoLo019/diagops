@@ -1,3 +1,5 @@
+import logging
+
 from backend.domain.evidence import EvidenceKind, EvidenceProvider, EvidenceStatus
 from backend.providers.registry import ProviderRegistry, build_mock_provider_registry
 from backend.services.incident_cases import load_incident_case
@@ -57,3 +59,15 @@ def test_registry_converts_provider_failure_to_error_evidence():
     assert evidence[0].kind == EvidenceKind.PROVIDER_ERROR
     assert evidence[0].status == EvidenceStatus.FAILED
     assert evidence[0].error_message == "provider exploded"
+
+
+def test_provider_registry_logs_provider_status(caplog):
+    event = load_incident_case("deployment_regression")
+    registry = build_mock_provider_registry()
+
+    with caplog.at_level(logging.INFO):
+        registry.collect_results(event)
+
+    messages = "\n".join(item.message for item in caplog.records)
+    assert "provider completed" in messages
+    assert "duration_ms" in messages

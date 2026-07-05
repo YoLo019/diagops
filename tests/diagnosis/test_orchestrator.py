@@ -1,3 +1,4 @@
+import logging
 from datetime import UTC, datetime
 
 import pytest
@@ -208,3 +209,17 @@ def test_repository_updates_action_and_verification_status():
     assert updated_action.note == "owner approved"
     assert updated_verification.status == "passed"
     assert updated_verification.result_note == "5xx is normal"
+
+
+def test_orchestrator_logs_investigation_lifecycle(caplog):
+    repository = InMemoryInvestigationRepository()
+    orchestrator = build_v2_orchestrator(repository=repository)
+    event = load_incident_case("deployment_regression")
+
+    with caplog.at_level(logging.INFO):
+        record = orchestrator.run(event)
+
+    messages = "\n".join(item.message for item in caplog.records)
+    assert record.id in messages
+    assert "investigation started" in messages
+    assert "investigation completed" in messages
