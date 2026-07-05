@@ -18,7 +18,7 @@ class ProviderResult(BaseModel):
     status: ProviderStatus = ProviderStatus.SUCCESS
     evidence_items: list[EvidenceItem] = Field(default_factory=list)
     error_message: str | None = None
-    duration_ms: int = 0
+    duration_ms: int = Field(default=0, ge=0)
 
     def to_error_evidence(self) -> EvidenceItem:
         status = EvidenceStatus(self.status)

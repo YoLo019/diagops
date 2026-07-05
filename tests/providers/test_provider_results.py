@@ -1,3 +1,6 @@
+import pytest
+from pydantic import ValidationError
+
 from backend.domain.evidence import EvidenceKind, EvidenceProvider, EvidenceStatus
 from backend.providers.results import ProviderResult, ProviderStatus
 
@@ -8,6 +11,11 @@ def test_provider_result_defaults_to_success():
     assert result.status == ProviderStatus.SUCCESS
     assert result.evidence_items == []
     assert result.duration_ms >= 0
+
+
+def test_provider_result_rejects_negative_duration():
+    with pytest.raises(ValidationError):
+        ProviderResult(provider=EvidenceProvider.LOG, duration_ms=-1)
 
 
 def test_failed_provider_result_creates_error_evidence():
