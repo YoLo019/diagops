@@ -5,8 +5,12 @@ from pydantic import BaseModel
 
 from backend.api.events import InvestigationSummary, to_summary
 from backend.db.models import InvestigationRecord
+from backend.diagnosis.context import SpecialistResult
 from backend.domain.actions import ActionStatus, VerificationStatus
 from backend.domain.events import IncidentEvent, IncidentSource, Severity
+from backend.domain.evidence import EvidenceItem, EvidenceProvider
+from backend.domain.reports import IncidentReport
+from backend.providers.results import ProviderResult
 from backend.services.container import get_container
 
 router = APIRouter(prefix="/investigations", tags=["investigations"])
@@ -26,6 +30,18 @@ class UpdateActionStatusRequest(BaseModel):
 class UpdateVerificationStatusRequest(BaseModel):
     status: VerificationStatus
     result_note: str | None = None
+
+
+def _get_investigation_record(investigation_id: str) -> InvestigationRecord:
+    container = get_container()
+    try:
+        return container.repository.get(investigation_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+def _sorted_evidence(record: InvestigationRecord) -> list[EvidenceItem]:
+    return sorted(record.evidence, key=lambda item: (item.timestamp, item.id))
 
 
 @router.get("", response_model=list[InvestigationRecord])
@@ -88,10 +104,42 @@ def update_verification_status(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.get("/{investigation_id}/timeline", response_model=list[EvidenceItem])
+def get_investigation_timeline(investigation_id: str) -> list[EvidenceItem]:
+    record = _get_investigation_record(investigation_id)
+    return _sorted_evidence(record)
+
+
+@router.get("/{investigation_id}/evidence", response_model=list[EvidenceItem])
+def get_investigation_evidence(
+    investigation_id: str,
+    provider: EvidenceProvider | None = None,
+) -> list[EvidenceItem]:
+    record = _get_investigation_record(investigation_id)
+    evidence = record.evidence
+    if provider is not None:
+        return [item for item in evidence if item.provider == provider]
+    return evidence
+
+
+@router.get("/{investigation_id}/provider-results", response_model=list[ProviderResult])
+def get_investigation_provider_results(investigation_id: str) -> list[ProviderResult]:
+    record = _get_investigation_record(investigation_id)
+    return record.provider_results
+
+
+@router.get("/{investigation_id}/specialist-results", response_model=list[SpecialistResult])
+def get_investigation_specialist_results(investigation_id: str) -> list[SpecialistResult]:
+    record = _get_investigation_record(investigation_id)
+    return record.specialist_results
+
+
+@router.get("/{investigation_id}/report", response_model=IncidentReport | None)
+def get_investigation_report(investigation_id: str) -> IncidentReport | None:
+    record = _get_investigation_record(investigation_id)
+    return record.report
+
+
 @router.get("/{investigation_id}", response_model=InvestigationRecord)
 def get_investigation(investigation_id: str) -> InvestigationRecord:
-    container = get_container()
-    try:
-        return container.repository.get(investigation_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _get_investigation_record(investigation_id)
