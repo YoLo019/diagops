@@ -1,19 +1,31 @@
 # DiagOps
 
-DiagOps is an event-driven SRE RCA agent MVP.
+DiagOps is an event-driven SRE RCA agent MVP for application service incidents.
 
-The first version focuses on application service incidents:
+V3 turns the first backend prototype into a local read-only investigation
+platform:
 
-- simulated incidents
-- Webhook incident events
-- mock evidence providers
-- rule-based RCA analysis
-- evidence-backed Markdown reports
+- FastAPI backend with SQLite persistence.
+- Mock, local log, deployment file, service catalog, and optional Prometheus
+  evidence providers.
+- Rule-based RCA, evidence-backed Markdown reports, recommended actions, and
+  verification tracking.
+- Read-only LLM analyst stub that is disabled by default and does not call any
+  network API.
+- Vite React investigation console for list/detail, evidence, hypotheses,
+  action status, verification results, and reports.
 
 ## Local Development
 
+Install Python dependencies:
+
 ```bash
 uv sync
+```
+
+Start the backend:
+
+```bash
 uv run uvicorn backend.main:app --reload
 ```
 
@@ -40,6 +52,79 @@ Build the frontend:
 ```bash
 cd frontend
 npm.cmd run build
+```
+
+## Local Data And Cache Paths
+
+The default SQLite database is stored under the project data directory:
+
+```text
+data/diagops.db
+```
+
+The repository is configured so local generated state stays off C drive where
+possible:
+
+```powershell
+uv cache dir
+# D:\agent\.uv-cache
+
+npm.cmd config get cache
+# D:\agent\.npm-cache
+```
+
+Node.js is expected from the D-drive runtime on this machine:
+
+```powershell
+Get-Command node
+# D:\paiflow\nodejs\node.exe
+```
+
+Do not commit runtime databases, frontend `node_modules`, frontend `dist`, or
+Playwright scratch output.
+
+## Provider Configuration
+
+The default provider config is `config/diagops.yaml`. A copy is available at
+`docs/examples/v3-provider-config.yaml`.
+
+Default providers:
+
+- `mock`: enabled, provides deterministic incident evidence.
+- `log_file`: enabled, reads `data/sample-logs/checkout-service.log`.
+- `deployment_file`: enabled, reads `data/deployments/deployments.json`.
+- `service_catalog`: enabled, reads `config/services.yaml`.
+- `prometheus`: disabled by default; when enabled it queries
+  `http://127.0.0.1:9090` with standard-library HTTP calls.
+
+Override config path:
+
+```powershell
+$env:DIAGOPS_CONFIG = "config/diagops.yaml"
+```
+
+Useful environment overrides:
+
+```powershell
+$env:DIAGOPS_DATABASE_URL = "sqlite:///data/diagops.db"
+$env:DIAGOPS_PROVIDER_MOCK_ENABLED = "true"
+$env:DIAGOPS_LLM_ENABLED = "false"
+```
+
+## Sample Local Data
+
+Run with the sample deployment and log evidence:
+
+```bash
+curl -X POST http://127.0.0.1:8000/events/simulated/deployment_regression
+```
+
+Send a V3 manual investigation:
+
+```bash
+curl -X POST http://127.0.0.1:8000/investigations/manual \
+  -H "Content-Type: application/json" \
+  -d @docs/examples/v3-manual-investigation.json
 ```
 
 ## Trigger A Simulated Incident
@@ -101,6 +186,7 @@ curl -X PATCH http://127.0.0.1:8000/investigations/<investigation_id>/verificati
 
 ## MVP Boundaries
 
-The MVP does not automatically modify production systems. It only collects
-evidence, ranks hypotheses, generates recommended actions, and records
-approval and verification status for engineer review.
+DiagOps is read-only in V3. It does not automatically modify production
+systems. It does not execute rollback, restart, scaling, or configuration
+changes. It collects evidence, ranks hypotheses, generates recommended actions,
+records approval status, and tracks verification results for engineer review.
