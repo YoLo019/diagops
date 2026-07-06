@@ -14,6 +14,7 @@ from backend.providers.mock_logs import MockLogProvider
 from backend.providers.mock_metrics import MockMetricProvider
 from backend.providers.mock_related_alerts import MockRelatedAlertProvider
 from backend.providers.mock_service_catalog import MockServiceCatalogProvider
+from backend.providers.prometheus import PrometheusProvider
 from backend.providers.results import ProviderResult, ProviderStatus
 
 logger = logging.getLogger(__name__)
@@ -95,5 +96,8 @@ def build_provider_registry_from_settings(settings: AppSettings) -> ProviderRegi
 
     if settings.providers.log_file.enabled:
         providers.append(FileLogProvider(settings.providers.log_file.paths))
+
+    if settings.providers.prometheus.enabled:
+        providers.append(PrometheusProvider(settings.providers.prometheus.base_url))
 
     return ProviderRegistry(providers=providers)
