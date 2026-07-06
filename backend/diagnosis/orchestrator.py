@@ -16,6 +16,7 @@ from backend.domain.evidence import (
     EvidenceStatus,
 )
 from backend.providers.registry import ProviderRegistry
+from backend.providers.results import ProviderResult
 from backend.rca.analyzer import RcaAnalyzer
 from backend.reports.generator import ReportGenerator
 from backend.tools.provider_tools import build_provider_tool_registry
@@ -55,7 +56,6 @@ class DiagnosisOrchestrator:
         )
         logger.info("investigation started id=%s service=%s", record.id, event.service)
         self.repository.update_status(record.id, InvestigationStatus.RUNNING)
-        self._record_v4_execution(record.id, event)
 
         try:
             context = self.coordinator.collect(event)
@@ -65,6 +65,7 @@ class DiagnosisOrchestrator:
             record.evidence = evidence
             record.updated_at = datetime.now(UTC)
             self.repository.save(record)
+            self._record_v4_execution(record.id, event, context.provider_results)
 
             hypotheses = self.analyzer.analyze(event, evidence)
             record.hypotheses = hypotheses
@@ -115,10 +116,15 @@ class DiagnosisOrchestrator:
                 failure_reason=str(exc),
             )
 
-    def _record_v4_execution(self, investigation_id: str, event: IncidentEvent) -> None:
+    def _record_v4_execution(
+        self,
+        investigation_id: str,
+        event: IncidentEvent,
+        provider_results: list[ProviderResult],
+    ) -> None:
         try:
             plan = self.task_planner.plan(event, investigation_id=investigation_id)
-            self.execution_engine.run(plan, event)
+            self.execution_engine.run(plan, event, provider_results=provider_results)
         except Exception as exc:
             logger.warning(
                 "v4 execution recording failed id=%s reason=%s",

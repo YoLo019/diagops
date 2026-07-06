@@ -78,6 +78,34 @@ def test_dependency_failed_task_is_skipped():
     assert skipped_calls == []
 
 
+def test_dependency_waits_when_dependent_has_higher_priority():
+    repository = InMemoryInvestigationRepository()
+    registry = ToolRegistry()
+    calls: list[str] = []
+    register_tool(registry, "read_logs", ToolCallStatus.SUCCESS, calls=calls)
+    register_tool(registry, "read_service_catalog", ToolCallStatus.SUCCESS, calls=calls)
+    plan = DiagnosisPlan(
+        investigation_id="inv-1",
+        tasks=[
+            task(
+                "task-service",
+                task_type=DiagnosisTaskType.SERVICE_CONTEXT,
+                priority=1,
+                depends_on=["task-log"],
+            ),
+            task("task-log", priority=20),
+        ],
+    )
+
+    completed = DiagnosisExecutionEngine(repository, registry).run(plan, event())
+
+    assert {item.id: item.status for item in completed.tasks} == {
+        "task-service": DiagnosisTaskStatus.COMPLETED,
+        "task-log": DiagnosisTaskStatus.COMPLETED,
+    }
+    assert calls == ["read_logs", "read_service_catalog"]
+
+
 def test_sqlite_repository_round_trips_engine_plan_tasks_executions_and_tool_calls(
     tmp_path,
 ):

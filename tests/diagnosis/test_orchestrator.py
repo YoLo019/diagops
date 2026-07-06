@@ -15,8 +15,10 @@ from backend.domain.actions import (
     RecommendedAction,
     VerificationSuggestion,
 )
+from backend.domain.evidence import EvidenceProvider
 from backend.domain.hypotheses import CauseType
-from backend.providers.registry import build_mock_provider_registry
+from backend.providers.registry import ProviderRegistry, build_mock_provider_registry
+from backend.providers.results import ProviderResult
 from backend.rca.analyzer import RcaAnalyzer
 from backend.reports.generator import ReportGenerator
 from backend.services.container import AppContainer
@@ -96,6 +98,29 @@ def test_orchestrator_records_v4_plan_tasks_executions_and_tool_calls():
     assert len(executions) == len(tasks)
     assert tool_calls
     assert {call.task_id for call in tool_calls} <= {task.id for task in tasks}
+
+
+def test_orchestrator_records_v4_without_collecting_provider_twice():
+    class CountingProvider:
+        provider = EvidenceProvider.LOG
+
+        def __init__(self):
+            self.calls = 0
+
+        def collect(self, event):
+            self.calls += 1
+            return ProviderResult(provider=self.provider)
+
+    provider = CountingProvider()
+    repository = InMemoryInvestigationRepository()
+    orchestrator = build_v2_orchestrator(
+        repository=repository,
+        providers=ProviderRegistry([provider]),
+    )
+
+    orchestrator.run(load_incident_case("deployment_regression"))
+
+    assert provider.calls == 1
 
 
 def test_orchestrator_persists_failed_record_when_report_generation_fails():

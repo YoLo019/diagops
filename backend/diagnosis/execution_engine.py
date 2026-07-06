@@ -13,6 +13,7 @@ from backend.domain.agent_plan import (
 )
 from backend.domain.events import IncidentEvent
 from backend.domain.tool_calls import ToolCallRecord, ToolCallStatus
+from backend.providers.results import ProviderResult, ProviderStatus
 from backend.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -29,22 +30,56 @@ class DiagnosisExecutionEngine:
         self.tool_registry = tool_registry
         self.router = router or AgentRouter()
 
-    def run(self, plan: DiagnosisPlan, event: IncidentEvent) -> DiagnosisPlan:
+    def run(
+        self,
+        plan: DiagnosisPlan,
+        event: IncidentEvent,
+        provider_results: list[ProviderResult] | None = None,
+    ) -> DiagnosisPlan:
         tasks = [self.router.apply_route(task) for task in sorted(plan.tasks, key=_task_order)]
         plan = plan.model_copy(update={"tasks": tasks})
         self._save_plan(plan)
 
         status_by_id: dict[str, DiagnosisTaskStatus] = {}
-        for index, task in enumerate(tasks):
-            if reason := self._blocked_reason(task, status_by_id):
-                task, execution = self._skip_task(task, reason)
-            else:
-                task, execution = self._run_task(plan.investigation_id, task, event)
+        task_ids = {task.id for task in tasks}
+        pending_indexes = set(range(len(tasks)))
+        while pending_indexes:
+            progress = False
+            for index in sorted(pending_indexes, key=lambda item: _task_order(tasks[item])):
+                task = tasks[index]
+                if reason := self._blocked_reason(task, status_by_id, task_ids):
+                    task, execution = self._skip_task(task, reason)
+                elif not self._dependencies_completed(task, status_by_id):
+                    continue
+                else:
+                    task, execution = self._run_task(
+                        plan.investigation_id,
+                        task,
+                        event,
+                        provider_results,
+                    )
 
-            tasks[index] = task
-            status_by_id[task.id] = task.status
-            self._save_tasks(plan.investigation_id, tasks)
-            self._save_executions(plan.investigation_id, [execution])
+                tasks[index] = task
+                status_by_id[task.id] = task.status
+                pending_indexes.remove(index)
+                progress = True
+                self._save_tasks(plan.investigation_id, tasks)
+                self._save_executions(plan.investigation_id, [execution])
+
+            if progress:
+                continue
+
+            for index in sorted(pending_indexes, key=lambda item: _task_order(tasks[item])):
+                task, execution = self._skip_task(
+                    tasks[index],
+                    "dependency cycle or unresolved dependency: "
+                    + ", ".join(tasks[index].depends_on),
+                )
+                tasks[index] = task
+                status_by_id[task.id] = task.status
+                self._save_tasks(plan.investigation_id, tasks)
+                self._save_executions(plan.investigation_id, [execution])
+            pending_indexes.clear()
 
         completed_plan = plan.model_copy(update={"tasks": tasks})
         self._save_plan(completed_plan)
@@ -55,6 +90,7 @@ class DiagnosisExecutionEngine:
         investigation_id: str,
         task: DiagnosisTask,
         event: IncidentEvent,
+        provider_results: list[ProviderResult] | None,
     ) -> tuple[DiagnosisTask, AgentExecution]:
         started_at = datetime.now(UTC)
         started = perf_counter()
@@ -66,7 +102,7 @@ class DiagnosisExecutionEngine:
         )
 
         calls = [
-            self._invoke_tool(investigation_id, event, task, tool_name)
+            self._invoke_tool(investigation_id, event, task, tool_name, provider_results)
             for tool_name in task.tool_names
         ]
         failed_calls = [call for call in calls if call.status == ToolCallStatus.FAILED]
@@ -111,11 +147,29 @@ class DiagnosisExecutionEngine:
         event: IncidentEvent,
         task: DiagnosisTask,
         tool_name: str,
+        provider_results: list[ProviderResult] | None,
     ) -> ToolCallRecord:
         tool_input = {"investigation_id": investigation_id}
         started_at = datetime.now(UTC)
         started = perf_counter()
         try:
+            spec = self.tool_registry.get(tool_name)
+            if spec.provider is not None and provider_results is not None:
+                call = _provider_tool_call(
+                    task=task,
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                    provider_results=[
+                        result
+                        for result in provider_results
+                        if result.provider == spec.provider
+                    ],
+                    started_at=started_at,
+                    started=started,
+                )
+                self._save_tool_calls(investigation_id, [call])
+                return call
+
             call = self.tool_registry.invoke(
                 tool_name,
                 event=event,
@@ -169,11 +223,27 @@ class DiagnosisExecutionEngine:
         self,
         task: DiagnosisTask,
         status_by_id: dict[str, DiagnosisTaskStatus],
+        task_ids: set[str],
     ) -> str | None:
         for dependency_id in task.depends_on:
-            if status_by_id.get(dependency_id) != DiagnosisTaskStatus.COMPLETED:
+            if dependency_id not in task_ids:
+                return f"dependency missing: {dependency_id}"
+            if status_by_id.get(dependency_id) in {
+                DiagnosisTaskStatus.FAILED,
+                DiagnosisTaskStatus.SKIPPED,
+            }:
                 return f"dependency not completed: {dependency_id}"
         return None
+
+    def _dependencies_completed(
+        self,
+        task: DiagnosisTask,
+        status_by_id: dict[str, DiagnosisTaskStatus],
+    ) -> bool:
+        return all(
+            status_by_id.get(dependency_id) == DiagnosisTaskStatus.COMPLETED
+            for dependency_id in task.depends_on
+        )
 
     def _save_plan(self, plan: DiagnosisPlan) -> None:
         self._repo_call("save_plan", plan)
@@ -203,6 +273,62 @@ class DiagnosisExecutionEngine:
 
 def _task_order(task: DiagnosisTask) -> tuple[int, bool]:
     return task.priority, bool(task.depends_on)
+
+
+def _provider_tool_call(
+    *,
+    task: DiagnosisTask,
+    tool_name: str,
+    tool_input: dict[str, Any],
+    provider_results: list[ProviderResult],
+    started_at: datetime,
+    started: float,
+) -> ToolCallRecord:
+    if not provider_results:
+        return ToolCallRecord(
+            task_id=task.id,
+            agent_name=task.agent_name,
+            tool_name=tool_name,
+            input=tool_input,
+            status=ToolCallStatus.FAILED,
+            error_message=f"no provider result for tool: {tool_name}",
+            started_at=started_at,
+            completed_at=datetime.now(UTC),
+            duration_ms=int((perf_counter() - started) * 1000),
+        )
+
+    failed = any(result.status == ProviderStatus.FAILED for result in provider_results)
+    skipped = all(result.status == ProviderStatus.SKIPPED for result in provider_results)
+    return ToolCallRecord(
+        task_id=task.id,
+        agent_name=task.agent_name,
+        tool_name=tool_name,
+        input=tool_input,
+        status=(
+            ToolCallStatus.FAILED
+            if failed
+            else ToolCallStatus.SKIPPED
+            if skipped
+            else ToolCallStatus.SUCCESS
+        ),
+        output_evidence_ids=[
+            item.id for result in provider_results for item in result.evidence_items
+        ],
+        error_message=_provider_result_message(provider_results),
+        started_at=started_at,
+        completed_at=datetime.now(UTC),
+        duration_ms=int((perf_counter() - started) * 1000),
+    )
+
+
+def _provider_result_message(results: list[ProviderResult]) -> str | None:
+    messages = [
+        result.error_message or f"{result.provider} provider {result.status}"
+        for result in results
+        if result.status
+        in {ProviderStatus.FAILED, ProviderStatus.PARTIAL, ProviderStatus.SKIPPED}
+    ]
+    return "; ".join(messages) or None
 
 
 __all__ = ["DiagnosisExecutionEngine"]
