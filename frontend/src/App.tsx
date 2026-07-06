@@ -14,10 +14,25 @@ import {
 
 const actionStatuses: ActionStatus[] = ["proposed", "approved", "rejected", "skipped", "done"];
 const verificationStatuses: VerificationStatus[] = ["pending", "passed", "failed", "skipped"];
+const statusLabels: Record<string, string> = {
+  approved: "已批准",
+  cancelled: "已取消",
+  completed: "已完成",
+  done: "已完成",
+  failed: "失败",
+  partial: "部分完成",
+  passed: "已通过",
+  pending: "待处理",
+  proposed: "待审批",
+  rejected: "已驳回",
+  running: "诊断中",
+  skipped: "已跳过",
+  success: "成功",
+};
 
 function formatDate(value?: string | null) {
   if (!value) {
-    return "n/a";
+    return "暂无";
   }
   return new Intl.DateTimeFormat(undefined, {
     month: "short",
@@ -31,12 +46,8 @@ function formatPercent(value: number) {
   return `${Math.round(value * 100)}%`;
 }
 
-function humanize(value: string) {
-  return value.replace(/_/g, " ");
-}
-
 function StatusBadge({ value }: { value: string }) {
-  return <span className={`badge badge-${value}`}>{humanize(value)}</span>;
+  return <span className={`badge badge-${value}`}>{statusLabels[value] ?? value}</span>;
 }
 
 function MarkdownReport({ markdown }: { markdown: string }) {
@@ -90,24 +101,24 @@ function ManualInvestigationForm({ onCreated }: { onCreated: (id: string) => voi
   return (
     <form className="panel manual-form" onSubmit={submit}>
       <div className="panel-heading">
-        <h2>Manual Investigation</h2>
+        <h2>新建诊断</h2>
       </div>
       <label>
-        Incident note
+        事件描述
         <textarea
           value={text}
           onChange={(event) => setText(event.target.value)}
-          placeholder="checkout-service error rate increased after a deploy"
+          placeholder="例如：checkout-service 发布后错误率升高"
           required
         />
       </label>
       <div className="field-row">
         <label>
-          Service
+          服务
           <input value={service} onChange={(event) => setService(event.target.value)} required />
         </label>
         <label>
-          Environment
+          环境
           <input
             value={environment}
             onChange={(event) => setEnvironment(event.target.value)}
@@ -117,7 +128,7 @@ function ManualInvestigationForm({ onCreated }: { onCreated: (id: string) => voi
       </div>
       {mutation.isError ? <p className="error">{mutation.error.message}</p> : null}
       <button type="submit" disabled={mutation.isPending || !text.trim()}>
-        {mutation.isPending ? "Creating..." : "Create investigation"}
+        {mutation.isPending ? "创建中..." : "创建诊断"}
       </button>
     </form>
   );
@@ -135,7 +146,7 @@ function InvestigationList({
   return (
     <section className="panel list-panel">
       <div className="panel-heading">
-        <h2>Investigation List</h2>
+        <h2>诊断列表</h2>
         <span>{investigations.length}</span>
       </div>
       <div className="investigation-list">
@@ -160,7 +171,7 @@ function InvestigationList({
           );
         })}
         {investigations.length === 0 ? (
-          <div className="empty-state">No investigations recorded yet.</div>
+          <div className="empty-state">暂无诊断记录。</div>
         ) : null}
       </div>
     </section>
@@ -173,24 +184,24 @@ function InvestigationDetail({ investigation }: { investigation: InvestigationRe
   return (
     <section className="panel detail-panel">
       <div className="panel-heading">
-        <h2>Investigation Detail</h2>
+        <h2>诊断详情</h2>
         <StatusBadge value={investigation.status} />
       </div>
       <div className="detail-grid">
         <div>
-          <span className="label">Service</span>
+          <span className="label">服务</span>
           <strong>{investigation.event.service}</strong>
         </div>
         <div>
-          <span className="label">Environment</span>
+          <span className="label">环境</span>
           <strong>{investigation.event.environment}</strong>
         </div>
         <div>
-          <span className="label">Severity</span>
-          <strong>{humanize(investigation.event.severity)}</strong>
+          <span className="label">严重级别</span>
+          <strong>{investigation.event.severity}</strong>
         </div>
         <div>
-          <span className="label">Started</span>
+          <span className="label">开始时间</span>
           <strong>{formatDate(investigation.event.started_at)}</strong>
         </div>
       </div>
@@ -198,9 +209,9 @@ function InvestigationDetail({ investigation }: { investigation: InvestigationRe
       <p>{investigation.event.description}</p>
       {topHypothesis ? (
         <div className="callout">
-          <span className="label">Top hypothesis</span>
-          <strong>{humanize(topHypothesis.cause_type)}</strong>
-          <span>{formatPercent(topHypothesis.confidence)} confidence</span>
+          <span className="label">首选根因</span>
+          <strong>{topHypothesis.cause_type}</strong>
+          <span>置信度 {formatPercent(topHypothesis.confidence)}</span>
         </div>
       ) : null}
       {investigation.failure_reason ? <p className="error">{investigation.failure_reason}</p> : null}
@@ -212,7 +223,7 @@ function EvidenceList({ investigation }: { investigation: InvestigationRecord })
   return (
     <section className="panel">
       <div className="panel-heading">
-        <h2>Evidence List</h2>
+        <h2>证据链</h2>
         <span>{investigation.evidence.length}</span>
       </div>
       <div className="evidence-list">
@@ -220,12 +231,12 @@ function EvidenceList({ investigation }: { investigation: InvestigationRecord })
           <article className="evidence-item" key={item.id}>
             <div>
               <StatusBadge value={item.status} />
-              <span className="provider">{humanize(item.provider)}</span>
+              <span className="provider">{item.provider}</span>
               <span className="timestamp">{formatDate(item.timestamp)}</span>
             </div>
             <strong>{item.summary}</strong>
             <p>
-              {humanize(item.kind)} / confidence {formatPercent(item.confidence)}
+              {item.kind} / 置信度 {formatPercent(item.confidence)}
             </p>
             {item.error_message ? <p className="error">{item.error_message}</p> : null}
           </article>
@@ -239,19 +250,19 @@ function Hypotheses({ investigation }: { investigation: InvestigationRecord }) {
   return (
     <section className="panel">
       <div className="panel-heading">
-        <h2>Hypotheses</h2>
+        <h2>候选根因</h2>
         <span>{investigation.hypotheses.length}</span>
       </div>
       <div className="hypothesis-list">
         {investigation.hypotheses.map((hypothesis) => (
           <article className="hypothesis-item" key={hypothesis.id}>
             <div className="score-row">
-              <strong>{humanize(hypothesis.cause_type)}</strong>
+              <strong>{hypothesis.cause_type}</strong>
               <span>{formatPercent(hypothesis.confidence)}</span>
             </div>
             <p>{hypothesis.summary}</p>
             {hypothesis.next_actions.length > 0 ? (
-              <p className="muted">Next: {hypothesis.next_actions.join(", ")}</p>
+              <p className="muted">下一步: {hypothesis.next_actions.join(", ")}</p>
             ) : null}
           </article>
         ))}
@@ -282,7 +293,7 @@ function RecommendedActions({ investigation }: { investigation: InvestigationRec
   return (
     <section className="panel">
       <div className="panel-heading">
-        <h2>Recommended Actions</h2>
+        <h2>建议动作</h2>
         <span>{investigation.actions.length}</span>
       </div>
       <div className="action-list">
@@ -294,12 +305,12 @@ function RecommendedActions({ investigation }: { investigation: InvestigationRec
             </div>
             <p>{action.description}</p>
             <div className="meta-row">
-              <span>Risk: {humanize(action.risk_level)}</span>
-              <span>{action.requires_approval ? "Approval required" : "Review optional"}</span>
+              <span>风险级别: {action.risk_level}</span>
+              <span>{action.requires_approval ? "需记录审批状态" : "可选记录审批状态"}</span>
             </div>
             <div className="control-row">
               <select
-                aria-label={`Action status for ${action.title}`}
+                aria-label={`${action.title} 的动作状态`}
                 defaultValue={action.status}
                 onChange={(event) =>
                   mutation.mutate({
@@ -311,12 +322,12 @@ function RecommendedActions({ investigation }: { investigation: InvestigationRec
               >
                 {actionStatuses.map((status) => (
                   <option key={status} value={status}>
-                    {humanize(status)}
+                    {statusLabels[status] ?? status}
                   </option>
                 ))}
               </select>
               <input
-                placeholder="Record approval note"
+                placeholder="记录审批状态"
                 value={notes[action.id] ?? action.note ?? ""}
                 onChange={(event) => setNotes({ ...notes, [action.id]: event.target.value })}
               />
@@ -350,7 +361,7 @@ function VerificationSuggestions({ investigation }: { investigation: Investigati
   return (
     <section className="panel">
       <div className="panel-heading">
-        <h2>Verification Suggestions</h2>
+        <h2>验证建议</h2>
         <span>{investigation.verification_suggestions.length}</span>
       </div>
       <div className="action-list">
@@ -361,10 +372,10 @@ function VerificationSuggestions({ investigation }: { investigation: Investigati
               <StatusBadge value={verification.status} />
             </div>
             <p>{verification.description}</p>
-            <p className="muted">Expected signal: {verification.expected_signal}</p>
+            <p className="muted">预期信号: {verification.expected_signal}</p>
             <div className="control-row">
               <select
-                aria-label={`Verification result for ${verification.title}`}
+                aria-label={`${verification.title} 的验证结果`}
                 defaultValue={verification.status}
                 onChange={(event) =>
                   mutation.mutate({
@@ -376,12 +387,12 @@ function VerificationSuggestions({ investigation }: { investigation: Investigati
               >
                 {verificationStatuses.map((status) => (
                   <option key={status} value={status}>
-                    {humanize(status)}
+                    {statusLabels[status] ?? status}
                   </option>
                 ))}
               </select>
               <input
-                placeholder="Record verification result"
+                placeholder="记录验证结果"
                 value={notes[verification.id] ?? verification.result_note ?? ""}
                 onChange={(event) =>
                   setNotes({ ...notes, [verification.id]: event.target.value })
@@ -399,12 +410,12 @@ function ReportPanel({ investigation }: { investigation: InvestigationRecord }) 
   return (
     <section className="panel report-panel">
       <div className="panel-heading">
-        <h2>Markdown Report</h2>
+        <h2>诊断报告</h2>
       </div>
       {investigation.report ? (
         <MarkdownReport markdown={investigation.report.markdown} />
       ) : (
-        <div className="empty-state">Report has not been generated for this investigation.</div>
+        <div className="empty-state">该诊断尚未生成报告。</div>
       )}
     </section>
   );
@@ -438,12 +449,12 @@ export default function App() {
     <main className="app-shell">
       <header className="topbar">
         <div>
-          <h1>DiagOps Investigation Console</h1>
-          <p>API base: {API_BASE_URL}</p>
+          <h1>DiagOps 诊断控制台</h1>
+          <p>API 地址: {API_BASE_URL}</p>
         </div>
         <div className="topbar-stats">
-          <span>{investigations.length} investigations</span>
-          <span>Records approval and verification status</span>
+          <span>共 {investigations.length} 条诊断</span>
+          <span>记录审批状态和验证结果</span>
         </div>
       </header>
 
@@ -468,7 +479,7 @@ export default function App() {
               <Hypotheses investigation={activeInvestigation} />
             </>
           ) : (
-            <div className="panel empty-state">Select or create an investigation to begin.</div>
+            <div className="panel empty-state">选择或创建一个诊断开始。</div>
           )}
         </section>
 
@@ -480,7 +491,7 @@ export default function App() {
               <ReportPanel investigation={activeInvestigation} />
             </>
           ) : (
-            <div className="panel empty-state">Workflow details will appear here.</div>
+            <div className="panel empty-state">审批、验证和报告会显示在这里。</div>
           )}
         </aside>
       </div>

@@ -11,10 +11,16 @@ def test_frontend_package_json_exists() -> None:
 def test_app_contains_investigation_list_and_detail_ui_strings() -> None:
     app = (FRONTEND / "src" / "App.tsx").read_text(encoding="utf-8")
 
-    assert "Investigation List" in app
-    assert "Investigation Detail" in app
-    assert "Evidence List" in app
-    assert "Recommended Actions" in app
+    assert "新建诊断" in app
+    assert "诊断列表" in app
+    assert "诊断详情" in app
+    assert "证据链" in app
+    assert "候选根因" in app
+    assert "建议动作" in app
+    assert "验证建议" in app
+    assert "诊断报告" in app
+    assert "记录审批状态" in app
+    assert "记录验证结果" in app
     assert "·" not in app
 
 
@@ -46,6 +52,14 @@ def test_ui_does_not_claim_production_changes_are_automatic() -> None:
         "automatically executes config change",
         "automatically executed config change",
         "automatic config change",
+        "自动执行回滚",
+        "自动回滚",
+        "自动执行重启",
+        "自动重启",
+        "自动执行扩容",
+        "自动扩容",
+        "自动执行配置变更",
+        "自动配置变更",
     ]
 
     for claim in forbidden_claims:
