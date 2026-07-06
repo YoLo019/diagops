@@ -12,7 +12,7 @@ from backend.domain.agent_plan import (
     DiagnosisTaskType,
 )
 from backend.domain.events import IncidentEvent, IncidentSource, Severity
-from backend.domain.evidence import EvidenceProvider
+from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
 from backend.domain.tool_calls import ToolCallRecord, ToolCallStatus, ToolSpec
 from backend.providers.results import ProviderResult, ProviderStatus
 from backend.tools.registry import ToolRegistry
@@ -126,6 +126,91 @@ def test_provider_skipped_tool_skips_task_and_dependent_without_calling_tool():
     assert skipped_calls == []
 
 
+def test_provider_mixed_success_and_skipped_completes_with_successful_evidence():
+    repository = InMemoryInvestigationRepository()
+    registry = ToolRegistry()
+    register_tool(
+        registry,
+        "read_service_catalog",
+        ToolCallStatus.SUCCESS,
+        provider=EvidenceProvider.SERVICE_CATALOG,
+    )
+    plan = DiagnosisPlan(
+        investigation_id="inv-1",
+        tasks=[
+            task(
+                "task-service",
+                task_type=DiagnosisTaskType.SERVICE_CONTEXT,
+            )
+        ],
+    )
+
+    completed = DiagnosisExecutionEngine(repository, registry).run(
+        plan,
+        event(),
+        provider_results=[
+            ProviderResult(
+                provider=EvidenceProvider.SERVICE_CATALOG,
+                evidence_items=[
+                    evidence_item(
+                        "ev-service",
+                        EvidenceProvider.SERVICE_CATALOG,
+                        EvidenceKind.SERVICE_METADATA,
+                    )
+                ],
+            ),
+            ProviderResult(
+                provider=EvidenceProvider.SERVICE_CATALOG,
+                status=ProviderStatus.SKIPPED,
+                error_message="file catalog disabled",
+            ),
+        ],
+    )
+
+    call = repository.list_tool_calls("inv-1")[0]
+    execution = repository.list_executions("inv-1")[0]
+    assert call.status == ToolCallStatus.SUCCESS
+    assert call.output_evidence_ids == ["ev-service"]
+    assert call.error_message == "file catalog disabled"
+    assert completed.tasks[0].status == DiagnosisTaskStatus.COMPLETED
+    assert execution.status == AgentExecutionStatus.COMPLETED
+    assert execution.evidence_ids == ["ev-service"]
+
+
+def test_provider_partial_with_evidence_is_success_with_partial_message():
+    repository = InMemoryInvestigationRepository()
+    registry = ToolRegistry()
+    register_tool(
+        registry,
+        "read_logs",
+        ToolCallStatus.SUCCESS,
+        provider=EvidenceProvider.LOG,
+    )
+    plan = DiagnosisPlan(investigation_id="inv-1", tasks=[task("task-log")])
+
+    completed = DiagnosisExecutionEngine(repository, registry).run(
+        plan,
+        event(),
+        provider_results=[
+            ProviderResult(
+                provider=EvidenceProvider.LOG,
+                status=ProviderStatus.PARTIAL,
+                evidence_items=[
+                    evidence_item("ev-log", EvidenceProvider.LOG, EvidenceKind.LOG_PATTERN)
+                ],
+                error_message="logs partial",
+            )
+        ],
+    )
+
+    call = repository.list_tool_calls("inv-1")[0]
+    assert completed.tasks[0].status == DiagnosisTaskStatus.COMPLETED
+    assert repository.list_executions("inv-1")[0].status == AgentExecutionStatus.COMPLETED
+    assert call.status == ToolCallStatus.SUCCESS
+    assert call.output_evidence_ids == ["ev-log"]
+    assert call.error_message == "logs partial"
+
+
 def test_dependency_waits_when_dependent_has_higher_priority():
     repository = InMemoryInvestigationRepository()
     registry = ToolRegistry()
@@ -214,6 +299,20 @@ def task(
         tool_names=["unrouted_tool"],
         priority=priority,
         depends_on=depends_on or [],
+    )
+
+
+def evidence_item(
+    evidence_id: str,
+    provider: EvidenceProvider,
+    kind: EvidenceKind,
+) -> EvidenceItem:
+    return EvidenceItem(
+        id=evidence_id,
+        provider=provider,
+        kind=kind,
+        timestamp=datetime(2026, 7, 6, 9, 0, tzinfo=UTC),
+        summary=evidence_id,
     )
 
 

@@ -306,8 +306,10 @@ def _provider_tool_call(
             duration_ms=int((perf_counter() - started) * 1000),
         )
 
-    failed = any(result.status == ProviderStatus.FAILED for result in provider_results)
-    skipped = any(result.status == ProviderStatus.SKIPPED for result in provider_results)
+    output_evidence_ids = [
+        item.id for result in provider_results for item in result.evidence_items
+    ]
+    statuses = {result.status for result in provider_results}
     return ToolCallRecord(
         task_id=task.id,
         agent_name=task.agent_name,
@@ -315,14 +317,13 @@ def _provider_tool_call(
         input=tool_input,
         status=(
             ToolCallStatus.FAILED
-            if failed
-            else ToolCallStatus.SKIPPED
-            if skipped
+            if ProviderStatus.FAILED in statuses
             else ToolCallStatus.SUCCESS
+            if output_evidence_ids
+            or statuses & {ProviderStatus.SUCCESS, ProviderStatus.PARTIAL}
+            else ToolCallStatus.SKIPPED
         ),
-        output_evidence_ids=[
-            item.id for result in provider_results for item in result.evidence_items
-        ],
+        output_evidence_ids=output_evidence_ids,
         error_message=_provider_result_message(provider_results),
         started_at=started_at,
         completed_at=datetime.now(UTC),
