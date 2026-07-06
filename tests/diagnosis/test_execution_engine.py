@@ -12,7 +12,9 @@ from backend.domain.agent_plan import (
     DiagnosisTaskType,
 )
 from backend.domain.events import IncidentEvent, IncidentSource, Severity
+from backend.domain.evidence import EvidenceProvider
 from backend.domain.tool_calls import ToolCallRecord, ToolCallStatus, ToolSpec
+from backend.providers.results import ProviderResult, ProviderStatus
 from backend.tools.registry import ToolRegistry
 
 
@@ -78,6 +80,52 @@ def test_dependency_failed_task_is_skipped():
     assert skipped_calls == []
 
 
+def test_provider_skipped_tool_skips_task_and_dependent_without_calling_tool():
+    repository = InMemoryInvestigationRepository()
+    registry = ToolRegistry()
+    skipped_calls: list[str] = []
+    register_tool(registry, "read_logs", ToolCallStatus.SUCCESS, provider=EvidenceProvider.LOG)
+    register_tool(registry, "read_service_catalog", ToolCallStatus.SUCCESS, calls=skipped_calls)
+    plan = DiagnosisPlan(
+        investigation_id="inv-1",
+        tasks=[
+            task("task-log", priority=10),
+            task(
+                "task-service",
+                task_type=DiagnosisTaskType.SERVICE_CONTEXT,
+                priority=20,
+                depends_on=["task-log"],
+            ),
+        ],
+    )
+
+    completed = DiagnosisExecutionEngine(repository, registry).run(
+        plan,
+        event(),
+        provider_results=[
+            ProviderResult(
+                provider=EvidenceProvider.LOG,
+                status=ProviderStatus.SKIPPED,
+                error_message="logs disabled",
+            )
+        ],
+    )
+
+    assert [item.status for item in completed.tasks] == [
+        DiagnosisTaskStatus.SKIPPED,
+        DiagnosisTaskStatus.SKIPPED,
+    ]
+    assert [item.status for item in repository.list_executions("inv-1")] == [
+        AgentExecutionStatus.SKIPPED,
+        AgentExecutionStatus.SKIPPED,
+    ]
+    assert repository.list_executions("inv-1")[0].error_message == "logs disabled"
+    assert repository.list_executions("inv-1")[0].summary == "logs disabled"
+    assert repository.list_tool_calls("inv-1")[0].status == ToolCallStatus.SKIPPED
+    assert repository.list_tool_calls("inv-1")[0].error_message == "logs disabled"
+    assert skipped_calls == []
+
+
 def test_dependency_waits_when_dependent_has_higher_priority():
     repository = InMemoryInvestigationRepository()
     registry = ToolRegistry()
@@ -132,6 +180,7 @@ def register_tool(
     *,
     error_message: str | None = None,
     calls: list[str] | None = None,
+    provider: EvidenceProvider | None = None,
 ) -> None:
     def handler(**kwargs):
         if calls is not None:
@@ -146,7 +195,7 @@ def register_tool(
             error_message=error_message,
         )
 
-    registry.register(ToolSpec(name=name, description=f"{name} tool"), handler)
+    registry.register(ToolSpec(name=name, description=f"{name} tool", provider=provider), handler)
 
 
 def task(

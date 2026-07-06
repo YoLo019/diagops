@@ -106,15 +106,22 @@ class DiagnosisExecutionEngine:
             for tool_name in task.tool_names
         ]
         failed_calls = [call for call in calls if call.status == ToolCallStatus.FAILED]
-        execution_status = (
-            AgentExecutionStatus.FAILED if failed_calls else AgentExecutionStatus.COMPLETED
-        )
-        task_status = (
-            DiagnosisTaskStatus.FAILED if failed_calls else DiagnosisTaskStatus.COMPLETED
-        )
+        skipped_calls = [call for call in calls if call.status == ToolCallStatus.SKIPPED]
+        if failed_calls:
+            execution_status = AgentExecutionStatus.FAILED
+            task_status = DiagnosisTaskStatus.FAILED
+            problem_calls = failed_calls + skipped_calls
+        elif skipped_calls:
+            execution_status = AgentExecutionStatus.SKIPPED
+            task_status = DiagnosisTaskStatus.SKIPPED
+            problem_calls = skipped_calls
+        else:
+            execution_status = AgentExecutionStatus.COMPLETED
+            task_status = DiagnosisTaskStatus.COMPLETED
+            problem_calls = []
         completed_at = datetime.now(UTC)
         error_message = "; ".join(
-            call.error_message or f"{call.tool_name} failed" for call in failed_calls
+            call.error_message or f"{call.tool_name} {call.status}" for call in problem_calls
         ) or None
 
         execution = AgentExecution(
@@ -125,7 +132,9 @@ class DiagnosisExecutionEngine:
             evidence_ids=[
                 evidence_id for call in calls for evidence_id in call.output_evidence_ids
             ],
-            summary=f"{task.agent_name} {execution_status}",
+            summary=error_message
+            if execution_status == AgentExecutionStatus.SKIPPED
+            else f"{task.agent_name} {execution_status}",
             error_message=error_message,
             started_at=started_at,
             completed_at=completed_at,
@@ -298,7 +307,7 @@ def _provider_tool_call(
         )
 
     failed = any(result.status == ProviderStatus.FAILED for result in provider_results)
-    skipped = all(result.status == ProviderStatus.SKIPPED for result in provider_results)
+    skipped = any(result.status == ProviderStatus.SKIPPED for result in provider_results)
     return ToolCallRecord(
         task_id=task.id,
         agent_name=task.agent_name,
