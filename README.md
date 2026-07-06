@@ -23,6 +23,21 @@ Health check:
 curl http://127.0.0.1:8000/health
 ```
 
+Frontend:
+
+```bash
+cd frontend
+npm.cmd install
+npm.cmd run dev
+```
+
+Build the frontend:
+
+```bash
+cd frontend
+npm.cmd run build
+```
+
 ## Trigger A Simulated Incident
 
 ```bash
