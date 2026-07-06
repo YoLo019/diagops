@@ -2,6 +2,12 @@ from datetime import datetime
 
 import pytest
 
+from backend.diagnosis.action_planner import ActionPlanner
+from backend.domain.actions import (
+    ActionRiskLevel,
+    ActionType,
+    RecommendedAction,
+)
 from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
 from backend.domain.hypotheses import CauseType, Hypothesis
 from backend.providers.registry import build_mock_provider_registry
@@ -24,6 +30,8 @@ def test_report_generator_outputs_markdown_with_evidence():
     assert "事实与推断" in report.markdown
     assert "观察到的事实" in report.markdown
     assert "推断结论/不确定性" in report.markdown
+    assert report.action_ids == []
+    assert report.verification_suggestion_ids == []
 
 
 def test_report_generator_rejects_empty_hypotheses():
@@ -59,6 +67,46 @@ def test_report_generator_rejects_missing_contradicting_evidence_id():
 
     with pytest.raises(ValueError, match="missing evidence id: ev-missing-contradiction"):
         ReportGenerator().generate("inv-1", event, evidence, hypotheses)
+
+
+def test_report_generator_rejects_missing_evidence_id_from_any_hypothesis():
+    event = load_incident_case("deployment_regression")
+    evidence = [_evidence("ev-real", "real deployment evidence")]
+    hypotheses = [
+        _hypothesis(supporting_evidence_ids=["ev-real"]),
+        _hypothesis(
+            cause_type=CauseType.TRAFFIC_SPIKE,
+            supporting_evidence_ids=["ev-missing-alternative"],
+        ),
+    ]
+
+    with pytest.raises(ValueError, match="missing evidence id: ev-missing-alternative"):
+        ReportGenerator().generate("inv-1", event, evidence, hypotheses)
+
+
+def test_report_generator_rejects_missing_action_evidence_id():
+    event = load_incident_case("deployment_regression")
+    evidence = [_evidence("ev-real", "real deployment evidence")]
+    hypotheses = [_hypothesis(supporting_evidence_ids=["ev-real"])]
+    actions = [
+        RecommendedAction(
+            action_type=ActionType.CHECK,
+            title="Inspect deployment",
+            description="Check deployment metadata.",
+            risk_level=ActionRiskLevel.READ_ONLY,
+            requires_approval=False,
+            supporting_evidence_ids=["ev-missing-action"],
+        )
+    ]
+
+    with pytest.raises(ValueError, match="missing evidence id: ev-missing-action"):
+        ReportGenerator().generate(
+            "inv-1",
+            event,
+            evidence,
+            hypotheses,
+            actions=actions,
+        )
 
 
 def test_report_generator_orders_markdown_evidence_chain_by_timestamp():
@@ -125,6 +173,53 @@ def test_report_generator_renders_real_contradicting_evidence_only():
     assert "real supporting evidence" in report.markdown
     assert "real contradicting evidence" in report.markdown
     assert "ev-missing" not in report.markdown
+
+
+def test_report_generator_renders_v2_actions_and_verifications():
+    event = load_incident_case("deployment_regression")
+    evidence = build_mock_provider_registry().collect_all(event)
+    hypotheses = RcaAnalyzer().analyze(event, evidence)
+    actions, verifications = ActionPlanner().plan(event, evidence, hypotheses)
+
+    report = ReportGenerator().generate(
+        "inv-1",
+        event,
+        evidence,
+        hypotheses,
+        actions=actions,
+        verification_suggestions=verifications,
+    )
+
+    assert report.action_ids == [action.id for action in actions]
+    assert report.verification_suggestion_ids == [
+        suggestion.id for suggestion in verifications
+    ]
+    assert "## 建议动作" in report.markdown
+    assert "## 需要审批的动作" in report.markdown
+    assert "## 验证建议" in report.markdown
+    assert "V2 未执行该动作" in report.markdown
+    assert actions[0].id in report.markdown
+    assert verifications[0].id in report.markdown
+
+
+def test_report_generator_accepts_explicit_none_for_v2_sections():
+    event = load_incident_case("deployment_regression")
+    evidence = [_evidence("ev-real", "real deployment evidence")]
+    hypotheses = [_hypothesis(supporting_evidence_ids=["ev-real"])]
+
+    report = ReportGenerator().generate(
+        "inv-1",
+        event,
+        evidence,
+        hypotheses,
+        actions=None,
+        verification_suggestions=None,
+    )
+
+    assert report.action_ids == []
+    assert report.verification_suggestion_ids == []
+    assert "## 需要审批的动作" in report.markdown
+    assert "## 验证建议" in report.markdown
 
 
 def _evidence(

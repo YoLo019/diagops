@@ -2,14 +2,18 @@ from datetime import timedelta
 
 from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
+from backend.providers.results import ProviderResult
 
 
 class MockDependencyProvider:
-    def collect(self, event: IncidentEvent) -> list[EvidenceItem]:
+    provider = EvidenceProvider.DEPENDENCY
+
+    def collect(self, event: IncidentEvent) -> ProviderResult:
+        evidence: list[EvidenceItem] = []
         if event.service == "order-service":
-            return [
+            evidence = [
                 EvidenceItem(
-                    provider=EvidenceProvider.DEPENDENCY,
+                    provider=self.provider,
                     kind=EvidenceKind.DEPENDENCY_HEALTH,
                     timestamp=event.started_at - timedelta(minutes=2),
                     summary=(
@@ -25,9 +29,9 @@ class MockDependencyProvider:
             ]
 
         if event.service == "payment-service":
-            return [
+            evidence = [
                 EvidenceItem(
-                    provider=EvidenceProvider.DEPENDENCY,
+                    provider=self.provider,
                     kind=EvidenceKind.DEPENDENCY_HEALTH,
                     timestamp=event.started_at + timedelta(minutes=2),
                     summary="payment dependency latency rose slightly after local errors started",
@@ -35,4 +39,4 @@ class MockDependencyProvider:
                 )
             ]
 
-        return []
+        return ProviderResult(provider=self.provider, evidence_items=evidence)

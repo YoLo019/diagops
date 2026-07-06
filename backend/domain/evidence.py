@@ -18,6 +18,7 @@ class EvidenceProvider(StrEnum):
     DEPLOY = "deploy"
     DEPENDENCY = "dependency"
     SERVICE_CATALOG = "service_catalog"
+    RELATED_ALERT = "related_alert"
 
 
 class EvidenceKind(StrEnum):
@@ -26,6 +27,15 @@ class EvidenceKind(StrEnum):
     DEPLOYMENT = "deployment"
     DEPENDENCY_HEALTH = "dependency_health"
     SERVICE_METADATA = "service_metadata"
+    RELATED_ALERT = "related_alert"
+    PROVIDER_ERROR = "provider_error"
+
+
+class EvidenceStatus(StrEnum):
+    SUCCESS = "success"
+    PARTIAL = "partial"
+    FAILED = "failed"
+    SKIPPED = "skipped"
 
 
 class EvidenceItem(BaseModel):
@@ -36,6 +46,8 @@ class EvidenceItem(BaseModel):
     summary: str
     payload: dict[str, JsonValue] = Field(default_factory=dict)
     confidence: float = Field(default=1.0, ge=0, le=1, allow_inf_nan=False)
+    status: EvidenceStatus = EvidenceStatus.SUCCESS
+    error_message: str | None = None
 
     @field_validator("payload")
     @classmethod

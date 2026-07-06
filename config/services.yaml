@@ -1,0 +1,13 @@
+services:
+  checkout-service:
+    owner: platform-team
+    team: payments-platform
+    runtime: python
+    repository: https://example.invalid/checkout-service
+    dependencies:
+      - inventory-service
+      - payment-db
+    dashboards:
+      - http://grafana.local/d/checkout
+    runbooks:
+      - http://runbooks.local/checkout
