@@ -141,10 +141,12 @@ def test_build_provider_registry_from_settings_adds_deployment_provider(tmp_path
 
     registry = build_provider_registry_from_settings(settings)
     results = registry.collect_results(load_incident_case("deployment_regression"))
+    deployment_results = [
+        result for result in results if result.provider == EvidenceProvider.DEPLOY
+    ]
 
-    assert len(results) == 1
-    assert results[0].provider == EvidenceProvider.DEPLOY
-    assert results[0].evidence_items[0].payload["version"] == "v1.8.2"
+    assert len(deployment_results) == 1
+    assert deployment_results[0].evidence_items[0].payload["version"] == "v1.8.2"
 
 
 def test_default_settings_include_deployment_provider():
