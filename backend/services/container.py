@@ -7,7 +7,7 @@ from backend.db.sqlite_repository import SQLiteInvestigationRepository
 from backend.diagnosis.action_planner import ActionPlanner
 from backend.diagnosis.coordinator import DiagnosisCoordinator
 from backend.diagnosis.orchestrator import DiagnosisOrchestrator
-from backend.providers.registry import build_mock_provider_registry
+from backend.providers.registry import build_provider_registry_from_settings
 from backend.rca.analyzer import RcaAnalyzer
 from backend.reports.generator import ReportGenerator
 
@@ -16,7 +16,7 @@ class AppContainer:
     def __init__(self, settings: AppSettings | None = None) -> None:
         self.settings = settings or load_settings()
         self.repository = self._build_repository()
-        providers = build_mock_provider_registry()
+        providers = build_provider_registry_from_settings(self.settings)
         self.orchestrator = DiagnosisOrchestrator(
             repository=self.repository,
             providers=providers,

@@ -1,5 +1,6 @@
 from backend.config.settings import AppSettings, StorageSettings
 from backend.db.models import InvestigationStatus
+from backend.domain.evidence import EvidenceProvider
 from backend.domain.hypotheses import CauseType
 from backend.services.container import AppContainer
 from backend.services.incident_cases import load_incident_case
@@ -16,6 +17,10 @@ def test_v3_deployment_regression_golden_persists_through_sqlite(tmp_path):
 
     container = AppContainer(settings=settings)
     record = container.orchestrator.run(load_incident_case("deployment_regression"))
+    provider_names = [result.provider for result in record.provider_results]
+    assert provider_names.count(EvidenceProvider.LOG) >= 2
+    assert provider_names.count(EvidenceProvider.DEPLOY) >= 2
+    assert EvidenceProvider.SERVICE_CATALOG in provider_names
     container.repository.engine.dispose()
 
     fresh_container = AppContainer(settings=settings)
