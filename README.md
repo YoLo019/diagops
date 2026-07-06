@@ -31,6 +31,10 @@ npm.cmd install
 npm.cmd run dev
 ```
 
+The Vite dev server proxies API requests to `http://127.0.0.1:8000` by
+default. Set `VITE_API_BASE_URL` only when the API is served from another
+origin.
+
 Build the frontend:
 
 ```bash

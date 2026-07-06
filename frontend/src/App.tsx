@@ -150,7 +150,7 @@ function InvestigationList({
             >
               <span className="item-title">{item.event.title}</span>
               <span className="item-meta">
-                {item.event.service} · {item.event.environment}
+                {item.event.service} / {item.event.environment}
               </span>
               <span className="item-footer">
                 <StatusBadge value={item.status} />
@@ -225,7 +225,7 @@ function EvidenceList({ investigation }: { investigation: InvestigationRecord })
             </div>
             <strong>{item.summary}</strong>
             <p>
-              {humanize(item.kind)} · confidence {formatPercent(item.confidence)}
+              {humanize(item.kind)} / confidence {formatPercent(item.confidence)}
             </p>
             {item.error_message ? <p className="error">{item.error_message}</p> : null}
           </article>
