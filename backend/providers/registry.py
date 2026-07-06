@@ -1,9 +1,11 @@
 import logging
 from time import perf_counter
 
+from backend.config.settings import AppSettings
 from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem, EvidenceProvider
 from backend.providers.base import EvidenceProviderProtocol
+from backend.providers.file_service_catalog import FileServiceCatalogProvider
 from backend.providers.mock_dependencies import MockDependencyProvider
 from backend.providers.mock_deploys import MockDeployProvider
 from backend.providers.mock_logs import MockLogProvider
@@ -66,3 +68,24 @@ def build_mock_provider_registry() -> ProviderRegistry:
             MockRelatedAlertProvider(),
         ]
     )
+
+
+def build_provider_registry_from_settings(settings: AppSettings) -> ProviderRegistry:
+    providers: list[EvidenceProviderProtocol] = []
+
+    if settings.providers.mock.enabled:
+        providers.extend(
+            [
+                MockLogProvider(),
+                MockMetricProvider(),
+                MockDeployProvider(),
+                MockDependencyProvider(),
+                MockServiceCatalogProvider(),
+                MockRelatedAlertProvider(),
+            ]
+        )
+
+    if settings.providers.service_catalog.enabled:
+        providers.append(FileServiceCatalogProvider(settings.providers.service_catalog.path))
+
+    return ProviderRegistry(providers=providers)
