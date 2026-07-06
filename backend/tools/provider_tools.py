@@ -62,11 +62,12 @@ def invoke_provider_tool(
     started_at = datetime.now(UTC)
     started = perf_counter()
     try:
-        results = [
-            result
-            for result in provider_registry.collect_results(event)
-            if result.provider == provider
+        target_providers = [
+            item
+            for item in provider_registry.providers
+            if getattr(item, "provider", EvidenceProvider.LOG) == provider
         ]
+        results = ProviderRegistry(target_providers).collect_results(event)
         failed = any(result.status == ProviderStatus.FAILED for result in results)
         return _record(
             tool_name=tool_name,

@@ -6,7 +6,7 @@ from backend.domain.events import IncidentEvent, IncidentSource, Severity
 from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
 from backend.domain.tool_calls import ToolCallStatus
 from backend.providers.registry import ProviderRegistry
-from backend.providers.results import ProviderResult
+from backend.providers.results import ProviderResult, ProviderStatus
 from backend.tools.provider_tools import build_provider_tool_registry
 
 
@@ -78,6 +78,44 @@ def test_provider_exception_returns_failed_tool_call_with_error_message():
     assert record.output_evidence_ids == []
 
 
+def test_provider_tool_does_not_invoke_non_matching_provider():
+    non_target = CountingFailingProvider(EvidenceProvider.METRIC)
+    registry = build_provider_tool_registry(
+        ProviderRegistry(
+            [
+                StaticProvider(EvidenceProvider.LOG, "ev-log"),
+                non_target,
+            ]
+        )
+    )
+
+    record = registry.invoke(
+        "read_logs",
+        event=event(),
+        task_id="task-1",
+        agent_name="LogAgent",
+    )
+
+    assert record.status == ToolCallStatus.SUCCESS
+    assert record.output_evidence_ids == ["ev-log"]
+    assert non_target.calls == 0
+
+
+def test_failed_provider_result_returns_failed_tool_call_with_error_message():
+    registry = build_provider_tool_registry(ProviderRegistry([FailedResultProvider()]))
+
+    record = registry.invoke(
+        "read_logs",
+        event=event(),
+        task_id="task-1",
+        agent_name="LogAgent",
+    )
+
+    assert record.status == ToolCallStatus.FAILED
+    assert record.error_message == "log degraded"
+    assert record.output_evidence_ids == []
+
+
 def test_unknown_tool_raises_value_error():
     registry = build_provider_tool_registry(ProviderRegistry([]))
 
@@ -131,6 +169,27 @@ class FailingProvider:
 
     def collect(self, event: IncidentEvent) -> ProviderResult:
         raise RuntimeError("provider exploded")
+
+
+class CountingFailingProvider:
+    def __init__(self, provider: EvidenceProvider) -> None:
+        self.provider = provider
+        self.calls = 0
+
+    def collect(self, event: IncidentEvent) -> ProviderResult:
+        self.calls += 1
+        raise AssertionError("non-target provider should not be called")
+
+
+class FailedResultProvider:
+    provider = EvidenceProvider.LOG
+
+    def collect(self, event: IncidentEvent) -> ProviderResult:
+        return ProviderResult(
+            provider=self.provider,
+            status=ProviderStatus.FAILED,
+            error_message="log degraded",
+        )
 
 
 _KIND_BY_PROVIDER = {
