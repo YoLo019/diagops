@@ -147,6 +147,15 @@ def test_build_provider_registry_from_settings_adds_deployment_provider(tmp_path
     assert results[0].evidence_items[0].payload["version"] == "v1.8.2"
 
 
+def test_default_settings_include_deployment_provider():
+    registry = build_provider_registry_from_settings(AppSettings())
+
+    assert any(
+        isinstance(provider, FileDeploymentProvider)
+        for provider in registry.providers
+    )
+
+
 def test_file_deployment_provider_accepts_manual_event_without_match():
     provider = FileDeploymentProvider(Path("data/deployments/deployments.json"))
     event = IncidentEvent(

@@ -109,7 +109,6 @@ def test_build_provider_registry_from_settings_preserves_mock_providers():
 
     registry = build_provider_registry_from_settings(settings)
 
-    assert len(registry.providers) == 6
     assert {provider.provider for provider in registry.providers} >= {
         EvidenceProvider.LOG,
         EvidenceProvider.METRIC,

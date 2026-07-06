@@ -89,11 +89,7 @@ def build_provider_registry_from_settings(settings: AppSettings) -> ProviderRegi
     if settings.providers.service_catalog.enabled:
         providers.append(FileServiceCatalogProvider(settings.providers.service_catalog.path))
 
-    deployment_file_is_configured = "deployment_file" in settings.providers.model_fields_set
-    if (
-        settings.providers.deployment_file.enabled
-        and (deployment_file_is_configured or not settings.providers.mock.enabled)
-    ):
+    if settings.providers.deployment_file.enabled:
         providers.append(FileDeploymentProvider(settings.providers.deployment_file.path))
 
     return ProviderRegistry(providers=providers)
