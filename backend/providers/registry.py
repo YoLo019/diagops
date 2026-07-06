@@ -5,6 +5,7 @@ from backend.config.settings import AppSettings
 from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem, EvidenceProvider
 from backend.providers.base import EvidenceProviderProtocol
+from backend.providers.file_deployments import FileDeploymentProvider
 from backend.providers.file_service_catalog import FileServiceCatalogProvider
 from backend.providers.mock_dependencies import MockDependencyProvider
 from backend.providers.mock_deploys import MockDeployProvider
@@ -87,5 +88,12 @@ def build_provider_registry_from_settings(settings: AppSettings) -> ProviderRegi
 
     if settings.providers.service_catalog.enabled:
         providers.append(FileServiceCatalogProvider(settings.providers.service_catalog.path))
+
+    deployment_file_is_configured = "deployment_file" in settings.providers.model_fields_set
+    if (
+        settings.providers.deployment_file.enabled
+        and (deployment_file_is_configured or not settings.providers.mock.enabled)
+    ):
+        providers.append(FileDeploymentProvider(settings.providers.deployment_file.path))
 
     return ProviderRegistry(providers=providers)

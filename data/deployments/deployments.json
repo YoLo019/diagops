@@ -1,0 +1,29 @@
+[
+  {
+    "service": "payment-service",
+    "environment": "prod",
+    "version": "v1.8.2",
+    "deployed_at": "2026-07-03T14:00:00+08:00",
+    "operator": "release-bot",
+    "commit": "abc1234",
+    "summary": "payment-service v1.8.2 deployed shortly before elevated 5xx errors"
+  },
+  {
+    "service": "payment-service",
+    "environment": "prod",
+    "version": "v1.8.1",
+    "deployed_at": "2026-07-03T10:00:00+08:00",
+    "operator": "release-bot",
+    "commit": "def5678",
+    "summary": "payment-service v1.8.1 deployed outside the incident window"
+  },
+  {
+    "service": "checkout-service",
+    "environment": "prod",
+    "version": "v3.4.0",
+    "deployed_at": "2026-07-03T14:01:00+08:00",
+    "operator": "checkout-team",
+    "commit": "987abcd",
+    "summary": "checkout-service deployment unrelated to payment-service incident"
+  }
+]
