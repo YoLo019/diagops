@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from backend.config.settings import AppSettings, LlmSettings, StorageSettings
 from backend.db.models import InvestigationRecord, InvestigationStatus
 from backend.db.repositories import InMemoryInvestigationRepository
 from backend.diagnosis.action_planner import ActionPlanner
@@ -18,6 +19,7 @@ from backend.domain.hypotheses import CauseType
 from backend.providers.registry import build_mock_provider_registry
 from backend.rca.analyzer import RcaAnalyzer
 from backend.reports.generator import ReportGenerator
+from backend.services.container import AppContainer
 from backend.services.incident_cases import load_incident_case
 
 
@@ -227,3 +229,50 @@ def test_orchestrator_logs_investigation_lifecycle(caplog):
     assert record.id in messages
     assert "investigation started" in messages
     assert "investigation completed" in messages
+
+
+def test_orchestrator_does_not_call_analyst_when_not_configured():
+    repository = InMemoryInvestigationRepository()
+    orchestrator = build_v2_orchestrator(repository=repository)
+    orchestrator.llm_analyst = None
+
+    record = orchestrator.run(load_incident_case("deployment_regression"))
+
+    assert record.status == InvestigationStatus.COMPLETED
+    assert record.llm_analysis is None
+
+
+def test_container_disables_analyst_when_llm_config_disabled():
+    container = AppContainer(
+        AppSettings(
+            storage=StorageSettings(url="memory://"),
+            llm=LlmSettings(enabled=False),
+        )
+    )
+
+    record = container.orchestrator.run(load_incident_case("deployment_regression"))
+
+    assert container.orchestrator.llm_analyst is None
+    assert record.llm_analysis is None
+
+
+def test_orchestrator_persists_llm_analysis_when_analyst_configured():
+    class StubAnalyst:
+        def analyze(self, *, investigation_id, evidence, hypotheses):
+            from backend.domain.llm_analysis import LLMAnalysis
+
+            return LLMAnalysis.create(
+                investigation_id=investigation_id,
+                existing_evidence_ids={item.id for item in evidence},
+                summary="stub summary",
+                referenced_evidence_ids=[evidence[0].id],
+            )
+
+    repository = InMemoryInvestigationRepository()
+    orchestrator = build_v2_orchestrator(repository=repository)
+    orchestrator.llm_analyst = StubAnalyst()
+
+    record = orchestrator.run(load_incident_case("deployment_regression"))
+
+    assert record.llm_analysis is not None
+    assert repository.get(record.id).llm_analysis == record.llm_analysis

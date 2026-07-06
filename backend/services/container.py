@@ -6,6 +6,7 @@ from backend.db.session import create_db_engine, initialize_database
 from backend.db.sqlite_repository import SQLiteInvestigationRepository
 from backend.diagnosis.action_planner import ActionPlanner
 from backend.diagnosis.coordinator import DiagnosisCoordinator
+from backend.diagnosis.llm_analyst import ReadOnlyLlmAnalyst
 from backend.diagnosis.orchestrator import DiagnosisOrchestrator
 from backend.providers.registry import build_provider_registry_from_settings
 from backend.rca.analyzer import RcaAnalyzer
@@ -17,6 +18,9 @@ class AppContainer:
         self.settings = settings or load_settings()
         self.repository = self._build_repository()
         providers = build_provider_registry_from_settings(self.settings)
+        llm_analyst = (
+            ReadOnlyLlmAnalyst(enabled=True) if self.settings.llm.enabled else None
+        )
         self.orchestrator = DiagnosisOrchestrator(
             repository=self.repository,
             providers=providers,
@@ -24,6 +28,7 @@ class AppContainer:
             report_generator=ReportGenerator(),
             coordinator=DiagnosisCoordinator(providers),
             action_planner=ActionPlanner(),
+            llm_analyst=llm_analyst,
         )
 
     def _build_repository(self):

@@ -22,6 +22,7 @@ from backend.domain.evidence import (
     EvidenceProvider,
 )
 from backend.domain.hypotheses import CauseType, Hypothesis
+from backend.domain.llm_analysis import LLMAnalysis
 from backend.providers.results import ProviderResult, ProviderStatus
 from backend.reports.generator import ReportGenerator
 from backend.services.incident_cases import load_incident_case
@@ -90,6 +91,16 @@ def completed_record() -> InvestigationRecord:
         ],
         hypotheses=hypotheses,
         report=report,
+        llm_analysis=LLMAnalysis.create(
+            investigation_id="inv-sqlite",
+            existing_evidence_ids={evidence[0].id},
+            summary="Read-only analysis found deployment evidence gaps.",
+            missing_evidence=["Add logs from the incident window."],
+            risk_notes=["Avoid irreversible actions until logs are reviewed."],
+            suggested_questions=["Did errors start after the deployment?"],
+            referenced_evidence_ids=[evidence[0].id],
+            created_at=datetime(2026, 7, 3, 10, 4, tzinfo=UTC),
+        ),
         actions=actions,
         verification_suggestions=verifications,
         created_at=datetime(2026, 7, 3, 10, 0, tzinfo=UTC),
@@ -131,6 +142,16 @@ def test_round_trips_provider_and_specialist_results(tmp_path):
     assert stored.provider_results == record.provider_results
     assert stored.specialist_results == record.specialist_results
     assert stored.provider_results[0].evidence_items == record.evidence
+
+
+def test_round_trips_llm_analysis(tmp_path):
+    repository, _engine = build_repository(tmp_path)
+    record = completed_record()
+
+    repository.save(record)
+
+    stored = repository.get(record.id)
+    assert stored.llm_analysis == record.llm_analysis
 
 
 def test_failed_provider_results_are_persisted(tmp_path):

@@ -5,6 +5,7 @@ from backend.db.models import InvestigationRecord, InvestigationStatus
 from backend.db.repositories import InMemoryInvestigationRepository
 from backend.diagnosis.action_planner import ActionPlanner
 from backend.diagnosis.coordinator import DiagnosisCoordinator
+from backend.diagnosis.llm_analyst import ReadOnlyLlmAnalyst
 from backend.domain.events import IncidentEvent
 from backend.domain.evidence import (
     EvidenceItem,
@@ -28,6 +29,7 @@ class DiagnosisOrchestrator:
         report_generator: ReportGenerator,
         coordinator: DiagnosisCoordinator | None = None,
         action_planner: ActionPlanner | None = None,
+        llm_analyst: ReadOnlyLlmAnalyst | None = None,
     ) -> None:
         self.repository = repository
         self.providers = providers
@@ -35,6 +37,7 @@ class DiagnosisOrchestrator:
         self.report_generator = report_generator
         self.coordinator = coordinator or DiagnosisCoordinator(providers)
         self.action_planner = action_planner or ActionPlanner()
+        self.llm_analyst = llm_analyst
 
     def run(self, event: IncidentEvent) -> InvestigationRecord:
         record = self.repository.save(
@@ -63,6 +66,12 @@ class DiagnosisOrchestrator:
             record.evidence = evidence
             record.actions = actions
             record.verification_suggestions = verifications
+            if self.llm_analyst is not None:
+                record.llm_analysis = self.llm_analyst.analyze(
+                    investigation_id=record.id,
+                    evidence=evidence,
+                    hypotheses=hypotheses,
+                )
             report = self.report_generator.generate(
                 record.id,
                 event,

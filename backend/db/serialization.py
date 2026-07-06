@@ -7,6 +7,7 @@ from backend.domain.actions import RecommendedAction, VerificationSuggestion
 from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem
 from backend.domain.hypotheses import Hypothesis
+from backend.domain.llm_analysis import LLMAnalysis
 from backend.domain.reports import IncidentReport
 from backend.providers.results import ProviderResult
 
@@ -34,7 +35,14 @@ def record_to_rows(record: InvestigationRecord) -> dict[str, Any]:
         "report": record.report.model_dump(mode="json") if record.report else None,
         "provider_results": _payload_rows(record.id, record.provider_results),
         "specialist_results": _payload_rows(record.id, record.specialist_results),
-        "llm_analysis": None,
+        "llm_analysis": (
+            {
+                "investigation_id": record.id,
+                "payload": record.llm_analysis.model_dump(mode="json"),
+            }
+            if record.llm_analysis is not None
+            else None
+        ),
     }
 
 
@@ -63,6 +71,11 @@ def rows_to_record(rows: Mapping[str, Any]) -> InvestigationRecord:
         report=(
             IncidentReport(**rows["report"]["payload"])
             if rows.get("report") is not None
+            else None
+        ),
+        llm_analysis=(
+            LLMAnalysis(**rows["llm_analysis"]["payload"])
+            if rows.get("llm_analysis") is not None
             else None
         ),
         failure_reason=investigation["failure_reason"],

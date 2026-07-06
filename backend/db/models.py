@@ -9,6 +9,7 @@ from backend.domain.actions import RecommendedAction, VerificationSuggestion
 from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem
 from backend.domain.hypotheses import Hypothesis
+from backend.domain.llm_analysis import LLMAnalysis
 from backend.domain.reports import IncidentReport
 from backend.providers.results import ProviderResult
 
@@ -30,6 +31,7 @@ class InvestigationRecord(BaseModel):
     specialist_results: list[SpecialistResult] = Field(default_factory=list)
     hypotheses: list[Hypothesis] = Field(default_factory=list)
     report: IncidentReport | None = None
+    llm_analysis: LLMAnalysis | None = None
     failure_reason: str | None = None
     actions: list[RecommendedAction] = Field(default_factory=list)
     verification_suggestions: list[VerificationSuggestion] = Field(default_factory=list)

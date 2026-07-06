@@ -66,6 +66,8 @@ class SQLiteInvestigationRepository:
                         payload=rows["report"],
                     )
                 )
+            if rows["llm_analysis"] is not None:
+                connection.execute(insert(llm_analyses).values(rows["llm_analysis"]))
         return record
 
     def get(self, investigation_id: str) -> InvestigationRecord:
@@ -96,6 +98,7 @@ class SQLiteInvestigationRepository:
                     connection, specialist_results, investigation_id
                 ),
                 "report": self._fetch_report(connection, investigation_id),
+                "llm_analysis": self._fetch_llm_analysis(connection, investigation_id),
             }
         return rows_to_record(rows)
 
@@ -223,3 +226,13 @@ class SQLiteInvestigationRepository:
             select(reports).where(reports.c.investigation_id == investigation_id)
         ).mappings().one_or_none()
         return dict(report) if report is not None else None
+
+    def _fetch_llm_analysis(
+        self,
+        connection: Any,
+        investigation_id: str,
+    ) -> dict[str, Any] | None:
+        analysis = connection.execute(
+            select(llm_analyses).where(llm_analyses.c.investigation_id == investigation_id)
+        ).mappings().one_or_none()
+        return dict(analysis) if analysis is not None else None
