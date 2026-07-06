@@ -1,12 +1,20 @@
+from __future__ import annotations
+
 from datetime import UTC, datetime
 
 from backend.db.models import InvestigationRecord, InvestigationStatus
 from backend.domain.actions import ActionStatus, VerificationStatus
+from backend.domain.agent_plan import AgentExecution, DiagnosisPlan, DiagnosisTask
+from backend.domain.tool_calls import ToolCallRecord
 
 
 class InMemoryInvestigationRepository:
     def __init__(self) -> None:
         self._records: dict[str, InvestigationRecord] = {}
+        self._plans: dict[str, DiagnosisPlan] = {}
+        self._tasks: dict[str, list[DiagnosisTask]] = {}
+        self._executions: dict[str, dict[str, AgentExecution]] = {}
+        self._tool_calls: dict[str, dict[str, ToolCallRecord]] = {}
 
     def save(self, record: InvestigationRecord) -> InvestigationRecord:
         self._records[record.id] = record
@@ -76,3 +84,51 @@ class InMemoryInvestigationRepository:
                 self._records[record.id] = record
                 return suggestion
         raise ValueError(f"Unknown verification suggestion: {verification_id}")
+
+    def save_plan(self, plan: DiagnosisPlan) -> DiagnosisPlan:
+        self._plans[plan.investigation_id] = plan
+        self._tasks[plan.investigation_id] = list(plan.tasks)
+        return plan
+
+    def get_plan(self, investigation_id: str) -> DiagnosisPlan | None:
+        plan = self._plans.get(investigation_id)
+        if plan is None:
+            return None
+        return plan.model_copy(update={"tasks": self.list_tasks(investigation_id)})
+
+    def save_tasks(
+        self,
+        investigation_id: str,
+        tasks: list[DiagnosisTask],
+    ) -> list[DiagnosisTask]:
+        self._tasks[investigation_id] = list(tasks)
+        return list(tasks)
+
+    def list_tasks(self, investigation_id: str) -> list[DiagnosisTask]:
+        return list(self._tasks.get(investigation_id, []))
+
+    def save_executions(
+        self,
+        investigation_id: str,
+        executions: list[AgentExecution],
+    ) -> list[AgentExecution]:
+        bucket = self._executions.setdefault(investigation_id, {})
+        for execution in executions:
+            bucket[execution.id] = execution
+        return list(executions)
+
+    def list_executions(self, investigation_id: str) -> list[AgentExecution]:
+        return list(self._executions.get(investigation_id, {}).values())
+
+    def save_tool_calls(
+        self,
+        investigation_id: str,
+        calls: list[ToolCallRecord],
+    ) -> list[ToolCallRecord]:
+        bucket = self._tool_calls.setdefault(investigation_id, {})
+        for call in calls:
+            bucket[call.id] = call
+        return list(calls)
+
+    def list_tool_calls(self, investigation_id: str) -> list[ToolCallRecord]:
+        return list(self._tool_calls.get(investigation_id, {}).values())

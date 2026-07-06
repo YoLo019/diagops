@@ -78,6 +78,26 @@ def test_orchestrator_persists_completed_record_with_actions_and_verifications()
     assert saved.completed_at is not None
 
 
+def test_orchestrator_records_v4_plan_tasks_executions_and_tool_calls():
+    repository = InMemoryInvestigationRepository()
+    orchestrator = build_v2_orchestrator(repository=repository)
+
+    record = orchestrator.run(load_incident_case("deployment_regression"))
+
+    plan = repository.get_plan(record.id)
+    tasks = repository.list_tasks(record.id)
+    executions = repository.list_executions(record.id)
+    tool_calls = repository.list_tool_calls(record.id)
+
+    assert plan is not None
+    assert plan.investigation_id == record.id
+    assert tasks == plan.tasks
+    assert tasks
+    assert len(executions) == len(tasks)
+    assert tool_calls
+    assert {call.task_id for call in tool_calls} <= {task.id for task in tasks}
+
+
 def test_orchestrator_persists_failed_record_when_report_generation_fails():
     class BrokenReportGenerator:
         def generate(self, *args, **kwargs):

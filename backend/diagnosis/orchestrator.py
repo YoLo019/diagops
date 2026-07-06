@@ -5,7 +5,9 @@ from backend.db.models import InvestigationRecord, InvestigationStatus
 from backend.db.repositories import InMemoryInvestigationRepository
 from backend.diagnosis.action_planner import ActionPlanner
 from backend.diagnosis.coordinator import DiagnosisCoordinator
+from backend.diagnosis.execution_engine import DiagnosisExecutionEngine
 from backend.diagnosis.llm_analyst import ReadOnlyLlmAnalyst
+from backend.diagnosis.planner import DiagnosisTaskPlanner
 from backend.domain.events import IncidentEvent
 from backend.domain.evidence import (
     EvidenceItem,
@@ -16,6 +18,7 @@ from backend.domain.evidence import (
 from backend.providers.registry import ProviderRegistry
 from backend.rca.analyzer import RcaAnalyzer
 from backend.reports.generator import ReportGenerator
+from backend.tools.provider_tools import build_provider_tool_registry
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +33,8 @@ class DiagnosisOrchestrator:
         coordinator: DiagnosisCoordinator | None = None,
         action_planner: ActionPlanner | None = None,
         llm_analyst: ReadOnlyLlmAnalyst | None = None,
+        task_planner: DiagnosisTaskPlanner | None = None,
+        execution_engine: DiagnosisExecutionEngine | None = None,
     ) -> None:
         self.repository = repository
         self.providers = providers
@@ -38,6 +43,11 @@ class DiagnosisOrchestrator:
         self.coordinator = coordinator or DiagnosisCoordinator(providers)
         self.action_planner = action_planner or ActionPlanner()
         self.llm_analyst = llm_analyst
+        self.task_planner = task_planner or DiagnosisTaskPlanner()
+        self.execution_engine = execution_engine or DiagnosisExecutionEngine(
+            repository=repository,
+            tool_registry=build_provider_tool_registry(providers),
+        )
 
     def run(self, event: IncidentEvent) -> InvestigationRecord:
         record = self.repository.save(
@@ -45,6 +55,7 @@ class DiagnosisOrchestrator:
         )
         logger.info("investigation started id=%s service=%s", record.id, event.service)
         self.repository.update_status(record.id, InvestigationStatus.RUNNING)
+        self._record_v4_execution(record.id, event)
 
         try:
             context = self.coordinator.collect(event)
@@ -102,6 +113,18 @@ class DiagnosisOrchestrator:
                 record.id,
                 InvestigationStatus.FAILED,
                 failure_reason=str(exc),
+            )
+
+    def _record_v4_execution(self, investigation_id: str, event: IncidentEvent) -> None:
+        try:
+            plan = self.task_planner.plan(event, investigation_id=investigation_id)
+            self.execution_engine.run(plan, event)
+        except Exception as exc:
+            logger.warning(
+                "v4 execution recording failed id=%s reason=%s",
+                investigation_id,
+                exc,
+                exc_info=True,
             )
 
     def _ensure_action_evidence(
