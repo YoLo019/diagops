@@ -1,0 +1,22 @@
+storage:
+  url: sqlite:///data/diagops.db
+
+providers:
+  mock:
+    enabled: true
+  log_file:
+    enabled: true
+    paths:
+      - data/sample-logs/checkout-service.log
+  prometheus:
+    enabled: false
+    base_url: http://127.0.0.1:9090
+  deployment_file:
+    enabled: true
+    path: data/deployments/deployments.json
+  service_catalog:
+    enabled: true
+    path: config/services.yaml
+
+llm:
+  enabled: false

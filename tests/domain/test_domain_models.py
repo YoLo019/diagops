@@ -3,8 +3,9 @@ from datetime import datetime
 import pytest
 from pydantic import ValidationError
 
+from backend.db.models import InvestigationRecord, InvestigationStatus
 from backend.domain.events import IncidentEvent, IncidentSource, Severity
-from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
+from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider, EvidenceStatus
 from backend.domain.hypotheses import CauseType, Hypothesis
 from backend.domain.reports import IncidentReport
 
@@ -126,3 +127,47 @@ def test_evidence_item_rejects_non_finite_payload_float(payload):
             summary="NullPointerException increased",
             payload=payload,
         )
+
+
+def test_evidence_item_defaults_to_success_status():
+    item = EvidenceItem(
+        provider=EvidenceProvider.LOG,
+        kind=EvidenceKind.LOG_PATTERN,
+        timestamp="2026-07-03T15:10:00+08:00",
+        summary="error spike",
+    )
+
+    assert item.status == EvidenceStatus.SUCCESS
+    assert item.error_message is None
+
+
+def test_provider_error_evidence_can_store_error_message():
+    item = EvidenceItem(
+        provider=EvidenceProvider.LOG,
+        kind=EvidenceKind.PROVIDER_ERROR,
+        status=EvidenceStatus.FAILED,
+        timestamp="2026-07-03T15:10:00+08:00",
+        summary="log provider failed",
+        error_message="timeout",
+    )
+
+    assert item.status == EvidenceStatus.FAILED
+    assert item.error_message == "timeout"
+
+
+def test_investigation_record_defaults_to_pending():
+    event = IncidentEvent(
+        source="webhook",
+        service="checkout-service",
+        environment="prod",
+        severity="warning",
+        title="Latency increased",
+        description="checkout-service latency increased",
+        started_at="2026-07-03T15:10:00+08:00",
+    )
+    record = InvestigationRecord(event=event)
+
+    assert record.status == InvestigationStatus.PENDING
+    assert record.failure_reason is None
+    assert record.actions == []
+    assert record.verification_suggestions == []

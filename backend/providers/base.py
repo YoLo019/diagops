@@ -1,9 +1,11 @@
 from typing import Protocol
 
 from backend.domain.events import IncidentEvent
-from backend.domain.evidence import EvidenceItem
+from backend.providers.results import ProviderResult
 
 
 class EvidenceProviderProtocol(Protocol):
-    def collect(self, event: IncidentEvent) -> list[EvidenceItem]:
+    provider: object
+
+    def collect(self, event: IncidentEvent) -> ProviderResult:
         """Collect evidence for an incident event."""

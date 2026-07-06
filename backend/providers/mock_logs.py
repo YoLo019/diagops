@@ -2,14 +2,18 @@ from datetime import timedelta
 
 from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
+from backend.providers.results import ProviderResult
 
 
 class MockLogProvider:
-    def collect(self, event: IncidentEvent) -> list[EvidenceItem]:
+    provider = EvidenceProvider.LOG
+
+    def collect(self, event: IncidentEvent) -> ProviderResult:
+        evidence: list[EvidenceItem] = []
         if event.service == "payment-service":
-            return [
+            evidence = [
                 EvidenceItem(
-                    provider=EvidenceProvider.LOG,
+                    provider=self.provider,
                     kind=EvidenceKind.LOG_PATTERN,
                     timestamp=event.started_at + timedelta(minutes=1),
                     summary="New NullPointerException appears in /pay/confirm after deployment",
@@ -22,9 +26,9 @@ class MockLogProvider:
             ]
 
         if event.service == "order-service":
-            return [
+            evidence = [
                 EvidenceItem(
-                    provider=EvidenceProvider.LOG,
+                    provider=self.provider,
                     kind=EvidenceKind.LOG_PATTERN,
                     timestamp=event.started_at,
                     summary="TimeoutException increased when calling inventory-service",
@@ -36,4 +40,4 @@ class MockLogProvider:
                 )
             ]
 
-        return []
+        return ProviderResult(provider=self.provider, evidence_items=evidence)

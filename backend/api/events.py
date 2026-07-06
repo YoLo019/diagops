@@ -16,20 +16,23 @@ class InvestigationSummary(BaseModel):
     title: str
     top_cause_type: str
     confidence: float
+    action_count: int = 0
+    verification_count: int = 0
+    failure_reason: str | None = None
 
 
 def to_summary(record: InvestigationRecord) -> InvestigationSummary:
-    if not record.hypotheses:
-        raise HTTPException(status_code=500, detail="Investigation has no hypotheses")
-
-    top = record.hypotheses[0]
+    top = record.hypotheses[0] if record.hypotheses else None
     return InvestigationSummary(
         id=record.id,
         status=record.status,
         service=record.event.service,
         title=record.event.title,
-        top_cause_type=top.cause_type,
-        confidence=top.confidence,
+        top_cause_type=top.cause_type if top else "unknown",
+        confidence=top.confidence if top else 0.0,
+        action_count=len(record.actions),
+        verification_count=len(record.verification_suggestions),
+        failure_reason=record.failure_reason,
     )
 
 

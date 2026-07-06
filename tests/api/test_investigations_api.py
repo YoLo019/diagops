@@ -49,3 +49,49 @@ def test_unknown_investigation_returns_404():
     response = client.get("/investigations/inv-not-found")
 
     assert response.status_code == 404
+
+
+def test_update_action_status_only_changes_state():
+    client = TestClient(app)
+    created = client.post("/events/simulated/deployment_regression").json()
+    detail = client.get(f"/investigations/{created['id']}").json()
+    action_id = detail["actions"][0]["id"]
+
+    response = client.patch(
+        f"/investigations/{created['id']}/actions/{action_id}",
+        json={"status": "approved", "note": "owner approved"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "approved"
+    assert body["note"] == "owner approved"
+
+
+def test_update_unknown_action_returns_404():
+    client = TestClient(app)
+    created = client.post("/events/simulated/deployment_regression").json()
+
+    response = client.patch(
+        f"/investigations/{created['id']}/actions/act-not-found",
+        json={"status": "approved"},
+    )
+
+    assert response.status_code == 404
+
+
+def test_update_verification_status_records_result_note():
+    client = TestClient(app)
+    created = client.post("/events/simulated/deployment_regression").json()
+    detail = client.get(f"/investigations/{created['id']}").json()
+    verification_id = detail["verification_suggestions"][0]["id"]
+
+    response = client.patch(
+        f"/investigations/{created['id']}/verifications/{verification_id}",
+        json={"status": "passed", "result_note": "5xx recovered"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "passed"
+    assert body["result_note"] == "5xx recovered"

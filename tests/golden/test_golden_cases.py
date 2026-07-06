@@ -1,5 +1,8 @@
 import pytest
 
+from backend.db.repositories import InMemoryInvestigationRepository
+from backend.diagnosis.coordinator import DiagnosisCoordinator
+from backend.diagnosis.orchestrator import DiagnosisOrchestrator
 from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
 from backend.domain.hypotheses import CauseType
 from backend.providers.registry import build_mock_provider_registry
@@ -46,6 +49,17 @@ def find_evidence(
 
     assert len(matches) == 1
     return matches[0]
+
+
+def build_v2_orchestrator() -> DiagnosisOrchestrator:
+    providers = build_mock_provider_registry()
+    return DiagnosisOrchestrator(
+        repository=InMemoryInvestigationRepository(),
+        providers=providers,
+        analyzer=RcaAnalyzer(),
+        report_generator=ReportGenerator(),
+        coordinator=DiagnosisCoordinator(providers),
+    )
 
 
 @pytest.mark.parametrize(
@@ -109,10 +123,16 @@ def test_golden_case_primary_cause_and_report_evidence(
     payload_value,
 ):
     event = load_incident_case(case_id)
-    evidence = build_mock_provider_registry().collect_all(event)
-    hypotheses = RcaAnalyzer().analyze(event, evidence)
-    report = ReportGenerator().generate(f"inv-{case_id}", event, evidence, hypotheses)
-    top = hypotheses[0]
+    record = build_v2_orchestrator().run(event)
+
+    assert record.status == "completed"
+    assert record.report is not None
+    assert record.actions
+    assert record.verification_suggestions
+
+    evidence = record.evidence
+    report = record.report
+    top = record.hypotheses[0]
     report_top = report.hypotheses[0]
     expected_evidence = find_evidence(
         evidence,
@@ -131,6 +151,20 @@ def test_golden_case_primary_cause_and_report_evidence(
     assert f"`{top.cause_type}`" in report.markdown
     assert top.summary in report.markdown
     assert f"{top.confidence:.2f}" in report.markdown
+    assert report.action_ids == [action.id for action in record.actions]
+    assert report.verification_suggestion_ids == [
+        suggestion.id for suggestion in record.verification_suggestions
+    ]
+    assert all(action.supporting_evidence_ids for action in record.actions)
+    evidence_ids = {item.id for item in evidence}
+    for action in record.actions:
+        assert set(action.supporting_evidence_ids) <= evidence_ids
+        if action.risk_level in {"medium", "high"}:
+            assert action.requires_approval is True
+    assert "建议动作" in report.markdown
+    assert "需要审批的动作" in report.markdown
+    assert "验证建议" in report.markdown
+    assert "V2 未执行该动作" in report.markdown
     assert "事实与推断" in report.markdown
     assert "观察到的事实" in report.markdown
     assert "推断结论/不确定性" in report.markdown
