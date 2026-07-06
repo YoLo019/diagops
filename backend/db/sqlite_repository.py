@@ -53,6 +53,12 @@ class SQLiteInvestigationRepository:
                 record.id,
                 rows["verification_suggestions"],
             )
+            self._replace_children(
+                connection, provider_results, record.id, rows["provider_results"]
+            )
+            self._replace_children(
+                connection, specialist_results, record.id, rows["specialist_results"]
+            )
             if rows["report"] is not None:
                 connection.execute(
                     insert(reports).values(
@@ -82,6 +88,12 @@ class SQLiteInvestigationRepository:
                 ),
                 "verification_suggestions": self._fetch_children(
                     connection, verification_suggestions, investigation_id
+                ),
+                "provider_results": self._fetch_children(
+                    connection, provider_results, investigation_id
+                ),
+                "specialist_results": self._fetch_children(
+                    connection, specialist_results, investigation_id
                 ),
                 "report": self._fetch_report(connection, investigation_id),
             }

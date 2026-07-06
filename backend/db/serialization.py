@@ -2,11 +2,13 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from backend.db.models import InvestigationRecord, InvestigationStatus
+from backend.diagnosis.context import SpecialistResult
 from backend.domain.actions import RecommendedAction, VerificationSuggestion
 from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem
 from backend.domain.hypotheses import Hypothesis
 from backend.domain.reports import IncidentReport
+from backend.providers.results import ProviderResult
 
 
 def record_to_rows(record: InvestigationRecord) -> dict[str, Any]:
@@ -30,8 +32,8 @@ def record_to_rows(record: InvestigationRecord) -> dict[str, Any]:
             record.id, record.verification_suggestions
         ),
         "report": record.report.model_dump(mode="json") if record.report else None,
-        "provider_results": [],
-        "specialist_results": [],
+        "provider_results": _payload_rows(record.id, record.provider_results),
+        "specialist_results": _payload_rows(record.id, record.specialist_results),
         "llm_analysis": None,
     }
 
@@ -45,6 +47,14 @@ def rows_to_record(rows: Mapping[str, Any]) -> InvestigationRecord:
         evidence=[
             EvidenceItem(**item["payload"])
             for item in _sorted_child_rows(rows.get("evidence_items", []))
+        ],
+        provider_results=[
+            ProviderResult(**item["payload"])
+            for item in _sorted_child_rows(rows.get("provider_results", []))
+        ],
+        specialist_results=[
+            SpecialistResult(**item["payload"])
+            for item in _sorted_child_rows(rows.get("specialist_results", []))
         ],
         hypotheses=[
             Hypothesis(**item["payload"])
@@ -74,6 +84,17 @@ def _child_rows(record_id: str, models: Sequence[Any]) -> list[dict[str, Any]]:
     return [
         {
             "id": model.id,
+            "investigation_id": record_id,
+            "position": index,
+            "payload": model.model_dump(mode="json"),
+        }
+        for index, model in enumerate(models)
+    ]
+
+
+def _payload_rows(record_id: str, models: Sequence[Any]) -> list[dict[str, Any]]:
+    return [
+        {
             "investigation_id": record_id,
             "position": index,
             "payload": model.model_dump(mode="json"),

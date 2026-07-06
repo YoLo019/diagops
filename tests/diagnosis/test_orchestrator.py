@@ -71,6 +71,8 @@ def test_orchestrator_persists_completed_record_with_actions_and_verifications()
     assert saved.report is not None
     assert saved.actions
     assert saved.verification_suggestions
+    assert saved.provider_results
+    assert saved.specialist_results
     assert saved.completed_at is not None
 
 
@@ -120,6 +122,8 @@ def test_orchestrator_preserves_context_when_action_planner_fails():
     assert saved.failure_reason == "planner exploded"
     assert saved.evidence
     assert saved.hypotheses
+    assert saved.provider_results
+    assert saved.specialist_results
     assert saved.actions == []
 
 

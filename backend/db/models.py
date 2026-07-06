@@ -4,11 +4,13 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+from backend.diagnosis.context import SpecialistResult
 from backend.domain.actions import RecommendedAction, VerificationSuggestion
 from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem
 from backend.domain.hypotheses import Hypothesis
 from backend.domain.reports import IncidentReport
+from backend.providers.results import ProviderResult
 
 
 class InvestigationStatus(StrEnum):
@@ -24,6 +26,8 @@ class InvestigationRecord(BaseModel):
     event: IncidentEvent
     status: InvestigationStatus = InvestigationStatus.PENDING
     evidence: list[EvidenceItem] = Field(default_factory=list)
+    provider_results: list[ProviderResult] = Field(default_factory=list)
+    specialist_results: list[SpecialistResult] = Field(default_factory=list)
     hypotheses: list[Hypothesis] = Field(default_factory=list)
     report: IncidentReport | None = None
     failure_reason: str | None = None

@@ -46,6 +46,8 @@ class DiagnosisOrchestrator:
         try:
             context = self.coordinator.collect(event)
             evidence = context.evidence
+            record.provider_results = context.provider_results
+            record.specialist_results = context.specialist_results
             record.evidence = evidence
             record.updated_at = datetime.now(UTC)
             self.repository.save(record)

@@ -7,6 +7,7 @@ from backend.db.schema import schema_version
 from backend.db.session import create_db_engine, initialize_database
 from backend.db.sqlite_repository import SQLiteInvestigationRepository
 from backend.diagnosis.action_planner import ActionPlanner
+from backend.diagnosis.context import SpecialistResult, SpecialistStatus
 from backend.domain.actions import (
     ActionRiskLevel,
     ActionStatus,
@@ -21,6 +22,7 @@ from backend.domain.evidence import (
     EvidenceProvider,
 )
 from backend.domain.hypotheses import CauseType, Hypothesis
+from backend.providers.results import ProviderResult, ProviderStatus
 from backend.reports.generator import ReportGenerator
 from backend.services.incident_cases import load_incident_case
 
@@ -69,6 +71,23 @@ def completed_record() -> InvestigationRecord:
         event=event,
         status=InvestigationStatus.COMPLETED,
         evidence=evidence,
+        provider_results=[
+            ProviderResult(
+                provider=EvidenceProvider.DEPLOY,
+                status=ProviderStatus.SUCCESS,
+                evidence_items=evidence,
+                duration_ms=12,
+            )
+        ],
+        specialist_results=[
+            SpecialistResult(
+                agent_name="DeployAnalyst",
+                status=SpecialistStatus.COMPLETED,
+                evidence_items=evidence,
+                summary="deploy provider returned 1 evidence item(s)",
+                duration_ms=12,
+            )
+        ],
         hypotheses=hypotheses,
         report=report,
         actions=actions,
@@ -100,6 +119,50 @@ def test_save_get_list_round_trips_completed_investigation(tmp_path):
     stored = repository.get(record.id)
     assert stored == record
     assert repository.list() == [record]
+
+
+def test_round_trips_provider_and_specialist_results(tmp_path):
+    repository, _engine = build_repository(tmp_path)
+    record = completed_record()
+
+    repository.save(record)
+
+    stored = repository.get(record.id)
+    assert stored.provider_results == record.provider_results
+    assert stored.specialist_results == record.specialist_results
+    assert stored.provider_results[0].evidence_items == record.evidence
+
+
+def test_failed_provider_results_are_persisted(tmp_path):
+    repository, _engine = build_repository(tmp_path)
+    record = InvestigationRecord(
+        event=load_incident_case("deployment_regression"),
+        status=InvestigationStatus.FAILED,
+        failure_reason="provider timeout",
+        provider_results=[
+            ProviderResult(
+                provider=EvidenceProvider.LOG,
+                status=ProviderStatus.FAILED,
+                error_message="log file missing",
+                duration_ms=7,
+            )
+        ],
+        specialist_results=[
+            SpecialistResult(
+                agent_name="LogAnalyst",
+                status=SpecialistStatus.FAILED,
+                summary="log provider returned 0 evidence item(s)",
+                errors=["log file missing"],
+                duration_ms=7,
+            )
+        ],
+    )
+
+    repository.save(record)
+
+    stored = repository.get(record.id)
+    assert stored.provider_results == record.provider_results
+    assert stored.specialist_results == record.specialist_results
 
 
 def test_new_repository_instance_reads_same_sqlite_file(tmp_path):
