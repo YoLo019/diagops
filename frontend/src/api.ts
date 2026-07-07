@@ -107,6 +107,92 @@ export type ManualInvestigationPayload = {
   environment: string;
 };
 
+export type DiagnosisTask = {
+  id: string;
+  title: string;
+  description: string;
+  task_type: string;
+  agent_name: string;
+  tool_names: string[];
+  depends_on: string[];
+  priority: number;
+  status: string;
+  created_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+};
+
+export type DiagnosisPlan = {
+  id: string;
+  investigation_id: string;
+  tasks: DiagnosisTask[];
+  created_at: string;
+};
+
+export type AgentExecution = {
+  id: string;
+  task_id: string;
+  agent_name: string;
+  status: string;
+  tool_call_ids: string[];
+  evidence_ids: string[];
+  summary?: string | null;
+  error_message?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  duration_ms: number;
+};
+
+export type ContextFact = {
+  id: string;
+  source_agent: string;
+  fact_type: string;
+  summary: string;
+  confidence: number;
+  evidence_ids: string[];
+  created_at: string;
+};
+
+export type ToolCallRecord = {
+  id: string;
+  task_id: string;
+  agent_name: string;
+  tool_name: string;
+  input: Record<string, unknown>;
+  status: string;
+  output_evidence_ids: string[];
+  error_message?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  duration_ms: number;
+};
+
+export type MemoryItem = {
+  id: string;
+  service: string;
+  environment: string;
+  memory_type: string;
+  summary: string;
+  source_investigation_id?: string | null;
+  tags: string[];
+  created_at: string;
+};
+
+export type TaskGraph = {
+  nodes: Array<{
+    id: string;
+    label: string;
+    title: string;
+    type: string;
+    status: string;
+    agent_name: string;
+  }>;
+  edges: Array<{
+    source: string;
+    target: string;
+  }>;
+};
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     headers: {
@@ -136,6 +222,34 @@ export function listInvestigations() {
 
 export function getInvestigation(id: string) {
   return request<InvestigationRecord>(`/investigations/${id}`);
+}
+
+export function getPlan(id: string) {
+  return request<DiagnosisPlan | null>(`/investigations/${id}/plan`);
+}
+
+export function getTasks(id: string) {
+  return request<DiagnosisTask[]>(`/investigations/${id}/tasks`);
+}
+
+export function getAgentExecutions(id: string) {
+  return request<AgentExecution[]>(`/investigations/${id}/agent-executions`);
+}
+
+export function getContextFacts(id: string) {
+  return request<ContextFact[]>(`/investigations/${id}/context`);
+}
+
+export function getToolCalls(id: string) {
+  return request<ToolCallRecord[]>(`/investigations/${id}/tool-calls`);
+}
+
+export function getMemoryHits(id: string) {
+  return request<MemoryItem[]>(`/investigations/${id}/memory`);
+}
+
+export function getTaskGraph(id: string) {
+  return request<TaskGraph>(`/investigations/${id}/task-graph`);
 }
 
 export function createManualInvestigation(payload: ManualInvestigationPayload) {

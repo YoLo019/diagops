@@ -19,9 +19,29 @@ def test_app_contains_investigation_list_and_detail_ui_strings() -> None:
     assert "建议动作" in app
     assert "验证建议" in app
     assert "诊断报告" in app
+    assert "任务规划" in app
+    assert "Agent 执行过程" in app
+    assert "工具调用" in app
+    assert "共享上下文" in app
+    assert "历史记忆" in app
     assert "记录审批状态" in app
     assert "记录验证结果" in app
     assert "·" not in app
+
+
+def test_api_exposes_v4_agent_process_methods() -> None:
+    api = (FRONTEND / "src" / "api.ts").read_text(encoding="utf-8")
+
+    for method_name in [
+        "getPlan",
+        "getTasks",
+        "getAgentExecutions",
+        "getContextFacts",
+        "getToolCalls",
+        "getMemoryHits",
+        "getTaskGraph",
+    ]:
+        assert f"function {method_name}" in api
 
 
 def test_frontend_uses_vite_proxy_by_default() -> None:

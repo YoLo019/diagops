@@ -1,15 +1,29 @@
 import { FormEvent, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ActionStatus,
   API_BASE_URL,
-  InvestigationRecord,
-  VerificationStatus,
   createManualInvestigation,
+  getAgentExecutions,
+  getContextFacts,
   getInvestigation,
+  getMemoryHits,
+  getPlan,
+  getTaskGraph,
+  getTasks,
+  getToolCalls,
   listInvestigations,
   updateActionStatus,
   updateVerificationStatus,
+  type ActionStatus,
+  type AgentExecution,
+  type ContextFact,
+  type DiagnosisPlan,
+  type DiagnosisTask,
+  type InvestigationRecord,
+  type MemoryItem,
+  type TaskGraph,
+  type ToolCallRecord,
+  type VerificationStatus,
 } from "./api";
 
 const actionStatuses: ActionStatus[] = ["proposed", "approved", "rejected", "skipped", "done"];
@@ -44,6 +58,10 @@ function formatDate(value?: string | null) {
 
 function formatPercent(value: number) {
   return `${Math.round(value * 100)}%`;
+}
+
+function formatIdList(values: string[]) {
+  return values.length > 0 ? values.join(", ") : "无";
 }
 
 function StatusBadge({ value }: { value: string }) {
@@ -406,6 +424,190 @@ function VerificationSuggestions({ investigation }: { investigation: Investigati
   );
 }
 
+type AgentProcessData = {
+  plan: DiagnosisPlan | null;
+  tasks: DiagnosisTask[];
+  executions: AgentExecution[];
+  contextFacts: ContextFact[];
+  toolCalls: ToolCallRecord[];
+  memoryHits: MemoryItem[];
+  taskGraph: TaskGraph;
+};
+
+function AgentProcessPanels({ investigationId }: { investigationId: string }) {
+  const processQuery = useQuery<AgentProcessData>({
+    queryKey: ["agent-process", investigationId],
+    queryFn: async () => {
+      const [plan, tasks, executions, contextFacts, toolCalls, memoryHits, taskGraph] =
+        await Promise.all([
+          getPlan(investigationId),
+          getTasks(investigationId),
+          getAgentExecutions(investigationId),
+          getContextFacts(investigationId),
+          getToolCalls(investigationId),
+          getMemoryHits(investigationId),
+          getTaskGraph(investigationId),
+        ]);
+      return { plan, tasks, executions, contextFacts, toolCalls, memoryHits, taskGraph };
+    },
+  });
+  const data = processQuery.data;
+  const tasks = data?.tasks.length ? data.tasks : data?.plan?.tasks ?? [];
+  const executions = data?.executions ?? [];
+  const toolCalls = data?.toolCalls ?? [];
+  const contextFacts = data?.contextFacts ?? [];
+  const memoryHits = data?.memoryHits ?? [];
+  const dependencyCount = data?.taskGraph.edges.length ?? 0;
+  const errorMessage = processQuery.isError ? processQuery.error.message : "";
+
+  return (
+    <>
+      <section className="panel agent-process-panel">
+        <div className="panel-heading">
+          <h2>任务规划</h2>
+          <span>
+            {tasks.length} 项, 依赖 {dependencyCount} 条
+          </span>
+        </div>
+        {processQuery.isLoading ? (
+          <div className="empty-state">加载中...</div>
+        ) : errorMessage ? (
+          <p className="error">{errorMessage}</p>
+        ) : tasks.length === 0 ? (
+          <div className="empty-state">暂无任务规划。</div>
+        ) : (
+          <div className="process-list">
+            {tasks.map((task) => (
+              <article className="process-item" key={task.id}>
+                <div className="workflow-heading">
+                  <strong>{task.title}</strong>
+                  <StatusBadge value={task.status} />
+                </div>
+                <div className="process-detail">
+                  <span>类型: {task.task_type}</span>
+                  <span>Agent: {task.agent_name}</span>
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="panel agent-process-panel">
+        <div className="panel-heading">
+          <h2>Agent 执行过程</h2>
+          <span>{executions.length}</span>
+        </div>
+        {processQuery.isLoading ? (
+          <div className="empty-state">加载中...</div>
+        ) : errorMessage ? (
+          <p className="error">{errorMessage}</p>
+        ) : executions.length === 0 ? (
+          <div className="empty-state">暂无 Agent 执行记录。</div>
+        ) : (
+          <div className="process-list">
+            {executions.map((execution) => (
+              <article className="process-item" key={execution.id}>
+                <div className="workflow-heading">
+                  <strong>{execution.agent_name}</strong>
+                  <StatusBadge value={execution.status} />
+                </div>
+                <p>{execution.summary ?? "暂无摘要"}</p>
+                {execution.error_message ? <p className="error">{execution.error_message}</p> : null}
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="panel agent-process-panel">
+        <div className="panel-heading">
+          <h2>工具调用</h2>
+          <span>{toolCalls.length}</span>
+        </div>
+        {processQuery.isLoading ? (
+          <div className="empty-state">加载中...</div>
+        ) : errorMessage ? (
+          <p className="error">{errorMessage}</p>
+        ) : toolCalls.length === 0 ? (
+          <div className="empty-state">暂无工具调用。</div>
+        ) : (
+          <div className="process-list">
+            {toolCalls.map((call) => (
+              <article className="process-item" key={call.id}>
+                <div className="workflow-heading">
+                  <strong>{call.tool_name}</strong>
+                  <StatusBadge value={call.status} />
+                </div>
+                <div className="process-detail">
+                  <span>Agent: {call.agent_name}</span>
+                  <span>证据: {formatIdList(call.output_evidence_ids)}</span>
+                </div>
+                {call.error_message ? <p className="error">{call.error_message}</p> : null}
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="panel agent-process-panel">
+        <div className="panel-heading">
+          <h2>共享上下文</h2>
+          <span>{contextFacts.length}</span>
+        </div>
+        {processQuery.isLoading ? (
+          <div className="empty-state">加载中...</div>
+        ) : errorMessage ? (
+          <p className="error">{errorMessage}</p>
+        ) : contextFacts.length === 0 ? (
+          <div className="empty-state">暂无共享上下文。</div>
+        ) : (
+          <div className="process-list">
+            {contextFacts.map((fact) => (
+              <article className="process-item" key={fact.id}>
+                <div className="workflow-heading">
+                  <strong>{fact.summary}</strong>
+                  <span>{formatPercent(fact.confidence)}</span>
+                </div>
+                <div className="process-detail">
+                  <span>类型: {fact.fact_type}</span>
+                  <span>来源: {fact.source_agent}</span>
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="panel agent-process-panel">
+        <div className="panel-heading">
+          <h2>历史记忆</h2>
+          <span>{memoryHits.length}</span>
+        </div>
+        {processQuery.isLoading ? (
+          <div className="empty-state">加载中...</div>
+        ) : errorMessage ? (
+          <p className="error">{errorMessage}</p>
+        ) : memoryHits.length === 0 ? (
+          <div className="empty-state">暂无历史记忆。</div>
+        ) : (
+          <div className="process-list">
+            {memoryHits.map((memory) => (
+              <article className="process-item" key={memory.id}>
+                <strong>{memory.summary}</strong>
+                <div className="process-detail">
+                  <span>类型: {memory.memory_type}</span>
+                  <span>标签: {formatIdList(memory.tags)}</span>
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+    </>
+  );
+}
+
 function ReportPanel({ investigation }: { investigation: InvestigationRecord }) {
   return (
     <section className="panel report-panel">
@@ -488,6 +690,7 @@ export default function App() {
             <>
               <RecommendedActions investigation={activeInvestigation} />
               <VerificationSuggestions investigation={activeInvestigation} />
+              <AgentProcessPanels investigationId={activeInvestigation.id} />
               <ReportPanel investigation={activeInvestigation} />
             </>
           ) : (
