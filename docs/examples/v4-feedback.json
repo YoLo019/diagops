@@ -1,0 +1,6 @@
+{
+  "root_cause_correct": true,
+  "action_useful": true,
+  "verification_result": "passed",
+  "note": "rollback suggestion matched the actual incident review"
+}

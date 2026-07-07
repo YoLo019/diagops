@@ -147,6 +147,53 @@ curl -X POST http://127.0.0.1:8000/events \
 curl http://127.0.0.1:8000/investigations
 ```
 
+## V4 Multi-Agent Workflow
+
+DiagOps V4 adds a read-only multi-agent investigation process on top of the V3
+platform:
+
+- A task planner creates diagnosis tasks for logs, metrics, deployments,
+  dependencies, service context, memory lookup, RCA synthesis, and optional LLM
+  review.
+- Agent routing assigns each task to the matching specialist agent and tool
+  names.
+- Shared context records evidence-backed facts that agents can read during the
+  same investigation.
+- Tool calls are recorded so the Agent process can show which read-only
+  provider wrapper ran, with inputs, status, duration, and output evidence IDs.
+- Memory and feedback store reusable incident summaries and human review notes.
+- The Chinese frontend includes an Agent panel for plan, task graph, timeline,
+  context, tool calls, and memory views.
+
+V4 keeps the same production safety boundary as V3. It does not execute
+rollback, restart, scale, or configuration changes. V4 tools are currently
+read-only provider wrappers plus execution records.
+
+### Agent Process APIs
+
+```text
+GET /investigations/{id}/plan
+GET /investigations/{id}/tasks
+GET /investigations/{id}/agent-executions
+GET /investigations/{id}/context
+GET /investigations/{id}/tool-calls
+GET /investigations/{id}/memory
+GET /investigations/{id}/task-graph
+```
+
+### Feedback API
+
+```bash
+curl -X POST http://127.0.0.1:8000/investigations/<investigation_id>/feedback \
+  -H "Content-Type: application/json" \
+  -d @docs/examples/v4-feedback.json
+```
+
+`POST /investigations/{id}/feedback` records a `MemoryItem` with human feedback
+for the investigation service and environment. It does not modify the
+investigation report, hypotheses, recommended actions, or verification
+suggestions.
+
 ## V2 Platform Loop
 
 DiagOps V2 keeps production systems read-only. It creates an investigation,
