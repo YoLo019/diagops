@@ -31,7 +31,7 @@ Response shapes:
         "title": "Read logs",
         "task_type": "log_investigation",
         "agent_name": "LogAgent",
-        "tool_names": ["log_file"],
+        "tool_names": ["read_logs"],
         "depends_on": [],
         "status": "completed"
       }
@@ -63,7 +63,7 @@ Response shapes:
       "id": "tool-...",
       "task_id": "task-...",
       "agent_name": "LogAgent",
-      "tool_name": "log_file",
+      "tool_name": "read_logs",
       "input": {"investigation_id": "<id>"},
       "status": "success",
       "output_evidence_ids": ["ev-..."]
