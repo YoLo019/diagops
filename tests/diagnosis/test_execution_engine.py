@@ -4,6 +4,7 @@ from backend.db.repositories import InMemoryInvestigationRepository
 from backend.db.session import create_db_engine, initialize_database
 from backend.db.sqlite_repository import SQLiteInvestigationRepository
 from backend.diagnosis.execution_engine import DiagnosisExecutionEngine
+from backend.domain.agent_context import ContextFactType
 from backend.domain.agent_plan import (
     AgentExecutionStatus,
     DiagnosisPlan,
@@ -32,6 +33,8 @@ def test_successful_tool_call_completes_task_execution_and_call():
     assert repository.list_executions("inv-1")[0].evidence_ids == ["ev-log"]
     assert repository.list_tool_calls("inv-1")[0].status == ToolCallStatus.SUCCESS
     assert repository.list_tool_calls("inv-1")[0].input == {"investigation_id": "inv-1"}
+    assert repository.list_context_facts("inv-1")[0].fact_type == ContextFactType.OBSERVATION
+    assert repository.list_context_facts("inv-1")[0].evidence_ids == ["ev-log"]
 
 
 def test_failed_tool_call_marks_task_and_execution_failed_without_raising():
@@ -255,6 +258,7 @@ def test_sqlite_repository_round_trips_engine_plan_tasks_executions_and_tool_cal
     assert repository.list_tasks("inv-1")[0].status == DiagnosisTaskStatus.COMPLETED
     assert repository.list_executions("inv-1")[0].status == AgentExecutionStatus.COMPLETED
     assert repository.list_tool_calls("inv-1")[0].output_evidence_ids == ["ev-log"]
+    assert repository.list_context_facts("inv-1")[0].evidence_ids == ["ev-log"]
 
 
 def register_tool(

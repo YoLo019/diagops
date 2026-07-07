@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 from backend.db.models import InvestigationRecord, InvestigationStatus
 from backend.domain.actions import ActionStatus, VerificationStatus
+from backend.domain.agent_context import ContextFact
 from backend.domain.agent_plan import AgentExecution, DiagnosisPlan, DiagnosisTask
 from backend.domain.memory import MemoryItem
 from backend.domain.tool_calls import ToolCallRecord
@@ -15,6 +16,7 @@ class InMemoryInvestigationRepository:
         self._plans: dict[str, DiagnosisPlan] = {}
         self._tasks: dict[str, list[DiagnosisTask]] = {}
         self._executions: dict[str, dict[str, AgentExecution]] = {}
+        self._context_facts: dict[str, dict[str, ContextFact]] = {}
         self._tool_calls: dict[str, dict[str, ToolCallRecord]] = {}
         self._memory_items: dict[str, MemoryItem] = {}
 
@@ -121,6 +123,19 @@ class InMemoryInvestigationRepository:
 
     def list_executions(self, investigation_id: str) -> list[AgentExecution]:
         return list(self._executions.get(investigation_id, {}).values())
+
+    def save_context_facts(
+        self,
+        investigation_id: str,
+        facts: list[ContextFact],
+    ) -> list[ContextFact]:
+        bucket = self._context_facts.setdefault(investigation_id, {})
+        for fact in facts:
+            bucket[fact.id] = fact
+        return list(facts)
+
+    def list_context_facts(self, investigation_id: str) -> list[ContextFact]:
+        return list(self._context_facts.get(investigation_id, {}).values())
 
     def save_tool_calls(
         self,

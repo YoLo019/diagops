@@ -4,6 +4,7 @@ from time import perf_counter
 from typing import Any
 
 from backend.diagnosis.router import AgentRouter
+from backend.domain.agent_context import ContextFact, ContextFactType
 from backend.domain.agent_plan import (
     AgentExecution,
     AgentExecutionStatus,
@@ -65,6 +66,7 @@ class DiagnosisExecutionEngine:
                 progress = True
                 self._save_tasks(plan.investigation_id, tasks)
                 self._save_executions(plan.investigation_id, [execution])
+                self._save_context_fact(plan.investigation_id, execution)
 
             if progress:
                 continue
@@ -79,6 +81,7 @@ class DiagnosisExecutionEngine:
                 status_by_id[task.id] = task.status
                 self._save_tasks(plan.investigation_id, tasks)
                 self._save_executions(plan.investigation_id, [execution])
+                self._save_context_fact(plan.investigation_id, execution)
             pending_indexes.clear()
 
         completed_plan = plan.model_copy(update={"tasks": tasks})
@@ -273,6 +276,28 @@ class DiagnosisExecutionEngine:
         calls: list[ToolCallRecord],
     ) -> None:
         self._repo_call("save_tool_calls", investigation_id, calls)
+
+    def _save_context_fact(
+        self,
+        investigation_id: str,
+        execution: AgentExecution,
+    ) -> None:
+        if not execution.evidence_ids:
+            return
+        self._repo_call(
+            "save_context_facts",
+            investigation_id,
+            [
+                ContextFact(
+                    id=f"fact-{execution.task_id}",
+                    source_agent=execution.agent_name,
+                    fact_type=ContextFactType.OBSERVATION,
+                    summary=f"{execution.agent_name} collected supporting evidence.",
+                    confidence=0.8,
+                    evidence_ids=execution.evidence_ids,
+                )
+            ],
+        )
 
     def _repo_call(self, method_name: str, *args: Any) -> None:
         method = getattr(self.repository, method_name, None)

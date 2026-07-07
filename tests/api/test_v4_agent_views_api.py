@@ -50,7 +50,9 @@ def test_agent_view_endpoints_return_data(
     assert plan["tasks"]
     assert tasks
     assert executions_response.json()
-    assert isinstance(context_response.json(), list)
+    context = context_response.json()
+    assert context
+    assert all(item["evidence_ids"] for item in context)
     assert tool_calls_response.json()
     assert graph["nodes"]
     assert {node["id"] for node in graph["nodes"]} == {task["id"] for task in tasks}
