@@ -18,77 +18,102 @@ curl http://127.0.0.1:8000/investigations/<id>/memory
 curl http://127.0.0.1:8000/investigations/<id>/task-graph
 ```
 
-Response shapes:
+Response shapes are returned per endpoint.
+
+`GET /investigations/<id>/plan`:
 
 ```json
 {
-  "plan": {
-    "id": "plan-...",
-    "investigation_id": "<id>",
-    "tasks": [
-      {
-        "id": "task-...",
-        "title": "Read logs",
-        "task_type": "log_investigation",
-        "agent_name": "LogAgent",
-        "tool_names": ["read_logs"],
-        "depends_on": [],
-        "status": "completed"
-      }
-    ]
-  },
-  "agent_executions": [
+  "id": "plan-...",
+  "investigation_id": "<id>",
+  "tasks": [
     {
-      "id": "exec-...",
-      "task_id": "task-...",
+      "id": "task-...",
+      "title": "Read logs",
+      "task_type": "log_investigation",
       "agent_name": "LogAgent",
-      "status": "completed",
-      "tool_call_ids": ["tool-..."],
-      "evidence_ids": ["ev-..."],
-      "summary": "..."
+      "tool_names": ["read_logs"],
+      "depends_on": [],
+      "status": "completed"
     }
-  ],
-  "context": [
-    {
-      "id": "fact-...",
-      "source_agent": "LogAgent",
-      "fact_type": "observation",
-      "summary": "...",
-      "confidence": 0.8,
-      "evidence_ids": ["ev-..."]
-    }
-  ],
-  "tool_calls": [
-    {
-      "id": "tool-...",
-      "task_id": "task-...",
-      "agent_name": "LogAgent",
-      "tool_name": "read_logs",
-      "input": {"investigation_id": "<id>"},
-      "status": "success",
-      "output_evidence_ids": ["ev-..."]
-    }
-  ],
-  "memory": [
-    {
-      "id": "mem-...",
-      "service": "checkout-service",
-      "environment": "prod",
-      "memory_type": "human_feedback",
-      "summary": "..."
-    }
-  ],
-  "task_graph": {
-    "nodes": [
-      {
-        "id": "task-...",
-        "label": "Read logs",
-        "type": "log_investigation",
-        "status": "completed",
-        "agent_name": "LogAgent"
-      }
-    ],
-    "edges": [{"source": "task-a", "target": "task-b"}]
+  ]
+}
+```
+
+`GET /investigations/<id>/agent-executions`:
+
+```json
+[
+  {
+    "id": "exec-...",
+    "task_id": "task-...",
+    "agent_name": "LogAgent",
+    "status": "completed",
+    "tool_call_ids": ["tool-..."],
+    "evidence_ids": ["ev-..."],
+    "summary": "..."
   }
+]
+```
+
+`GET /investigations/<id>/context`:
+
+```json
+[
+  {
+    "id": "fact-...",
+    "source_agent": "LogAgent",
+    "fact_type": "observation",
+    "summary": "...",
+    "confidence": 0.8,
+    "evidence_ids": ["ev-..."]
+  }
+]
+```
+
+`GET /investigations/<id>/tool-calls`:
+
+```json
+[
+  {
+    "id": "tool-...",
+    "task_id": "task-...",
+    "agent_name": "LogAgent",
+    "tool_name": "read_logs",
+    "input": {"investigation_id": "<id>"},
+    "status": "success",
+    "output_evidence_ids": ["ev-..."]
+  }
+]
+```
+
+`GET /investigations/<id>/memory`:
+
+```json
+[
+  {
+    "id": "mem-...",
+    "service": "checkout-service",
+    "environment": "prod",
+    "memory_type": "human_feedback",
+    "summary": "..."
+  }
+]
+```
+
+`GET /investigations/<id>/task-graph`:
+
+```json
+{
+  "nodes": [
+    {
+      "id": "task-...",
+      "label": "Read logs",
+      "type": "log_investigation",
+      "status": "completed",
+      "agent_name": "LogAgent"
+    }
+  ],
+  "edges": [{"source": "task-a", "target": "task-b"}]
 }
 ```
