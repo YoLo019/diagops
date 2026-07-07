@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from backend.db.models import InvestigationRecord, InvestigationStatus
 from backend.domain.actions import ActionStatus, VerificationStatus
 from backend.domain.agent_plan import AgentExecution, DiagnosisPlan, DiagnosisTask
+from backend.domain.memory import MemoryItem
 from backend.domain.tool_calls import ToolCallRecord
 
 
@@ -15,6 +16,7 @@ class InMemoryInvestigationRepository:
         self._tasks: dict[str, list[DiagnosisTask]] = {}
         self._executions: dict[str, dict[str, AgentExecution]] = {}
         self._tool_calls: dict[str, dict[str, ToolCallRecord]] = {}
+        self._memory_items: dict[str, MemoryItem] = {}
 
     def save(self, record: InvestigationRecord) -> InvestigationRecord:
         self._records[record.id] = record
@@ -132,3 +134,26 @@ class InMemoryInvestigationRepository:
 
     def list_tool_calls(self, investigation_id: str) -> list[ToolCallRecord]:
         return list(self._tool_calls.get(investigation_id, {}).values())
+
+    def save_memory_items(self, items: list[MemoryItem]) -> list[MemoryItem]:
+        for item in items:
+            self._memory_items[item.id] = item
+        return list(items)
+
+    def list_memory(
+        self,
+        service: str,
+        environment: str,
+        *,
+        limit: int | None = None,
+    ) -> list[MemoryItem]:
+        items = sorted(
+            (
+                item
+                for item in self._memory_items.values()
+                if item.service == service and item.environment == environment
+            ),
+            key=lambda item: (item.created_at, item.id),
+            reverse=True,
+        )
+        return items if limit is None else items[:limit]

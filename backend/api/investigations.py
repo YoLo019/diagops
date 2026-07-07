@@ -9,7 +9,9 @@ from backend.diagnosis.context import SpecialistResult
 from backend.domain.actions import ActionStatus, VerificationStatus
 from backend.domain.events import IncidentEvent, IncidentSource, Severity
 from backend.domain.evidence import EvidenceItem, EvidenceProvider
+from backend.domain.memory import MemoryItem
 from backend.domain.reports import IncidentReport
+from backend.memory import MemoryStore
 from backend.providers.results import ProviderResult
 from backend.services.container import get_container
 
@@ -30,6 +32,13 @@ class UpdateActionStatusRequest(BaseModel):
 class UpdateVerificationStatusRequest(BaseModel):
     status: VerificationStatus
     result_note: str | None = None
+
+
+class FeedbackRequest(BaseModel):
+    root_cause_correct: bool | None = None
+    action_useful: bool | None = None
+    verification_result: str | None = None
+    note: str | None = None
 
 
 def _get_investigation_record(investigation_id: str) -> InvestigationRecord:
@@ -102,6 +111,22 @@ def update_verification_status(
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/{investigation_id}/feedback", response_model=MemoryItem)
+def record_feedback(
+    investigation_id: str,
+    request: FeedbackRequest,
+) -> MemoryItem:
+    record = _get_investigation_record(investigation_id)
+    container = get_container()
+    return MemoryStore(container.repository).record_feedback(
+        record,
+        request.root_cause_correct,
+        request.action_useful,
+        request.verification_result,
+        request.note,
+    )
 
 
 @router.get("/{investigation_id}/timeline", response_model=list[EvidenceItem])
