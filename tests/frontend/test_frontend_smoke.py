@@ -28,6 +28,25 @@ def test_app_contains_investigation_list_and_detail_ui_strings() -> None:
     assert "记录验证结果" in app
     assert "·" not in app
 
+    for old_label in [
+        "New Investigation",
+        "Investigation List",
+        "Investigation Detail",
+        "Evidence Chain",
+        "Candidate Causes",
+        "Recommended Actions",
+        "Verification Suggestions",
+        "Diagnosis Report",
+        "Task Plan",
+        "Tool Calls",
+        "Shared Context",
+        "Historical Memory",
+        "Create Diagnosis",
+        "Record approval status",
+        "Record verification result",
+    ]:
+        assert old_label not in app
+
 
 def test_api_exposes_v4_agent_process_methods() -> None:
     api = (FRONTEND / "src" / "api.ts").read_text(encoding="utf-8")
