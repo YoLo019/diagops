@@ -168,3 +168,30 @@ def test_golden_case_primary_cause_and_report_evidence(
     assert "事实与推断" in report.markdown
     assert "观察到的事实" in report.markdown
     assert "推断结论/不确定性" in report.markdown
+
+
+def test_golden_deployment_regression_v5_coordination_review_references_known_records():
+    repository = InMemoryInvestigationRepository()
+    providers = build_mock_provider_registry()
+    orchestrator = DiagnosisOrchestrator(
+        repository=repository,
+        providers=providers,
+        analyzer=RcaAnalyzer(),
+        report_generator=ReportGenerator(),
+        coordinator=DiagnosisCoordinator(providers),
+    )
+
+    record = orchestrator.run(load_incident_case("deployment_regression"))
+    findings = repository.list_agent_findings(record.id)
+    review = repository.get_coordination_review(record.id)
+
+    assert review is not None
+    assert review.candidates[0].cause_type == CauseType.DEPLOYMENT_REGRESSION
+
+    evidence_ids = {item.id for item in record.evidence}
+    finding_ids = {finding.id for finding in findings}
+    for candidate in review.candidates:
+        assert set(candidate.supporting_evidence_ids) <= evidence_ids
+        assert set(candidate.contradicting_evidence_ids) <= evidence_ids
+        assert set(candidate.supporting_finding_ids) <= finding_ids
+        assert set(candidate.contradicting_finding_ids) <= finding_ids

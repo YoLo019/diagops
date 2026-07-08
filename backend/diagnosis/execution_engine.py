@@ -345,7 +345,7 @@ def _provider_tool_call(
             if ProviderStatus.FAILED in statuses
             else ToolCallStatus.SUCCESS
             if output_evidence_ids
-            or statuses & {ProviderStatus.SUCCESS, ProviderStatus.PARTIAL}
+            or ProviderStatus.SUCCESS in statuses
             else ToolCallStatus.SKIPPED
         ),
         output_evidence_ids=output_evidence_ids,

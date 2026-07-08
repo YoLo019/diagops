@@ -5,8 +5,10 @@ from datetime import UTC, datetime
 from backend.db.models import InvestigationRecord, InvestigationStatus
 from backend.domain.actions import ActionStatus, VerificationStatus
 from backend.domain.agent_context import ContextFact
+from backend.domain.agent_findings import AgentFinding, CoordinationReview
 from backend.domain.agent_plan import AgentExecution, DiagnosisPlan, DiagnosisTask
 from backend.domain.memory import MemoryItem
+from backend.domain.react_trace import ReActTrace
 from backend.domain.tool_calls import ToolCallRecord
 
 
@@ -19,6 +21,9 @@ class InMemoryInvestigationRepository:
         self._context_facts: dict[str, dict[str, ContextFact]] = {}
         self._tool_calls: dict[str, dict[str, ToolCallRecord]] = {}
         self._memory_items: dict[str, MemoryItem] = {}
+        self._agent_findings: dict[str, dict[str, AgentFinding]] = {}
+        self._coordination_reviews: dict[str, CoordinationReview] = {}
+        self._react_traces: dict[str, ReActTrace] = {}
 
     def save(self, record: InvestigationRecord) -> InvestigationRecord:
         self._records[record.id] = record
@@ -172,3 +177,36 @@ class InMemoryInvestigationRepository:
             reverse=True,
         )
         return items if limit is None else items[:limit]
+
+    def save_agent_findings(
+        self,
+        investigation_id: str,
+        findings: list[AgentFinding],
+    ) -> list[AgentFinding]:
+        bucket = self._agent_findings.setdefault(investigation_id, {})
+        for finding in findings:
+            bucket[finding.id] = finding
+        return list(findings)
+
+    def list_agent_findings(self, investigation_id: str) -> list[AgentFinding]:
+        return list(self._agent_findings.get(investigation_id, {}).values())
+
+    def save_coordination_review(
+        self,
+        review: CoordinationReview,
+    ) -> CoordinationReview:
+        self._coordination_reviews[review.investigation_id] = review
+        return review
+
+    def get_coordination_review(
+        self,
+        investigation_id: str,
+    ) -> CoordinationReview | None:
+        return self._coordination_reviews.get(investigation_id)
+
+    def save_react_trace(self, trace: ReActTrace) -> ReActTrace:
+        self._react_traces[trace.investigation_id] = trace
+        return trace
+
+    def get_react_trace(self, investigation_id: str) -> ReActTrace | None:
+        return self._react_traces.get(investigation_id)

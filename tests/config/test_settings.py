@@ -8,6 +8,7 @@ def test_default_settings_use_d_drive_project_paths(monkeypatch):
     monkeypatch.delenv("DIAGOPS_DATABASE_URL", raising=False)
     monkeypatch.delenv("DIAGOPS_PROVIDER_MOCK_ENABLED", raising=False)
     monkeypatch.delenv("DIAGOPS_LLM_ENABLED", raising=False)
+    monkeypatch.delenv("DIAGOPS_REACT_ENABLED", raising=False)
 
     settings = load_settings()
 
@@ -17,6 +18,8 @@ def test_default_settings_use_d_drive_project_paths(monkeypatch):
     assert settings.providers.deployment_file.path == Path("data/deployments/deployments.json")
     assert settings.providers.log_file.paths == [Path("data/sample-logs/checkout-service.log")]
     assert settings.llm.enabled is False
+    assert settings.react.enabled is False
+    assert settings.react.max_steps == 5
 
 
 def test_environment_database_url_override(monkeypatch, tmp_path):
@@ -34,11 +37,13 @@ def test_environment_boolean_overrides(monkeypatch, tmp_path):
     monkeypatch.setenv("DIAGOPS_CONFIG", str(tmp_path / "missing.yaml"))
     monkeypatch.setenv("DIAGOPS_PROVIDER_MOCK_ENABLED", "false")
     monkeypatch.setenv("DIAGOPS_LLM_ENABLED", "true")
+    monkeypatch.setenv("DIAGOPS_REACT_ENABLED", "true")
 
     settings = load_settings()
 
     assert settings.providers.mock.enabled is False
     assert settings.llm.enabled is True
+    assert settings.react.enabled is True
 
 
 def test_missing_config_file_uses_safe_defaults(monkeypatch, tmp_path):

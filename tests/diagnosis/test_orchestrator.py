@@ -8,21 +8,26 @@ from backend.db.models import InvestigationRecord, InvestigationStatus
 from backend.db.repositories import InMemoryInvestigationRepository
 from backend.diagnosis.action_planner import ActionPlanner
 from backend.diagnosis.coordinator import DiagnosisCoordinator
+from backend.diagnosis.execution_engine import DiagnosisExecutionEngine
 from backend.diagnosis.orchestrator import DiagnosisOrchestrator
+from backend.diagnosis.react_agent import ReActInvestigationAgent, ReActLlmResponse
 from backend.domain.actions import (
     ActionRiskLevel,
     ActionType,
     RecommendedAction,
     VerificationSuggestion,
 )
+from backend.domain.agent_findings import AgentName
 from backend.domain.evidence import EvidenceProvider
 from backend.domain.hypotheses import CauseType
+from backend.domain.react_trace import ReActTraceStatus
 from backend.providers.registry import ProviderRegistry, build_mock_provider_registry
 from backend.providers.results import ProviderResult
 from backend.rca.analyzer import RcaAnalyzer
 from backend.reports.generator import ReportGenerator
 from backend.services.container import AppContainer
 from backend.services.incident_cases import load_incident_case
+from backend.tools.provider_tools import build_provider_tool_registry
 
 
 def build_v2_orchestrator(
@@ -121,6 +126,58 @@ def test_orchestrator_records_v4_without_collecting_provider_twice():
     orchestrator.run(load_incident_case("deployment_regression"))
 
     assert provider.calls == 1
+
+
+def test_orchestrator_records_v5_findings_and_coordination_review():
+    repository = InMemoryInvestigationRepository()
+    orchestrator = build_v2_orchestrator(repository=repository)
+
+    record = orchestrator.run(load_incident_case("deployment_regression"))
+
+    findings = repository.list_agent_findings(record.id)
+    review = repository.get_coordination_review(record.id)
+
+    assert {finding.agent_name for finding in findings} >= {
+        AgentName.LOG,
+        AgentName.METRIC,
+        AgentName.DEPLOYMENT,
+    }
+    assert review is not None
+    assert review.candidates
+    assert review.candidates[0].supporting_evidence_ids
+
+
+class OneShotReactLlm:
+    def generate(self, messages, tools):
+        return ReActLlmResponse(content="Read-only ReAct review complete.")
+
+
+def test_orchestrator_records_v6_react_trace_when_agent_is_configured():
+    repository = InMemoryInvestigationRepository()
+    providers = build_mock_provider_registry()
+    tool_registry = build_provider_tool_registry(providers)
+    orchestrator = DiagnosisOrchestrator(
+        repository=repository,
+        providers=providers,
+        analyzer=RcaAnalyzer(),
+        report_generator=ReportGenerator(),
+        execution_engine=DiagnosisExecutionEngine(
+            repository=repository,
+            tool_registry=tool_registry,
+        ),
+        react_agent=ReActInvestigationAgent(
+            llm=OneShotReactLlm(),
+            tool_registry=tool_registry,
+            max_steps=1,
+        ),
+    )
+
+    record = orchestrator.run(load_incident_case("deployment_regression"))
+    trace = repository.get_react_trace(record.id)
+
+    assert trace is not None
+    assert trace.status == ReActTraceStatus.COMPLETED
+    assert trace.final_answer == "Read-only ReAct review complete."
 
 
 def test_orchestrator_persists_failed_record_when_report_generation_fails():

@@ -194,6 +194,45 @@ for the investigation service and environment. It does not modify the
 investigation report, hypotheses, recommended actions, or verification
 suggestions.
 
+## V5 Agentic RCA Workbench
+
+DiagOps V5 adds a read-only RCA workbench on top of the V4 agent process:
+
+- LogAgent, MetricAgent, and DeploymentAgent produce independent findings.
+- The coordinator ranks multiple root-cause candidates instead of forcing one answer.
+- Candidates cite supporting and contradicting findings plus evidence IDs.
+- The frontend shows Agent 判断, 候选根因排序, and 证据链预览.
+
+V5 remains read-only. It does not execute rollback, restart, scaling, SSH, or
+configuration changes. Optional LLM enhancement is disabled by default and is
+not required for the workbench.
+
+### V5 RCA APIs
+
+```text
+GET /investigations/{id}/agent-findings
+GET /investigations/{id}/coordination-review
+GET /investigations/{id}/rca-workbench
+```
+
+## V6 Single-Agent ReAct
+
+DiagOps V6 adds an optional read-only ReAct trace. A single
+ReActInvestigationAgent requests one read-only tool call at a time across logs,
+metrics, deployments, dependencies, service catalog, and memory lookup.
+
+The trace records assistant text, tool calls, observations, evidence IDs,
+status, and the final answer. Deterministic RCA remains the source of truth.
+
+V6 does not execute shell commands, SSH, rollback, restart, scaling,
+configuration changes, or remediation.
+
+### V6 ReAct API
+
+```text
+GET /investigations/{id}/react-trace
+```
+
 ## V2 Platform Loop
 
 DiagOps V2 keeps production systems read-only. It creates an investigation,

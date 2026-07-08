@@ -8,6 +8,8 @@ import {
   getInvestigation,
   getMemoryHits,
   getPlan,
+  getRcaWorkbench,
+  getReActTrace,
   getTaskGraph,
   getTasks,
   getToolCalls,
@@ -16,11 +18,14 @@ import {
   updateVerificationStatus,
   type ActionStatus,
   type AgentExecution,
+  type AgentFinding,
   type ContextFact,
   type DiagnosisPlan,
   type DiagnosisTask,
   type InvestigationRecord,
   type MemoryItem,
+  type RcaWorkbench,
+  type ReActTrace,
   type TaskGraph,
   type ToolCallRecord,
   type VerificationStatus,
@@ -285,6 +290,145 @@ function Hypotheses({ investigation }: { investigation: InvestigationRecord }) {
           </article>
         ))}
       </div>
+    </section>
+  );
+}
+
+function RcaWorkbenchPanel({ investigationId }: { investigationId: string }) {
+  const workbenchQuery = useQuery<RcaWorkbench>({
+    queryKey: ["rca-workbench", investigationId],
+    queryFn: () => getRcaWorkbench(investigationId),
+    enabled: Boolean(investigationId),
+  });
+  const findingsByAgent = (workbenchQuery.data?.findings ?? []).reduce<Record<string, AgentFinding[]>>(
+    (groups, finding) => {
+      groups[finding.agent_name] = [...(groups[finding.agent_name] ?? []), finding];
+      return groups;
+    },
+    {},
+  );
+  const candidates = workbenchQuery.data?.candidates ?? [];
+  const edges = workbenchQuery.data?.graph_seed.edges ?? [];
+  const isEmpty =
+    Object.keys(findingsByAgent).length === 0 && candidates.length === 0 && edges.length === 0;
+
+  return (
+    <section className="panel rca-workbench">
+      <div className="panel-heading">
+        <h2>Agent 判断</h2>
+        <span>{workbenchQuery.data?.findings.length ?? 0}</span>
+      </div>
+      {workbenchQuery.isLoading ? (
+        <div className="empty-state">加载 RCA 工作台...</div>
+      ) : workbenchQuery.isError ? (
+        <p className="error">RCA 工作台加载失败：{workbenchQuery.error.message}</p>
+      ) : isEmpty ? (
+        <div className="empty-state">暂无 RCA 工作台数据。</div>
+      ) : (
+        <>
+          <div className="compact-list">
+            {Object.entries(findingsByAgent).map(([agentName, findings]) => (
+              <article className="compact-row" key={agentName}>
+                <strong>{agentName}</strong>
+                {findings.map((finding) => (
+                  <div key={finding.id}>
+                    <p>{finding.summary}</p>
+                    <div className="process-detail">
+                      <span>类型: {finding.finding_type}</span>
+                      <span>关联根因: {finding.related_cause_type ?? "无"}</span>
+                      <span>严重度: {finding.severity}</span>
+                      <span>置信度 {formatPercent(finding.confidence)}</span>
+                      <span className="evidence-link">证据: {formatIdList(finding.evidence_ids)}</span>
+                      <span>缺口: {formatIdList(finding.gaps)}</span>
+                    </div>
+                    <p className="muted">{finding.rationale}</p>
+                  </div>
+                ))}
+              </article>
+            ))}
+          </div>
+
+          <div className="panel-heading">
+            <h2>候选根因排序</h2>
+            <span>{candidates.length}</span>
+          </div>
+          <div className="compact-list">
+            {candidates.map((candidate) => (
+              <article className="compact-row" key={candidate.id}>
+                <div className="score-row">
+                  <strong>#{candidate.rank} {candidate.cause_type}</strong>
+                  <span>{formatPercent(candidate.confidence)}</span>
+                </div>
+                <p>{candidate.summary}</p>
+                <p>{candidate.rationale}</p>
+                <div className="process-detail">
+                  <span>支持判断: {formatIdList(candidate.supporting_finding_ids)}</span>
+                  <span>反对判断: {formatIdList(candidate.contradicting_finding_ids)}</span>
+                  <span>支持证据: {formatIdList(candidate.supporting_evidence_ids)}</span>
+                  <span>反对证据: {formatIdList(candidate.contradicting_evidence_ids)}</span>
+                </div>
+                <p className="muted">{candidate.uncertainty}</p>
+              </article>
+            ))}
+          </div>
+
+          <div className="panel-heading">
+            <h2>证据链预览</h2>
+            <span>{edges.length}</span>
+          </div>
+          <div className="compact-list">
+            {edges.map((edge, index) => (
+              <div className="compact-row evidence-link" key={`${edge.source}-${edge.relation}-${edge.target}-${index}`}>
+                {edge.source} {edge.relation} {edge.target}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+function ReActTracePanel({ investigationId }: { investigationId: string }) {
+  const traceQuery = useQuery<ReActTrace | null>({
+    queryKey: ["react-trace", investigationId],
+    queryFn: () => getReActTrace(investigationId),
+    enabled: Boolean(investigationId),
+  });
+  const trace = traceQuery.data;
+
+  return (
+    <section className="panel">
+      <div className="panel-heading">
+        <h2>ReAct 推理过程</h2>
+        <span>只读</span>
+      </div>
+      {traceQuery.isLoading ? (
+        <div className="empty-state">加载 ReAct 轨迹...</div>
+      ) : traceQuery.isError ? (
+        <p className="error">ReAct 轨迹加载失败：{traceQuery.error.message}</p>
+      ) : !trace ? (
+        <div className="empty-state">暂无 ReAct 轨迹。只读代理未产生额外记录。</div>
+      ) : (
+        <div className="compact-list">
+          {trace.final_answer ? <p>{trace.final_answer}</p> : null}
+          {trace.steps.map((step) => (
+            <article className="compact-row" key={step.step_number}>
+              <strong>
+                #{step.step_number} {step.tool_name ?? step.status}
+              </strong>
+              {step.assistant_text ? <p>{step.assistant_text}</p> : null}
+              {step.observation ? <p>{step.observation}</p> : null}
+              <div className="process-detail">
+                <span>状态: {step.status}</span>
+                <span>输入: {JSON.stringify(step.tool_input)}</span>
+                <span>证据: {formatIdList(step.output_evidence_ids)}</span>
+              </div>
+              {step.error_message ? <p className="error">{step.error_message}</p> : null}
+            </article>
+          ))}
+        </div>
+      )}
     </section>
   );
 }
@@ -679,6 +823,8 @@ export default function App() {
               <InvestigationDetail investigation={activeInvestigation} />
               <EvidenceList investigation={activeInvestigation} />
               <Hypotheses investigation={activeInvestigation} />
+              <RcaWorkbenchPanel investigationId={activeInvestigation.id} />
+              <ReActTracePanel investigationId={activeInvestigation.id} />
             </>
           ) : (
             <div className="panel empty-state">选择或创建一个诊断开始。</div>

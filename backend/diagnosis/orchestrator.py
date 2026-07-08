@@ -4,10 +4,13 @@ from datetime import UTC, datetime
 from backend.db.models import InvestigationRecord, InvestigationStatus
 from backend.db.repositories import InMemoryInvestigationRepository
 from backend.diagnosis.action_planner import ActionPlanner
+from backend.diagnosis.coordination_review import build_coordination_review
 from backend.diagnosis.coordinator import DiagnosisCoordinator
 from backend.diagnosis.execution_engine import DiagnosisExecutionEngine
+from backend.diagnosis.finding_builders import build_agent_findings
 from backend.diagnosis.llm_analyst import ReadOnlyLlmAnalyst
 from backend.diagnosis.planner import DiagnosisTaskPlanner
+from backend.diagnosis.react_agent import ReActInvestigationAgent
 from backend.domain.events import IncidentEvent
 from backend.domain.evidence import (
     EvidenceItem,
@@ -36,6 +39,7 @@ class DiagnosisOrchestrator:
         llm_analyst: ReadOnlyLlmAnalyst | None = None,
         task_planner: DiagnosisTaskPlanner | None = None,
         execution_engine: DiagnosisExecutionEngine | None = None,
+        react_agent: ReActInvestigationAgent | None = None,
     ) -> None:
         self.repository = repository
         self.providers = providers
@@ -49,6 +53,7 @@ class DiagnosisOrchestrator:
             repository=repository,
             tool_registry=build_provider_tool_registry(providers),
         )
+        self.react_agent = react_agent
 
     def run(self, event: IncidentEvent) -> InvestigationRecord:
         record = self.repository.save(
@@ -71,6 +76,7 @@ class DiagnosisOrchestrator:
             record.hypotheses = hypotheses
             record.updated_at = datetime.now(UTC)
             self.repository.save(record)
+            self._record_v5_coordination(record.id, event, evidence, hypotheses)
 
             actions, verifications = self.action_planner.plan(event, evidence, hypotheses)
             evidence = self._ensure_action_evidence(evidence, actions)
@@ -78,6 +84,9 @@ class DiagnosisOrchestrator:
             record.evidence = evidence
             record.actions = actions
             record.verification_suggestions = verifications
+            record.updated_at = datetime.now(UTC)
+            self.repository.save(record)
+            self._record_v6_react_trace(record.id, event, evidence)
             if self.llm_analyst is not None:
                 record.llm_analysis = self.llm_analyst.analyze(
                     investigation_id=record.id,
@@ -116,6 +125,41 @@ class DiagnosisOrchestrator:
                 failure_reason=str(exc),
             )
 
+    def _record_v5_coordination(
+        self,
+        investigation_id: str,
+        event: IncidentEvent,
+        evidence: list[EvidenceItem],
+        hypotheses,
+    ) -> None:
+        try:
+            findings = build_agent_findings(investigation_id, event, evidence)
+            cause_rank = {
+                hypothesis.cause_type: index for index, hypothesis in enumerate(hypotheses)
+            }
+            findings.sort(
+                key=lambda finding: cause_rank.get(
+                    finding.related_cause_type, len(cause_rank)
+                )
+            )
+            save_findings = getattr(self.repository, "save_agent_findings", None)
+            if save_findings is not None:
+                save_findings(investigation_id, findings)
+
+            review = build_coordination_review(
+                investigation_id, findings, evidence, hypotheses
+            )
+            save_review = getattr(self.repository, "save_coordination_review", None)
+            if save_review is not None:
+                save_review(review)
+        except Exception as exc:
+            logger.warning(
+                "v5 coordination recording failed id=%s reason=%s",
+                investigation_id,
+                exc,
+                exc_info=True,
+            )
+
     def _record_v4_execution(
         self,
         investigation_id: str,
@@ -128,6 +172,32 @@ class DiagnosisOrchestrator:
         except Exception as exc:
             logger.warning(
                 "v4 execution recording failed id=%s reason=%s",
+                investigation_id,
+                exc,
+                exc_info=True,
+            )
+
+    def _record_v6_react_trace(
+        self,
+        investigation_id: str,
+        event: IncidentEvent,
+        evidence: list[EvidenceItem],
+    ) -> None:
+        if self.react_agent is None:
+            return
+
+        try:
+            trace = self.react_agent.run(
+                investigation_id=investigation_id,
+                event=event,
+                existing_evidence_ids=[item.id for item in evidence],
+            )
+            save_trace = getattr(self.repository, "save_react_trace", None)
+            if callable(save_trace):
+                save_trace(trace)
+        except Exception as exc:
+            logger.warning(
+                "v6 react trace failed id=%s reason=%s",
                 investigation_id,
                 exc,
                 exc_info=True,

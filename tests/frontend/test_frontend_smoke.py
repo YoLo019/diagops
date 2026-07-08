@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -24,6 +25,20 @@ def test_app_contains_investigation_list_and_detail_ui_strings() -> None:
     assert "工具调用" in app
     assert "共享上下文" in app
     assert "历史记忆" in app
+    assert "Agent 判断" in app
+    assert "候选根因排序" in app
+    assert "证据链预览" in app
+    assert "加载 RCA 工作台" in app
+    assert "RCA 工作台加载失败" in app
+    assert "暂无 RCA 工作台数据" in app
+    assert "类型" in app
+    assert "关联根因" in app
+    assert "严重度" in app
+    assert "缺口" in app
+    assert "支持判断" in app
+    assert "反对判断" in app
+    assert "支持证据" in app
+    assert "反对证据" in app
     assert "记录审批状态" in app
     assert "记录验证结果" in app
     assert "·" not in app
@@ -48,7 +63,7 @@ def test_app_contains_investigation_list_and_detail_ui_strings() -> None:
         assert old_label not in app
 
 
-def test_api_exposes_v4_agent_process_methods() -> None:
+def test_api_exposes_v4_agent_process_methods_and_v5_rca_workbench_methods() -> None:
     api = (FRONTEND / "src" / "api.ts").read_text(encoding="utf-8")
 
     for method_name in [
@@ -59,8 +74,29 @@ def test_api_exposes_v4_agent_process_methods() -> None:
         "getToolCalls",
         "getMemoryHits",
         "getTaskGraph",
+        "getAgentFindings",
+        "getCoordinationReview",
+        "getRcaWorkbench",
     ]:
         assert f"function {method_name}" in api
+
+
+def test_api_exposes_v6_react_trace_method() -> None:
+    api = (FRONTEND / "src" / "api.ts").read_text(encoding="utf-8")
+
+    assert "export type ReActTrace" in api
+    assert "getReActTrace" in api
+    assert "/react-trace" in api
+
+
+def test_app_contains_react_trace_panel_copy() -> None:
+    app = (FRONTEND / "src" / "App.tsx").read_text(encoding="utf-8")
+
+    assert "ReAct 推理过程" in app
+    assert "只读" in app
+    assert "输入:" in app
+    assert "tool_input" in app
+    assert "getReActTrace" in app
 
 
 def test_frontend_uses_vite_proxy_by_default() -> None:
@@ -69,6 +105,14 @@ def test_frontend_uses_vite_proxy_by_default() -> None:
 
     assert 'import.meta.env.VITE_API_BASE_URL ?? ""' in api
     assert '"/investigations": "http://127.0.0.1:8000"' in vite_config
+
+
+def test_topbar_stats_allows_long_urls_to_wrap() -> None:
+    styles = (FRONTEND / "src" / "styles.css").read_text(encoding="utf-8")
+    topbar_stats = re.search(r"\.topbar-stats\s*\{[^}]+\}", styles)
+
+    assert topbar_stats is not None
+    assert "overflow-wrap: anywhere" in topbar_stats.group(0)
 
 
 def test_ui_does_not_claim_production_changes_are_automatic() -> None:

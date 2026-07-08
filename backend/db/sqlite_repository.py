@@ -10,7 +10,9 @@ from sqlalchemy.engine import Engine
 from backend.db.models import InvestigationRecord, InvestigationStatus
 from backend.db.schema import (
     agent_executions,
+    agent_findings,
     context_facts,
+    coordination_reviews,
     diagnosis_plans,
     diagnosis_tasks,
     events,
@@ -20,6 +22,7 @@ from backend.db.schema import (
     llm_analyses,
     memory_items,
     provider_results,
+    react_traces,
     recommended_actions,
     reports,
     specialist_results,
@@ -29,8 +32,10 @@ from backend.db.schema import (
 from backend.db.serialization import record_to_rows, rows_to_record
 from backend.domain.actions import ActionStatus, VerificationStatus
 from backend.domain.agent_context import ContextFact
+from backend.domain.agent_findings import AgentFinding, CoordinationReview
 from backend.domain.agent_plan import AgentExecution, DiagnosisPlan, DiagnosisTask
 from backend.domain.memory import MemoryItem
+from backend.domain.react_trace import ReActTrace
 from backend.domain.tool_calls import ToolCallRecord
 
 
@@ -314,6 +319,83 @@ class SQLiteInvestigationRepository:
         with self.engine.connect() as connection:
             rows = connection.execute(statement).mappings().all()
         return [MemoryItem(**row["payload"]) for row in rows]
+
+    def save_agent_findings(
+        self,
+        investigation_id: str,
+        findings: Sequence[AgentFinding],
+    ) -> list[AgentFinding]:
+        rows = []
+        for finding in findings:
+            row = self._agent_payload_row(investigation_id, finding, status=None)
+            row["agent_name"] = row["payload"]["agent_name"]
+            rows.append(row)
+        with self.engine.begin() as connection:
+            self._upsert_payload_rows(connection, agent_findings, rows)
+        return list(findings)
+
+    def list_agent_findings(self, investigation_id: str) -> list[AgentFinding]:
+        with self.engine.connect() as connection:
+            rows = self._fetch_agent_rows(connection, agent_findings, investigation_id)
+        return [AgentFinding(**row["payload"]) for row in rows]
+
+    def save_coordination_review(
+        self,
+        review: CoordinationReview,
+    ) -> CoordinationReview:
+        payload = review.model_dump(mode="json")
+        row = {
+            "id": review.id,
+            "investigation_id": review.investigation_id,
+            "created_at": payload["created_at"],
+            "payload": payload,
+        }
+        with self.engine.begin() as connection:
+            connection.execute(
+                delete(coordination_reviews).where(
+                    coordination_reviews.c.investigation_id == review.investigation_id
+                )
+            )
+            connection.execute(insert(coordination_reviews).values(row))
+        return review
+
+    def get_coordination_review(
+        self,
+        investigation_id: str,
+    ) -> CoordinationReview | None:
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                select(coordination_reviews).where(
+                    coordination_reviews.c.investigation_id == investigation_id
+                )
+            ).mappings().one_or_none()
+        return None if row is None else CoordinationReview(**row["payload"])
+
+    def save_react_trace(self, trace: ReActTrace) -> ReActTrace:
+        payload = trace.model_dump(mode="json")
+        row = {
+            "id": trace.id,
+            "investigation_id": trace.investigation_id,
+            "payload": payload,
+            "created_at": payload["created_at"],
+        }
+        with self.engine.begin() as connection:
+            connection.execute(
+                delete(react_traces).where(
+                    react_traces.c.investigation_id == trace.investigation_id
+                )
+            )
+            connection.execute(insert(react_traces).values(row))
+        return trace
+
+    def get_react_trace(self, investigation_id: str) -> ReActTrace | None:
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                select(react_traces).where(
+                    react_traces.c.investigation_id == investigation_id
+                )
+            ).mappings().one_or_none()
+        return None if row is None else ReActTrace.model_validate(row["payload"])
 
     def _replace_children(
         self,

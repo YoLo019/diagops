@@ -159,9 +159,44 @@ memory_items = Table(
     Column("payload", JSON, nullable=False),
 )
 
+agent_findings = Table(
+    "agent_findings",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("investigation_id", ForeignKey("investigations.id"), nullable=False, index=True),
+    Column("agent_name", String, nullable=False, index=True),
+    Column("created_at", String, nullable=False, index=True),
+    Column("payload", JSON, nullable=False),
+)
+
+coordination_reviews = Table(
+    "coordination_reviews",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("investigation_id", ForeignKey("investigations.id"), nullable=False, index=True),
+    Column("created_at", String, nullable=False, index=True),
+    Column("payload", JSON, nullable=False),
+)
+
+react_traces = Table(
+    "react_traces",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("investigation_id", ForeignKey("investigations.id"), nullable=False, index=True),
+    Column("payload", JSON, nullable=False),
+    Column("created_at", String, nullable=False, index=True),
+)
+
 Index(
     "ix_memory_items_service_environment_created_at",
     memory_items.c.service,
     memory_items.c.environment,
     memory_items.c.created_at,
+)
+
+Index(
+    "ix_agent_findings_investigation_agent_created_at",
+    agent_findings.c.investigation_id,
+    agent_findings.c.agent_name,
+    agent_findings.c.created_at,
 )

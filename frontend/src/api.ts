@@ -193,6 +193,85 @@ export type TaskGraph = {
   }>;
 };
 
+export type AgentFinding = {
+  id: string;
+  investigation_id: string;
+  agent_name: string;
+  finding_type: string;
+  summary: string;
+  confidence: number;
+  evidence_ids: string[];
+  related_cause_type?: string | null;
+  severity: string;
+  rationale: string;
+  gaps: string[];
+  created_at: string;
+};
+
+export type RootCauseCandidate = {
+  id: string;
+  cause_type: string;
+  summary: string;
+  rank: number;
+  confidence: number;
+  supporting_finding_ids: string[];
+  contradicting_finding_ids: string[];
+  supporting_evidence_ids: string[];
+  contradicting_evidence_ids: string[];
+  rationale: string;
+  uncertainty: string;
+};
+
+export type CoordinationReview = {
+  id: string;
+  investigation_id: string;
+  candidates: RootCauseCandidate[];
+  created_at: string;
+};
+
+export type RcaWorkbench = {
+  investigation: InvestigationRecord;
+  findings: AgentFinding[];
+  candidates: RootCauseCandidate[];
+  evidence: EvidenceItem[];
+  graph_seed: {
+    nodes: Array<{
+      id: string;
+      label: string;
+      type: string;
+    }>;
+    edges: Array<{
+      source: string;
+      relation: string;
+      target: string;
+    }>;
+  };
+};
+
+export type ReActTraceStep = {
+  step_number: number;
+  assistant_text?: string | null;
+  tool_name?: string | null;
+  tool_input: Record<string, unknown>;
+  tool_call_id?: string | null;
+  observation?: string | null;
+  output_evidence_ids: string[];
+  status: string;
+  error_message?: string | null;
+  started_at: string;
+  completed_at?: string | null;
+};
+
+export type ReActTrace = {
+  id: string;
+  investigation_id: string;
+  status: string;
+  final_answer?: string | null;
+  steps: ReActTraceStep[];
+  created_at: string;
+  completed_at?: string | null;
+};
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     headers: {
@@ -250,6 +329,22 @@ export function getMemoryHits(id: string) {
 
 export function getTaskGraph(id: string) {
   return request<TaskGraph>(`/investigations/${id}/task-graph`);
+}
+
+export function getAgentFindings(id: string) {
+  return request<AgentFinding[]>(`/investigations/${id}/agent-findings`);
+}
+
+export function getCoordinationReview(id: string) {
+  return request<CoordinationReview | null>(`/investigations/${id}/coordination-review`);
+}
+
+export function getRcaWorkbench(id: string) {
+  return request<RcaWorkbench>(`/investigations/${id}/rca-workbench`);
+}
+
+export function getReActTrace(id: string) {
+  return request<ReActTrace | null>(`/investigations/${id}/react-trace`);
 }
 
 export function createManualInvestigation(payload: ManualInvestigationPayload) {

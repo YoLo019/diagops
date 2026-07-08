@@ -214,6 +214,38 @@ def test_provider_partial_with_evidence_is_success_with_partial_message():
     assert call.error_message == "logs partial"
 
 
+def test_provider_partial_without_evidence_skips_task_with_partial_message():
+    repository = InMemoryInvestigationRepository()
+    registry = ToolRegistry()
+    register_tool(
+        registry,
+        "read_logs",
+        ToolCallStatus.SUCCESS,
+        provider=EvidenceProvider.LOG,
+    )
+    plan = DiagnosisPlan(investigation_id="inv-1", tasks=[task("task-log")])
+
+    completed = DiagnosisExecutionEngine(repository, registry).run(
+        plan,
+        event(),
+        provider_results=[
+            ProviderResult(
+                provider=EvidenceProvider.LOG,
+                status=ProviderStatus.PARTIAL,
+                error_message="logs partial",
+            )
+        ],
+    )
+
+    call = repository.list_tool_calls("inv-1")[0]
+    execution = repository.list_executions("inv-1")[0]
+    assert completed.tasks[0].status == DiagnosisTaskStatus.SKIPPED
+    assert execution.status == AgentExecutionStatus.SKIPPED
+    assert execution.summary == "logs partial"
+    assert call.status == ToolCallStatus.SKIPPED
+    assert call.error_message == "logs partial"
+
+
 def test_dependency_waits_when_dependent_has_higher_priority():
     repository = InMemoryInvestigationRepository()
     registry = ToolRegistry()
