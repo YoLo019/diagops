@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from backend.api.events import InvestigationSummary, to_summary
 from backend.db.models import InvestigationRecord
@@ -9,7 +9,9 @@ from backend.diagnosis.context import SpecialistResult
 from backend.domain.actions import ActionStatus, VerificationStatus
 from backend.domain.events import IncidentEvent, IncidentSource, Severity
 from backend.domain.evidence import EvidenceItem, EvidenceProvider
+from backend.domain.memory import MemoryItem
 from backend.domain.reports import IncidentReport
+from backend.memory import MemoryStore
 from backend.providers.results import ProviderResult
 from backend.services.container import get_container
 
@@ -17,9 +19,11 @@ router = APIRouter(prefix="/investigations", tags=["investigations"])
 
 
 class ManualInvestigationRequest(BaseModel):
-    text: str
-    service: str
-    environment: str
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    text: str = Field(min_length=1)
+    service: str = Field(min_length=1)
+    environment: str = Field(min_length=1)
 
 
 class UpdateActionStatusRequest(BaseModel):
@@ -30,6 +34,13 @@ class UpdateActionStatusRequest(BaseModel):
 class UpdateVerificationStatusRequest(BaseModel):
     status: VerificationStatus
     result_note: str | None = None
+
+
+class FeedbackRequest(BaseModel):
+    root_cause_correct: bool | None = None
+    action_useful: bool | None = None
+    verification_result: str | None = None
+    note: str | None = None
 
 
 def _get_investigation_record(investigation_id: str) -> InvestigationRecord:
@@ -54,13 +65,16 @@ def list_investigations() -> list[InvestigationRecord]:
 def create_manual_investigation(
     request: ManualInvestigationRequest,
 ) -> InvestigationSummary:
+    text = request.text.strip()
+    service = request.service.strip()
+    environment = request.environment.strip()
     event = IncidentEvent(
         source=IncidentSource.MANUAL,
-        service=request.service,
-        environment=request.environment,
+        service=service,
+        environment=environment,
         severity=Severity.WARNING,
-        title=request.text[:80],
-        description=request.text,
+        title=text[:80],
+        description=text,
         started_at=datetime.now(UTC),
     )
     container = get_container()
@@ -102,6 +116,22 @@ def update_verification_status(
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/{investigation_id}/feedback", response_model=MemoryItem)
+def record_feedback(
+    investigation_id: str,
+    request: FeedbackRequest,
+) -> MemoryItem:
+    record = _get_investigation_record(investigation_id)
+    container = get_container()
+    return MemoryStore(container.repository).record_feedback(
+        record,
+        request.root_cause_correct,
+        request.action_useful,
+        request.verification_result,
+        request.note,
+    )
 
 
 @router.get("/{investigation_id}/timeline", response_model=list[EvidenceItem])

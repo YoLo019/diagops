@@ -64,6 +64,8 @@ button {
   display: flex;
   flex-direction: column;
   gap: 5px;
+  min-width: 0;
+  overflow-wrap: anywhere;
   white-space: nowrap;
 }
 
@@ -172,7 +174,9 @@ textarea {
 .investigation-list,
 .evidence-list,
 .hypothesis-list,
-.action-list {
+.action-list,
+.process-list,
+.compact-list {
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -201,7 +205,8 @@ textarea {
 }
 
 .item-title,
-.workflow-heading strong {
+.workflow-heading strong,
+.process-item strong {
   font-size: 14px;
   font-weight: 700;
 }
@@ -211,9 +216,11 @@ textarea {
 .timestamp,
 .provider,
 .meta-row,
+.process-detail,
 .evidence-item p,
 .hypothesis-item p,
-.workflow-item p {
+.workflow-item p,
+.process-item p {
   color: #687789;
   font-size: 13px;
 }
@@ -310,10 +317,13 @@ textarea {
 
 .evidence-item,
 .hypothesis-item,
-.workflow-item {
+.workflow-item,
+.process-item,
+.compact-row {
   border: 1px solid #e0e6ed;
   border-radius: 8px;
   padding: 12px;
+  overflow-wrap: anywhere;
 }
 
 .evidence-item div:first-child {
@@ -340,6 +350,33 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+.process-item {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.process-detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+}
+
+.rca-workbench .panel-heading:not(:first-child) {
+  margin-top: 16px;
+}
+
+.compact-row p {
+  color: #687789;
+  font-size: 13px;
+  margin: 6px 0 0;
+}
+
+.evidence-link {
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
 }
 
 .control-row select {
@@ -421,6 +458,7 @@ textarea {
 
   .topbar-stats {
     align-items: flex-start;
+    white-space: normal;
   }
 
   .workspace,

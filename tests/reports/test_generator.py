@@ -7,6 +7,7 @@ from backend.domain.actions import (
     ActionRiskLevel,
     ActionType,
     RecommendedAction,
+    VerificationSuggestion,
 )
 from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
 from backend.domain.hypotheses import CauseType, Hypothesis
@@ -152,6 +153,65 @@ def test_report_generator_renders_alternative_hypotheses():
     assert "traffic_spike" in report.markdown
     assert "Traffic also increased around the incident." in report.markdown
     assert "0.42" in report.markdown
+
+
+def test_report_generator_renders_stable_chinese_headings_and_raw_fields():
+    event = load_incident_case("deployment_regression")
+    evidence = [_evidence("ev-real", "real deployment evidence")]
+    hypotheses = [
+        _hypothesis(supporting_evidence_ids=["ev-real"]),
+        _hypothesis(
+            cause_type=CauseType.TRAFFIC_SPIKE,
+            summary="Traffic also increased around the incident.",
+            confidence=0.42,
+        ),
+    ]
+    actions = [
+        RecommendedAction(
+            action_type=ActionType.CHECK,
+            title="Inspect deployment",
+            description="Check deployment metadata.",
+            risk_level=ActionRiskLevel.READ_ONLY,
+            requires_approval=False,
+            supporting_evidence_ids=["ev-real"],
+        )
+    ]
+    verifications = [
+        VerificationSuggestion(
+            title="Check recovery",
+            description="Confirm error rate returned to normal.",
+            expected_signal="5xx rate below 1%",
+        )
+    ]
+
+    report = ReportGenerator().generate(
+        "inv-1",
+        event,
+        evidence,
+        hypotheses,
+        actions=actions,
+        verification_suggestions=verifications,
+    )
+
+    for heading in [
+        "摘要",
+        "最可能根因",
+        "证据链",
+        "支持该结论的证据",
+        "其他可能假设",
+        "建议动作",
+        "验证建议",
+        "事实与推断",
+    ]:
+        assert f"## {heading}" in report.markdown
+
+    assert "[deploy/deployment]" in report.markdown
+    assert "`deployment_regression`" in report.markdown
+    assert "`traffic_spike`" in report.markdown
+    assert "`check`" in report.markdown
+    assert "`read_only`" in report.markdown
+    assert "`proposed`" in report.markdown
+    assert "`pending`" in report.markdown
 
 
 def test_report_generator_renders_real_contradicting_evidence_only():

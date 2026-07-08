@@ -1,12 +1,29 @@
+from __future__ import annotations
+
 from datetime import UTC, datetime
 
 from backend.db.models import InvestigationRecord, InvestigationStatus
 from backend.domain.actions import ActionStatus, VerificationStatus
+from backend.domain.agent_context import ContextFact
+from backend.domain.agent_findings import AgentFinding, CoordinationReview
+from backend.domain.agent_plan import AgentExecution, DiagnosisPlan, DiagnosisTask
+from backend.domain.memory import MemoryItem
+from backend.domain.react_trace import ReActTrace
+from backend.domain.tool_calls import ToolCallRecord
 
 
 class InMemoryInvestigationRepository:
     def __init__(self) -> None:
         self._records: dict[str, InvestigationRecord] = {}
+        self._plans: dict[str, DiagnosisPlan] = {}
+        self._tasks: dict[str, list[DiagnosisTask]] = {}
+        self._executions: dict[str, dict[str, AgentExecution]] = {}
+        self._context_facts: dict[str, dict[str, ContextFact]] = {}
+        self._tool_calls: dict[str, dict[str, ToolCallRecord]] = {}
+        self._memory_items: dict[str, MemoryItem] = {}
+        self._agent_findings: dict[str, dict[str, AgentFinding]] = {}
+        self._coordination_reviews: dict[str, CoordinationReview] = {}
+        self._react_traces: dict[str, ReActTrace] = {}
 
     def save(self, record: InvestigationRecord) -> InvestigationRecord:
         self._records[record.id] = record
@@ -76,3 +93,120 @@ class InMemoryInvestigationRepository:
                 self._records[record.id] = record
                 return suggestion
         raise ValueError(f"Unknown verification suggestion: {verification_id}")
+
+    def save_plan(self, plan: DiagnosisPlan) -> DiagnosisPlan:
+        self._plans[plan.investigation_id] = plan
+        self._tasks[plan.investigation_id] = list(plan.tasks)
+        return plan
+
+    def get_plan(self, investigation_id: str) -> DiagnosisPlan | None:
+        plan = self._plans.get(investigation_id)
+        if plan is None:
+            return None
+        return plan.model_copy(update={"tasks": self.list_tasks(investigation_id)})
+
+    def save_tasks(
+        self,
+        investigation_id: str,
+        tasks: list[DiagnosisTask],
+    ) -> list[DiagnosisTask]:
+        self._tasks[investigation_id] = list(tasks)
+        return list(tasks)
+
+    def list_tasks(self, investigation_id: str) -> list[DiagnosisTask]:
+        return list(self._tasks.get(investigation_id, []))
+
+    def save_executions(
+        self,
+        investigation_id: str,
+        executions: list[AgentExecution],
+    ) -> list[AgentExecution]:
+        bucket = self._executions.setdefault(investigation_id, {})
+        for execution in executions:
+            bucket[execution.id] = execution
+        return list(executions)
+
+    def list_executions(self, investigation_id: str) -> list[AgentExecution]:
+        return list(self._executions.get(investigation_id, {}).values())
+
+    def save_context_facts(
+        self,
+        investigation_id: str,
+        facts: list[ContextFact],
+    ) -> list[ContextFact]:
+        bucket = self._context_facts.setdefault(investigation_id, {})
+        for fact in facts:
+            bucket[fact.id] = fact
+        return list(facts)
+
+    def list_context_facts(self, investigation_id: str) -> list[ContextFact]:
+        return list(self._context_facts.get(investigation_id, {}).values())
+
+    def save_tool_calls(
+        self,
+        investigation_id: str,
+        calls: list[ToolCallRecord],
+    ) -> list[ToolCallRecord]:
+        bucket = self._tool_calls.setdefault(investigation_id, {})
+        for call in calls:
+            bucket[call.id] = call
+        return list(calls)
+
+    def list_tool_calls(self, investigation_id: str) -> list[ToolCallRecord]:
+        return list(self._tool_calls.get(investigation_id, {}).values())
+
+    def save_memory_items(self, items: list[MemoryItem]) -> list[MemoryItem]:
+        for item in items:
+            self._memory_items[item.id] = item
+        return list(items)
+
+    def list_memory(
+        self,
+        service: str,
+        environment: str,
+        *,
+        limit: int | None = None,
+    ) -> list[MemoryItem]:
+        items = sorted(
+            (
+                item
+                for item in self._memory_items.values()
+                if item.service == service and item.environment == environment
+            ),
+            key=lambda item: (item.created_at, item.id),
+            reverse=True,
+        )
+        return items if limit is None else items[:limit]
+
+    def save_agent_findings(
+        self,
+        investigation_id: str,
+        findings: list[AgentFinding],
+    ) -> list[AgentFinding]:
+        bucket = self._agent_findings.setdefault(investigation_id, {})
+        for finding in findings:
+            bucket[finding.id] = finding
+        return list(findings)
+
+    def list_agent_findings(self, investigation_id: str) -> list[AgentFinding]:
+        return list(self._agent_findings.get(investigation_id, {}).values())
+
+    def save_coordination_review(
+        self,
+        review: CoordinationReview,
+    ) -> CoordinationReview:
+        self._coordination_reviews[review.investigation_id] = review
+        return review
+
+    def get_coordination_review(
+        self,
+        investigation_id: str,
+    ) -> CoordinationReview | None:
+        return self._coordination_reviews.get(investigation_id)
+
+    def save_react_trace(self, trace: ReActTrace) -> ReActTrace:
+        self._react_traces[trace.investigation_id] = trace
+        return trace
+
+    def get_react_trace(self, investigation_id: str) -> ReActTrace | None:
+        return self._react_traces.get(investigation_id)

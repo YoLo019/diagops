@@ -84,6 +84,24 @@ def test_manual_investigation_requires_service_and_environment():
     assert response.status_code == 422
 
 
+@pytest.mark.parametrize("field", ["text", "service", "environment"])
+def test_manual_investigation_rejects_blank_fields(field: str):
+    client = TestClient(app)
+    payload = {
+        "text": "checkout-service has many 500s",
+        "service": "checkout-service",
+        "environment": "prod",
+    }
+    payload[field] = "   "
+
+    response = client.post(
+        "/investigations/manual",
+        json=payload,
+    )
+
+    assert response.status_code == 422
+
+
 def test_manual_investigation_creates_completed_record():
     client = TestClient(app)
 

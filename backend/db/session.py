@@ -3,7 +3,7 @@ from sqlalchemy.engine import Engine
 
 from backend.db.schema import metadata, schema_version
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 
 
 def create_db_engine(database_url: str) -> Engine:

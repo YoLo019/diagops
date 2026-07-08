@@ -51,10 +51,16 @@ class LlmSettings(BaseModel):
     enabled: bool = False
 
 
+class ReActSettings(BaseModel):
+    enabled: bool = False
+    max_steps: int = 5
+
+
 class AppSettings(BaseModel):
     storage: StorageSettings = Field(default_factory=StorageSettings)
     providers: ProviderSettings = Field(default_factory=ProviderSettings)
     llm: LlmSettings = Field(default_factory=LlmSettings)
+    react: ReActSettings = Field(default_factory=ReActSettings)
 
 
 def load_settings() -> AppSettings:
@@ -79,6 +85,9 @@ def _apply_environment_overrides(settings: AppSettings) -> None:
 
     if llm_enabled := _get_env("DIAGOPS_LLM_ENABLED"):
         settings.llm.enabled = _parse_bool(llm_enabled)
+
+    if react_enabled := _get_env("DIAGOPS_REACT_ENABLED"):
+        settings.react.enabled = _parse_bool(react_enabled)
 
 
 def _parse_bool(value: str) -> bool:

@@ -118,7 +118,7 @@ def test_schema_initialization_creates_schema_version(tmp_path):
         version = connection.execute(select(schema_version.c.version)).scalar_one()
 
     assert "schema_version" in tables
-    assert version == 3
+    assert version == 4
 
 
 def test_save_get_list_round_trips_completed_investigation(tmp_path):

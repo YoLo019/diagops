@@ -1,23 +1,57 @@
 import { FormEvent, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ActionStatus,
   API_BASE_URL,
-  InvestigationRecord,
-  VerificationStatus,
   createManualInvestigation,
+  getAgentExecutions,
+  getContextFacts,
   getInvestigation,
+  getMemoryHits,
+  getPlan,
+  getRcaWorkbench,
+  getReActTrace,
+  getTaskGraph,
+  getTasks,
+  getToolCalls,
   listInvestigations,
   updateActionStatus,
   updateVerificationStatus,
+  type ActionStatus,
+  type AgentExecution,
+  type AgentFinding,
+  type ContextFact,
+  type DiagnosisPlan,
+  type DiagnosisTask,
+  type InvestigationRecord,
+  type MemoryItem,
+  type RcaWorkbench,
+  type ReActTrace,
+  type TaskGraph,
+  type ToolCallRecord,
+  type VerificationStatus,
 } from "./api";
 
 const actionStatuses: ActionStatus[] = ["proposed", "approved", "rejected", "skipped", "done"];
 const verificationStatuses: VerificationStatus[] = ["pending", "passed", "failed", "skipped"];
+const statusLabels: Record<string, string> = {
+  approved: "已批准",
+  cancelled: "已取消",
+  completed: "已完成",
+  done: "已完成",
+  failed: "失败",
+  partial: "部分完成",
+  passed: "已通过",
+  pending: "待处理",
+  proposed: "待审批",
+  rejected: "已驳回",
+  running: "诊断中",
+  skipped: "已跳过",
+  success: "成功",
+};
 
 function formatDate(value?: string | null) {
   if (!value) {
-    return "n/a";
+    return "暂无";
   }
   return new Intl.DateTimeFormat(undefined, {
     month: "short",
@@ -31,12 +65,12 @@ function formatPercent(value: number) {
   return `${Math.round(value * 100)}%`;
 }
 
-function humanize(value: string) {
-  return value.replace(/_/g, " ");
+function formatIdList(values: string[]) {
+  return values.length > 0 ? values.join(", ") : "无";
 }
 
 function StatusBadge({ value }: { value: string }) {
-  return <span className={`badge badge-${value}`}>{humanize(value)}</span>;
+  return <span className={`badge badge-${value}`}>{statusLabels[value] ?? value}</span>;
 }
 
 function MarkdownReport({ markdown }: { markdown: string }) {
@@ -90,24 +124,24 @@ function ManualInvestigationForm({ onCreated }: { onCreated: (id: string) => voi
   return (
     <form className="panel manual-form" onSubmit={submit}>
       <div className="panel-heading">
-        <h2>Manual Investigation</h2>
+        <h2>新建诊断</h2>
       </div>
       <label>
-        Incident note
+        事件描述
         <textarea
           value={text}
           onChange={(event) => setText(event.target.value)}
-          placeholder="checkout-service error rate increased after a deploy"
+          placeholder="例如：checkout-service 发布后错误率升高"
           required
         />
       </label>
       <div className="field-row">
         <label>
-          Service
+          服务
           <input value={service} onChange={(event) => setService(event.target.value)} required />
         </label>
         <label>
-          Environment
+          环境
           <input
             value={environment}
             onChange={(event) => setEnvironment(event.target.value)}
@@ -117,7 +151,7 @@ function ManualInvestigationForm({ onCreated }: { onCreated: (id: string) => voi
       </div>
       {mutation.isError ? <p className="error">{mutation.error.message}</p> : null}
       <button type="submit" disabled={mutation.isPending || !text.trim()}>
-        {mutation.isPending ? "Creating..." : "Create investigation"}
+        {mutation.isPending ? "创建中..." : "创建诊断"}
       </button>
     </form>
   );
@@ -135,7 +169,7 @@ function InvestigationList({
   return (
     <section className="panel list-panel">
       <div className="panel-heading">
-        <h2>Investigation List</h2>
+        <h2>诊断列表</h2>
         <span>{investigations.length}</span>
       </div>
       <div className="investigation-list">
@@ -160,7 +194,7 @@ function InvestigationList({
           );
         })}
         {investigations.length === 0 ? (
-          <div className="empty-state">No investigations recorded yet.</div>
+          <div className="empty-state">暂无诊断记录。</div>
         ) : null}
       </div>
     </section>
@@ -173,24 +207,24 @@ function InvestigationDetail({ investigation }: { investigation: InvestigationRe
   return (
     <section className="panel detail-panel">
       <div className="panel-heading">
-        <h2>Investigation Detail</h2>
+        <h2>诊断详情</h2>
         <StatusBadge value={investigation.status} />
       </div>
       <div className="detail-grid">
         <div>
-          <span className="label">Service</span>
+          <span className="label">服务</span>
           <strong>{investigation.event.service}</strong>
         </div>
         <div>
-          <span className="label">Environment</span>
+          <span className="label">环境</span>
           <strong>{investigation.event.environment}</strong>
         </div>
         <div>
-          <span className="label">Severity</span>
-          <strong>{humanize(investigation.event.severity)}</strong>
+          <span className="label">严重级别</span>
+          <strong>{investigation.event.severity}</strong>
         </div>
         <div>
-          <span className="label">Started</span>
+          <span className="label">开始时间</span>
           <strong>{formatDate(investigation.event.started_at)}</strong>
         </div>
       </div>
@@ -198,9 +232,9 @@ function InvestigationDetail({ investigation }: { investigation: InvestigationRe
       <p>{investigation.event.description}</p>
       {topHypothesis ? (
         <div className="callout">
-          <span className="label">Top hypothesis</span>
-          <strong>{humanize(topHypothesis.cause_type)}</strong>
-          <span>{formatPercent(topHypothesis.confidence)} confidence</span>
+          <span className="label">首选根因</span>
+          <strong>{topHypothesis.cause_type}</strong>
+          <span>置信度 {formatPercent(topHypothesis.confidence)}</span>
         </div>
       ) : null}
       {investigation.failure_reason ? <p className="error">{investigation.failure_reason}</p> : null}
@@ -212,7 +246,7 @@ function EvidenceList({ investigation }: { investigation: InvestigationRecord })
   return (
     <section className="panel">
       <div className="panel-heading">
-        <h2>Evidence List</h2>
+        <h2>证据链</h2>
         <span>{investigation.evidence.length}</span>
       </div>
       <div className="evidence-list">
@@ -220,12 +254,12 @@ function EvidenceList({ investigation }: { investigation: InvestigationRecord })
           <article className="evidence-item" key={item.id}>
             <div>
               <StatusBadge value={item.status} />
-              <span className="provider">{humanize(item.provider)}</span>
+              <span className="provider">{item.provider}</span>
               <span className="timestamp">{formatDate(item.timestamp)}</span>
             </div>
             <strong>{item.summary}</strong>
             <p>
-              {humanize(item.kind)} / confidence {formatPercent(item.confidence)}
+              {item.kind} / 置信度 {formatPercent(item.confidence)}
             </p>
             {item.error_message ? <p className="error">{item.error_message}</p> : null}
           </article>
@@ -239,23 +273,162 @@ function Hypotheses({ investigation }: { investigation: InvestigationRecord }) {
   return (
     <section className="panel">
       <div className="panel-heading">
-        <h2>Hypotheses</h2>
+        <h2>候选根因</h2>
         <span>{investigation.hypotheses.length}</span>
       </div>
       <div className="hypothesis-list">
         {investigation.hypotheses.map((hypothesis) => (
           <article className="hypothesis-item" key={hypothesis.id}>
             <div className="score-row">
-              <strong>{humanize(hypothesis.cause_type)}</strong>
+              <strong>{hypothesis.cause_type}</strong>
               <span>{formatPercent(hypothesis.confidence)}</span>
             </div>
             <p>{hypothesis.summary}</p>
             {hypothesis.next_actions.length > 0 ? (
-              <p className="muted">Next: {hypothesis.next_actions.join(", ")}</p>
+              <p className="muted">下一步: {hypothesis.next_actions.join(", ")}</p>
             ) : null}
           </article>
         ))}
       </div>
+    </section>
+  );
+}
+
+function RcaWorkbenchPanel({ investigationId }: { investigationId: string }) {
+  const workbenchQuery = useQuery<RcaWorkbench>({
+    queryKey: ["rca-workbench", investigationId],
+    queryFn: () => getRcaWorkbench(investigationId),
+    enabled: Boolean(investigationId),
+  });
+  const findingsByAgent = (workbenchQuery.data?.findings ?? []).reduce<Record<string, AgentFinding[]>>(
+    (groups, finding) => {
+      groups[finding.agent_name] = [...(groups[finding.agent_name] ?? []), finding];
+      return groups;
+    },
+    {},
+  );
+  const candidates = workbenchQuery.data?.candidates ?? [];
+  const edges = workbenchQuery.data?.graph_seed.edges ?? [];
+  const isEmpty =
+    Object.keys(findingsByAgent).length === 0 && candidates.length === 0 && edges.length === 0;
+
+  return (
+    <section className="panel rca-workbench">
+      <div className="panel-heading">
+        <h2>Agent 判断</h2>
+        <span>{workbenchQuery.data?.findings.length ?? 0}</span>
+      </div>
+      {workbenchQuery.isLoading ? (
+        <div className="empty-state">加载 RCA 工作台...</div>
+      ) : workbenchQuery.isError ? (
+        <p className="error">RCA 工作台加载失败：{workbenchQuery.error.message}</p>
+      ) : isEmpty ? (
+        <div className="empty-state">暂无 RCA 工作台数据。</div>
+      ) : (
+        <>
+          <div className="compact-list">
+            {Object.entries(findingsByAgent).map(([agentName, findings]) => (
+              <article className="compact-row" key={agentName}>
+                <strong>{agentName}</strong>
+                {findings.map((finding) => (
+                  <div key={finding.id}>
+                    <p>{finding.summary}</p>
+                    <div className="process-detail">
+                      <span>类型: {finding.finding_type}</span>
+                      <span>关联根因: {finding.related_cause_type ?? "无"}</span>
+                      <span>严重度: {finding.severity}</span>
+                      <span>置信度 {formatPercent(finding.confidence)}</span>
+                      <span className="evidence-link">证据: {formatIdList(finding.evidence_ids)}</span>
+                      <span>缺口: {formatIdList(finding.gaps)}</span>
+                    </div>
+                    <p className="muted">{finding.rationale}</p>
+                  </div>
+                ))}
+              </article>
+            ))}
+          </div>
+
+          <div className="panel-heading">
+            <h2>候选根因排序</h2>
+            <span>{candidates.length}</span>
+          </div>
+          <div className="compact-list">
+            {candidates.map((candidate) => (
+              <article className="compact-row" key={candidate.id}>
+                <div className="score-row">
+                  <strong>#{candidate.rank} {candidate.cause_type}</strong>
+                  <span>{formatPercent(candidate.confidence)}</span>
+                </div>
+                <p>{candidate.summary}</p>
+                <p>{candidate.rationale}</p>
+                <div className="process-detail">
+                  <span>支持判断: {formatIdList(candidate.supporting_finding_ids)}</span>
+                  <span>反对判断: {formatIdList(candidate.contradicting_finding_ids)}</span>
+                  <span>支持证据: {formatIdList(candidate.supporting_evidence_ids)}</span>
+                  <span>反对证据: {formatIdList(candidate.contradicting_evidence_ids)}</span>
+                </div>
+                <p className="muted">{candidate.uncertainty}</p>
+              </article>
+            ))}
+          </div>
+
+          <div className="panel-heading">
+            <h2>证据链预览</h2>
+            <span>{edges.length}</span>
+          </div>
+          <div className="compact-list">
+            {edges.map((edge, index) => (
+              <div className="compact-row evidence-link" key={`${edge.source}-${edge.relation}-${edge.target}-${index}`}>
+                {edge.source} {edge.relation} {edge.target}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+function ReActTracePanel({ investigationId }: { investigationId: string }) {
+  const traceQuery = useQuery<ReActTrace | null>({
+    queryKey: ["react-trace", investigationId],
+    queryFn: () => getReActTrace(investigationId),
+    enabled: Boolean(investigationId),
+  });
+  const trace = traceQuery.data;
+
+  return (
+    <section className="panel">
+      <div className="panel-heading">
+        <h2>ReAct 推理过程</h2>
+        <span>只读</span>
+      </div>
+      {traceQuery.isLoading ? (
+        <div className="empty-state">加载 ReAct 轨迹...</div>
+      ) : traceQuery.isError ? (
+        <p className="error">ReAct 轨迹加载失败：{traceQuery.error.message}</p>
+      ) : !trace ? (
+        <div className="empty-state">暂无 ReAct 轨迹。只读代理未产生额外记录。</div>
+      ) : (
+        <div className="compact-list">
+          {trace.final_answer ? <p>{trace.final_answer}</p> : null}
+          {trace.steps.map((step) => (
+            <article className="compact-row" key={step.step_number}>
+              <strong>
+                #{step.step_number} {step.tool_name ?? step.status}
+              </strong>
+              {step.assistant_text ? <p>{step.assistant_text}</p> : null}
+              {step.observation ? <p>{step.observation}</p> : null}
+              <div className="process-detail">
+                <span>状态: {step.status}</span>
+                <span>输入: {JSON.stringify(step.tool_input)}</span>
+                <span>证据: {formatIdList(step.output_evidence_ids)}</span>
+              </div>
+              {step.error_message ? <p className="error">{step.error_message}</p> : null}
+            </article>
+          ))}
+        </div>
+      )}
     </section>
   );
 }
@@ -282,7 +455,7 @@ function RecommendedActions({ investigation }: { investigation: InvestigationRec
   return (
     <section className="panel">
       <div className="panel-heading">
-        <h2>Recommended Actions</h2>
+        <h2>建议动作</h2>
         <span>{investigation.actions.length}</span>
       </div>
       <div className="action-list">
@@ -294,12 +467,12 @@ function RecommendedActions({ investigation }: { investigation: InvestigationRec
             </div>
             <p>{action.description}</p>
             <div className="meta-row">
-              <span>Risk: {humanize(action.risk_level)}</span>
-              <span>{action.requires_approval ? "Approval required" : "Review optional"}</span>
+              <span>风险级别: {action.risk_level}</span>
+              <span>{action.requires_approval ? "需记录审批状态" : "可选记录审批状态"}</span>
             </div>
             <div className="control-row">
               <select
-                aria-label={`Action status for ${action.title}`}
+                aria-label={`${action.title} 的动作状态`}
                 defaultValue={action.status}
                 onChange={(event) =>
                   mutation.mutate({
@@ -311,12 +484,12 @@ function RecommendedActions({ investigation }: { investigation: InvestigationRec
               >
                 {actionStatuses.map((status) => (
                   <option key={status} value={status}>
-                    {humanize(status)}
+                    {statusLabels[status] ?? status}
                   </option>
                 ))}
               </select>
               <input
-                placeholder="Record approval note"
+                placeholder="记录审批状态"
                 value={notes[action.id] ?? action.note ?? ""}
                 onChange={(event) => setNotes({ ...notes, [action.id]: event.target.value })}
               />
@@ -350,7 +523,7 @@ function VerificationSuggestions({ investigation }: { investigation: Investigati
   return (
     <section className="panel">
       <div className="panel-heading">
-        <h2>Verification Suggestions</h2>
+        <h2>验证建议</h2>
         <span>{investigation.verification_suggestions.length}</span>
       </div>
       <div className="action-list">
@@ -361,10 +534,10 @@ function VerificationSuggestions({ investigation }: { investigation: Investigati
               <StatusBadge value={verification.status} />
             </div>
             <p>{verification.description}</p>
-            <p className="muted">Expected signal: {verification.expected_signal}</p>
+            <p className="muted">预期信号: {verification.expected_signal}</p>
             <div className="control-row">
               <select
-                aria-label={`Verification result for ${verification.title}`}
+                aria-label={`${verification.title} 的验证结果`}
                 defaultValue={verification.status}
                 onChange={(event) =>
                   mutation.mutate({
@@ -376,12 +549,12 @@ function VerificationSuggestions({ investigation }: { investigation: Investigati
               >
                 {verificationStatuses.map((status) => (
                   <option key={status} value={status}>
-                    {humanize(status)}
+                    {statusLabels[status] ?? status}
                   </option>
                 ))}
               </select>
               <input
-                placeholder="Record verification result"
+                placeholder="记录验证结果"
                 value={notes[verification.id] ?? verification.result_note ?? ""}
                 onChange={(event) =>
                   setNotes({ ...notes, [verification.id]: event.target.value })
@@ -395,16 +568,200 @@ function VerificationSuggestions({ investigation }: { investigation: Investigati
   );
 }
 
+type AgentProcessData = {
+  plan: DiagnosisPlan | null;
+  tasks: DiagnosisTask[];
+  executions: AgentExecution[];
+  contextFacts: ContextFact[];
+  toolCalls: ToolCallRecord[];
+  memoryHits: MemoryItem[];
+  taskGraph: TaskGraph;
+};
+
+function AgentProcessPanels({ investigationId }: { investigationId: string }) {
+  const processQuery = useQuery<AgentProcessData>({
+    queryKey: ["agent-process", investigationId],
+    queryFn: async () => {
+      const [plan, tasks, executions, contextFacts, toolCalls, memoryHits, taskGraph] =
+        await Promise.all([
+          getPlan(investigationId),
+          getTasks(investigationId),
+          getAgentExecutions(investigationId),
+          getContextFacts(investigationId),
+          getToolCalls(investigationId),
+          getMemoryHits(investigationId),
+          getTaskGraph(investigationId),
+        ]);
+      return { plan, tasks, executions, contextFacts, toolCalls, memoryHits, taskGraph };
+    },
+  });
+  const data = processQuery.data;
+  const tasks = data?.tasks.length ? data.tasks : data?.plan?.tasks ?? [];
+  const executions = data?.executions ?? [];
+  const toolCalls = data?.toolCalls ?? [];
+  const contextFacts = data?.contextFacts ?? [];
+  const memoryHits = data?.memoryHits ?? [];
+  const dependencyCount = data?.taskGraph.edges.length ?? 0;
+  const errorMessage = processQuery.isError ? processQuery.error.message : "";
+
+  return (
+    <>
+      <section className="panel agent-process-panel">
+        <div className="panel-heading">
+          <h2>任务规划</h2>
+          <span>
+            {tasks.length} 项, 依赖 {dependencyCount} 条
+          </span>
+        </div>
+        {processQuery.isLoading ? (
+          <div className="empty-state">加载中...</div>
+        ) : errorMessage ? (
+          <p className="error">{errorMessage}</p>
+        ) : tasks.length === 0 ? (
+          <div className="empty-state">暂无任务规划。</div>
+        ) : (
+          <div className="process-list">
+            {tasks.map((task) => (
+              <article className="process-item" key={task.id}>
+                <div className="workflow-heading">
+                  <strong>{task.title}</strong>
+                  <StatusBadge value={task.status} />
+                </div>
+                <div className="process-detail">
+                  <span>类型: {task.task_type}</span>
+                  <span>Agent: {task.agent_name}</span>
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="panel agent-process-panel">
+        <div className="panel-heading">
+          <h2>Agent 执行过程</h2>
+          <span>{executions.length}</span>
+        </div>
+        {processQuery.isLoading ? (
+          <div className="empty-state">加载中...</div>
+        ) : errorMessage ? (
+          <p className="error">{errorMessage}</p>
+        ) : executions.length === 0 ? (
+          <div className="empty-state">暂无 Agent 执行记录。</div>
+        ) : (
+          <div className="process-list">
+            {executions.map((execution) => (
+              <article className="process-item" key={execution.id}>
+                <div className="workflow-heading">
+                  <strong>{execution.agent_name}</strong>
+                  <StatusBadge value={execution.status} />
+                </div>
+                <p>{execution.summary ?? "暂无摘要"}</p>
+                {execution.error_message ? <p className="error">{execution.error_message}</p> : null}
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="panel agent-process-panel">
+        <div className="panel-heading">
+          <h2>工具调用</h2>
+          <span>{toolCalls.length}</span>
+        </div>
+        {processQuery.isLoading ? (
+          <div className="empty-state">加载中...</div>
+        ) : errorMessage ? (
+          <p className="error">{errorMessage}</p>
+        ) : toolCalls.length === 0 ? (
+          <div className="empty-state">暂无工具调用。</div>
+        ) : (
+          <div className="process-list">
+            {toolCalls.map((call) => (
+              <article className="process-item" key={call.id}>
+                <div className="workflow-heading">
+                  <strong>{call.tool_name}</strong>
+                  <StatusBadge value={call.status} />
+                </div>
+                <div className="process-detail">
+                  <span>Agent: {call.agent_name}</span>
+                  <span>证据: {formatIdList(call.output_evidence_ids)}</span>
+                </div>
+                {call.error_message ? <p className="error">{call.error_message}</p> : null}
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="panel agent-process-panel">
+        <div className="panel-heading">
+          <h2>共享上下文</h2>
+          <span>{contextFacts.length}</span>
+        </div>
+        {processQuery.isLoading ? (
+          <div className="empty-state">加载中...</div>
+        ) : errorMessage ? (
+          <p className="error">{errorMessage}</p>
+        ) : contextFacts.length === 0 ? (
+          <div className="empty-state">暂无共享上下文。</div>
+        ) : (
+          <div className="process-list">
+            {contextFacts.map((fact) => (
+              <article className="process-item" key={fact.id}>
+                <div className="workflow-heading">
+                  <strong>{fact.summary}</strong>
+                  <span>{formatPercent(fact.confidence)}</span>
+                </div>
+                <div className="process-detail">
+                  <span>类型: {fact.fact_type}</span>
+                  <span>来源: {fact.source_agent}</span>
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="panel agent-process-panel">
+        <div className="panel-heading">
+          <h2>历史记忆</h2>
+          <span>{memoryHits.length}</span>
+        </div>
+        {processQuery.isLoading ? (
+          <div className="empty-state">加载中...</div>
+        ) : errorMessage ? (
+          <p className="error">{errorMessage}</p>
+        ) : memoryHits.length === 0 ? (
+          <div className="empty-state">暂无历史记忆。</div>
+        ) : (
+          <div className="process-list">
+            {memoryHits.map((memory) => (
+              <article className="process-item" key={memory.id}>
+                <strong>{memory.summary}</strong>
+                <div className="process-detail">
+                  <span>类型: {memory.memory_type}</span>
+                  <span>标签: {formatIdList(memory.tags)}</span>
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+    </>
+  );
+}
+
 function ReportPanel({ investigation }: { investigation: InvestigationRecord }) {
   return (
     <section className="panel report-panel">
       <div className="panel-heading">
-        <h2>Markdown Report</h2>
+        <h2>诊断报告</h2>
       </div>
       {investigation.report ? (
         <MarkdownReport markdown={investigation.report.markdown} />
       ) : (
-        <div className="empty-state">Report has not been generated for this investigation.</div>
+        <div className="empty-state">该诊断尚未生成报告。</div>
       )}
     </section>
   );
@@ -438,12 +795,12 @@ export default function App() {
     <main className="app-shell">
       <header className="topbar">
         <div>
-          <h1>DiagOps Investigation Console</h1>
-          <p>API base: {API_BASE_URL}</p>
+          <h1>DiagOps 诊断控制台</h1>
+          <p>API 地址: {API_BASE_URL}</p>
         </div>
         <div className="topbar-stats">
-          <span>{investigations.length} investigations</span>
-          <span>Records approval and verification status</span>
+          <span>共 {investigations.length} 条诊断</span>
+          <span>记录审批状态和验证结果</span>
         </div>
       </header>
 
@@ -466,9 +823,11 @@ export default function App() {
               <InvestigationDetail investigation={activeInvestigation} />
               <EvidenceList investigation={activeInvestigation} />
               <Hypotheses investigation={activeInvestigation} />
+              <RcaWorkbenchPanel investigationId={activeInvestigation.id} />
+              <ReActTracePanel investigationId={activeInvestigation.id} />
             </>
           ) : (
-            <div className="panel empty-state">Select or create an investigation to begin.</div>
+            <div className="panel empty-state">选择或创建一个诊断开始。</div>
           )}
         </section>
 
@@ -477,10 +836,11 @@ export default function App() {
             <>
               <RecommendedActions investigation={activeInvestigation} />
               <VerificationSuggestions investigation={activeInvestigation} />
+              <AgentProcessPanels investigationId={activeInvestigation.id} />
               <ReportPanel investigation={activeInvestigation} />
             </>
           ) : (
-            <div className="panel empty-state">Workflow details will appear here.</div>
+            <div className="panel empty-state">审批、验证和报告会显示在这里。</div>
           )}
         </aside>
       </div>

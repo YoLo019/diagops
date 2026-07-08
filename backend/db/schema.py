@@ -1,4 +1,4 @@
-from sqlalchemy import Column, ForeignKey, Integer, MetaData, String, Table, Text
+from sqlalchemy import Column, ForeignKey, Index, Integer, MetaData, String, Table, Text
 from sqlalchemy.types import JSON
 
 metadata = MetaData()
@@ -95,4 +95,108 @@ llm_analyses = Table(
     metadata,
     Column("investigation_id", ForeignKey("investigations.id"), primary_key=True),
     Column("payload", JSON, nullable=False),
+)
+
+diagnosis_plans = Table(
+    "diagnosis_plans",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("investigation_id", ForeignKey("investigations.id"), nullable=False, index=True),
+    Column("created_at", String, nullable=False, index=True),
+    Column("payload", JSON, nullable=False),
+)
+
+diagnosis_tasks = Table(
+    "diagnosis_tasks",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("investigation_id", ForeignKey("investigations.id"), nullable=False, index=True),
+    Column("position", Integer, nullable=False),
+    Column("status", String, nullable=False, index=True),
+    Column("created_at", String, nullable=False, index=True),
+    Column("payload", JSON, nullable=False),
+)
+
+agent_executions = Table(
+    "agent_executions",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("investigation_id", ForeignKey("investigations.id"), nullable=False, index=True),
+    Column("task_id", String, nullable=False, index=True),
+    Column("status", String, nullable=False, index=True),
+    Column("created_at", String, nullable=False, index=True),
+    Column("payload", JSON, nullable=False),
+)
+
+context_facts = Table(
+    "context_facts",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("investigation_id", ForeignKey("investigations.id"), nullable=False, index=True),
+    Column("created_at", String, nullable=False, index=True),
+    Column("payload", JSON, nullable=False),
+)
+
+tool_calls = Table(
+    "tool_calls",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("investigation_id", ForeignKey("investigations.id"), nullable=False, index=True),
+    Column("task_id", String, nullable=False, index=True),
+    Column("status", String, nullable=False, index=True),
+    Column("created_at", String, nullable=False, index=True),
+    Column("payload", JSON, nullable=False),
+)
+
+memory_items = Table(
+    "memory_items",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("service", String, nullable=False, index=True),
+    Column("environment", String, nullable=False, index=True),
+    Column("source_investigation_id", ForeignKey("investigations.id"), nullable=True, index=True),
+    Column("created_at", String, nullable=False, index=True),
+    Column("payload", JSON, nullable=False),
+)
+
+agent_findings = Table(
+    "agent_findings",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("investigation_id", ForeignKey("investigations.id"), nullable=False, index=True),
+    Column("agent_name", String, nullable=False, index=True),
+    Column("created_at", String, nullable=False, index=True),
+    Column("payload", JSON, nullable=False),
+)
+
+coordination_reviews = Table(
+    "coordination_reviews",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("investigation_id", ForeignKey("investigations.id"), nullable=False, index=True),
+    Column("created_at", String, nullable=False, index=True),
+    Column("payload", JSON, nullable=False),
+)
+
+react_traces = Table(
+    "react_traces",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("investigation_id", ForeignKey("investigations.id"), nullable=False, index=True),
+    Column("payload", JSON, nullable=False),
+    Column("created_at", String, nullable=False, index=True),
+)
+
+Index(
+    "ix_memory_items_service_environment_created_at",
+    memory_items.c.service,
+    memory_items.c.environment,
+    memory_items.c.created_at,
+)
+
+Index(
+    "ix_agent_findings_investigation_agent_created_at",
+    agent_findings.c.investigation_id,
+    agent_findings.c.agent_name,
+    agent_findings.c.created_at,
 )

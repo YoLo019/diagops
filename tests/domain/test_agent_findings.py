@@ -1,0 +1,71 @@
+import pytest
+from pydantic import ValidationError
+
+from backend.domain.agent_findings import (
+    AgentFinding,
+    AgentFindingType,
+    AgentName,
+    CoordinationReview,
+    RootCauseCandidate,
+)
+from backend.domain.hypotheses import CauseType
+
+
+def test_agent_finding_requires_evidence_unless_gap():
+    with pytest.raises(ValidationError, match="evidence_ids"):
+        AgentFinding(
+            investigation_id="inv-1",
+            agent_name=AgentName.LOG,
+            finding_type=AgentFindingType.SIGNAL,
+            summary="Log error spike",
+            confidence=0.8,
+        )
+
+    gap = AgentFinding(
+        investigation_id="inv-1",
+        agent_name=AgentName.LOG,
+        finding_type=AgentFindingType.GAP,
+        summary="Log evidence is missing",
+        confidence=0.2,
+    )
+
+    assert gap.evidence_ids == []
+
+
+def test_agent_finding_confidence_is_bounded():
+    with pytest.raises(ValidationError):
+        AgentFinding(
+            investigation_id="inv-1",
+            agent_name=AgentName.METRIC,
+            finding_type=AgentFindingType.SIGNAL,
+            summary="Bad confidence",
+            confidence=1.1,
+            evidence_ids=["ev-1"],
+        )
+
+
+def test_coordination_review_orders_candidates_by_rank():
+    lower = RootCauseCandidate(
+        cause_type=CauseType.TRAFFIC_SPIKE,
+        summary="Traffic may be elevated",
+        rank=2,
+        confidence=0.4,
+        supporting_finding_ids=["finding-2"],
+        supporting_evidence_ids=["ev-2"],
+        rationale="Metric signal exists.",
+        uncertainty="Deployment evidence is stronger.",
+    )
+    higher = RootCauseCandidate(
+        cause_type=CauseType.DEPLOYMENT_REGRESSION,
+        summary="Deployment likely caused the incident",
+        rank=1,
+        confidence=0.8,
+        supporting_finding_ids=["finding-1"],
+        supporting_evidence_ids=["ev-1"],
+        rationale="Deployment and log evidence align.",
+        uncertainty="Metrics should be checked.",
+    )
+
+    review = CoordinationReview(investigation_id="inv-1", candidates=[lower, higher])
+
+    assert [candidate.rank for candidate in review.candidates] == [1, 2]
