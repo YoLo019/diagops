@@ -17,6 +17,7 @@ from backend.domain.agent_plan import (
 )
 from backend.domain.evidence import EvidenceProvider
 from backend.domain.memory import MemoryItem, MemoryType
+from backend.domain.multi_agent import AgentExecutionLayer
 from backend.domain.tool_calls import ToolCallRecord, ToolCallStatus, ToolSpec
 
 
@@ -45,6 +46,26 @@ def test_agent_models_defaults_are_readable_and_empty_lists_are_fresh():
     assert plan.tasks == []
     assert context.facts == []
     assert memory.tags == []
+    assert task.execution_layer == AgentExecutionLayer.CUSTOM
+    assert task.analysis_round is None
+    assert execution.execution_layer == AgentExecutionLayer.CUSTOM
+    assert execution.analysis_round is None
+
+
+@pytest.mark.parametrize("model", [DiagnosisTask, AgentExecution])
+def test_task_and_execution_reject_invalid_analysis_round(model):
+    common = {"agent_name": "LogAgent", "analysis_round": 3}
+    if model is DiagnosisTask:
+        common.update(
+            title="Read logs",
+            description="Collect error patterns.",
+            task_type=DiagnosisTaskType.LOG_INVESTIGATION,
+        )
+    else:
+        common["task_id"] = "task-1"
+
+    with pytest.raises(ValidationError):
+        model(**common)
 
 
 @pytest.mark.parametrize("confidence", [-0.1, 1.1, float("nan"), float("inf")])

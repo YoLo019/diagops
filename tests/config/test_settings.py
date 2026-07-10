@@ -1,5 +1,8 @@
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from backend.config.settings import AppSettings, load_settings
 
 
@@ -9,6 +12,10 @@ def test_default_settings_use_d_drive_project_paths(monkeypatch):
     monkeypatch.delenv("DIAGOPS_PROVIDER_MOCK_ENABLED", raising=False)
     monkeypatch.delenv("DIAGOPS_LLM_ENABLED", raising=False)
     monkeypatch.delenv("DIAGOPS_REACT_ENABLED", raising=False)
+    monkeypatch.delenv("DIAGOPS_AGENTS_ENABLED", raising=False)
+    monkeypatch.delenv("DIAGOPS_AGENTS_MODEL", raising=False)
+    monkeypatch.delenv("DIAGOPS_AGENTS_MAX_TURNS", raising=False)
+    monkeypatch.delenv("DIAGOPS_AGENTS_TIMEOUT_SECONDS", raising=False)
 
     settings = load_settings()
 
@@ -20,6 +27,10 @@ def test_default_settings_use_d_drive_project_paths(monkeypatch):
     assert settings.llm.enabled is False
     assert settings.react.enabled is False
     assert settings.react.max_steps == 5
+    assert settings.agents.enabled is False
+    assert settings.agents.model is None
+    assert settings.agents.max_turns == 8
+    assert settings.agents.timeout_seconds == 60
 
 
 def test_environment_database_url_override(monkeypatch, tmp_path):
@@ -38,12 +49,35 @@ def test_environment_boolean_overrides(monkeypatch, tmp_path):
     monkeypatch.setenv("DIAGOPS_PROVIDER_MOCK_ENABLED", "false")
     monkeypatch.setenv("DIAGOPS_LLM_ENABLED", "true")
     monkeypatch.setenv("DIAGOPS_REACT_ENABLED", "true")
+    monkeypatch.setenv("DIAGOPS_AGENTS_ENABLED", "true")
+    monkeypatch.setenv("DIAGOPS_AGENTS_MODEL", "test-model")
+    monkeypatch.setenv("DIAGOPS_AGENTS_MAX_TURNS", "12")
+    monkeypatch.setenv("DIAGOPS_AGENTS_TIMEOUT_SECONDS", "90")
 
     settings = load_settings()
 
     assert settings.providers.mock.enabled is False
     assert settings.llm.enabled is True
     assert settings.react.enabled is True
+    assert settings.agents.enabled is True
+    assert settings.agents.model == "test-model"
+    assert settings.agents.max_turns == 12
+    assert settings.agents.timeout_seconds == 90
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("DIAGOPS_AGENTS_MAX_TURNS", "0"),
+        ("DIAGOPS_AGENTS_TIMEOUT_SECONDS", "-1"),
+    ],
+)
+def test_invalid_agents_environment_limits_are_rejected(monkeypatch, tmp_path, name, value):
+    monkeypatch.setenv("DIAGOPS_CONFIG", str(tmp_path / "missing.yaml"))
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(ValidationError):
+        load_settings()
 
 
 def test_missing_config_file_uses_safe_defaults(monkeypatch, tmp_path):

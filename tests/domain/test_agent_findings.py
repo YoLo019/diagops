@@ -9,6 +9,7 @@ from backend.domain.agent_findings import (
     RootCauseCandidate,
 )
 from backend.domain.hypotheses import CauseType
+from backend.domain.multi_agent import AgentExecutionLayer, MultiAgentRunStatus
 
 
 def test_agent_finding_requires_evidence_unless_gap():
@@ -44,6 +45,50 @@ def test_agent_finding_confidence_is_bounded():
         )
 
 
+def test_old_agent_finding_payload_gets_multi_agent_defaults():
+    finding = AgentFinding.model_validate(
+        {
+            "investigation_id": "inv-1",
+            "agent_name": "LogAgent",
+            "finding_type": "signal",
+            "summary": "Log error spike",
+            "confidence": 0.8,
+            "evidence_ids": ["ev-1"],
+        }
+    )
+
+    assert finding.execution_layer == AgentExecutionLayer.CUSTOM
+    assert finding.analysis_round == 1
+    assert finding.revises_finding_id is None
+
+
+def test_round_two_finding_requires_revision_id():
+    with pytest.raises(ValidationError, match="revises_finding_id"):
+        AgentFinding(
+            investigation_id="inv-1",
+            agent_name=AgentName.LOG,
+            finding_type=AgentFindingType.SIGNAL,
+            summary="Reconsidered signal",
+            confidence=0.8,
+            evidence_ids=["ev-1"],
+            analysis_round=2,
+        )
+
+
+def test_round_one_finding_rejects_revision_id():
+    with pytest.raises(ValidationError, match="revises_finding_id"):
+        AgentFinding(
+            investigation_id="inv-1",
+            agent_name=AgentName.LOG,
+            finding_type=AgentFindingType.SIGNAL,
+            summary="Initial signal",
+            confidence=0.8,
+            evidence_ids=["ev-1"],
+            analysis_round=1,
+            revises_finding_id="finding-old",
+        )
+
+
 def test_coordination_review_orders_candidates_by_rank():
     lower = RootCauseCandidate(
         cause_type=CauseType.TRAFFIC_SPIKE,
@@ -69,3 +114,17 @@ def test_coordination_review_orders_candidates_by_rank():
     review = CoordinationReview(investigation_id="inv-1", candidates=[lower, higher])
 
     assert [candidate.rank for candidate in review.candidates] == [1, 2]
+
+
+def test_old_coordination_review_payload_gets_multi_agent_defaults():
+    review = CoordinationReview.model_validate(
+        {"investigation_id": "inv-1", "candidates": []}
+    )
+
+    assert review.execution_layer == AgentExecutionLayer.CUSTOM
+    assert review.run_status == MultiAgentRunStatus.COMPLETED
+    assert review.decision_status is None
+    assert review.baseline_cause_type is None
+    assert review.selected_cause_type is None
+    assert review.summary == ""
+    assert review.uncertainty == ""

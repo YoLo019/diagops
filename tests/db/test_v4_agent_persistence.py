@@ -1,8 +1,9 @@
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import inspect, select
+from sqlalchemy import insert, inspect, select
 
-from backend.db.schema import schema_version
+from backend.db.repositories import InMemoryInvestigationRepository
+from backend.db.schema import agent_executions, diagnosis_tasks, schema_version
 from backend.db.session import create_db_engine, initialize_database
 from backend.db.sqlite_repository import SQLiteInvestigationRepository
 from backend.domain.agent_context import ContextFact, ContextFactType
@@ -15,6 +16,7 @@ from backend.domain.agent_plan import (
     DiagnosisTaskType,
 )
 from backend.domain.memory import MemoryItem, MemoryType
+from backend.domain.multi_agent import AgentExecutionLayer
 from backend.domain.tool_calls import ToolCallRecord, ToolCallStatus
 
 
@@ -242,3 +244,89 @@ def test_memory_round_trip_preserves_created_at_microseconds(tmp_path):
     repository.save_memory_items([memory])
 
     assert repository.list_memory("checkout", "prod") == [memory]
+
+
+def test_v7_tasks_and_executions_round_trip_in_memory_and_sqlite(tmp_path):
+    sqlite_repository, _engine = build_repository(tmp_path)
+    repositories = [InMemoryInvestigationRepository(), sqlite_repository]
+    tasks = [
+        task(f"task-sdk-{round_number}").model_copy(
+            update={
+                "execution_layer": AgentExecutionLayer.OPENAI_AGENTS_SDK,
+                "analysis_round": round_number,
+            }
+        )
+        for round_number in (1, 2)
+    ]
+    executions = [
+        AgentExecution(
+            id=f"exec-sdk-{round_number}",
+            task_id=tasks[round_number - 1].id,
+            agent_name="LogAgent",
+            status=AgentExecutionStatus.COMPLETED,
+            execution_layer=AgentExecutionLayer.OPENAI_AGENTS_SDK,
+            analysis_round=round_number,
+            started_at=dt(round_number),
+            completed_at=dt(round_number + 1),
+        )
+        for round_number in (1, 2)
+    ]
+
+    for repository in repositories:
+        repository.save_tasks("inv-1", tasks)
+        repository.save_executions("inv-1", executions)
+
+        assert repository.list_tasks("inv-1") == tasks
+        assert repository.list_executions("inv-1") == executions
+
+
+def test_old_task_and_execution_payloads_use_v7_defaults(tmp_path):
+    old_task = task("task-old").model_dump(
+        mode="json", exclude={"execution_layer", "analysis_round"}
+    )
+    old_execution = AgentExecution(
+        id="exec-old",
+        task_id="task-old",
+        agent_name="LogAgent",
+        status=AgentExecutionStatus.COMPLETED,
+        started_at=dt(1),
+    ).model_dump(mode="json", exclude={"execution_layer", "analysis_round"})
+
+    restored_task = DiagnosisTask.model_validate(old_task)
+    restored_execution = AgentExecution.model_validate(old_execution)
+
+    assert restored_task.execution_layer == AgentExecutionLayer.CUSTOM
+    assert restored_task.analysis_round is None
+    assert restored_execution.execution_layer == AgentExecutionLayer.CUSTOM
+    assert restored_execution.analysis_round is None
+
+    memory_repository = InMemoryInvestigationRepository()
+    memory_repository.save_tasks("inv-old", [restored_task])
+    memory_repository.save_executions("inv-old", [restored_execution])
+    assert memory_repository.list_tasks("inv-old") == [restored_task]
+    assert memory_repository.list_executions("inv-old") == [restored_execution]
+
+    sqlite_repository, engine = build_repository(tmp_path)
+    with engine.begin() as connection:
+        connection.execute(
+            insert(diagnosis_tasks).values(
+                id=old_task["id"],
+                investigation_id="inv-old",
+                position=0,
+                status=old_task["status"],
+                created_at=old_task["created_at"],
+                payload=old_task,
+            )
+        )
+        connection.execute(
+            insert(agent_executions).values(
+                id=old_execution["id"],
+                investigation_id="inv-old",
+                task_id=old_execution["task_id"],
+                status=old_execution["status"],
+                created_at=old_execution["started_at"],
+                payload=old_execution,
+            )
+        )
+    assert sqlite_repository.list_tasks("inv-old") == [restored_task]
+    assert sqlite_repository.list_executions("inv-old") == [restored_execution]

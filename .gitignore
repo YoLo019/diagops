@@ -12,3 +12,4 @@ data/diagops.db-*
 frontend/dist/
 frontend/node_modules/
 frontend/tsconfig.tsbuildinfo
+/artifacts/v7-live-acceptance-*.json

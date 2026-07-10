@@ -10,6 +10,9 @@ export type InvestigationStatus =
 
 export type ActionStatus = "proposed" | "approved" | "rejected" | "skipped" | "done";
 export type VerificationStatus = "pending" | "passed" | "failed" | "skipped";
+export type AgentExecutionLayer = "custom" | "openai_agents_sdk";
+export type CoordinationDecisionStatus = "agreement" | "conflict" | "agent_leads" | "fallback";
+export type MultiAgentRunStatus = "completed" | "partial" | "failed" | "skipped";
 
 export type IncidentEvent = {
   source: string;
@@ -117,6 +120,8 @@ export type DiagnosisTask = {
   depends_on: string[];
   priority: number;
   status: string;
+  execution_layer?: AgentExecutionLayer;
+  analysis_round?: 1 | 2 | null;
   created_at: string;
   started_at?: string | null;
   completed_at?: string | null;
@@ -134,6 +139,8 @@ export type AgentExecution = {
   task_id: string;
   agent_name: string;
   status: string;
+  execution_layer?: AgentExecutionLayer;
+  analysis_round?: 1 | 2 | null;
   tool_call_ids: string[];
   evidence_ids: string[];
   summary?: string | null;
@@ -205,6 +212,9 @@ export type AgentFinding = {
   severity: string;
   rationale: string;
   gaps: string[];
+  execution_layer?: AgentExecutionLayer;
+  analysis_round?: 1 | 2;
+  revises_finding_id?: string | null;
   created_at: string;
 };
 
@@ -226,7 +236,19 @@ export type CoordinationReview = {
   id: string;
   investigation_id: string;
   candidates: RootCauseCandidate[];
+  execution_layer?: AgentExecutionLayer;
+  run_status?: MultiAgentRunStatus;
+  decision_status?: CoordinationDecisionStatus | null;
+  baseline_cause_type?: string | null;
+  selected_cause_type?: string | null;
+  summary?: string;
+  uncertainty?: string;
   created_at: string;
+};
+
+export type MultiAgentRunSummary = {
+  status: MultiAgentRunStatus;
+  failure_reason?: string | null;
 };
 
 export type RcaWorkbench = {
@@ -234,6 +256,9 @@ export type RcaWorkbench = {
   findings: AgentFinding[];
   candidates: RootCauseCandidate[];
   evidence: EvidenceItem[];
+  coordination_review?: CoordinationReview | null;
+  agent_executions?: AgentExecution[];
+  multi_agent_run?: MultiAgentRunSummary | null;
   graph_seed: {
     nodes: Array<{
       id: string;
