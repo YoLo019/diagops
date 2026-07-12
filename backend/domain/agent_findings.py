@@ -1,10 +1,16 @@
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, model_validator
 
 from backend.domain.hypotheses import CauseType
+from backend.domain.multi_agent import (
+    AgentExecutionLayer,
+    CoordinationDecisionStatus,
+    MultiAgentRunStatus,
+)
 
 
 class AgentName(StrEnum):
@@ -38,12 +44,19 @@ class AgentFinding(BaseModel):
     severity: AgentFindingSeverity = AgentFindingSeverity.MEDIUM
     rationale: str = ""
     gaps: list[str] = Field(default_factory=list)
+    execution_layer: AgentExecutionLayer = AgentExecutionLayer.CUSTOM
+    analysis_round: Literal[1, 2] = 1
+    revises_finding_id: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     @model_validator(mode="after")
-    def require_evidence_unless_gap(self) -> "AgentFinding":
+    def validate_finding(self) -> "AgentFinding":
         if self.finding_type != AgentFindingType.GAP and not self.evidence_ids:
             raise ValueError("evidence_ids required unless finding_type is gap")
+        if self.analysis_round == 1 and self.revises_finding_id is not None:
+            raise ValueError("round 1 cannot set revises_finding_id")
+        if self.analysis_round == 2 and self.revises_finding_id is None:
+            raise ValueError("round 2 requires revises_finding_id")
         return self
 
 
@@ -65,6 +78,13 @@ class CoordinationReview(BaseModel):
     id: str = Field(default_factory=lambda: f"coordination-{uuid4().hex}")
     investigation_id: str
     candidates: list[RootCauseCandidate] = Field(default_factory=list)
+    execution_layer: AgentExecutionLayer = AgentExecutionLayer.CUSTOM
+    run_status: MultiAgentRunStatus = MultiAgentRunStatus.COMPLETED
+    decision_status: CoordinationDecisionStatus | None = None
+    baseline_cause_type: CauseType | None = None
+    selected_cause_type: CauseType | None = None
+    summary: str = ""
+    uncertainty: str = ""
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     @model_validator(mode="after")

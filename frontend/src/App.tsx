@@ -17,15 +17,20 @@ import {
   updateActionStatus,
   updateVerificationStatus,
   type ActionStatus,
+  type AgentExecutionLayer,
   type AgentExecution,
   type AgentFinding,
   type ContextFact,
+  type CoordinationDecisionStatus,
+  type CoordinationReview,
   type DiagnosisPlan,
   type DiagnosisTask,
   type InvestigationRecord,
   type MemoryItem,
+  type MultiAgentRunSummary,
   type RcaWorkbench,
   type ReActTrace,
+  type RootCauseCandidate,
   type TaskGraph,
   type ToolCallRecord,
   type VerificationStatus,
@@ -48,6 +53,93 @@ const statusLabels: Record<string, string> = {
   skipped: "已跳过",
   success: "成功",
 };
+const decisionLabels: Record<CoordinationDecisionStatus, string> = {
+  agreement: "多 Agent 复核一致",
+  conflict: "存在冲突，需要人工确认",
+  agent_leads: "多 Agent 主要候选，尚未确认",
+  fallback: "多 Agent 复核未完成，以下为确定性 RCA 结果",
+};
+
+export function selectDisplayedCause(
+  decisionStatus: CoordinationDecisionStatus,
+  selectedCause: string | null | undefined,
+  baselineCause: string,
+) {
+  if (decisionStatus === "conflict") {
+    return "未选择（冲突待人工确认）";
+  }
+  if (decisionStatus === "fallback") {
+    return baselineCause;
+  }
+  if (selectedCause) {
+    return selectedCause;
+  }
+  return "未选择";
+}
+
+export function isUsableV7Review(
+  review: CoordinationReview | null | undefined,
+  run: MultiAgentRunSummary | null | undefined,
+): review is CoordinationReview {
+  if (
+    review?.execution_layer !== "openai_agents_sdk" ||
+    !run ||
+    !["completed", "partial"].includes(run.status) ||
+    review.run_status !== run.status ||
+    !review.decision_status
+  ) {
+    return false;
+  }
+  if (review.decision_status === "conflict") {
+    return review.selected_cause_type === null;
+  }
+  if (review.decision_status === "agreement") {
+    return (
+      run.status === "completed" &&
+      Boolean(review.baseline_cause_type) &&
+      review.selected_cause_type === review.baseline_cause_type
+    );
+  }
+  if (review.decision_status === "agent_leads") {
+    return review.selected_cause_type !== null && review.selected_cause_type !== undefined;
+  }
+  return true;
+}
+
+export function selectVisibleCandidates(
+  review: CoordinationReview | null | undefined,
+  run: MultiAgentRunSummary | null | undefined,
+  legacyCandidates: RootCauseCandidate[],
+) {
+  if (review?.execution_layer !== "openai_agents_sdk") {
+    return legacyCandidates;
+  }
+  return isUsableV7Review(review, run) ? review.candidates : [];
+}
+
+export function projectAgentUiText(text: string, executionLayer?: AgentExecutionLayer) {
+  if (executionLayer !== "openai_agents_sdk") {
+    return text;
+  }
+  if (
+    /已执行|已修复|修复成功|回滚|重启|扩容|缩容|配置.*修改|修复.*完成|配置变更|\b(?:i|we)\s+(?:successfully\s+)?updated\s+(?:the\s+)?(?:production\s+)?config(?:uration)?(?:\s+successfully)?\b|\b(?:i|we)\s+(?:already\s+)?rolled\s+back\s+(?:the\s+)?(?:deployment|service|release)\b|\b(?:i|we)\s+(?:already\s+)?applied\s+(?:the\s+)?config(?:uration)?\s+(?:change|update)\b|\b(?:ssh|rollback|restart|scale|rebooted|repaired|fixed|executed)\b/isu.test(
+      text,
+    )
+  ) {
+    return "[未验证操作声明已省略]";
+  }
+
+  return text
+    .replace(/\bbearer\s+[^\s,;]+/giu, "[REDACTED]")
+    .replace(
+      /\b(?:[\w-]*(?:token|secret|password|passwd|pwd)|(?:api|access|private)[_-]?key|key)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/giu,
+      "[REDACTED]",
+    )
+    .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s/@:]+:[^\s/@]+@[^\s]+/giu, "[REDACTED_URL]")
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/giu, "[REDACTED_EMAIL]")
+    .trim()
+    .replace(/\s+/gu, " ");
+}
 
 function formatDate(value?: string | null) {
   if (!value) {
@@ -294,28 +386,114 @@ function Hypotheses({ investigation }: { investigation: InvestigationRecord }) {
   );
 }
 
+function groupFindingsByAgent(findings: AgentFinding[]) {
+  return findings.reduce<Record<string, AgentFinding[]>>((groups, finding) => {
+    groups[finding.agent_name] = [...(groups[finding.agent_name] ?? []), finding];
+    return groups;
+  }, {});
+}
+
+function AgentFindingList({ findingsByAgent }: { findingsByAgent: Record<string, AgentFinding[]> }) {
+  return (
+    <div className="compact-list">
+      {Object.entries(findingsByAgent).map(([agentName, findings]) => (
+        <article className="compact-row" key={agentName}>
+          <strong>{agentName}</strong>
+          {findings.map((finding) => (
+            <div key={finding.id}>
+              <p>{projectAgentUiText(finding.summary, finding.execution_layer)}</p>
+              <div className="process-detail">
+                {finding.execution_layer === "openai_agents_sdk" ? (
+                  <>
+                    <span>{finding.analysis_round === 2 ? "第 2 轮修订" : "第 1 轮"}</span>
+                    {finding.revises_finding_id ? (
+                      <span>修订自: {finding.revises_finding_id}</span>
+                    ) : null}
+                  </>
+                ) : null}
+                <span>类型: {finding.finding_type}</span>
+                <span>关联根因: {finding.related_cause_type ?? "无"}</span>
+                <span>严重度: {finding.severity}</span>
+                <span>置信度 {formatPercent(finding.confidence)}</span>
+                <span className="evidence-link">证据: {formatIdList(finding.evidence_ids)}</span>
+                <span>
+                  缺口: {formatIdList(
+                    finding.gaps.map((gap) => projectAgentUiText(gap, finding.execution_layer)),
+                  )}
+                </span>
+              </div>
+              <p className="muted">
+                {projectAgentUiText(finding.rationale, finding.execution_layer)}
+              </p>
+            </div>
+          ))}
+        </article>
+      ))}
+    </div>
+  );
+}
+
 function RcaWorkbenchPanel({ investigationId }: { investigationId: string }) {
   const workbenchQuery = useQuery<RcaWorkbench>({
     queryKey: ["rca-workbench", investigationId],
     queryFn: () => getRcaWorkbench(investigationId),
     enabled: Boolean(investigationId),
   });
-  const findingsByAgent = (workbenchQuery.data?.findings ?? []).reduce<Record<string, AgentFinding[]>>(
-    (groups, finding) => {
-      groups[finding.agent_name] = [...(groups[finding.agent_name] ?? []), finding];
-      return groups;
-    },
-    {},
+  const legacyCandidates = workbenchQuery.data?.candidates ?? [];
+  const run = workbenchQuery.data?.multi_agent_run ?? null;
+  const persistedReview = workbenchQuery.data?.coordination_review;
+  const review = isUsableV7Review(persistedReview, run) ? persistedReview : null;
+  const candidates = selectVisibleCandidates(persistedReview, run, legacyCandidates);
+  const visibleCandidateIds = new Set(candidates.map((candidate) => candidate.id));
+  const hiddenCandidateIds = new Set(
+    legacyCandidates
+      .map((candidate) => candidate.id)
+      .filter((candidateId) => !visibleCandidateIds.has(candidateId)),
   );
-  const candidates = workbenchQuery.data?.candidates ?? [];
-  const edges = workbenchQuery.data?.graph_seed.edges ?? [];
+  const edges = (workbenchQuery.data?.graph_seed.edges ?? []).filter(
+    (edge) => !hiddenCandidateIds.has(edge.source) && !hiddenCandidateIds.has(edge.target),
+  );
+  const baselineHypothesis = workbenchQuery.data?.investigation.hypotheses[0];
+  const baselineCause = review?.baseline_cause_type ?? baselineHypothesis?.cause_type ?? "未知";
+  const baselineConfidence = baselineHypothesis?.confidence;
+  const decisionStatus = review?.decision_status ?? "fallback";
+  const selectedCause = selectDisplayedCause(
+    decisionStatus,
+    review?.selected_cause_type,
+    baselineCause,
+  );
+  const findings = workbenchQuery.data?.findings ?? [];
+  const findingsByAgent = groupFindingsByAgent(findings);
+  const v7Findings = findings.filter(
+    (finding) => finding.execution_layer === "openai_agents_sdk",
+  );
+  const customFindings = findings.filter(
+    (finding) => finding.execution_layer !== "openai_agents_sdk",
+  );
+  const v7FindingsByAgent = groupFindingsByAgent(v7Findings);
+  const customFindingsByAgent = groupFindingsByAgent(customFindings);
+  const revisionCount = v7Findings.filter((finding) => finding.analysis_round === 2).length;
+  const reviewSummary = review
+    ? projectAgentUiText(review.summary ?? "", review.execution_layer)
+    : "";
+  const reviewUncertainty = review
+    ? projectAgentUiText(review.uncertainty ?? "", review.execution_layer)
+    : "";
+  const safeRunFailureReason = projectAgentUiText(
+    run?.failure_reason ?? "",
+    run ? "openai_agents_sdk" : undefined,
+  );
+  const evidenceIds = (workbenchQuery.data?.evidence ?? []).map((item) => item.id);
+  const recommendationTitles = (workbenchQuery.data?.investigation.actions ?? []).map(
+    (action) => action.title,
+  );
   const isEmpty =
-    Object.keys(findingsByAgent).length === 0 && candidates.length === 0 && edges.length === 0;
+    Object.keys(findingsByAgent).length === 0 && candidates.length === 0 && edges.length === 0 && !run;
 
   return (
     <section className="panel rca-workbench">
       <div className="panel-heading">
-        <h2>Agent 判断</h2>
+        <h2>{run ? "混合 RCA 裁决" : "Agent 判断"}</h2>
         <span>{workbenchQuery.data?.findings.length ?? 0}</span>
       </div>
       {workbenchQuery.isLoading ? (
@@ -326,27 +504,75 @@ function RcaWorkbenchPanel({ investigationId }: { investigationId: string }) {
         <div className="empty-state">暂无 RCA 工作台数据。</div>
       ) : (
         <>
-          <div className="compact-list">
-            {Object.entries(findingsByAgent).map(([agentName, findings]) => (
-              <article className="compact-row" key={agentName}>
-                <strong>{agentName}</strong>
-                {findings.map((finding) => (
-                  <div key={finding.id}>
-                    <p>{finding.summary}</p>
-                    <div className="process-detail">
-                      <span>类型: {finding.finding_type}</span>
-                      <span>关联根因: {finding.related_cause_type ?? "无"}</span>
-                      <span>严重度: {finding.severity}</span>
-                      <span>置信度 {formatPercent(finding.confidence)}</span>
-                      <span className="evidence-link">证据: {formatIdList(finding.evidence_ids)}</span>
-                      <span>缺口: {formatIdList(finding.gaps)}</span>
-                    </div>
-                    <p className="muted">{finding.rationale}</p>
-                  </div>
-                ))}
-              </article>
-            ))}
-          </div>
+          {run ? (
+            <>
+              <div className="detail-grid">
+                <div>
+                  <span className="label">运行状态</span>
+                  <StatusBadge value={run.status} />
+                </div>
+                <div>
+                  <span className="label">裁决</span>
+                  <strong>{decisionLabels[decisionStatus]}</strong>
+                </div>
+                <div>
+                  <span className="label">确定性 RCA baseline</span>
+                  <strong>{baselineCause}</strong>
+                  {baselineConfidence === undefined ? null : (
+                    <span>{formatPercent(baselineConfidence)}</span>
+                  )}
+                </div>
+                <div>
+                  <span className="label">最终候选</span>
+                  <strong>{selectedCause}</strong>
+                </div>
+              </div>
+
+              <div className="compact-list">
+                <article className="compact-row">
+                  <strong>事实（证据）</strong>
+                  <p className="evidence-link">证据 IDs: {formatIdList(evidenceIds)}</p>
+                </article>
+                <article className="compact-row">
+                  <strong>确定性推断</strong>
+                  <p>{baselineHypothesis?.summary ?? baselineCause}</p>
+                </article>
+                <article className="compact-row">
+                  <strong>Agent 推断</strong>
+                  <p>{reviewSummary || "本次多 Agent 复核未形成可持久化裁决。"}</p>
+                  <p>
+                    冲突复核: {revisionCount > 0 ? `${revisionCount} 条第 2 轮修订` : "未触发第 2 轮修订"}
+                  </p>
+                </article>
+                <article className="compact-row">
+                  <strong>建议（仅建议，未执行）</strong>
+                  <p>{recommendationTitles.length > 0 ? recommendationTitles.join("；") : "暂无建议"}</p>
+                </article>
+                <article className="compact-row">
+                  <strong>不确定性</strong>
+                  <p>{reviewUncertainty || safeRunFailureReason || "本次未提供额外不确定性说明。"}</p>
+                  {safeRunFailureReason ? (
+                    <p className="error">失败原因: {safeRunFailureReason}</p>
+                  ) : null}
+                </article>
+              </div>
+
+              <div className="panel-heading">
+                <h2>Agent 推断</h2>
+                <span>{v7Findings.length}</span>
+              </div>
+            </>
+          ) : null}
+          <AgentFindingList findingsByAgent={run ? v7FindingsByAgent : findingsByAgent} />
+          {run ? (
+            <>
+              <div className="panel-heading">
+                <h2>既有 Agent 判断</h2>
+                <span>{customFindings.length}</span>
+              </div>
+              <AgentFindingList findingsByAgent={customFindingsByAgent} />
+            </>
+          ) : null}
 
           <div className="panel-heading">
             <h2>候选根因排序</h2>
@@ -359,15 +585,17 @@ function RcaWorkbenchPanel({ investigationId }: { investigationId: string }) {
                   <strong>#{candidate.rank} {candidate.cause_type}</strong>
                   <span>{formatPercent(candidate.confidence)}</span>
                 </div>
-                <p>{candidate.summary}</p>
-                <p>{candidate.rationale}</p>
+                <p>{projectAgentUiText(candidate.summary, persistedReview?.execution_layer)}</p>
+                <p>{projectAgentUiText(candidate.rationale, persistedReview?.execution_layer)}</p>
                 <div className="process-detail">
                   <span>支持判断: {formatIdList(candidate.supporting_finding_ids)}</span>
                   <span>反对判断: {formatIdList(candidate.contradicting_finding_ids)}</span>
                   <span>支持证据: {formatIdList(candidate.supporting_evidence_ids)}</span>
                   <span>反对证据: {formatIdList(candidate.contradicting_evidence_ids)}</span>
                 </div>
-                <p className="muted">{candidate.uncertainty}</p>
+                <p className="muted">
+                  {projectAgentUiText(candidate.uncertainty, persistedReview?.execution_layer)}
+                </p>
               </article>
             ))}
           </div>

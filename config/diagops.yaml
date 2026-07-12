@@ -20,3 +20,9 @@ providers:
 
 llm:
   enabled: false
+
+agents:
+  enabled: false
+  model: null
+  max_turns: 8
+  timeout_seconds: 60

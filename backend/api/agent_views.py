@@ -1,3 +1,4 @@
+from datetime import UTC
 from typing import Any
 
 from fastapi import APIRouter
@@ -7,6 +8,11 @@ from backend.domain.agent_context import ContextFact
 from backend.domain.agent_findings import AgentFinding, CoordinationReview
 from backend.domain.agent_plan import AgentExecution, DiagnosisPlan, DiagnosisTask
 from backend.domain.memory import MemoryItem
+from backend.domain.multi_agent import (
+    AgentExecutionLayer,
+    MultiAgentRunStatus,
+    MultiAgentRunSummary,
+)
 from backend.domain.react_trace import ReActTrace
 from backend.domain.tool_calls import ToolCallRecord
 from backend.services.container import get_container
@@ -37,6 +43,82 @@ def _get_react_trace(investigation_id: str) -> ReActTrace | None:
     if not callable(get_trace):
         return None
     return get_trace(investigation_id)
+
+
+def _safe_agents_failure_reason(message: str | None) -> str:
+    text = (message or "").lower()
+    categories = (
+        (
+            ("not configured", "not locally configured", "missing model", "missing api key"),
+            "Agents runtime not configured",
+        ),
+        (("timed out", "timeout"), "Agents runtime timed out"),
+        (("rate limit", "rate_limit", "429"), "Agents runtime rate limited"),
+        (("quota",), "Agents runtime quota exceeded"),
+        (
+            ("invalid output", "invalid model output", "validation error"),
+            "Agents runtime returned invalid output",
+        ),
+        (
+            ("authentication", "unauthorized", "forbidden", "api key"),
+            "Agents runtime authentication failed",
+        ),
+    )
+    return next(
+        (label for markers, label in categories if any(marker in text for marker in markers)),
+        "Agents runtime failed",
+    )
+
+
+def _execution_timestamp(execution: AgentExecution) -> float:
+    timestamp = execution.completed_at or execution.started_at
+    return (
+        float("-inf")
+        if timestamp is None
+        else timestamp.replace(tzinfo=timestamp.tzinfo or UTC).timestamp()
+    )
+
+
+def _multi_agent_run_summary(
+    review: CoordinationReview | None,
+    executions: list[AgentExecution],
+) -> MultiAgentRunSummary | None:
+    if (
+        review is not None
+        and review.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK
+        and review.run_status
+        in {MultiAgentRunStatus.COMPLETED, MultiAgentRunStatus.PARTIAL}
+    ):
+        return MultiAgentRunSummary(status=review.run_status)
+
+    attempts = [
+        execution
+        for execution in executions
+        if execution.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK
+        and execution.agent_name == "CoordinatorAgent"
+    ]
+    if not attempts:
+        return None
+    latest = max(
+        attempts,
+        key=lambda execution: (
+            _execution_timestamp(execution),
+            execution.id,
+        ),
+    )
+    if latest.status.value not in {
+        MultiAgentRunStatus.FAILED.value,
+        MultiAgentRunStatus.SKIPPED.value,
+    }:
+        return None
+    return MultiAgentRunSummary(
+        status=MultiAgentRunStatus(latest.status.value),
+        failure_reason=(
+            "Agents runtime not configured"
+            if latest.status.value == MultiAgentRunStatus.SKIPPED.value
+            else _safe_agents_failure_reason(latest.error_message)
+        ),
+    )
 
 
 @router.get("/{investigation_id}/plan", response_model=DiagnosisPlan | None)
@@ -113,6 +195,7 @@ def get_investigation_rca_workbench(investigation_id: str) -> dict[str, Any]:
     record = _get_investigation_record(investigation_id)
     findings = _list_agent_findings(investigation_id)
     review = _get_coordination_review(investigation_id)
+    executions = _repository().list_executions(investigation_id)
     candidates = [] if review is None else review.candidates
     return {
         "investigation": record,
@@ -120,6 +203,9 @@ def get_investigation_rca_workbench(investigation_id: str) -> dict[str, Any]:
         "candidates": candidates,
         "evidence": record.evidence,
         "graph_seed": _build_rca_graph_seed(record.evidence, findings, candidates),
+        "coordination_review": review,
+        "agent_executions": executions,
+        "multi_agent_run": _multi_agent_run_summary(review, executions),
     }
 
 
