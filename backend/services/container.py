@@ -5,6 +5,7 @@ from backend.db.repositories import InMemoryInvestigationRepository
 from backend.db.session import create_db_engine, initialize_database
 from backend.db.sqlite_repository import SQLiteInvestigationRepository
 from backend.diagnosis.action_planner import ActionPlanner
+from backend.diagnosis.agents_runtime import AgentsRcaRuntime
 from backend.diagnosis.coordinator import DiagnosisCoordinator
 from backend.diagnosis.llm_analyst import ReadOnlyLlmAnalyst
 from backend.diagnosis.orchestrator import DiagnosisOrchestrator
@@ -21,6 +22,15 @@ class AppContainer:
         llm_analyst = (
             ReadOnlyLlmAnalyst(enabled=True) if self.settings.llm.enabled else None
         )
+        agents_runtime = (
+            AgentsRcaRuntime(
+                model=self.settings.agents.model,
+                max_turns=self.settings.agents.max_turns,
+                timeout_seconds=self.settings.agents.timeout_seconds,
+            )
+            if self.settings.agents.enabled
+            else None
+        )
         self.orchestrator = DiagnosisOrchestrator(
             repository=self.repository,
             providers=providers,
@@ -29,6 +39,7 @@ class AppContainer:
             coordinator=DiagnosisCoordinator(providers),
             action_planner=ActionPlanner(),
             llm_analyst=llm_analyst,
+            agents_runtime=agents_runtime,
         )
 
     def _build_repository(self):

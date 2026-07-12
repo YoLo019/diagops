@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class StorageSettings(BaseModel):
@@ -56,11 +56,21 @@ class ReActSettings(BaseModel):
     max_steps: int = 5
 
 
+class AgentsSettings(BaseModel):
+    model_config = ConfigDict(validate_assignment=True)
+
+    enabled: bool = False
+    model: str | None = None
+    max_turns: int = Field(default=8, ge=1)
+    timeout_seconds: int = Field(default=60, ge=1)
+
+
 class AppSettings(BaseModel):
     storage: StorageSettings = Field(default_factory=StorageSettings)
     providers: ProviderSettings = Field(default_factory=ProviderSettings)
     llm: LlmSettings = Field(default_factory=LlmSettings)
     react: ReActSettings = Field(default_factory=ReActSettings)
+    agents: AgentsSettings = Field(default_factory=AgentsSettings)
 
 
 def load_settings() -> AppSettings:
@@ -88,6 +98,18 @@ def _apply_environment_overrides(settings: AppSettings) -> None:
 
     if react_enabled := _get_env("DIAGOPS_REACT_ENABLED"):
         settings.react.enabled = _parse_bool(react_enabled)
+
+    if agents_enabled := _get_env("DIAGOPS_AGENTS_ENABLED"):
+        settings.agents.enabled = _parse_bool(agents_enabled)
+
+    if agents_model := _get_env("DIAGOPS_AGENTS_MODEL"):
+        settings.agents.model = agents_model
+
+    if agents_max_turns := _get_env("DIAGOPS_AGENTS_MAX_TURNS"):
+        settings.agents.max_turns = int(agents_max_turns)
+
+    if agents_timeout_seconds := _get_env("DIAGOPS_AGENTS_TIMEOUT_SECONDS"):
+        settings.agents.timeout_seconds = int(agents_timeout_seconds)
 
 
 def _parse_bool(value: str) -> bool:

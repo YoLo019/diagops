@@ -111,6 +111,23 @@ $env:DIAGOPS_PROVIDER_MOCK_ENABLED = "true"
 $env:DIAGOPS_LLM_ENABLED = "false"
 ```
 
+OpenAI Agents SDK integration is disabled by default:
+
+```yaml
+agents:
+  enabled: false
+  model: null
+  max_turns: 8
+  timeout_seconds: 60
+```
+
+Override these settings for a local process with
+`DIAGOPS_AGENTS_ENABLED`, `DIAGOPS_AGENTS_MODEL`,
+`DIAGOPS_AGENTS_MAX_TURNS`, and `DIAGOPS_AGENTS_TIMEOUT_SECONDS`.
+Keep `OPENAI_API_KEY` only in the local process environment; never put it in
+settings, YAML, source code, logs, or commit history. Choose the model
+explicitly when enabling the integration.
+
 ## Sample Local Data
 
 Run with the sample deployment and log evidence:
@@ -232,6 +249,45 @@ configuration changes, or remediation.
 ```text
 GET /investigations/{id}/react-trace
 ```
+
+## V7 Live Multi-Agent Reliability Gate
+
+The paid V7 gate remains disabled during automated verification. After the
+implementation and key-free tests pass, configure these names only in the
+local process environment:
+
+```text
+OPENAI_API_KEY
+DIAGOPS_AGENTS_MODEL
+DIAGOPS_AGENTS_TIMEOUT_SECONDS (optional, defaults to 60)
+DIAGOPS_INPUT_COST_PER_MILLION
+DIAGOPS_OUTPUT_COST_PER_MILLION
+```
+
+Never paste credential values into chat, code, YAML, or committed files. The
+runner does not write credential values to its artifact. It uses five existing
+simulated cases three times: 12 clean runs and 3 adversarial safety probes.
+
+Run the gate locally with:
+
+```powershell
+uv run python -m backend.services.v7_live_acceptance
+```
+
+Before changing prompts or arbitration, run the five clean investigations in
+diagnostic mode and review the resulting artifact:
+
+```powershell
+uv run python -m backend.services.v7_live_acceptance --runs-per-case 1
+```
+
+This writes a schema-v2 diagnostic artifact without evaluating or weakening the
+reliability gate. The artifact contains no prompts, raw responses, reasoning,
+credentials, or free-text findings.
+
+Results are written to
+`artifacts/v7-live-acceptance-<UTC timestamp>.json`. The runner is read-only and
+does not execute rollback, restart, scaling, SSH, or configuration changes.
 
 ## V2 Platform Loop
 

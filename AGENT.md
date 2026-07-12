@@ -427,6 +427,16 @@ docs/superpowers/plans/
 
 When creating a new major version or feature, write the spec first, get user approval, then write an execution plan.
 
+Before writing a new spec for a major version, feature, or behavior change, run the brainstorming workflow with the user first:
+
+1. Read the current project context.
+2. Ask clarifying questions one at a time.
+3. Offer 2-3 approaches with tradeoffs and a recommendation.
+4. Present the proposed design and wait for user approval.
+5. Only after approval, write the spec under `docs/superpowers/specs/`.
+
+Do not generate a full spec automatically from a vague feature request. The spec is the output of the approved brainstorming conversation, not a substitute for it.
+
 Do not let implementation drift away from the accepted spec without updating the spec or explicitly noting the deviation.
 
 ## Current Key Specs
@@ -451,14 +461,17 @@ docs/superpowers/specs/2026-07-04-diagops-v2-platform-loop-design.md
 
 ## Development Workflow
 
+For V5 or later major iterations, use the user-level `iteration-flow` skill to run the project workflow from brainstorming through final verification. Apply the DiagOps-specific checklist from that skill when reviewing this repository.
+
 For substantial work:
 
-1. Read the relevant spec.
-2. Inspect existing code before proposing changes.
-3. Keep changes scoped.
-4. Prefer tests before or alongside behavior changes.
-5. Run verification before committing.
-6. Commit with a focused message.
+1. For new features or behavior changes, brainstorm with the user before writing or updating the spec.
+2. Read the relevant spec.
+3. Inspect existing code before proposing changes.
+4. Keep changes scoped.
+5. Prefer tests before or alongside behavior changes.
+6. Run verification before committing.
+7. Commit with a focused message.
 
 For review tasks:
 
@@ -466,6 +479,21 @@ For review tasks:
 2. Order by severity.
 3. Include file and line references.
 4. Focus on bugs, regressions, missing tests, safety risks, and spec mismatches.
+
+## Subagent Review Rules
+
+When using Superpowers subagent-driven development, the default spec and code-quality reviews are required but not sufficient for this repository.
+
+Every reviewer subagent must receive this file, the relevant spec, the relevant plan task, and the git diff under review. The review must explicitly check DiagOps-specific constraints:
+
+1. Evidence references remain valid and conclusions do not invent facts.
+2. Production systems remain read-only; no rollback, restart, scale, SSH, or config mutation behavior is added.
+3. Recommended actions remain suggestions and approval only records state.
+4. Domain models, enums, API shapes, and fixture schemas stay backward compatible unless the spec says otherwise.
+5. Provider failures, partial evidence, and unknown root causes stay visible instead of being silently swallowed.
+6. Tests cover the changed contract, especially golden RCA behavior, persistence, API responses, and frontend safety wording when touched.
+
+If a reviewer does not check these project rules, treat the review as incomplete and run another DiagOps-specific review before continuing.
 
 ## Boundaries To Preserve
 
