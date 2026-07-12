@@ -621,6 +621,7 @@ async def test_missing_specialist_and_invalid_evidence_preserve_partial_work(mon
     stub = TurnStub(
         _turn([_draft(AgentName.LOG, "ev-log"), invalid]),
         _turn(),
+        _turn(),
     )
 
     result = await AgentsRcaRuntime(model="fake", turn=stub).run(
@@ -631,6 +632,228 @@ async def test_missing_specialist_and_invalid_evidence_preserve_partial_work(mon
     assert result.run_summary.status == MultiAgentRunStatus.PARTIAL
     assert result.review is not None
     assert result.review.decision_status != CoordinationDecisionStatus.AGREEMENT
+
+
+@pytest.mark.anyio
+async def test_missing_specialist_is_recollected_once_and_can_complete(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "present")
+    stub = TurnStub(
+        _turn(
+            [
+                _draft(AgentName.LOG, "ev-log"),
+                _draft(AgentName.DEPLOYMENT, "ev-deploy"),
+            ]
+        ),
+        _turn([_draft(AgentName.METRIC, "ev-metric")]),
+        _turn(),
+    )
+
+    result = await AgentsRcaRuntime(model="fake", turn=stub).run(
+        "inv-1", _incident(), _all_evidence(), [_baseline()]
+    )
+
+    assert len(stub.calls) == 3
+    assert stub.calls[1]["specialist_names"] == [AgentName.METRIC]
+    assert stub.calls[1]["analysis_round"] == 1
+    assert result.run_summary.status == MultiAgentRunStatus.COMPLETED
+    assert all(task.status == DiagnosisTaskStatus.COMPLETED for task in result.tasks)
+    assert all(
+        execution.status == AgentExecutionStatus.COMPLETED
+        for execution in result.executions
+    )
+
+
+@pytest.mark.anyio
+async def test_missing_specialist_recollection_failure_remains_partial(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "present")
+    stub = TurnStub(
+        _turn([_draft(AgentName.LOG, "ev-log")]),
+        _turn([_draft(AgentName.METRIC, "ev-invented")]),
+        _turn(),
+    )
+
+    result = await AgentsRcaRuntime(model="fake", turn=stub).run(
+        "inv-1", _incident(), _all_evidence(), [_baseline()]
+    )
+
+    assert stub.calls[1]["specialist_names"] == [AgentName.METRIC, AgentName.DEPLOYMENT]
+    assert result.run_summary.status == MultiAgentRunStatus.PARTIAL
+    assert any(task.status == DiagnosisTaskStatus.FAILED for task in result.tasks)
+
+
+@pytest.mark.anyio
+async def test_missing_specialists_are_recollected_after_invalid_first_coordinator(
+    monkeypatch,
+):
+    monkeypatch.setenv("OPENAI_API_KEY", "present")
+    stub = TurnStub(
+        _turn([_draft(AgentName.LOG, "ev-log")], proposal=False),
+        _turn(
+            [
+                _draft(AgentName.METRIC, "ev-metric"),
+                _draft(AgentName.DEPLOYMENT, "ev-deploy"),
+            ]
+        ),
+        _turn(),
+    )
+
+    result = await AgentsRcaRuntime(model="fake", turn=stub).run(
+        "inv-1", _incident(), _all_evidence(), [_baseline()]
+    )
+
+    assert stub.calls[1]["specialist_names"] == [
+        AgentName.METRIC,
+        AgentName.DEPLOYMENT,
+    ]
+    assert result.run_summary.status == MultiAgentRunStatus.PARTIAL
+
+
+@pytest.mark.anyio
+async def test_duplicate_specialist_output_recollects_only_missing_specialist(
+    monkeypatch,
+):
+    monkeypatch.setenv("OPENAI_API_KEY", "present")
+    log = _draft(AgentName.LOG, "ev-log")
+    stub = TurnStub(
+        _turn(
+            [
+                log,
+                log,
+                _draft(AgentName.METRIC, "ev-metric"),
+            ]
+        ),
+        _turn([_draft(AgentName.DEPLOYMENT, "ev-deploy")]),
+        _turn(),
+    )
+
+    result = await AgentsRcaRuntime(model="fake", turn=stub).run(
+        "inv-1", _incident(), _all_evidence(), [_baseline()]
+    )
+
+    assert len(stub.calls) == 3
+    assert stub.calls[1]["specialist_names"] == [AgentName.DEPLOYMENT]
+    assert stub.calls[1]["analysis_round"] == 1
+    assert {finding.agent_name for finding in result.findings} == set(AgentName)
+    assert result.run_summary.status == MultiAgentRunStatus.PARTIAL
+    assert any(
+        task.agent_name == AgentName.LOG.value
+        and task.status == DiagnosisTaskStatus.FAILED
+        for task in result.tasks
+    )
+
+
+@pytest.mark.anyio
+async def test_unauthorized_output_cannot_be_hidden_by_successful_recollection(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "present")
+    unauthorized = _CapturedDraft(
+        "ShellAgent", _draft(AgentName.METRIC, "ev-metric").draft
+    )
+    stub = TurnStub(
+        _turn([_draft(AgentName.LOG, "ev-log"), unauthorized]),
+        _turn(
+            [
+                _draft(AgentName.METRIC, "ev-metric"),
+                _draft(AgentName.DEPLOYMENT, "ev-deploy"),
+            ]
+        ),
+        _turn(),
+    )
+
+    result = await AgentsRcaRuntime(model="fake", turn=stub).run(
+        "inv-1", _incident(), _all_evidence(), [_baseline()]
+    )
+
+    assert len(stub.calls) == 3
+    assert stub.calls[1]["specialist_names"] == [AgentName.METRIC, AgentName.DEPLOYMENT]
+    assert stub.calls[1]["analysis_round"] == 1
+    assert {finding.agent_name for finding in result.findings} == set(AgentName)
+    assert result.run_summary.status == MultiAgentRunStatus.PARTIAL
+    assert any(
+        task.agent_name == "ShellAgent" and task.status == DiagnosisTaskStatus.FAILED
+        for task in result.tasks
+    )
+    assert any(
+        execution.agent_name == "ShellAgent"
+        and execution.status == AgentExecutionStatus.FAILED
+        and execution.error_message
+        for execution in result.executions
+    )
+
+
+@pytest.mark.anyio
+async def test_unknown_output_with_all_required_findings_remains_partial(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "present")
+    unknown = _CapturedDraft(
+        "ShellAgent", _draft(AgentName.METRIC, "ev-metric").draft
+    )
+    stub = TurnStub(_turn([*_all_first_round(), unknown]), _turn())
+
+    result = await AgentsRcaRuntime(model="fake", turn=stub).run(
+        "inv-1", _incident(), _all_evidence(), [_baseline()]
+    )
+
+    assert len(stub.calls) == 2
+    assert result.run_summary.status == MultiAgentRunStatus.PARTIAL
+    assert any(
+        task.agent_name == "ShellAgent" and task.status == DiagnosisTaskStatus.FAILED
+        for task in result.tasks
+    )
+    assert any(
+        execution.agent_name == "ShellAgent"
+        and execution.status == AgentExecutionStatus.FAILED
+        for execution in result.executions
+    )
+
+
+@pytest.mark.anyio
+async def test_invalid_first_evidence_failure_survives_successful_recollection(
+    monkeypatch,
+):
+    monkeypatch.setenv("OPENAI_API_KEY", "present")
+    stub = TurnStub(
+        _turn([_draft(AgentName.LOG, "ev-log"), _draft(AgentName.METRIC, "ev-bad")]),
+        _turn(
+            [
+                _draft(AgentName.METRIC, "ev-metric"),
+                _draft(AgentName.DEPLOYMENT, "ev-deploy"),
+            ]
+        ),
+        _turn(),
+    )
+
+    result = await AgentsRcaRuntime(model="fake", turn=stub).run(
+        "inv-1", _incident(), _all_evidence(), [_baseline()]
+    )
+
+    assert stub.calls[1]["specialist_names"] == [AgentName.METRIC, AgentName.DEPLOYMENT]
+    assert result.run_summary.status == MultiAgentRunStatus.PARTIAL
+    assert any(
+        task.agent_name == AgentName.METRIC.value and task.status == DiagnosisTaskStatus.FAILED
+        for task in result.tasks
+    )
+    assert any(
+        execution.agent_name == AgentName.METRIC.value
+        and execution.status == AgentExecutionStatus.FAILED
+        for execution in result.executions
+    )
+
+
+@pytest.mark.anyio
+async def test_overall_timeout_covers_missing_specialist_recollection(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "present")
+
+    async def hang():
+        await asyncio.Event().wait()
+
+    stub = TurnStub(_turn([_draft(AgentName.LOG, "ev-log")]), hang)
+
+    result = await AgentsRcaRuntime(
+        model="fake", turn=stub, timeout_seconds=0.01
+    ).run("inv-1", _incident(), _all_evidence(), [_baseline()])
+
+    assert len(stub.calls) == 2
+    assert result.run_summary.status == MultiAgentRunStatus.FAILED
+    assert "timeout" in (result.run_summary.failure_reason or "").lower()
 
 
 @pytest.mark.anyio
@@ -678,6 +901,7 @@ async def test_invalid_specialist_output_is_rejected_without_escaping(
     monkeypatch.setenv("OPENAI_API_KEY", "present")
     stub = TurnStub(
         _turn([_draft(AgentName.LOG, "ev-log"), invalid]),
+        _turn(),
         _turn(),
     )
 

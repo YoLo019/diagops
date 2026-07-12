@@ -235,6 +235,19 @@ class AgentsRcaRuntime:
             max_turns=self.max_turns,
             analysis_round=1,
         )
+        first_names: list[AgentName] = []
+        first_returned_names: set[str] = set()
+        nonrecoverable_first_output = False
+        for captured in first.captured_drafts:
+            try:
+                name = AgentName(captured.agent_name)
+            except (TypeError, ValueError):
+                nonrecoverable_first_output = True
+                continue
+            first_returned_names.add(name.value)
+            if name in first_names:
+                nonrecoverable_first_output = True
+            first_names.append(name)
         partial = self._consume_turn(
             result,
             first,
@@ -244,9 +257,68 @@ class AgentsRcaRuntime:
             analysis_round=1,
             seen_responses=seen_responses,
         )
+        partial |= nonrecoverable_first_output
         if first.cancelled or (first.error and not result.findings):
             self._finish_failed(result, first.error or "SDK turn failed")
             return
+
+        missing = [
+            name
+            for name in AgentName
+            if not any(
+                finding.agent_name == name and finding.analysis_round == 1
+                for finding in result.findings
+            )
+        ]
+        if missing and first.error is None:
+            failed_task_ids = {
+                task.id
+                for task in result.tasks
+                if (
+                    task.agent_name in {name.value for name in missing}
+                    and task.agent_name not in first_returned_names
+                    and task.analysis_round == 1
+                )
+                and task.status == DiagnosisTaskStatus.FAILED
+            }
+            result.tasks = [
+                task for task in result.tasks if task.id not in failed_task_ids
+            ]
+            result.executions = [
+                execution
+                for execution in result.executions
+                if execution.task_id not in failed_task_ids
+            ]
+            recollected = await self.turn(
+                model=self.model,
+                coordinator_input=(
+                    "Invoke every supplied missing specialist exactly once. Their "
+                    "independent outputs are diagnostic drafts, not production actions."
+                ),
+                specialist_inputs={name: first_inputs[name] for name in missing},
+                specialist_names=missing,
+                max_turns=self.max_turns,
+                analysis_round=1,
+            )
+            self._consume_turn(
+                result,
+                recollected,
+                requested=missing,
+                allowed_evidence={
+                    name: _evidence_ids(evidence, name) for name in missing
+                },
+                investigation_id=investigation_id,
+                analysis_round=1,
+                seen_responses=seen_responses,
+            )
+            if recollected.cancelled:
+                self._finish_failed(result, recollected.error or "SDK turn failed")
+                return
+            partial = any(
+                task.analysis_round == 1
+                and task.status == DiagnosisTaskStatus.FAILED
+                for task in result.tasks
+            ) or nonrecoverable_first_output
 
         baseline = hypotheses[0] if hypotheses else None
         conflicting = (
@@ -354,6 +426,16 @@ class AgentsRcaRuntime:
             try:
                 name = AgentName(captured.agent_name)
             except (TypeError, ValueError):
+                unknown_task, unknown_execution = _records(
+                    str(captured.agent_name),
+                    DiagnosisTaskType.RCA_SYNTHESIS,
+                    analysis_round,
+                    DiagnosisTaskStatus.FAILED,
+                    AgentExecutionStatus.FAILED,
+                    error="Unknown specialist output",
+                )
+                result.tasks.append(unknown_task)
+                result.executions.append(unknown_execution)
                 continue
             if name not in requested or name in captured_by_agent:
                 invalid_agents.add(name)
@@ -548,12 +630,6 @@ async def _run_sdk_turn(
                 trace_include_sensitive_data=False,
             ),
         )
-        proposal = _CoordinatorProposal.model_validate(run_result.final_output)
-        run_results = [run_result, *captured_results]
-        raw_responses = _unique_responses(
-            [*hook_responses, *_raw_responses(run_results)]
-        )
-        error = None
     except (asyncio.CancelledError, Exception) as exc:
         run_data = getattr(exc, "run_data", None)
         exception_responses = list(getattr(run_data, "raw_responses", []))
@@ -568,6 +644,15 @@ async def _run_sdk_turn(
         error = _safe_reason(exc)
         cancelled = isinstance(exc, asyncio.CancelledError)
     else:
+        run_results = [run_result, *captured_results]
+        raw_responses = _unique_responses(
+            [*hook_responses, *_raw_responses(run_results)]
+        )
+        try:
+            proposal = _CoordinatorProposal.model_validate(run_result.final_output)
+        except Exception:
+            proposal = None
+        error = None
         cancelled = False
     input_tokens, output_tokens = _response_usage(raw_responses)
     return _SdkTurnResult(

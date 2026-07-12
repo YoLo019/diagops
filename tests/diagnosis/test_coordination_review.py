@@ -237,6 +237,134 @@ def test_decide_hybrid_status_matrix(baseline, findings, run_status, expected):
     assert decide_hybrid_status(baseline, findings, run_status) == expected
 
 
+@pytest.mark.parametrize(
+    "finding_type",
+    [AgentFindingType.ROOT_CAUSE, AgentFindingType.SIGNAL],
+    ids=["root-cause", "signal"],
+)
+def test_valid_baseline_accepts_single_evidenced_corroboration(finding_type):
+    finding = _sdk_finding(
+        "metric",
+        AgentName.METRIC,
+        CauseType.DATABASE_SLOWDOWN,
+        finding_type=finding_type,
+    )
+
+    assert (
+        decide_hybrid_status(
+            _hypothesis(CauseType.DATABASE_SLOWDOWN, 0.8),
+            [finding],
+            MultiAgentRunStatus.COMPLETED,
+        )
+        == CoordinationDecisionStatus.AGREEMENT
+    )
+
+
+@pytest.mark.parametrize(
+    "finding",
+    [
+        _sdk_finding(
+            "no-evidence",
+            AgentName.METRIC,
+            CauseType.DATABASE_SLOWDOWN,
+            finding_type=AgentFindingType.SIGNAL,
+        ).model_copy(update={"evidence_ids": []}),
+        _sdk_finding(
+            "low-confidence",
+            AgentName.METRIC,
+            CauseType.DATABASE_SLOWDOWN,
+            confidence=LOW_CONFIDENCE - 0.01,
+            finding_type=AgentFindingType.SIGNAL,
+        ),
+    ],
+    ids=["no-evidence", "low-confidence"],
+)
+def test_single_signal_without_qualified_support_falls_back(finding):
+    assert (
+        decide_hybrid_status(
+            _hypothesis(CauseType.DATABASE_SLOWDOWN, 0.8),
+            [finding],
+            MultiAgentRunStatus.COMPLETED,
+        )
+        == CoordinationDecisionStatus.FALLBACK
+    )
+
+
+@pytest.mark.parametrize("agent_names", [[AgentName.METRIC], list(AgentName)])
+def test_unknown_baseline_does_not_promote_signals_to_agent_leads(agent_names):
+    signals = [
+        _sdk_finding(
+            f"signal-{agent_name.value}",
+            agent_name,
+            CauseType.DATABASE_SLOWDOWN,
+            finding_type=AgentFindingType.SIGNAL,
+        )
+        for agent_name in agent_names
+    ]
+    assert (
+        decide_hybrid_status(
+            _hypothesis(CauseType.UNKNOWN, 0.4),
+            signals,
+            MultiAgentRunStatus.COMPLETED,
+        )
+        == CoordinationDecisionStatus.FALLBACK
+    )
+
+
+def test_different_evidenced_signal_conflicts_with_valid_baseline():
+    signal = _sdk_finding(
+        "metric",
+        AgentName.METRIC,
+        CauseType.TRAFFIC_SPIKE,
+        finding_type=AgentFindingType.SIGNAL,
+    )
+
+    assert (
+        decide_hybrid_status(
+            _hypothesis(CauseType.DATABASE_SLOWDOWN, 0.8),
+            [signal],
+            MultiAgentRunStatus.COMPLETED,
+        )
+        == CoordinationDecisionStatus.CONFLICT
+    )
+
+
+def test_partial_run_cannot_use_single_corroboration():
+    finding = _sdk_finding(
+        "metric", AgentName.METRIC, CauseType.DATABASE_SLOWDOWN
+    )
+
+    assert (
+        decide_hybrid_status(
+            _hypothesis(CauseType.DATABASE_SLOWDOWN, 0.8),
+            [finding],
+            MultiAgentRunStatus.PARTIAL,
+        )
+        == CoordinationDecisionStatus.FALLBACK
+    )
+
+
+def test_baseline_contradiction_blocks_single_corroboration():
+    findings = [
+        _sdk_finding("metric", AgentName.METRIC, CauseType.DATABASE_SLOWDOWN),
+        _sdk_finding(
+            "log",
+            AgentName.LOG,
+            CauseType.DATABASE_SLOWDOWN,
+            finding_type=AgentFindingType.CONTRADICTION,
+        ),
+    ]
+
+    assert (
+        decide_hybrid_status(
+            _hypothesis(CauseType.DATABASE_SLOWDOWN, 0.8),
+            findings,
+            MultiAgentRunStatus.COMPLETED,
+        )
+        == CoordinationDecisionStatus.CONFLICT
+    )
+
+
 def test_low_confidence_boundary_is_strict_and_finding_at_boundary_is_active():
     baseline = _hypothesis(CauseType.TRAFFIC_SPIKE, LOW_CONFIDENCE)
     findings = [

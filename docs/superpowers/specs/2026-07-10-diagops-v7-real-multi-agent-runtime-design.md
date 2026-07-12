@@ -194,6 +194,23 @@ The first-round specialist must not receive:
 
 This avoids anchoring the independent assessments.
 
+After the first SDK turn, DiagOps derives missing specialists from validated
+round-1 findings, not from the Coordinator proposal. When one or more required
+specialists are missing and the SDK turn itself did not error or cancel, the
+runtime performs exactly one targeted recollection containing only those
+missing specialists. It reuses the original specialist inputs, evidence
+allowlists, read-only boundary, turn limit, overall timeout, and
+`analysis_round=1`; successful specialists are not invoked again.
+
+The targeted recollection is allowed even when the first Coordinator proposal
+is missing or invalid. Coordinator output validation failure is not an SDK
+transport/execution error. It remains visible and keeps the run partial;
+recollection may recover specialist evidence but must not convert that first
+coordination failure into a completed run. Unknown or duplicate specialist
+output is non-recoverable in V7 and keeps the run partial, but does not block
+recollection of other missing required specialists. There is no loop or general
+retry framework.
+
 ### 7.3 Coordinator Comparison
 
 After all first-round results are available, the coordinator receives:
@@ -546,10 +563,19 @@ No new page or graph library is added.
 
 ### 13.2 Specialist Failure
 
-1. One failed specialist produces a partial run.
-2. Valid findings from other specialists remain visible.
-3. A partial run cannot produce a high-confidence agent confirmation.
-4. A failed specialist does not enter an unlimited retry loop.
+1. After the first turn, missing specialists receive exactly one targeted
+   recollection when the turn has no SDK error or cancellation.
+2. Missing-specialist detection depends on validated round-1 findings and does
+   not require a valid first Coordinator proposal.
+3. One specialist that remains failed after recollection produces a partial
+   run.
+4. Valid findings from other specialists remain visible and successful
+   specialists are not repeated.
+5. A partial run cannot produce a high-confidence agent confirmation.
+6. Unknown or duplicate specialist output is not itself recollected and remains
+   visible as partial, but does not block recollection of other missing
+   specialists.
+7. A failed specialist does not enter an unlimited retry loop.
 
 ### 13.3 Coordinator Failure
 
@@ -614,12 +640,17 @@ Prove:
 1. The runtime is constructed only when enabled and configured.
 2. The coordinator invokes all three specialists in round 1.
 3. Round-1 specialist inputs exclude baseline and peer findings.
-4. The coordinator receives the validated first-round findings and baseline.
-5. Only conflicting specialists enter round 2.
-6. No specialist runs more than twice.
-7. Agreement, conflict, agent-leads, and fallback decisions follow the defined
+4. Missing round-1 specialists are recollected exactly once using the original
+   input and evidence allowlist, including when the first Coordinator proposal
+   is missing without an SDK error.
+5. Successful specialists are not recollected; unknown and duplicate output
+   cannot be washed into a completed run.
+6. The coordinator receives the validated first-round findings and baseline.
+7. Only conflicting specialists enter round 2.
+8. No specialist runs more than twice.
+9. Agreement, conflict, agent-leads, and fallback decisions follow the defined
    rules.
-8. SDK/model failure preserves a completed deterministic investigation.
+10. SDK/model failure preserves a completed deterministic investigation.
 
 ### 15.2 Evidence And Safety Tests
 

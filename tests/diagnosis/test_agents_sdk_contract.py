@@ -192,6 +192,38 @@ async def test_real_runner_invokes_three_structured_agent_tools_offline():
 
 
 @pytest.mark.anyio
+async def test_successful_runner_invalid_final_proposal_keeps_drafts_and_usage(
+    monkeypatch,
+):
+    model = ScriptedModel()
+    def always_fail_validation(cls, value, *args, **kwargs):
+        del cls, value, args, kwargs
+        raise ValueError("invalid final proposal")
+
+    monkeypatch.setattr(
+        _CoordinatorProposal,
+        "model_validate",
+        classmethod(always_fail_validation),
+    )
+
+    result = await _run_sdk_turn(
+        model=model,
+        coordinator_input="Request all specialists",
+        specialist_inputs={name: f"Evidence only for {name}" for name in AgentName},
+        specialist_names=list(AgentName),
+        max_turns=8,
+    )
+
+    assert result.coordinator_proposal is None
+    assert result.error is None
+    assert result.cancelled is False
+    assert {captured.agent_name for captured in result.captured_drafts} == set(
+        AgentName
+    )
+    assert (result.input_tokens, result.output_tokens) == (270, 50)
+
+
+@pytest.mark.anyio
 async def test_invalid_first_tail_continues_with_partial_synthesis(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "presence-only")
     model = ScriptedModel(invalid_final=True)

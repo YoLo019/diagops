@@ -78,7 +78,6 @@ def decide_hybrid_status(
     active = _active_sdk_findings(findings)
     conclusions = _active_conclusions(active)
     causes = {finding.related_cause_type for finding in conclusions.values()}
-    support = Counter(finding.related_cause_type for finding in conclusions.values())
     selected = _otherwise_selected_cause(baseline, conclusions)
     contradicted = any(
         finding.finding_type == AgentFindingType.CONTRADICTION
@@ -86,23 +85,28 @@ def decide_hybrid_status(
         for finding in active
     )
 
-    if run_status in {MultiAgentRunStatus.FAILED, MultiAgentRunStatus.SKIPPED}:
+    if run_status != MultiAgentRunStatus.COMPLETED:
         return CoordinationDecisionStatus.FALLBACK
-    if (
-        run_status == MultiAgentRunStatus.COMPLETED
-        and _valid_baseline(baseline)
-        and support[baseline.cause_type] >= 2
-        and causes <= {baseline.cause_type}
-        and not contradicted
-    ):
-        return CoordinationDecisionStatus.AGREEMENT
-    if (
-        (_valid_baseline(baseline) and any(cause != baseline.cause_type for cause in causes))
-        or len(causes) > 1
-        or contradicted
-    ):
+    if _valid_baseline(baseline):
+        corroborating_causes = {
+            finding.related_cause_type
+            for finding in active
+            if finding.finding_type
+            in {AgentFindingType.ROOT_CAUSE, AgentFindingType.SIGNAL}
+            and finding.related_cause_type not in {None, CauseType.UNKNOWN}
+            and finding.confidence >= LOW_CONFIDENCE
+            and finding.evidence_ids
+        }
+        if contradicted or any(
+            cause != baseline.cause_type for cause in corroborating_causes
+        ):
+            return CoordinationDecisionStatus.CONFLICT
+        if baseline.cause_type in corroborating_causes:
+            return CoordinationDecisionStatus.AGREEMENT
+        return CoordinationDecisionStatus.FALLBACK
+    if len(causes) > 1 or contradicted:
         return CoordinationDecisionStatus.CONFLICT
-    if not _valid_baseline(baseline) and selected is not None:
+    if selected is not None:
         return CoordinationDecisionStatus.AGENT_LEADS
     return CoordinationDecisionStatus.FALLBACK
 

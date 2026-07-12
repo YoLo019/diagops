@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import os
 import re
 import sys
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
@@ -28,7 +29,7 @@ from backend.domain.multi_agent import (
 from backend.providers.mock_logs import MockLogProvider
 from backend.providers.registry import ProviderRegistry, build_mock_provider_registry
 from backend.rca.analyzer import RcaAnalyzer
-from backend.reports.generator import ReportGenerator
+from backend.reports.generator import ReportGenerator, _safe_failure_reason
 from backend.services.incident_cases import load_incident_case
 
 EXPECTED_CAUSES = {
@@ -57,6 +58,7 @@ class LiveConfig:
     model: str
     input_cost_per_million: float
     output_cost_per_million: float
+    timeout_seconds: int = 60
 
 
 class CapturingAgentsRcaRuntime(AgentsRcaRuntime):
@@ -110,6 +112,30 @@ class _PromptInjectionLogProvider:
 
 
 @dataclass(frozen=True)
+class AcceptanceFinding:
+    agent_name: str
+    finding_type: str
+    related_cause_type: str | None
+    confidence: float
+    evidence_ids: list[str]
+    analysis_round: int
+    revises_finding_id: str | None
+
+
+@dataclass(frozen=True)
+class AcceptanceCandidate:
+    cause_type: str
+    rank: int
+    confidence: float
+    supporting_finding_ids: list[str]
+    contradicting_finding_ids: list[str]
+    supporting_evidence_ids: list[str]
+    contradicting_evidence_ids: list[str]
+    supporting_agent_count: int
+    contradicting_agent_count: int
+
+
+@dataclass(frozen=True)
 class AcceptanceRun:
     case_id: str
     repetition: int
@@ -131,6 +157,10 @@ class AcceptanceRun:
     mandatory_step_skipped_without_fallback: bool
     wrong_result_became_agreement: bool
     user_visible_executed_action_claim: bool
+    run_status: MultiAgentRunStatus | None = None
+    fallback_reason: str | None = None
+    findings: list[AcceptanceFinding] = field(default_factory=list)
+    candidates: list[AcceptanceCandidate] = field(default_factory=list)
 
     @property
     def correct_candidate(self) -> bool:
@@ -289,19 +319,37 @@ def load_live_config(environ: Mapping[str, str] = os.environ) -> LiveConfig:
         raise ValueError("Cost environment values must be finite")
     if input_cost < 0 or output_cost < 0:
         raise ValueError("Cost environment values must be non-negative")
-    return LiveConfig(environ["DIAGOPS_AGENTS_MODEL"].strip(), input_cost, output_cost)
+    try:
+        timeout_seconds = int(environ.get("DIAGOPS_AGENTS_TIMEOUT_SECONDS", "60"))
+    except ValueError:
+        raise ValueError("Agents timeout must be a positive integer") from None
+    if timeout_seconds < 1:
+        raise ValueError("Agents timeout must be a positive integer")
+    return LiveConfig(
+        environ["DIAGOPS_AGENTS_MODEL"].strip(),
+        input_cost,
+        output_cost,
+        timeout_seconds,
+    )
 
 
 def run_live_cohort(
     config: LiveConfig,
     *,
     runtime: AgentsRcaRuntime | None = None,
+    runs_per_case: int = 3,
 ) -> list[AcceptanceRun]:
-    runtime = runtime or CapturingAgentsRcaRuntime(model=config.model)
+    if runs_per_case not in {1, 3}:
+        raise ValueError("runs_per_case must be 1 or 3")
+    canonical = runs_per_case == 3
+    runtime = runtime or CapturingAgentsRcaRuntime(
+        model=config.model,
+        timeout_seconds=config.timeout_seconds,
+    )
     rows: list[AcceptanceRun] = []
     for case_id, expected in EXPECTED_CAUSES.items():
-        for repetition in range(1, 4):
-            adversarial = (case_id, repetition) in INJECTION_RUNS
+        for repetition in range(1, runs_per_case + 1):
+            adversarial = canonical and (case_id, repetition) in INJECTION_RUNS
             runtime.last_result = None
             repository = InMemoryInvestigationRepository()
             providers = _providers(adversarial)
@@ -341,20 +389,26 @@ def write_artifact(
     directory: Path,
     config: LiveConfig,
     results: list[AcceptanceRun],
-    evaluation: AcceptanceEvaluation,
+    evaluation: AcceptanceEvaluation | None,
+    *,
+    mode: str = "reliability_gate",
 ) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     generated_at = datetime.now(UTC)
     stem = f"v7-live-acceptance-{generated_at:%Y%m%dT%H%M%S%fZ}"
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "mode": mode,
         "generated_at": generated_at.isoformat(),
         "model": config.model,
         "pricing_per_million": {
             "input": config.input_cost_per_million,
             "output": config.output_cost_per_million,
         },
-        "cohorts": {"clean": 12, "adversarial": 3},
+        "cohorts": {
+            "clean": sum(row.cohort == "clean" for row in results),
+            "adversarial": sum(row.cohort == "adversarial" for row in results),
+        },
         "results": [
             {
                 **asdict(row),
@@ -363,7 +417,7 @@ def write_artifact(
             }
             for row in results
         ],
-        "evaluation": asdict(evaluation),
+        "evaluation": asdict(evaluation) if evaluation is not None else None,
     }
     content = json.dumps(
         payload, ensure_ascii=False, indent=2, allow_nan=False
@@ -453,6 +507,51 @@ def _build_run(
             or decision in {None, CoordinationDecisionStatus.FALLBACK}
         )
     )
+    references_valid = result is not None and _references_valid(record, result)
+    findings: list[AcceptanceFinding] = []
+    candidates: list[AcceptanceCandidate] = []
+    if result is not None and references_valid:
+        finding_by_id = {item.id: item for item in result.findings}
+        findings = [
+            AcceptanceFinding(
+                agent_name=item.agent_name.value,
+                finding_type=item.finding_type.value,
+                related_cause_type=(
+                    item.related_cause_type.value
+                    if item.related_cause_type is not None
+                    else None
+                ),
+                confidence=item.confidence,
+                evidence_ids=list(item.evidence_ids),
+                analysis_round=item.analysis_round,
+                revises_finding_id=item.revises_finding_id,
+            )
+            for item in result.findings
+        ]
+        candidates = [
+            AcceptanceCandidate(
+                cause_type=item.cause_type.value,
+                rank=item.rank,
+                confidence=item.confidence,
+                supporting_finding_ids=list(item.supporting_finding_ids),
+                contradicting_finding_ids=list(item.contradicting_finding_ids),
+                supporting_evidence_ids=list(item.supporting_evidence_ids),
+                contradicting_evidence_ids=list(item.contradicting_evidence_ids),
+                supporting_agent_count=len(
+                    {
+                        finding_by_id[finding_id].agent_name
+                        for finding_id in item.supporting_finding_ids
+                    }
+                ),
+                contradicting_agent_count=len(
+                    {
+                        finding_by_id[finding_id].agent_name
+                        for finding_id in item.contradicting_finding_ids
+                    }
+                ),
+            )
+            for item in result.review.candidates
+        ] if result.review is not None else []
     return AcceptanceRun(
         case_id=case_id,
         repetition=repetition,
@@ -463,7 +562,7 @@ def _build_run(
         fallback=fallback,
         valid_result=valid_result,
         real_review=real_review,
-        references_valid=result is not None and _references_valid(record, result),
+        references_valid=references_valid,
         model=config.model,
         duration_ms=duration_ms,
         input_tokens=input_tokens,
@@ -478,6 +577,19 @@ def _build_run(
         mandatory_step_skipped_without_fallback=mandatory_without_fallback,
         wrong_result_became_agreement=wrong_agreement,
         user_visible_executed_action_claim=_visible_action_claim(record, result),
+        run_status=(result.run_summary.status if references_valid else None),
+        fallback_reason=(
+            _safe_failure_reason(
+                result.run_summary.failure_reason,
+                result.run_summary.status,
+            )
+            if references_valid
+            and result is not None
+            and result.run_summary.failure_reason is not None
+            else None
+        ),
+        findings=findings,
+        candidates=candidates,
     )
 
 
@@ -587,15 +699,39 @@ def _visible_action_claim(
     return bool(_ACTION_CLAIM.search(section))
 
 
-def main() -> int:
+def _parse_args(argv: list[str] | None = None):
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--runs-per-case",
+        type=int,
+        choices=(1, 3),
+        default=3,
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
     try:
         config = load_live_config()
     except ValueError as exc:
         print(f"V7 live acceptance configuration error: {exc}", file=sys.stderr)
         return 2
-    results = run_live_cohort(config)
-    evaluation = evaluate_results(results)
-    path = write_artifact(Path("artifacts"), config, results, evaluation)
+    results = run_live_cohort(config, runs_per_case=args.runs_per_case)
+    diagnostic = args.runs_per_case == 1
+    evaluation = None if diagnostic else evaluate_results(results)
+    path = write_artifact(
+        Path("artifacts"),
+        config,
+        results,
+        evaluation,
+        mode="diagnostic" if diagnostic else "reliability_gate",
+    )
+    if diagnostic:
+        print("V7 live acceptance: DIAGNOSTIC ONLY")
+        print(f"Artifact: {path}")
+        return 0
+    assert evaluation is not None
     print(f"V7 live acceptance: {'PASS' if evaluation.passed else 'FAIL'}")
     print(f"Artifact: {path}")
     return 0 if evaluation.passed else 1

@@ -259,6 +259,7 @@ local process environment:
 ```text
 OPENAI_API_KEY
 DIAGOPS_AGENTS_MODEL
+DIAGOPS_AGENTS_TIMEOUT_SECONDS (optional, defaults to 60)
 DIAGOPS_INPUT_COST_PER_MILLION
 DIAGOPS_OUTPUT_COST_PER_MILLION
 ```
@@ -272,6 +273,17 @@ Run the gate locally with:
 ```powershell
 uv run python -m backend.services.v7_live_acceptance
 ```
+
+Before changing prompts or arbitration, run the five clean investigations in
+diagnostic mode and review the resulting artifact:
+
+```powershell
+uv run python -m backend.services.v7_live_acceptance --runs-per-case 1
+```
+
+This writes a schema-v2 diagnostic artifact without evaluating or weakening the
+reliability gate. The artifact contains no prompts, raw responses, reasoning,
+credentials, or free-text findings.
 
 Results are written to
 `artifacts/v7-live-acceptance-<UTC timestamp>.json`. The runner is read-only and

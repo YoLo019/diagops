@@ -344,9 +344,17 @@ Expected: pass using the real SDK Runner with no network call.
 Check only whether model and `OPENAI_API_KEY` exist, apply one overall
 `asyncio.wait_for`, expose all three specialist tools, and omit baseline and
 peer findings from specialist inputs. The runtime owns IDs and validates every
-draft before accepting it. Compare captured specialist names with the required
-three-name set; a missing call makes the run partial or fallback and can never
-produce `agreement`.
+draft before accepting it. Derive missing specialists from validated round-1
+findings. If the first turn has no SDK error or cancellation, invoke only those
+missing specialists exactly once with the original inputs, evidence allowlist,
+read-only boundary, `analysis_round=1`, turn limit, and overall timeout. Do this
+even when the first Coordinator proposal is missing or invalid. Do not repeat
+successful specialists, retry an unknown agent, add a loop, or add a generic
+retry abstraction. Unknown or duplicate output keeps the run partial but must
+not block recollection of other missing required specialists. Treat Coordinator
+proposal validation failure separately from SDK transport/execution error so
+the former can still recollect. A missing first Coordinator proposal remains
+visible and keeps the run partial even when recollection succeeds.
 
 Run:
 
@@ -355,6 +363,13 @@ uv run pytest tests/diagnosis/test_agents_runtime.py -k "first_round or isolatio
 ```
 
 Expected: first-round and isolation tests pass.
+
+Add a focused regression test where the first turn returns one valid
+specialist finding, no Coordinator proposal, and no SDK error. Assert the
+second turn requests only the two missing specialists once and the final run is
+partial. Also cover successful recollection, failed recollection, unknown or
+duplicate output with and without other missing specialists, the production SDK
+adapter's invalid proposal path, and timeout coverage.
 
 - [ ] **Step 9: Always run Coordinator synthesis and optionally review conflicts**
 
