@@ -26,7 +26,7 @@ def test_create_simulated_event_returns_completed_investigation():
     assert body["top_cause_type"] == "deployment_regression"
 
 
-def test_create_webhook_event_returns_completed_investigation():
+def test_webhook_without_real_metric_provider_preserves_unknown_cause():
     client = TestClient(app)
 
     response = client.post(
@@ -45,7 +45,8 @@ def test_create_webhook_event_returns_completed_investigation():
     )
 
     assert response.status_code == 200
-    assert response.json()["top_cause_type"] == "traffic_spike"
+    assert response.json()["status"] == "completed"
+    assert response.json()["top_cause_type"] == "unknown"
 
 
 def test_create_event_summary_includes_v2_counts():

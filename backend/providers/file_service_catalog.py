@@ -7,12 +7,15 @@ from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
 from backend.providers.results import ProviderResult, ProviderStatus
 
+MAX_CATALOG_BYTES = 2 * 1024 * 1024
+
 
 class FileServiceCatalogProvider:
     provider = EvidenceProvider.SERVICE_CATALOG
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, max_bytes: int = MAX_CATALOG_BYTES) -> None:
         self.path = path
+        self.max_bytes = max_bytes
 
     def collect(self, event: IncidentEvent) -> ProviderResult:
         services = self._load_services()
@@ -22,6 +25,13 @@ class FileServiceCatalogProvider:
                 provider=self.provider,
                 status=ProviderStatus.SKIPPED,
                 error_message=f"Service not found in catalog: {event.service}",
+            )
+        environments = _list_value(service, "environments")
+        if environments and event.environment not in environments:
+            return ProviderResult(
+                provider=self.provider,
+                status=ProviderStatus.SKIPPED,
+                error_message="Service catalog environment is out of scope",
             )
 
         evidence = EvidenceItem(
@@ -39,12 +49,16 @@ class FileServiceCatalogProvider:
                 "dashboards": _list_value(service, "dashboards"),
                 "runbooks": _list_value(service, "runbooks"),
                 "environment": event.environment,
+                "environment_scope": "allowlist" if environments else "global",
+                "time_filter": "not_applicable",
             },
             confidence=1.0,
         )
         return ProviderResult(provider=self.provider, evidence_items=[evidence])
 
     def _load_services(self) -> dict[str, dict[str, Any]]:
+        if self.path.stat().st_size > self.max_bytes:
+            raise ValueError("Service catalog exceeds size limit")
         loaded = yaml.safe_load(self.path.read_text(encoding="utf-8"))
         if not isinstance(loaded, dict):
             raise ValueError("Service catalog must be a YAML mapping")

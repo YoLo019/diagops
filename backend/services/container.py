@@ -1,3 +1,5 @@
+import logging
+import os
 from pathlib import Path
 
 from backend.config.settings import AppSettings, StorageSettings, load_settings
@@ -7,30 +9,44 @@ from backend.db.sqlite_repository import SQLiteInvestigationRepository
 from backend.diagnosis.action_planner import ActionPlanner
 from backend.diagnosis.agents_runtime import AgentsRcaRuntime
 from backend.diagnosis.coordinator import DiagnosisCoordinator
-from backend.diagnosis.llm_analyst import ReadOnlyLlmAnalyst
+from backend.diagnosis.deepseek_model import create_deepseek_model
 from backend.diagnosis.orchestrator import DiagnosisOrchestrator
+from backend.domain.multi_agent import ModelProvider
 from backend.providers.registry import build_provider_registry_from_settings
 from backend.rca.analyzer import RcaAnalyzer
 from backend.reports.generator import ReportGenerator
+
+logger = logging.getLogger(__name__)
 
 
 class AppContainer:
     def __init__(self, settings: AppSettings | None = None) -> None:
         self.settings = settings or load_settings()
+        self.engine = None
         self.repository = self._build_repository()
         providers = build_provider_registry_from_settings(self.settings)
-        llm_analyst = (
-            ReadOnlyLlmAnalyst(enabled=True) if self.settings.llm.enabled else None
-        )
-        agents_runtime = (
-            AgentsRcaRuntime(
-                model=self.settings.agents.model,
-                max_turns=self.settings.agents.max_turns,
-                timeout_seconds=self.settings.agents.timeout_seconds,
-            )
-            if self.settings.agents.enabled
-            else None
-        )
+        agents_runtime = None
+        if self.settings.agents.enabled:
+            try:
+                provider = self.settings.agents.provider
+                model = self.settings.agents.model
+                if provider == ModelProvider.DEEPSEEK:
+                    model = create_deepseek_model(
+                        model,
+                        os.getenv("DEEPSEEK_API_KEY"),
+                    )
+                agents_runtime = AgentsRcaRuntime(
+                    model=model,
+                    max_turns=self.settings.agents.max_turns,
+                    timeout_seconds=self.settings.agents.timeout_seconds,
+                    model_provider=provider,
+                    model_name=self.settings.agents.model,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "agents runtime construction failed error_type=%s",
+                    type(exc).__name__,
+                )
         self.orchestrator = DiagnosisOrchestrator(
             repository=self.repository,
             providers=providers,
@@ -38,7 +54,6 @@ class AppContainer:
             report_generator=ReportGenerator(),
             coordinator=DiagnosisCoordinator(providers),
             action_planner=ActionPlanner(),
-            llm_analyst=llm_analyst,
             agents_runtime=agents_runtime,
         )
 
@@ -48,9 +63,9 @@ class AppContainer:
             return InMemoryInvestigationRepository()
         if storage_url.startswith("sqlite"):
             self._ensure_sqlite_parent_directory(storage_url)
-            engine = create_db_engine(storage_url)
-            initialize_database(engine)
-            return SQLiteInvestigationRepository(engine)
+            self.engine = create_db_engine(storage_url)
+            initialize_database(self.engine)
+            return SQLiteInvestigationRepository(self.engine)
         raise ValueError(f"Unsupported storage URL: {storage_url}")
 
     def _ensure_sqlite_parent_directory(self, storage_url: str) -> None:
@@ -63,6 +78,12 @@ class AppContainer:
         parent = database_path.parent
         if str(parent) not in {"", "."}:
             parent.mkdir(parents=True, exist_ok=True)
+
+    def close(self) -> None:
+        """释放仅由当前 container 创建并持有的数据库 engine。"""
+        if self.engine is not None:
+            self.engine.dispose()
+            self.engine = None
 
 
 _container: AppContainer | None = None
@@ -78,5 +99,9 @@ def get_container() -> AppContainer:
 def reset_container(settings: AppSettings | None = None) -> AppContainer:
     global _container
     test_settings = settings or AppSettings(storage=StorageSettings(url="memory://"))
-    _container = AppContainer(settings=test_settings)
+    replacement = AppContainer(settings=test_settings)
+    previous = _container
+    _container = replacement
+    if previous is not None:
+        previous.close()
     return _container

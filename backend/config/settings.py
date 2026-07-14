@@ -4,6 +4,8 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
+from backend.domain.multi_agent import ModelProvider
+
 
 class StorageSettings(BaseModel):
     url: str = "sqlite:///data/diagops.db"
@@ -47,19 +49,11 @@ class ProviderSettings(BaseModel):
     )
 
 
-class LlmSettings(BaseModel):
-    enabled: bool = False
-
-
-class ReActSettings(BaseModel):
-    enabled: bool = False
-    max_steps: int = 5
-
-
 class AgentsSettings(BaseModel):
     model_config = ConfigDict(validate_assignment=True)
 
     enabled: bool = False
+    provider: ModelProvider = ModelProvider.OPENAI
     model: str | None = None
     max_turns: int = Field(default=8, ge=1)
     timeout_seconds: int = Field(default=60, ge=1)
@@ -68,8 +62,6 @@ class AgentsSettings(BaseModel):
 class AppSettings(BaseModel):
     storage: StorageSettings = Field(default_factory=StorageSettings)
     providers: ProviderSettings = Field(default_factory=ProviderSettings)
-    llm: LlmSettings = Field(default_factory=LlmSettings)
-    react: ReActSettings = Field(default_factory=ReActSettings)
     agents: AgentsSettings = Field(default_factory=AgentsSettings)
 
 
@@ -93,14 +85,11 @@ def _apply_environment_overrides(settings: AppSettings) -> None:
     if mock_enabled := _get_env("DIAGOPS_PROVIDER_MOCK_ENABLED"):
         settings.providers.mock.enabled = _parse_bool(mock_enabled)
 
-    if llm_enabled := _get_env("DIAGOPS_LLM_ENABLED"):
-        settings.llm.enabled = _parse_bool(llm_enabled)
-
-    if react_enabled := _get_env("DIAGOPS_REACT_ENABLED"):
-        settings.react.enabled = _parse_bool(react_enabled)
-
     if agents_enabled := _get_env("DIAGOPS_AGENTS_ENABLED"):
         settings.agents.enabled = _parse_bool(agents_enabled)
+
+    if agents_provider := _get_env("DIAGOPS_AGENTS_PROVIDER"):
+        settings.agents.provider = agents_provider.strip().lower()
 
     if agents_model := _get_env("DIAGOPS_AGENTS_MODEL"):
         settings.agents.model = agents_model

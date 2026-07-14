@@ -5,9 +5,11 @@ import pytest
 from backend.diagnosis.coordination_review import (
     LOW_CONFIDENCE,
     build_coordination_review,
-    build_hybrid_coordination_review,
     conflicting_agent_names,
     decide_hybrid_status,
+)
+from backend.diagnosis.coordination_review import (
+    build_hybrid_coordination_review as _build_hybrid_coordination_review,
 )
 from backend.domain.agent_findings import AgentFinding, AgentFindingType, AgentName
 from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
@@ -15,8 +17,16 @@ from backend.domain.hypotheses import CauseType, Hypothesis
 from backend.domain.multi_agent import (
     AgentExecutionLayer,
     CoordinationDecisionStatus,
+    ModelProvider,
     MultiAgentRunStatus,
+    StabilizationCategory,
 )
+
+
+def build_hybrid_coordination_review(*args, **kwargs):
+    kwargs.setdefault("model_provider", ModelProvider.OPENAI)
+    kwargs.setdefault("model_name", "gpt-test")
+    return _build_hybrid_coordination_review(*args, **kwargs)
 
 
 def _hypothesis(cause_type: CauseType, confidence: float) -> Hypothesis:
@@ -237,17 +247,11 @@ def test_decide_hybrid_status_matrix(baseline, findings, run_status, expected):
     assert decide_hybrid_status(baseline, findings, run_status) == expected
 
 
-@pytest.mark.parametrize(
-    "finding_type",
-    [AgentFindingType.ROOT_CAUSE, AgentFindingType.SIGNAL],
-    ids=["root-cause", "signal"],
-)
-def test_valid_baseline_accepts_single_evidenced_corroboration(finding_type):
+def test_valid_baseline_accepts_single_evidenced_root_cause_corroboration():
     finding = _sdk_finding(
         "metric",
         AgentName.METRIC,
         CauseType.DATABASE_SLOWDOWN,
-        finding_type=finding_type,
     )
 
     assert (
@@ -311,7 +315,7 @@ def test_unknown_baseline_does_not_promote_signals_to_agent_leads(agent_names):
     )
 
 
-def test_different_evidenced_signal_conflicts_with_valid_baseline():
+def test_different_evidenced_signal_does_not_conflict_with_valid_baseline():
     signal = _sdk_finding(
         "metric",
         AgentName.METRIC,
@@ -325,7 +329,7 @@ def test_different_evidenced_signal_conflicts_with_valid_baseline():
             [signal],
             MultiAgentRunStatus.COMPLETED,
         )
-        == CoordinationDecisionStatus.CONFLICT
+        == CoordinationDecisionStatus.FALLBACK
     )
 
 
@@ -658,7 +662,7 @@ def test_hybrid_builder_sets_code_owned_fields_and_ignores_v5_findings():
     review = build_hybrid_coordination_review(
         "inv-1",
         [sdk, v5],
-        [_evidence("ev-sdk"), _evidence("ev-v5")],
+        [_evidence("ev-sdk", CauseType.TRAFFIC_SPIKE), _evidence("ev-v5")],
         [_hypothesis(CauseType.UNKNOWN, 0.4)],
         MultiAgentRunStatus.PARTIAL,
         "Model summary",
@@ -683,6 +687,40 @@ def test_hybrid_builder_sets_code_owned_fields_and_ignores_v5_findings():
         "v5" not in candidate.supporting_finding_ids
         for candidate in review.candidates
     )
+
+
+def test_hybrid_builder_requires_and_persists_attribution():
+    finding = _sdk_finding("sdk", AgentName.LOG, CauseType.TRAFFIC_SPIKE)
+    args = (
+        "inv-1",
+        [finding],
+        [_evidence("ev-sdk", CauseType.TRAFFIC_SPIKE)],
+        [_hypothesis(CauseType.DEPLOYMENT_REGRESSION, 0.8)],
+        MultiAgentRunStatus.COMPLETED,
+        "Summary",
+        "Uncertainty",
+    )
+
+    with pytest.raises(TypeError):
+        _build_hybrid_coordination_review(*args)
+
+    attributed_review = build_hybrid_coordination_review(
+        *args,
+        model_provider=ModelProvider.OPENAI,
+        model_name="gpt-test",
+        primary_stabilization_category=StabilizationCategory.HYBRID_CONTRACT,
+        secondary_stabilization_categories=[StabilizationCategory.FINAL_SYNTHESIS],
+    )
+
+    assert attributed_review.model_provider == ModelProvider.OPENAI
+    assert attributed_review.model_name == "gpt-test"
+    assert (
+        attributed_review.primary_stabilization_category
+        == StabilizationCategory.HYBRID_CONTRACT
+    )
+    assert attributed_review.secondary_stabilization_categories == [
+        StabilizationCategory.FINAL_SYNTHESIS
+    ]
 
 
 def test_hybrid_contradiction_only_candidate_keeps_finding_and_evidence_ids():
@@ -725,7 +763,10 @@ def test_hybrid_keeps_alternative_and_contradicted_baseline_candidates_visible()
     review = build_hybrid_coordination_review(
         "inv-1",
         findings,
-        [_evidence("ev-log-root"), _evidence("ev-metric-contradiction")],
+        [
+            _evidence("ev-log-root", CauseType.TRAFFIC_SPIKE),
+            _evidence("ev-metric-contradiction"),
+        ],
         [_hypothesis(CauseType.DEPLOYMENT_REGRESSION, 0.8)],
         MultiAgentRunStatus.COMPLETED,
         "Conflicting review",
@@ -772,7 +813,11 @@ def test_hybrid_builder_selected_cause_follows_deterministic_decision(
     review = build_hybrid_coordination_review(
         "inv-1",
         findings,
-        [_evidence(item_id) for finding in findings for item_id in finding.evidence_ids],
+        [
+            _evidence(item_id, finding.related_cause_type)
+            for finding in findings
+            for item_id in finding.evidence_ids
+        ],
         [baseline],
         MultiAgentRunStatus.COMPLETED,
         "Summary",
@@ -783,7 +828,7 @@ def test_hybrid_builder_selected_cause_follows_deterministic_decision(
     assert review.selected_cause_type == expected_selected
 
 
-def test_agent_leads_selected_cause_is_ranked_before_high_confidence_signal():
+def test_agent_leads_excludes_high_confidence_signal_from_candidates():
     findings = [
         _sdk_finding(
             "signal",
@@ -803,7 +848,11 @@ def test_agent_leads_selected_cause_is_ranked_before_high_confidence_signal():
     review = build_hybrid_coordination_review(
         "inv-1",
         findings,
-        [_evidence(item_id) for finding in findings for item_id in finding.evidence_ids],
+        [
+            _evidence(item_id, finding.related_cause_type)
+            for finding in findings
+            for item_id in finding.evidence_ids
+        ],
         [_hypothesis(CauseType.UNKNOWN, 0.4)],
         MultiAgentRunStatus.COMPLETED,
         "Agent-led review",
@@ -813,7 +862,7 @@ def test_agent_leads_selected_cause_is_ranked_before_high_confidence_signal():
     assert review.decision_status == CoordinationDecisionStatus.AGENT_LEADS
     assert review.selected_cause_type == CauseType.TRAFFIC_SPIKE
     assert review.candidates[0].cause_type == review.selected_cause_type
-    assert [candidate.rank for candidate in review.candidates] == [1, 2]
+    assert [candidate.rank for candidate in review.candidates] == [1]
 
 
 def test_hybrid_builder_rejects_finding_from_another_investigation():
@@ -857,11 +906,31 @@ def _finding(
     )
 
 
-def _evidence(evidence_id: str) -> EvidenceItem:
+def _evidence(
+    evidence_id: str, cause_type: CauseType | None = None
+) -> EvidenceItem:
+    provider, kind = {
+        CauseType.TRAFFIC_SPIKE: (
+            EvidenceProvider.METRIC,
+            EvidenceKind.METRIC_TREND,
+        ),
+        CauseType.DATABASE_SLOWDOWN: (
+            EvidenceProvider.METRIC,
+            EvidenceKind.METRIC_TREND,
+        ),
+        CauseType.SINGLE_INSTANCE_ISSUE: (
+            EvidenceProvider.METRIC,
+            EvidenceKind.METRIC_TREND,
+        ),
+        CauseType.DOWNSTREAM_DEPENDENCY_FAILURE: (
+            EvidenceProvider.DEPENDENCY,
+            EvidenceKind.DEPENDENCY_HEALTH,
+        ),
+    }.get(cause_type, (EvidenceProvider.LOG, EvidenceKind.LOG_PATTERN))
     return EvidenceItem(
         id=evidence_id,
-        provider=EvidenceProvider.LOG,
-        kind=EvidenceKind.LOG_PATTERN,
+        provider=provider,
+        kind=kind,
         timestamp=datetime(2026, 1, 1, tzinfo=UTC),
         summary=f"{evidence_id} summary",
     )

@@ -9,7 +9,6 @@ import {
   getMemoryHits,
   getPlan,
   getRcaWorkbench,
-  getReActTrace,
   getTaskGraph,
   getTasks,
   getToolCalls,
@@ -26,18 +25,17 @@ import {
   type DiagnosisPlan,
   type DiagnosisTask,
   type InvestigationRecord,
+  type InvestigationSummary,
   type MemoryItem,
   type MultiAgentRunSummary,
+  type RecommendedAction,
   type RcaWorkbench,
-  type ReActTrace,
   type RootCauseCandidate,
   type TaskGraph,
   type ToolCallRecord,
   type VerificationStatus,
 } from "./api";
 
-const actionStatuses: ActionStatus[] = ["proposed", "approved", "rejected", "skipped", "done"];
-const verificationStatuses: VerificationStatus[] = ["pending", "passed", "failed", "skipped"];
 const statusLabels: Record<string, string> = {
   approved: "已批准",
   cancelled: "已取消",
@@ -53,6 +51,19 @@ const statusLabels: Record<string, string> = {
   skipped: "已跳过",
   success: "成功",
 };
+
+function allowedActionTargets(action: RecommendedAction): ActionStatus[] {
+  if (action.status === "proposed") {
+    return action.requires_approval
+      ? ["approved", "rejected", "skipped"]
+      : ["done", "rejected", "skipped"];
+  }
+  return action.status === "approved" ? ["done", "skipped"] : [];
+}
+
+function allowedVerificationTargets(status: VerificationStatus): VerificationStatus[] {
+  return status === "pending" ? ["passed", "failed", "skipped"] : [];
+}
 const decisionLabels: Record<CoordinationDecisionStatus, string> = {
   agreement: "多 Agent 复核一致",
   conflict: "存在冲突，需要人工确认",
@@ -254,7 +265,7 @@ function InvestigationList({
   selectedId,
   onSelect,
 }: {
-  investigations: InvestigationRecord[];
+  investigations: InvestigationSummary[];
   selectedId?: string;
   onSelect: (id: string) => void;
 }) {
@@ -266,7 +277,6 @@ function InvestigationList({
       </div>
       <div className="investigation-list">
         {investigations.map((item) => {
-          const topHypothesis = item.hypotheses[0];
           return (
             <button
               className={item.id === selectedId ? "investigation-item selected" : "investigation-item"}
@@ -274,13 +284,11 @@ function InvestigationList({
               onClick={() => onSelect(item.id)}
               type="button"
             >
-              <span className="item-title">{item.event.title}</span>
-              <span className="item-meta">
-                {item.event.service} / {item.event.environment}
-              </span>
+              <span className="item-title">{item.title}</span>
+              <span className="item-meta">{item.service}</span>
               <span className="item-footer">
                 <StatusBadge value={item.status} />
-                <span>{topHypothesis ? formatPercent(topHypothesis.confidence) : "0%"}</span>
+                <span>{formatPercent(item.confidence)}</span>
               </span>
             </button>
           );
@@ -441,6 +449,7 @@ function RcaWorkbenchPanel({ investigationId }: { investigationId: string }) {
   });
   const legacyCandidates = workbenchQuery.data?.candidates ?? [];
   const run = workbenchQuery.data?.multi_agent_run ?? null;
+  const agentConfig = workbenchQuery.data?.agent_config ?? null;
   const persistedReview = workbenchQuery.data?.coordination_review;
   const review = isUsableV7Review(persistedReview, run) ? persistedReview : null;
   const candidates = selectVisibleCandidates(persistedReview, run, legacyCandidates);
@@ -526,6 +535,38 @@ function RcaWorkbenchPanel({ investigationId }: { investigationId: string }) {
                   <span className="label">最终候选</span>
                   <strong>{selectedCause}</strong>
                 </div>
+                {review && review.model_provider && review.model_name ? (
+                  <div>
+                    <span className="label">Provider / model</span>
+                    <strong>{review.model_provider} / {review.model_name}</strong>
+                  </div>
+                ) : run.model_provider && run.model_name ? (
+                  <div>
+                    <span className="label">Provider / model</span>
+                    <strong>{run.model_provider} / {run.model_name}</strong>
+                  </div>
+                ) : null}
+                {agentConfig ? (
+                  <>
+                    <div>
+                      <span className="label">实现状态</span>
+                      <strong>{agentConfig.implementation_status}</strong>
+                    </div>
+                    <div>
+                      <span className="label">认证状态</span>
+                      <strong>{agentConfig.certification_status}</strong>
+                    </div>
+                  </>
+                ) : null}
+                {run.primary_stabilization_category ? (
+                  <div>
+                    <span className="label">Stabilization</span>
+                    <strong>{run.primary_stabilization_category}</strong>
+                    {run.secondary_stabilization_categories?.length ? (
+                      <span>{run.secondary_stabilization_categories.join(", ")}</span>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
 
               <div className="compact-list">
@@ -617,50 +658,6 @@ function RcaWorkbenchPanel({ investigationId }: { investigationId: string }) {
   );
 }
 
-function ReActTracePanel({ investigationId }: { investigationId: string }) {
-  const traceQuery = useQuery<ReActTrace | null>({
-    queryKey: ["react-trace", investigationId],
-    queryFn: () => getReActTrace(investigationId),
-    enabled: Boolean(investigationId),
-  });
-  const trace = traceQuery.data;
-
-  return (
-    <section className="panel">
-      <div className="panel-heading">
-        <h2>ReAct 推理过程</h2>
-        <span>只读</span>
-      </div>
-      {traceQuery.isLoading ? (
-        <div className="empty-state">加载 ReAct 轨迹...</div>
-      ) : traceQuery.isError ? (
-        <p className="error">ReAct 轨迹加载失败：{traceQuery.error.message}</p>
-      ) : !trace ? (
-        <div className="empty-state">暂无 ReAct 轨迹。只读代理未产生额外记录。</div>
-      ) : (
-        <div className="compact-list">
-          {trace.final_answer ? <p>{trace.final_answer}</p> : null}
-          {trace.steps.map((step) => (
-            <article className="compact-row" key={step.step_number}>
-              <strong>
-                #{step.step_number} {step.tool_name ?? step.status}
-              </strong>
-              {step.assistant_text ? <p>{step.assistant_text}</p> : null}
-              {step.observation ? <p>{step.observation}</p> : null}
-              <div className="process-detail">
-                <span>状态: {step.status}</span>
-                <span>输入: {JSON.stringify(step.tool_input)}</span>
-                <span>证据: {formatIdList(step.output_evidence_ids)}</span>
-              </div>
-              {step.error_message ? <p className="error">{step.error_message}</p> : null}
-            </article>
-          ))}
-        </div>
-      )}
-    </section>
-  );
-}
-
 function RecommendedActions({ investigation }: { investigation: InvestigationRecord }) {
   const queryClient = useQueryClient();
   const [notes, setNotes] = useState<Record<string, string>>({});
@@ -701,7 +698,8 @@ function RecommendedActions({ investigation }: { investigation: InvestigationRec
             <div className="control-row">
               <select
                 aria-label={`${action.title} 的动作状态`}
-                defaultValue={action.status}
+                value={action.status}
+                disabled={allowedActionTargets(action).length === 0}
                 onChange={(event) =>
                   mutation.mutate({
                     actionId: action.id,
@@ -710,7 +708,8 @@ function RecommendedActions({ investigation }: { investigation: InvestigationRec
                   })
                 }
               >
-                {actionStatuses.map((status) => (
+                <option value={action.status}>{statusLabels[action.status] ?? action.status}</option>
+                {allowedActionTargets(action).map((status) => (
                   <option key={status} value={status}>
                     {statusLabels[status] ?? status}
                   </option>
@@ -732,16 +731,36 @@ function RecommendedActions({ investigation }: { investigation: InvestigationRec
 function VerificationSuggestions({ investigation }: { investigation: InvestigationRecord }) {
   const queryClient = useQueryClient();
   const [notes, setNotes] = useState<Record<string, string>>({});
+  const [evidenceRefs, setEvidenceRefs] = useState<Record<string, string>>({});
+  const [relationRefs, setRelationRefs] = useState<Record<string, string>>({});
+  const resultEvidence = investigation.evidence.filter(
+    (item) => item.status === "success" || item.status === "partial",
+  );
   const mutation = useMutation({
     mutationFn: ({
       verificationId,
       status,
       resultNote,
+      resultEvidenceIds,
+      relatedActionIds,
+      relatedCauseTypes,
     }: {
       verificationId: string;
       status: VerificationStatus;
       resultNote: string;
-    }) => updateVerificationStatus(investigation.id, verificationId, status, resultNote),
+      resultEvidenceIds: string[];
+      relatedActionIds: string[];
+      relatedCauseTypes: string[];
+    }) =>
+      updateVerificationStatus(
+        investigation.id,
+        verificationId,
+        status,
+        resultNote,
+        resultEvidenceIds,
+        relatedActionIds,
+        relatedCauseTypes,
+      ),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["investigation", investigation.id] });
       queryClient.invalidateQueries({ queryKey: ["investigations"] });
@@ -766,16 +785,34 @@ function VerificationSuggestions({ investigation }: { investigation: Investigati
             <div className="control-row">
               <select
                 aria-label={`${verification.title} 的验证结果`}
-                defaultValue={verification.status}
-                onChange={(event) =>
+                value={verification.status}
+                disabled={allowedVerificationTargets(verification.status).length === 0}
+                onChange={(event) => {
+                  const status = event.target.value as VerificationStatus;
+                  const relation = relationRefs[verification.id] ?? "";
                   mutation.mutate({
                     verificationId: verification.id,
-                    status: event.target.value as VerificationStatus,
+                    status,
                     resultNote: notes[verification.id] ?? verification.result_note ?? "",
-                  })
-                }
+                    resultEvidenceIds:
+                      status === "skipped"
+                        ? []
+                        : [evidenceRefs[verification.id] ?? ""].filter(Boolean),
+                    relatedActionIds:
+                      status === "skipped" || !relation.startsWith("action:")
+                        ? []
+                        : [relation.slice("action:".length)],
+                    relatedCauseTypes:
+                      status === "skipped" || !relation.startsWith("cause:")
+                        ? []
+                        : [relation.slice("cause:".length)],
+                  });
+                }}
               >
-                {verificationStatuses.map((status) => (
+                <option value={verification.status}>
+                  {statusLabels[verification.status] ?? verification.status}
+                </option>
+                {allowedVerificationTargets(verification.status).map((status) => (
                   <option key={status} value={status}>
                     {statusLabels[status] ?? status}
                   </option>
@@ -788,6 +825,39 @@ function VerificationSuggestions({ investigation }: { investigation: Investigati
                   setNotes({ ...notes, [verification.id]: event.target.value })
                 }
               />
+              {verification.status === "pending" ? (
+                <>
+                  <select
+                    aria-label={`${verification.title} 的结果证据`}
+                    value={evidenceRefs[verification.id] ?? ""}
+                    onChange={(event) =>
+                      setEvidenceRefs({ ...evidenceRefs, [verification.id]: event.target.value })
+                    }
+                  >
+                    <option value="">选择结果 Evidence</option>
+                    {resultEvidence.map((item) => (
+                      <option key={item.id} value={item.id}>{item.id}</option>
+                    ))}
+                  </select>
+                  <select
+                    aria-label={`${verification.title} 的关联对象`}
+                    value={relationRefs[verification.id] ?? ""}
+                    onChange={(event) =>
+                      setRelationRefs({ ...relationRefs, [verification.id]: event.target.value })
+                    }
+                  >
+                    <option value="">选择关联 action 或 cause</option>
+                    {investigation.actions.map((action) => (
+                      <option key={action.id} value={`action:${action.id}`}>action: {action.id}</option>
+                    ))}
+                    {investigation.hypotheses.map((hypothesis) => (
+                      <option key={hypothesis.cause_type} value={`cause:${hypothesis.cause_type}`}>
+                        cause: {hypothesis.cause_type}
+                      </option>
+                    ))}
+                  </select>
+                </>
+              ) : null}
             </div>
           </article>
         ))}
@@ -796,41 +866,52 @@ function VerificationSuggestions({ investigation }: { investigation: Investigati
   );
 }
 
-type AgentProcessData = {
-  plan: DiagnosisPlan | null;
-  tasks: DiagnosisTask[];
-  executions: AgentExecution[];
-  contextFacts: ContextFact[];
-  toolCalls: ToolCallRecord[];
-  memoryHits: MemoryItem[];
-  taskGraph: TaskGraph;
-};
-
 function AgentProcessPanels({ investigationId }: { investigationId: string }) {
-  const processQuery = useQuery<AgentProcessData>({
-    queryKey: ["agent-process", investigationId],
-    queryFn: async () => {
-      const [plan, tasks, executions, contextFacts, toolCalls, memoryHits, taskGraph] =
-        await Promise.all([
-          getPlan(investigationId),
-          getTasks(investigationId),
-          getAgentExecutions(investigationId),
-          getContextFacts(investigationId),
-          getToolCalls(investigationId),
-          getMemoryHits(investigationId),
-          getTaskGraph(investigationId),
-        ]);
-      return { plan, tasks, executions, contextFacts, toolCalls, memoryHits, taskGraph };
-    },
+  const planQuery = useQuery<DiagnosisPlan | null>({
+    queryKey: ["plan", investigationId],
+    queryFn: () => getPlan(investigationId),
+    enabled: Boolean(investigationId),
   });
-  const data = processQuery.data;
-  const tasks = data?.tasks.length ? data.tasks : data?.plan?.tasks ?? [];
-  const executions = data?.executions ?? [];
-  const toolCalls = data?.toolCalls ?? [];
-  const contextFacts = data?.contextFacts ?? [];
-  const memoryHits = data?.memoryHits ?? [];
-  const dependencyCount = data?.taskGraph.edges.length ?? 0;
-  const errorMessage = processQuery.isError ? processQuery.error.message : "";
+  const tasksQuery = useQuery<DiagnosisTask[]>({
+    queryKey: ["tasks", investigationId],
+    queryFn: () => getTasks(investigationId),
+    enabled: Boolean(investigationId),
+  });
+  const executionsQuery = useQuery<AgentExecution[]>({
+    queryKey: ["agent-executions", investigationId],
+    queryFn: () => getAgentExecutions(investigationId),
+    enabled: Boolean(investigationId),
+  });
+  const contextQuery = useQuery<ContextFact[]>({
+    queryKey: ["context", investigationId],
+    queryFn: () => getContextFacts(investigationId),
+    enabled: Boolean(investigationId),
+  });
+  const toolCallsQuery = useQuery<ToolCallRecord[]>({
+    queryKey: ["tool-calls", investigationId],
+    queryFn: () => getToolCalls(investigationId),
+    enabled: Boolean(investigationId),
+  });
+  const memoryQuery = useQuery<MemoryItem[]>({
+    queryKey: ["memory", investigationId],
+    queryFn: () => getMemoryHits(investigationId),
+    enabled: Boolean(investigationId),
+  });
+  const taskGraphQuery = useQuery<TaskGraph>({
+    queryKey: ["task-graph", investigationId],
+    queryFn: () => getTaskGraph(investigationId),
+    enabled: Boolean(investigationId),
+  });
+  const tasks = tasksQuery.data?.length
+    ? tasksQuery.data
+    : planQuery.data?.tasks ?? [];
+  const executions = executionsQuery.data ?? [];
+  const toolCalls = toolCallsQuery.data ?? [];
+  const contextFacts = contextQuery.data ?? [];
+  const memoryHits = memoryQuery.data ?? [];
+  const dependencyCount = taskGraphQuery.data?.edges.length ?? 0;
+  const tasksLoading = tasks.length === 0 && (tasksQuery.isLoading || planQuery.isLoading);
+  const tasksError = tasks.length === 0 ? tasksQuery.error ?? planQuery.error : null;
 
   return (
     <>
@@ -838,13 +919,16 @@ function AgentProcessPanels({ investigationId }: { investigationId: string }) {
         <div className="panel-heading">
           <h2>任务规划</h2>
           <span>
-            {tasks.length} 项, 依赖 {dependencyCount} 条
+            {tasks.length} 项, {taskGraphQuery.isError ? "依赖数据不可用" : `依赖 ${dependencyCount} 条`}
           </span>
         </div>
-        {processQuery.isLoading ? (
+        {taskGraphQuery.isError ? (
+          <p className="error">任务依赖图不可用：{taskGraphQuery.error.message}</p>
+        ) : null}
+        {tasksLoading ? (
           <div className="empty-state">加载中...</div>
-        ) : errorMessage ? (
-          <p className="error">{errorMessage}</p>
+        ) : tasksError ? (
+          <p className="error">{tasksError.message}</p>
         ) : tasks.length === 0 ? (
           <div className="empty-state">暂无任务规划。</div>
         ) : (
@@ -870,10 +954,10 @@ function AgentProcessPanels({ investigationId }: { investigationId: string }) {
           <h2>Agent 执行过程</h2>
           <span>{executions.length}</span>
         </div>
-        {processQuery.isLoading ? (
+        {executionsQuery.isLoading ? (
           <div className="empty-state">加载中...</div>
-        ) : errorMessage ? (
-          <p className="error">{errorMessage}</p>
+        ) : executionsQuery.isError ? (
+          <p className="error">{executionsQuery.error.message}</p>
         ) : executions.length === 0 ? (
           <div className="empty-state">暂无 Agent 执行记录。</div>
         ) : (
@@ -885,7 +969,25 @@ function AgentProcessPanels({ investigationId }: { investigationId: string }) {
                   <StatusBadge value={execution.status} />
                 </div>
                 <p>{execution.summary ?? "暂无摘要"}</p>
-                {execution.error_message ? <p className="error">{execution.error_message}</p> : null}
+                <div className="process-detail">
+                  {execution.step_kind ? <span>Step: {execution.step_kind}</span> : null}
+                  {execution.attempt ? <span>Attempt: {execution.attempt}</span> : null}
+                  {execution.failure_category && execution.failure_category !== "none" ? (
+                    <span>Failure: {execution.failure_category}</span>
+                  ) : null}
+                  {execution.result_validation_category ? (
+                    <span>Validation: {execution.result_validation_category}</span>
+                  ) : null}
+                  {execution.model_provider ? (
+                    <span>
+                      Provider: {execution.model_provider}
+                      {execution.model_name ? ` / ${execution.model_name}` : ""}
+                    </span>
+                  ) : null}
+                </div>
+                {execution.execution_layer !== "openai_agents_sdk" && execution.error_message ? (
+                  <p className="error">{execution.error_message}</p>
+                ) : null}
               </article>
             ))}
           </div>
@@ -897,10 +999,10 @@ function AgentProcessPanels({ investigationId }: { investigationId: string }) {
           <h2>工具调用</h2>
           <span>{toolCalls.length}</span>
         </div>
-        {processQuery.isLoading ? (
+        {toolCallsQuery.isLoading ? (
           <div className="empty-state">加载中...</div>
-        ) : errorMessage ? (
-          <p className="error">{errorMessage}</p>
+        ) : toolCallsQuery.isError ? (
+          <p className="error">{toolCallsQuery.error.message}</p>
         ) : toolCalls.length === 0 ? (
           <div className="empty-state">暂无工具调用。</div>
         ) : (
@@ -927,10 +1029,10 @@ function AgentProcessPanels({ investigationId }: { investigationId: string }) {
           <h2>共享上下文</h2>
           <span>{contextFacts.length}</span>
         </div>
-        {processQuery.isLoading ? (
+        {contextQuery.isLoading ? (
           <div className="empty-state">加载中...</div>
-        ) : errorMessage ? (
-          <p className="error">{errorMessage}</p>
+        ) : contextQuery.isError ? (
+          <p className="error">{contextQuery.error.message}</p>
         ) : contextFacts.length === 0 ? (
           <div className="empty-state">暂无共享上下文。</div>
         ) : (
@@ -956,10 +1058,10 @@ function AgentProcessPanels({ investigationId }: { investigationId: string }) {
           <h2>历史记忆</h2>
           <span>{memoryHits.length}</span>
         </div>
-        {processQuery.isLoading ? (
+        {memoryQuery.isLoading ? (
           <div className="empty-state">加载中...</div>
-        ) : errorMessage ? (
-          <p className="error">{errorMessage}</p>
+        ) : memoryQuery.isError ? (
+          <p className="error">{memoryQuery.error.message}</p>
         ) : memoryHits.length === 0 ? (
           <div className="empty-state">暂无历史记忆。</div>
         ) : (
@@ -1002,13 +1104,7 @@ export default function App() {
     queryFn: listInvestigations,
   });
 
-  const investigations = useMemo(
-    () =>
-      [...(investigationsQuery.data ?? [])].sort(
-        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
-      ),
-    [investigationsQuery.data],
-  );
+  const investigations = investigationsQuery.data ?? [];
 
   const activeId = selectedId ?? investigations[0]?.id;
   const detailQuery = useQuery({
@@ -1017,7 +1113,7 @@ export default function App() {
     enabled: Boolean(activeId),
   });
 
-  const activeInvestigation = detailQuery.data ?? investigations.find((item) => item.id === activeId);
+  const activeInvestigation = detailQuery.data;
 
   return (
     <main className="app-shell">
@@ -1052,8 +1148,11 @@ export default function App() {
               <EvidenceList investigation={activeInvestigation} />
               <Hypotheses investigation={activeInvestigation} />
               <RcaWorkbenchPanel investigationId={activeInvestigation.id} />
-              <ReActTracePanel investigationId={activeInvestigation.id} />
             </>
+          ) : detailQuery.isError ? (
+            <div className="panel error-panel">{detailQuery.error.message}</div>
+          ) : detailQuery.isLoading ? (
+            <div className="panel empty-state">加载诊断详情...</div>
           ) : (
             <div className="panel empty-state">选择或创建一个诊断开始。</div>
           )}

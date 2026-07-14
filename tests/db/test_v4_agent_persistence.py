@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import insert, inspect, select
 
+from backend.db.models import InvestigationRecord
 from backend.db.repositories import InMemoryInvestigationRepository
 from backend.db.schema import agent_executions, diagnosis_tasks, schema_version
 from backend.db.session import create_db_engine, initialize_database
@@ -18,6 +19,7 @@ from backend.domain.agent_plan import (
 from backend.domain.memory import MemoryItem, MemoryType
 from backend.domain.multi_agent import AgentExecutionLayer
 from backend.domain.tool_calls import ToolCallRecord, ToolCallStatus
+from backend.services.incident_cases import load_incident_case
 
 
 def build_repository(tmp_path):
@@ -43,14 +45,23 @@ def task(task_id: str, status: DiagnosisTaskStatus = DiagnosisTaskStatus.PENDING
     )
 
 
-def test_schema_initialization_creates_v4_agent_tables(tmp_path):
+def seed_investigation(repository, investigation_id: str = "inv-1") -> None:
+    repository.save(
+        InvestigationRecord(
+            id=investigation_id,
+            event=load_incident_case("deployment_regression"),
+        )
+    )
+
+
+def test_schema_initialization_creates_current_agent_tables(tmp_path):
     _repository, engine = build_repository(tmp_path)
 
     tables = set(inspect(engine).get_table_names())
     with engine.connect() as connection:
         version = connection.execute(select(schema_version.c.version)).scalar_one()
 
-    assert version == 4
+    assert version == 5
     assert {
         "diagnosis_plans",
         "diagnosis_tasks",
@@ -63,6 +74,7 @@ def test_schema_initialization_creates_v4_agent_tables(tmp_path):
 
 def test_plan_round_trip_replaces_plan_and_tasks_for_investigation(tmp_path):
     repository, _engine = build_repository(tmp_path)
+    seed_investigation(repository)
     first_task = task("task-1")
     first_plan = DiagnosisPlan(
         id="plan-1",
@@ -92,6 +104,7 @@ def test_plan_round_trip_replaces_plan_and_tasks_for_investigation(tmp_path):
 
 def test_save_tasks_replaces_task_list_for_investigation(tmp_path):
     repository, _engine = build_repository(tmp_path)
+    seed_investigation(repository)
     first = task("task-1")
     second = task("task-2")
 
@@ -103,6 +116,7 @@ def test_save_tasks_replaces_task_list_for_investigation(tmp_path):
 
 def test_executions_context_facts_and_tool_calls_append_and_replace_by_id(tmp_path):
     repository, _engine = build_repository(tmp_path)
+    seed_investigation(repository)
     execution = AgentExecution(
         id="exec-1",
         task_id="task-1",
@@ -248,6 +262,7 @@ def test_memory_round_trip_preserves_created_at_microseconds(tmp_path):
 
 def test_v7_tasks_and_executions_round_trip_in_memory_and_sqlite(tmp_path):
     sqlite_repository, _engine = build_repository(tmp_path)
+    seed_investigation(sqlite_repository)
     repositories = [InMemoryInvestigationRepository(), sqlite_repository]
     tasks = [
         task(f"task-sdk-{round_number}").model_copy(
@@ -307,6 +322,7 @@ def test_old_task_and_execution_payloads_use_v7_defaults(tmp_path):
     assert memory_repository.list_executions("inv-old") == [restored_execution]
 
     sqlite_repository, engine = build_repository(tmp_path)
+    seed_investigation(sqlite_repository, "inv-old")
     with engine.begin() as connection:
         connection.execute(
             insert(diagnosis_tasks).values(

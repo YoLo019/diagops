@@ -9,9 +9,10 @@ from backend.domain.evidence import (
     EvidenceItem,
     EvidenceKind,
     EvidenceProvider,
+    EvidenceStatus,
     JsonValue,
 )
-from backend.providers.results import ProviderResult
+from backend.providers.results import ProviderResult, ProviderStatus
 
 _QUERY_TEMPLATES = {
     "qps": 'sum(rate(http_requests_total{{service="{service}",environment="{environment}"}}[5m]))',
@@ -43,9 +44,20 @@ class PrometheusProvider:
 
     def collect(self, event: IncidentEvent) -> ProviderResult:
         queries = _queries_for_event(event)
-        observed_values = {
-            name: self._query_instant(query) for name, query in queries.items()
-        }
+        observed_values: dict[str, JsonValue] = {}
+        failures: list[str] = []
+        for name, query in queries.items():
+            try:
+                observed_values[name] = self._query_instant(query, event.started_at.timestamp())
+            except Exception as exc:
+                failures.append(f"{name}: {exc}")
+        if not observed_values:
+            return ProviderResult(
+                provider=self.provider,
+                status=ProviderStatus.FAILED,
+                error_message="; ".join(failures),
+            )
+        status = ProviderStatus.PARTIAL if failures else ProviderStatus.SUCCESS
 
         evidence = EvidenceItem(
             provider=self.provider,
@@ -58,18 +70,22 @@ class PrometheusProvider:
             payload={
                 "service": event.service,
                 "environment": event.environment,
-                "base_url": self.base_url,
                 "query_names": list(queries),
-                "queries": queries,
                 "observed_values": observed_values,
             },
             confidence=0.8,
+            status=EvidenceStatus(status),
         )
-        return ProviderResult(provider=self.provider, evidence_items=[evidence])
+        return ProviderResult(
+            provider=self.provider,
+            status=status,
+            evidence_items=[evidence],
+            error_message="; ".join(failures) or None,
+        )
 
-    def _query_instant(self, query: str) -> JsonValue:
+    def _query_instant(self, query: str, query_time: float) -> JsonValue:
         endpoint = f"{self.base_url}/api/v1/query"
-        url = f"{endpoint}?{urllib.parse.urlencode({'query': query})}"
+        url = f"{endpoint}?{urllib.parse.urlencode({'query': query, 'time': query_time})}"
         request = urllib.request.Request(url, headers={"Accept": "application/json"})
 
         with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:

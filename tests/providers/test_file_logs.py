@@ -1,6 +1,8 @@
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from backend.config.settings import (
     AppSettings,
     DeploymentFileProviderSettings,
@@ -40,9 +42,8 @@ def test_payload_contains_error_count_sample_lines_and_patterns():
     assert evidence.payload["error_count"] == 2
     assert len(evidence.payload["sample_lines"]) == 2
     assert set(evidence.payload["patterns"]) >= {"ERROR", "Exception", "HTTP 500", "5xx"}
-    assert evidence.payload["path"] == "data\\sample-logs\\checkout-service.log" or (
-        evidence.payload["path"] == "data/sample-logs/checkout-service.log"
-    )
+    assert evidence.payload["source"] == "configured_log_file"
+    assert "path" not in evidence.payload
     assert evidence.payload["service"] == "checkout-service"
     assert evidence.payload["environment"] == "prod"
 
@@ -52,11 +53,10 @@ def test_missing_log_file_produces_provider_failure_through_registry(tmp_path):
 
     evidence = registry.collect_all(_event())
 
-    assert len(evidence) == 1
-    assert evidence[0].kind == EvidenceKind.PROVIDER_ERROR
-    assert evidence[0].provider == EvidenceProvider.LOG
-    assert evidence[0].status == EvidenceStatus.FAILED
-    assert evidence[0].error_message is not None
+    failed = next(item for item in evidence if item.provider == EvidenceProvider.LOG)
+    assert failed.kind == EvidenceKind.PROVIDER_ERROR
+    assert failed.status == EvidenceStatus.FAILED
+    assert failed.error_message is not None
 
 
 def test_log_provider_filters_service_and_timestamped_lines(tmp_path):
@@ -66,6 +66,8 @@ def test_log_provider_filters_service_and_timestamped_lines(tmp_path):
 2026-07-06T08:01:00+00:00 checkout-service prod ERROR HTTP 500 included
 2026-07-06T09:30:00+00:00 checkout-service prod ERROR HTTP 500 outside window
 2026-07-06T08:02:00+00:00 inventory-service prod ERROR HTTP 500 wrong service
+2026-07-06T08:03:00+00:00 checkout-service staging ERROR HTTP 500 wrong environment
+checkout-service prod ERROR HTTP 500 missing timestamp
 """.lstrip(),
         encoding="utf-8",
     )
@@ -78,6 +80,16 @@ def test_log_provider_filters_service_and_timestamped_lines(tmp_path):
     assert sample_lines == [
         "2026-07-06T08:01:00+00:00 checkout-service prod ERROR HTTP 500 included"
     ]
+
+
+def test_log_provider_rejects_oversized_input(tmp_path):
+    log_path = tmp_path / "large.log"
+    log_path.write_text("x" * 65, encoding="utf-8")
+
+    provider = FileLogProvider([log_path], max_bytes=64)
+
+    with pytest.raises(ValueError, match="size limit"):
+        provider.collect(_event())
 
 
 def test_log_provider_returns_success_with_empty_evidence_when_no_matches(tmp_path):
@@ -113,9 +125,11 @@ def test_registry_builder_adds_file_log_provider(tmp_path):
     results = registry.collect_results(_event())
 
     assert any(isinstance(provider, FileLogProvider) for provider in registry.providers)
-    assert len(results) == 1
-    assert results[0].provider == EvidenceProvider.LOG
-    assert results[0].evidence_items[0].payload["error_count"] == 1
+    log_result = next(
+        result for result in results if result.provider == EvidenceProvider.LOG
+    )
+    assert log_result.evidence_items[0].payload["error_count"] == 1
+    assert sum(result.status == ProviderStatus.SKIPPED for result in results) == 5
 
 
 def _event() -> IncidentEvent:

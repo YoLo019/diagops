@@ -3,13 +3,15 @@ from enum import StrEnum
 from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from backend.domain.hypotheses import CauseType
 from backend.domain.multi_agent import (
     AgentExecutionLayer,
     CoordinationDecisionStatus,
+    ModelProvider,
     MultiAgentRunStatus,
+    StabilizationCategory,
 )
 
 
@@ -75,6 +77,8 @@ class RootCauseCandidate(BaseModel):
 
 
 class CoordinationReview(BaseModel):
+    model_config = ConfigDict(protected_namespaces=("model_validate", "model_dump"))
+
     id: str = Field(default_factory=lambda: f"coordination-{uuid4().hex}")
     investigation_id: str
     candidates: list[RootCauseCandidate] = Field(default_factory=list)
@@ -83,6 +87,12 @@ class CoordinationReview(BaseModel):
     decision_status: CoordinationDecisionStatus | None = None
     baseline_cause_type: CauseType | None = None
     selected_cause_type: CauseType | None = None
+    model_provider: ModelProvider | None = None
+    model_name: str | None = None
+    primary_stabilization_category: StabilizationCategory | None = None
+    secondary_stabilization_categories: list[StabilizationCategory] = Field(
+        default_factory=list
+    )
     summary: str = ""
     uncertainty: str = ""
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

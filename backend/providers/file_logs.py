@@ -6,6 +6,7 @@ from pathlib import Path
 from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
 from backend.providers.results import ProviderResult
+from backend.safety.redaction import redact_text
 
 _ERROR_PATTERNS = {
     "ERROR": re.compile(r"\bERROR\b", re.IGNORECASE),
@@ -16,13 +17,26 @@ _ERROR_PATTERNS = {
 }
 
 _TIMESTAMP_PREFIX = re.compile(r"^(?P<timestamp>\d{4}-\d{2}-\d{2}T\S+)")
+MAX_LOG_BYTES = 5 * 1024 * 1024
+MAX_LOG_LINES = 10_000
+MAX_LOG_MATCHES = 100
 
 
 class FileLogProvider:
     provider = EvidenceProvider.LOG
 
-    def __init__(self, paths: list[Path]) -> None:
+    def __init__(
+        self,
+        paths: list[Path],
+        *,
+        max_bytes: int = MAX_LOG_BYTES,
+        max_lines: int = MAX_LOG_LINES,
+        max_matches: int = MAX_LOG_MATCHES,
+    ) -> None:
         self.paths = paths
+        self.max_bytes = max_bytes
+        self.max_lines = max_lines
+        self.max_matches = max_matches
 
     def collect(self, event: IncidentEvent) -> ProviderResult:
         evidence: list[EvidenceItem] = []
@@ -42,11 +56,13 @@ class FileLogProvider:
                         f"pattern matches"
                     ),
                     payload={
-                        "path": str(path),
+                        "source": "configured_log_file",
                         "service": event.service,
                         "environment": event.environment,
                         "error_count": len(matches),
-                        "sample_lines": [match.line for match in matches[:5]],
+                        "sample_lines": [
+                            redact_text(match.line) for match in matches[:5]
+                        ],
                         "patterns": patterns,
                     },
                     confidence=1.0,
@@ -56,13 +72,17 @@ class FileLogProvider:
         return ProviderResult(provider=self.provider, evidence_items=evidence)
 
     def _matches_for_path(self, path: Path, event: IncidentEvent) -> list["_LogMatch"]:
+        if path.stat().st_size > self.max_bytes:
+            raise ValueError("Log file exceeds size limit")
         window = timedelta(minutes=event.time_window_minutes)
         matches: list[_LogMatch] = []
-        for line in path.read_text(encoding="utf-8").splitlines():
+        for line in path.read_text(encoding="utf-8").splitlines()[: self.max_lines]:
             parsed_at = _parse_timestamp(line)
-            if parsed_at is not None and abs(parsed_at - event.started_at) > window:
+            if parsed_at is None or abs(parsed_at - event.started_at) > window:
                 continue
-            if event.service not in line:
+            if not _contains_scope(line, event.service) or not _contains_scope(
+                line, event.environment
+            ):
                 continue
 
             patterns = [
@@ -72,6 +92,8 @@ class FileLogProvider:
                 matches.append(
                     _LogMatch(line=line, timestamp=parsed_at, patterns=patterns)
                 )
+                if len(matches) >= self.max_matches:
+                    break
         return matches
 
 
@@ -92,3 +114,7 @@ def _parse_timestamp(line: str) -> datetime | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def _contains_scope(line: str, value: str) -> bool:
+    return re.search(rf"(?<![\w-]){re.escape(value)}(?![\w-])", line) is not None

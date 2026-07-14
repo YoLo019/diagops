@@ -1,6 +1,8 @@
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from backend.config.settings import (
     AppSettings,
     DeploymentFileProviderSettings,
@@ -103,11 +105,10 @@ def test_missing_deployment_file_becomes_provider_error_evidence(tmp_path):
 
     evidence = registry.collect_all(load_incident_case("deployment_regression"))
 
-    assert len(evidence) == 1
-    assert evidence[0].kind == EvidenceKind.PROVIDER_ERROR
-    assert evidence[0].provider == EvidenceProvider.DEPLOY
-    assert evidence[0].status == EvidenceStatus.FAILED
-    assert evidence[0].error_message is not None
+    failed = next(item for item in evidence if item.provider == EvidenceProvider.DEPLOY)
+    assert failed.kind == EvidenceKind.PROVIDER_ERROR
+    assert failed.status == EvidenceStatus.FAILED
+    assert failed.error_message is not None
 
 
 def test_build_provider_registry_from_settings_adds_deployment_provider(tmp_path):
@@ -175,3 +176,13 @@ def test_file_deployment_provider_accepts_manual_event_without_match():
 
     assert result.status == ProviderStatus.SUCCESS
     assert result.evidence_items == []
+
+
+def test_file_deployment_provider_rejects_oversized_input(tmp_path):
+    path = tmp_path / "deployments.json"
+    path.write_text("[] " + ("x" * 64), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="size limit"):
+        FileDeploymentProvider(path, max_bytes=32).collect(
+            load_incident_case("deployment_regression")
+        )

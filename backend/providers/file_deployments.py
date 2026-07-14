@@ -7,12 +7,23 @@ from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
 from backend.providers.results import ProviderResult
 
+MAX_DEPLOYMENT_BYTES = 2 * 1024 * 1024
+MAX_DEPLOYMENTS = 10_000
+
 
 class FileDeploymentProvider:
     provider = EvidenceProvider.DEPLOY
 
-    def __init__(self, path: Path) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        max_bytes: int = MAX_DEPLOYMENT_BYTES,
+        max_deployments: int = MAX_DEPLOYMENTS,
+    ) -> None:
         self.path = path
+        self.max_bytes = max_bytes
+        self.max_deployments = max_deployments
 
     def collect(self, event: IncidentEvent) -> ProviderResult:
         deployments = self._load_deployments()
@@ -53,12 +64,14 @@ class FileDeploymentProvider:
         return ProviderResult(provider=self.provider, evidence_items=evidence)
 
     def _load_deployments(self) -> list[dict[str, Any]]:
+        if self.path.stat().st_size > self.max_bytes:
+            raise ValueError("Deployment file exceeds size limit")
         loaded = json.loads(self.path.read_text(encoding="utf-8"))
         if not isinstance(loaded, list):
             raise ValueError("Deployment file must contain a JSON list")
 
         deployments: list[dict[str, Any]] = []
-        for item in loaded:
+        for item in loaded[: self.max_deployments]:
             if not isinstance(item, dict):
                 raise ValueError("Deployment records must be JSON objects")
             deployments.append(_deployment_record(item))

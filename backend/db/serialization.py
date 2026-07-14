@@ -10,10 +10,11 @@ from backend.domain.hypotheses import Hypothesis
 from backend.domain.llm_analysis import LLMAnalysis
 from backend.domain.reports import IncidentReport
 from backend.providers.results import ProviderResult
+from backend.safety.redaction import assert_safe_value
 
 
 def record_to_rows(record: InvestigationRecord) -> dict[str, Any]:
-    return {
+    rows = {
         "investigation": {
             "id": record.id,
             "event": record.event.model_dump(mode="json"),
@@ -35,15 +36,9 @@ def record_to_rows(record: InvestigationRecord) -> dict[str, Any]:
         "report": record.report.model_dump(mode="json") if record.report else None,
         "provider_results": _payload_rows(record.id, record.provider_results),
         "specialist_results": _payload_rows(record.id, record.specialist_results),
-        "llm_analysis": (
-            {
-                "investigation_id": record.id,
-                "payload": record.llm_analysis.model_dump(mode="json"),
-            }
-            if record.llm_analysis is not None
-            else None
-        ),
     }
+    assert_safe_value(rows)
+    return rows
 
 
 def rows_to_record(rows: Mapping[str, Any]) -> InvestigationRecord:

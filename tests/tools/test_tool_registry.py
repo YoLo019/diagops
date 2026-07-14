@@ -74,7 +74,8 @@ def test_provider_exception_returns_failed_tool_call_with_error_message():
     )
 
     assert record.status == ToolCallStatus.FAILED
-    assert record.error_message == "provider exploded"
+    assert record.error_message == "provider collection failed"
+    assert "exploded" not in record.error_message
     assert record.output_evidence_ids == []
 
 

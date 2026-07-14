@@ -8,6 +8,7 @@ from backend.domain.hypotheses import CauseType
 from backend.providers.registry import build_mock_provider_registry
 from backend.rca.analyzer import RcaAnalyzer
 from backend.reports.generator import ReportGenerator
+from backend.safety.redaction import escape_markdown
 from backend.services.incident_cases import load_incident_case
 
 
@@ -146,7 +147,7 @@ def test_golden_case_primary_cause_and_report_evidence(
     assert top.cause_type == expected_cause
     assert report_top == top
     assert expected_evidence.id in report_top.supporting_evidence_ids
-    assert expected_evidence.summary in supporting_section
+    assert escape_markdown(expected_evidence.summary) in supporting_section
     assert report.summary == top.summary
     assert f"`{top.cause_type}`" in report.markdown
     assert top.summary in report.markdown

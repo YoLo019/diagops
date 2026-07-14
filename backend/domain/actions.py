@@ -3,6 +3,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field, model_validator
 
+from backend.domain.hypotheses import CauseType
+
 
 class ActionType(StrEnum):
     CHECK = "check"
@@ -68,3 +70,6 @@ class VerificationSuggestion(BaseModel):
     expected_signal: str
     status: VerificationStatus = VerificationStatus.PENDING
     result_note: str | None = None
+    result_evidence_ids: list[str] = Field(default_factory=list)
+    related_action_ids: list[str] = Field(default_factory=list)
+    related_cause_types: list[CauseType] = Field(default_factory=list)

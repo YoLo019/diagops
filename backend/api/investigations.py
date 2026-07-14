@@ -1,18 +1,22 @@
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from backend.api.events import InvestigationSummary, to_summary
-from backend.db.models import InvestigationRecord
+from backend.api.events import to_summary
+from backend.db.models import InvestigationRecord, InvestigationSummary
 from backend.diagnosis.context import SpecialistResult
 from backend.domain.actions import ActionStatus, VerificationStatus
 from backend.domain.events import IncidentEvent, IncidentSource, Severity
 from backend.domain.evidence import EvidenceItem, EvidenceProvider
+from backend.domain.human_transitions import HumanStateConflict
+from backend.domain.hypotheses import CauseType
 from backend.domain.memory import MemoryItem
 from backend.domain.reports import IncidentReport
 from backend.memory import MemoryStore
 from backend.providers.results import ProviderResult
+from backend.safety.redaction import redact_model, redact_text
 from backend.services.container import get_container
 
 router = APIRouter(prefix="/investigations", tags=["investigations"])
@@ -34,6 +38,9 @@ class UpdateActionStatusRequest(BaseModel):
 class UpdateVerificationStatusRequest(BaseModel):
     status: VerificationStatus
     result_note: str | None = None
+    result_evidence_ids: list[str] = Field(default_factory=list)
+    related_action_ids: list[str] = Field(default_factory=list)
+    related_cause_types: list[CauseType] = Field(default_factory=list)
 
 
 class FeedbackRequest(BaseModel):
@@ -46,7 +53,7 @@ class FeedbackRequest(BaseModel):
 def _get_investigation_record(investigation_id: str) -> InvestigationRecord:
     container = get_container()
     try:
-        return container.repository.get(investigation_id)
+        return redact_model(container.repository.get(investigation_id))
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -58,7 +65,13 @@ def _sorted_evidence(record: InvestigationRecord) -> list[EvidenceItem]:
 @router.get("", response_model=list[InvestigationRecord])
 def list_investigations() -> list[InvestigationRecord]:
     container = get_container()
-    return container.repository.list()
+    return [redact_model(record) for record in container.repository.list()]
+
+
+@router.get("/summaries", response_model=list[InvestigationSummary])
+def list_investigation_summaries() -> list[InvestigationSummary]:
+    container = get_container()
+    return [redact_model(item) for item in container.repository.list_summaries()]
 
 
 @router.post("/manual", response_model=InvestigationSummary)
@@ -90,11 +103,17 @@ def update_action_status(
 ):
     container = get_container()
     try:
-        return container.repository.update_action_status(
+        updated = container.repository.update_action_status(
             investigation_id,
             action_id,
             status=request.status,
-            note=request.note,
+            note=redact_text(request.note) if request.note is not None else None,
+        )
+        return redact_model(updated)
+    except HumanStateConflict as exc:
+        return JSONResponse(
+            status_code=409,
+            content={"code": exc.code, "detail": exc.detail},
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -108,11 +127,24 @@ def update_verification_status(
 ):
     container = get_container()
     try:
-        return container.repository.update_verification_status(
+        updated = container.repository.update_verification_status(
             investigation_id,
             verification_id,
             status=request.status,
-            result_note=request.result_note,
+            result_note=(
+                redact_text(request.result_note)
+                if request.result_note is not None
+                else None
+            ),
+            result_evidence_ids=request.result_evidence_ids,
+            related_action_ids=request.related_action_ids,
+            related_cause_types=request.related_cause_types,
+        )
+        return redact_model(updated)
+    except HumanStateConflict as exc:
+        return JSONResponse(
+            status_code=409,
+            content={"code": exc.code, "detail": exc.detail},
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

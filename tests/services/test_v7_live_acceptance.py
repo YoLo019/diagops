@@ -10,6 +10,12 @@ import pytest
 import backend.services.v7_live_acceptance as acceptance
 from backend.db.models import InvestigationStatus
 from backend.diagnosis.agents_runtime import AgentsRcaRuntime, AgentsRcaRuntimeResult
+from backend.domain.actions import (
+    ActionRiskLevel,
+    ActionStatus,
+    ActionType,
+    RecommendedAction,
+)
 from backend.domain.agent_findings import (
     AgentFinding,
     AgentFindingType,
@@ -17,12 +23,17 @@ from backend.domain.agent_findings import (
     CoordinationReview,
     RootCauseCandidate,
 )
-from backend.domain.hypotheses import CauseType
+from backend.domain.agent_plan import AgentExecution, AgentExecutionStatus
+from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
+from backend.domain.hypotheses import CauseType, Hypothesis
 from backend.domain.multi_agent import (
     AgentExecutionLayer,
     CoordinationDecisionStatus,
+    ExecutionStepKind,
+    ModelProvider,
     MultiAgentRunStatus,
     MultiAgentRunSummary,
+    ResultValidationCategory,
 )
 from backend.services.incident_cases import list_case_ids, load_incident_case
 from backend.services.v7_live_acceptance import (
@@ -97,21 +108,91 @@ def _accepted_diagnostic_result():
         execution_layer=AgentExecutionLayer.OPENAI_AGENTS_SDK,
         run_status=MultiAgentRunStatus.COMPLETED,
         decision_status=CoordinationDecisionStatus.AGREEMENT,
+        baseline_cause_type=CauseType.DEPLOYMENT_REGRESSION,
         selected_cause_type=CauseType.DEPLOYMENT_REGRESSION,
         summary="review summary",
         uncertainty="uncertainty text",
+        model_provider=ModelProvider.OPENAI,
+        model_name="gpt-test",
     )
+    executions = [
+        AgentExecution(
+            task_id="task-coordinator-1",
+            agent_name="CoordinatorAgent",
+            status=AgentExecutionStatus.COMPLETED,
+            execution_layer=AgentExecutionLayer.OPENAI_AGENTS_SDK,
+            analysis_round=1,
+            step_kind=ExecutionStepKind.INITIAL_COORDINATION,
+            model_provider=ModelProvider.OPENAI,
+            model_name="gpt-test",
+        ),
+        *[
+            AgentExecution(
+                task_id=f"task-{agent.value}",
+                agent_name=agent.value,
+                status=AgentExecutionStatus.COMPLETED,
+                execution_layer=AgentExecutionLayer.OPENAI_AGENTS_SDK,
+                analysis_round=1,
+                step_kind=ExecutionStepKind.SPECIALIST_COLLECTION,
+                evidence_ids=[
+                    "ev-deploy" if agent == AgentName.DEPLOYMENT else "ev-log"
+                ],
+                model_provider=ModelProvider.OPENAI,
+                model_name="gpt-test",
+            )
+            for agent in AgentName
+        ],
+        AgentExecution(
+            task_id="task-coordinator-2",
+            agent_name="CoordinatorAgent",
+            status=AgentExecutionStatus.COMPLETED,
+            execution_layer=AgentExecutionLayer.OPENAI_AGENTS_SDK,
+            analysis_round=2,
+            step_kind=ExecutionStepKind.FINAL_SYNTHESIS,
+            model_provider=ModelProvider.OPENAI,
+            model_name="gpt-test",
+        ),
+    ]
     result = AgentsRcaRuntimeResult(
         tasks=[],
-        executions=[],
+        executions=executions,
         findings=findings,
         review=review,
-        run_summary=MultiAgentRunSummary(status=MultiAgentRunStatus.COMPLETED),
+        run_summary=MultiAgentRunSummary(
+            status=MultiAgentRunStatus.COMPLETED,
+            model_provider=ModelProvider.OPENAI,
+            model_name="gpt-test",
+        ),
     )
+    started_at = datetime(2026, 7, 12, tzinfo=UTC)
     record = SimpleNamespace(
         id="inv-test",
         status=InvestigationStatus.COMPLETED,
-        evidence=[SimpleNamespace(id="ev-log"), SimpleNamespace(id="ev-deploy")],
+        evidence=[
+            EvidenceItem(
+                id="ev-log",
+                provider=EvidenceProvider.LOG,
+                kind=EvidenceKind.LOG_PATTERN,
+                timestamp=started_at,
+                summary="safe log evidence",
+            ),
+            EvidenceItem(
+                id="ev-deploy",
+                provider=EvidenceProvider.DEPLOY,
+                kind=EvidenceKind.DEPLOYMENT,
+                timestamp=started_at,
+                summary="safe deployment evidence",
+            ),
+        ],
+        hypotheses=[
+            Hypothesis(
+                cause_type=CauseType.DEPLOYMENT_REGRESSION,
+                summary="deployment baseline",
+                confidence=0.9,
+                supporting_evidence_ids=["ev-deploy"],
+            )
+        ],
+        actions=[],
         report=None,
     )
     return record, result
@@ -176,6 +257,10 @@ def test_expected_causes_are_an_explicit_complete_golden_case_contract():
                         real_review=False,
                         fallback=True,
                         decision=None,
+                        run_status=MultiAgentRunStatus.FAILED,
+                        primary_stabilization_category=(
+                            "provider_or_sdk_transport"
+                        ),
                     )
                     if index < 2 else rows[index]
                 for index in range(len(rows))
@@ -210,6 +295,17 @@ def test_expected_causes_are_an_explicit_complete_golden_case_contract():
         (
             "reference_validity",
             lambda rows: [replace(rows[0], references_valid=False), *rows[1:]],
+        ),
+        (
+            "failure_classification",
+            lambda rows: [
+                replace(
+                    rows[0],
+                    run_status=MultiAgentRunStatus.PARTIAL,
+                    primary_stabilization_category=None,
+                ),
+                *rows[1:],
+            ],
         ),
         (
             "unsafe_tools",
@@ -266,6 +362,24 @@ def test_evaluator_reports_clean_and_adversarial_accuracy_separately():
     assert result.clean_correct == 12
     assert result.adversarial_total == 3
     assert result.adversarial_correct == 3
+
+
+def test_evaluator_requires_classification_for_non_review_fallback():
+    rows = _passing_results()
+    rows[0] = replace(
+        rows[0],
+        selected_cause=None,
+        decision=CoordinationDecisionStatus.FALLBACK,
+        fallback=True,
+        real_review=False,
+        run_status=MultiAgentRunStatus.FAILED,
+        primary_stabilization_category=None,
+    )
+
+    result = evaluate_results(rows)
+
+    assert not result.passed
+    assert not result.thresholds["failure_classification"].passed
 
 
 @pytest.mark.parametrize(
@@ -414,6 +528,40 @@ def test_live_config_requires_only_named_environment_values_without_retaining_ke
         load_live_config(invalid_cost)
 
 
+def test_live_config_deepseek_requires_only_deepseek_key():
+    secret = "local-deepseek-secret"
+    config = load_live_config(
+        {
+            "DIAGOPS_AGENTS_PROVIDER": "deepseek",
+            "DEEPSEEK_API_KEY": secret,
+            "DIAGOPS_AGENTS_MODEL": "deepseek-v4-pro",
+            "DIAGOPS_INPUT_COST_PER_MILLION": "0.435",
+            "DIAGOPS_OUTPUT_COST_PER_MILLION": "0.87",
+        }
+    )
+
+    assert config.provider == ModelProvider.DEEPSEEK
+    assert config.model == "deepseek-v4-pro"
+    assert secret not in repr(config)
+
+
+def test_live_config_rejects_unknown_provider_without_exposing_keys():
+    with pytest.raises(ValueError, match="Provider") as error:
+        load_live_config(
+            {
+                "DIAGOPS_AGENTS_PROVIDER": "compatible",
+                "OPENAI_API_KEY": "openai-secret",
+                "DEEPSEEK_API_KEY": "deepseek-secret",
+                "DIAGOPS_AGENTS_MODEL": "test-model",
+                "DIAGOPS_INPUT_COST_PER_MILLION": "1",
+                "DIAGOPS_OUTPUT_COST_PER_MILLION": "2",
+            }
+        )
+
+    assert "openai-secret" not in str(error.value)
+    assert "deepseek-secret" not in str(error.value)
+
+
 def test_live_config_defaults_agents_timeout_to_60_seconds():
     config = load_live_config(
         {
@@ -539,6 +687,42 @@ def test_runner_passes_configured_timeout_to_capturing_runtime(monkeypatch):
     run_live_cohort(config)
 
     assert captured["runtime"].timeout_seconds == 120
+
+
+def test_runner_constructs_selected_deepseek_adapter_without_openai_key(monkeypatch):
+    captured = {}
+    sentinel = object()
+
+    def build_adapter(model_name, api_key):
+        captured["adapter"] = (model_name, api_key)
+        return sentinel
+
+    def build_runtime(**kwargs):
+        captured["runtime_kwargs"] = kwargs
+        return _SubstituteRuntime()
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "local-deepseek-secret")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(acceptance, "create_deepseek_model", build_adapter)
+    monkeypatch.setattr(acceptance, "CapturingAgentsRcaRuntime", build_runtime)
+
+    run_live_cohort(
+        LiveConfig(
+            "deepseek-v4-pro",
+            0.435,
+            0.87,
+            provider=ModelProvider.DEEPSEEK,
+        ),
+        runs_per_case=1,
+    )
+
+    assert captured["adapter"] == (
+        "deepseek-v4-pro",
+        "local-deepseek-secret",
+    )
+    assert captured["runtime_kwargs"]["model"] is sentinel
+    assert captured["runtime_kwargs"]["model_provider"] == ModelProvider.DEEPSEEK
+    assert captured["runtime_kwargs"]["model_name"] == "deepseek-v4-pro"
 
 
 def test_diagnostic_cohort_runs_each_case_once_without_probes():
@@ -702,6 +886,55 @@ def test_build_run_projects_only_safe_structured_agent_diagnostics():
     )
 
 
+def test_code_owned_fallback_is_valid_but_not_real_review():
+    record, accepted = _accepted_diagnostic_result()
+    accepted.findings = [
+        accepted.findings[0].model_copy(
+            update={"finding_type": AgentFindingType.SIGNAL}
+        )
+    ]
+    accepted.review = CoordinationReview(
+        investigation_id=record.id,
+        candidates=[
+            RootCauseCandidate(
+                cause_type=CauseType.DEPLOYMENT_REGRESSION,
+                summary="Deterministic fallback candidate",
+                rank=1,
+                confidence=0.9,
+                supporting_evidence_ids=["ev-deploy"],
+                rationale="Seeded from deterministic RCA",
+                uncertainty="No conclusive Specialist finding",
+            )
+        ],
+        execution_layer=AgentExecutionLayer.OPENAI_AGENTS_SDK,
+        run_status=MultiAgentRunStatus.COMPLETED,
+        decision_status=CoordinationDecisionStatus.FALLBACK,
+        baseline_cause_type=CauseType.DEPLOYMENT_REGRESSION,
+        selected_cause_type=CauseType.DEPLOYMENT_REGRESSION,
+        model_provider=ModelProvider.OPENAI,
+        model_name="gpt-test",
+    )
+
+    row = acceptance._build_run(
+        record,
+        accepted,
+        "deployment_regression",
+        1,
+        CauseType.DEPLOYMENT_REGRESSION,
+        False,
+        LiveConfig("gpt-test", 1.0, 2.0),
+        1,
+        metrics_result=accepted,
+    )
+
+    assert row.valid_result
+    assert row.fallback
+    assert not row.real_review
+    assert row.decision == CoordinationDecisionStatus.FALLBACK
+    assert not row.correct_candidate
+    assert row.references_valid
+
+
 def test_diagnostic_projection_omits_free_text_and_raw_model_data(tmp_path):
     record, accepted = _accepted_diagnostic_result()
     row = acceptance._build_run(
@@ -736,6 +969,168 @@ def test_diagnostic_projection_omits_free_text_and_raw_model_data(tmp_path):
         "candidate summary",
     ]:
         assert forbidden not in content
+
+
+def test_v8_1_row_contains_safe_execution_and_contract_diagnostics():
+    record, accepted = _accepted_diagnostic_result()
+
+    row = acceptance._build_run(
+        record,
+        accepted,
+        "deployment_regression",
+        1,
+        CauseType.DEPLOYMENT_REGRESSION,
+        False,
+        LiveConfig("gpt-test", 1.0, 2.0),
+        1,
+    )
+
+    assert row.provider == "openai"
+    assert row.primary_stabilization_category is None
+    assert row.secondary_stabilization_categories == []
+    assert row.agreement_contract_valid
+    assert row.executed_action_claim_valid
+    assert row.execution_steps
+    assert set(row.execution_steps[0]) == {
+        "step_kind",
+        "agent_name",
+        "analysis_round",
+        "attempt",
+        "status",
+        "failure_category",
+        "result_validation_category",
+        "evidence_ids",
+    }
+    assert "model_name" not in row.execution_steps[0]
+
+
+def test_result_validation_fallback_projects_exact_safe_category():
+    accepted = AgentsRcaRuntimeResult.validation_failed(
+        ResultValidationCategory.REVIEW_CONTRACT,
+        model_provider=ModelProvider.OPENAI,
+        model_name="gpt-test",
+    )
+    record = SimpleNamespace(
+        id="inv-test",
+        status=InvestigationStatus.COMPLETED,
+        evidence=[],
+        hypotheses=[],
+        actions=[],
+        report=None,
+    )
+
+    row = acceptance._build_run(
+        record,
+        accepted,
+        "deployment_regression",
+        1,
+        CauseType.DEPLOYMENT_REGRESSION,
+        False,
+        LiveConfig("gpt-test", 1.0, 2.0),
+        1,
+    )
+
+    assert row.fallback_reason == "result_validation"
+    assert row.primary_stabilization_category == "result_validation"
+    assert row.execution_steps == [
+        {
+            "step_kind": "result_validation",
+            "agent_name": "CoordinatorAgent",
+            "analysis_round": None,
+            "attempt": 1,
+            "status": "failed",
+            "failure_category": "invalid_output",
+            "result_validation_category": "review_contract",
+            "evidence_ids": [],
+        }
+    ]
+
+
+def test_executed_action_claim_requires_valid_done_human_state():
+    record, accepted = _accepted_diagnostic_result()
+    record.report = SimpleNamespace(
+        markdown=(
+            "## 混合 RCA 裁决\n\nService was restarted successfully."
+            "\n\n## 建议动作"
+        )
+    )
+
+    row = acceptance._build_run(
+        record,
+        accepted,
+        "deployment_regression",
+        1,
+        CauseType.DEPLOYMENT_REGRESSION,
+        False,
+        LiveConfig("gpt-test", 1.0, 2.0),
+        1,
+    )
+
+    assert row.user_visible_executed_action_claim
+    assert not row.executed_action_claim_valid
+
+
+def test_executed_action_claim_accepts_human_recorded_done_state():
+    record, accepted = _accepted_diagnostic_result()
+    record.report = SimpleNamespace(
+        markdown=(
+            "## 混合 RCA 裁决\n\nService was restarted successfully."
+            "\n\n## 建议动作"
+        )
+    )
+    record.actions = [
+        RecommendedAction(
+            action_type=ActionType.RESTART_SUGGESTION,
+            title="Restart after human approval",
+            description="Human-recorded state only",
+            risk_level=ActionRiskLevel.HIGH,
+            requires_approval=True,
+            supporting_evidence_ids=["ev-log"],
+            status=ActionStatus.DONE,
+            note="approved by incident commander",
+        )
+    ]
+
+    row = acceptance._build_run(
+        record,
+        accepted,
+        "deployment_regression",
+        1,
+        CauseType.DEPLOYMENT_REGRESSION,
+        False,
+        LiveConfig("gpt-test", 1.0, 2.0),
+        1,
+    )
+
+    assert row.user_visible_executed_action_claim
+    assert row.executed_action_claim_valid
+
+
+def test_new_contract_thresholds_fail_independently():
+    agreement_rows = _passing_results()
+    agreement_rows[0] = replace(
+        agreement_rows[0], agreement_contract_valid=False
+    )
+    action_rows = _passing_results()
+    action_rows[0] = replace(
+        action_rows[0], executed_action_claim_valid=False
+    )
+
+    agreement = evaluate_results(agreement_rows)
+    action = evaluate_results(action_rows)
+
+    assert not agreement.thresholds["agreement_contract_validity"].passed
+    assert all(
+        detail.passed
+        for name, detail in agreement.thresholds.items()
+        if name != "agreement_contract_validity"
+    )
+    assert not action.thresholds["executed_action_claim_validity"].passed
+    assert all(
+        detail.passed
+        for name, detail in action.thresholds.items()
+        if name != "executed_action_claim_validity"
+    )
 
 
 def test_diagnostic_projection_rejects_dangling_references():
@@ -782,7 +1177,7 @@ def test_diagnostic_projection_classifies_fallback_reason_without_free_text():
         1,
     )
 
-    assert row.fallback_reason == "unknown failed"
+    assert row.fallback_reason == "unknown"
 
 
 @pytest.mark.parametrize(
@@ -832,12 +1227,18 @@ def test_artifact_is_json_serializable_and_contains_no_credential_value(tmp_path
     content = path.read_text(encoding="utf-8")
     payload = json.loads(content)
 
-    assert path.name.startswith("v7-live-acceptance-")
-    assert payload["schema_version"] == 2
-    assert payload["mode"] == "reliability_gate"
-    assert payload["cohorts"] == {"clean": 12, "adversarial": 3}
-    assert payload["evaluation"]["passed"] is True
-    assert len(payload["results"]) == 15
+    assert path.name == "result.json"
+    assert path.parent.name.startswith("v8-1-live-")
+    assert payload["schema_version"] == 3
+    assert payload["mode"] == "live"
+    assert payload["provider"] == "openai"
+    assert payload["model"] == "test-model"
+    assert payload["aggregate"]["cohorts"] == {
+        "clean": 12,
+        "adversarial": 3,
+    }
+    assert payload["aggregate"]["passed"] is True
+    assert len(payload["case_results"]) == 15
     assert secret not in content
 
 
@@ -853,10 +1254,43 @@ def test_diagnostic_artifact_has_actual_cohorts_and_null_evaluation(tmp_path):
     )
     payload = json.loads(path.read_text(encoding="utf-8"))
 
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
     assert payload["mode"] == "diagnostic"
-    assert payload["cohorts"] == {"clean": 5, "adversarial": 0}
-    assert payload["evaluation"] is None
+    assert payload["aggregate"]["cohorts"] == {
+        "clean": 5,
+        "adversarial": 0,
+    }
+    assert payload["aggregate"]["passed"] is None
+    assert payload["aggregate"]["diagnostic_only"] is True
+
+
+def test_artifact_preserves_deepseek_provider_and_model_per_row(tmp_path):
+    rows = [
+        replace(row, provider="deepseek", model="deepseek-v4-pro")
+        for row in _passing_results()
+        if row.repetition == 1
+    ]
+
+    path = write_artifact(
+        tmp_path,
+        LiveConfig(
+            "deepseek-v4-pro",
+            0.435,
+            0.87,
+            provider=ModelProvider.DEEPSEEK,
+        ),
+        rows,
+        None,
+        mode="diagnostic",
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+
+    assert payload["provider"] == "deepseek"
+    assert payload["model"] == "deepseek-v4-pro"
+    assert all(row["provider"] == "deepseek" for row in payload["case_results"])
+    assert all(
+        row["model"] == "deepseek-v4-pro" for row in payload["case_results"]
+    )
 
 
 def test_artifact_uses_distinct_paths_when_generated_at_the_same_time(
@@ -880,13 +1314,13 @@ def test_artifact_uses_distinct_paths_when_generated_at_the_same_time(
 
     assert first != second
     assert first.exists() and second.exists()
-    assert "123456" in first.name
+    assert "123456" in first.parent.name
 
 
 def test_live_artifacts_are_gitignored():
-    assert "/artifacts/v7-live-acceptance-*.json" in open(
-        ".gitignore", encoding="utf-8"
-    ).read().splitlines()
+    ignored = open(".gitignore", encoding="utf-8").read().splitlines()
+    assert "/artifacts/v7-live-acceptance-*.json" in ignored
+    assert "/output/reliability/" in ignored
 
 
 def test_main_returns_nonzero_for_failed_gate_without_printing_credentials(
@@ -919,7 +1353,7 @@ def test_main_returns_nonzero_for_failed_gate_without_printing_credentials(
     assert acceptance.main([]) == 1
     output = capsys.readouterr().out
     assert captured["runs_per_case"] == 3
-    assert captured["mode"] == "reliability_gate"
+    assert captured["mode"] == "live"
     assert captured["evaluation"] is not None
     assert "FAIL" in output
     assert secret not in output
@@ -965,11 +1399,62 @@ def test_main_diagnostic_mode_skips_gate_evaluation(monkeypatch, capsys):
     assert "PASS" not in output
 
 
+def test_main_deterministic_mode_does_not_load_credentials(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        acceptance,
+        "load_live_config",
+        lambda: pytest.fail("deterministic mode must not load live credentials"),
+    )
+    monkeypatch.setattr(
+        acceptance,
+        "run_live_cohort",
+        lambda config, *, runtime, runs_per_case: captured.update(
+            config=config,
+            runtime=runtime,
+            runs_per_case=runs_per_case,
+        )
+        or _passing_results(),
+    )
+    monkeypatch.setattr(
+        acceptance,
+        "write_artifact",
+        lambda *args, **kwargs: Path("output/reliability/deterministic/result.json"),
+    )
+
+    assert acceptance.main(["--mode", "deterministic"]) == 0
+    assert captured["config"].provider == "substitute"
+    assert captured["config"].model == "fault-injector-v1"
+    assert captured["runtime"] is not None
+    assert captured["runs_per_case"] == 3
+
+
 def test_readme_documents_disabled_live_gate_without_credential_values():
     readme = Path("README.md").read_text(encoding="utf-8")
+    prose = " ".join(readme.split())
 
-    assert "python -m backend.services.v7_live_acceptance" in readme
+    assert (
+        "python -m backend.services.v7_live_acceptance --mode deterministic"
+        in readme
+    )
+    assert (
+        "python -m backend.services.v7_live_acceptance --mode live "
+        "--runs-per-case 1" in readme
+    )
+    assert "python -m backend.services.v7_live_acceptance --mode live" in readme
     assert all(name in readme for name in acceptance.REQUIRED_ENV)
-    assert "artifacts/v7-live-acceptance-<UTC timestamp>.json" in readme
-    assert "12 clean" in readme and "3 adversarial" in readme
-    assert "never" in readme.lower() and "chat" in readme.lower()
+    assert "schema-v3" in readme
+    assert "output/reliability/<run_id>/result.json" in readme
+    assert "output/reliability/<run_id>/summary.md" in readme
+    assert "12 clean runs" in prose and "3 adversarial safety probes" in prose
+    assert "never" in prose.lower() and "chat" in prose.lower()
+    assert "does not read live credentials" in prose
+    assert "does not claim PASS" in prose
+    assert "Base URL" in readme
+    assert "raw response" in readme
+    assert "reasoning" in readme
+    assert "read-only" in readme
+    assert "five seconds shorter" in prose
+    assert "automatic retries are disabled" in prose
+    assert "frozen validation" in prose
+    assert "unknown" in prose

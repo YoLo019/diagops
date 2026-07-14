@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 
+from backend.diagnosis.evidence_validation import validate_agent_semantics
 from backend.domain.agent_findings import (
     AgentFinding,
     AgentFindingType,
@@ -14,7 +15,9 @@ from backend.domain.hypotheses import CauseType, Hypothesis
 from backend.domain.multi_agent import (
     AgentExecutionLayer,
     CoordinationDecisionStatus,
+    ModelProvider,
     MultiAgentRunStatus,
+    StabilizationCategory,
 )
 
 LOW_CONFIDENCE = 0.5
@@ -88,20 +91,9 @@ def decide_hybrid_status(
     if run_status != MultiAgentRunStatus.COMPLETED:
         return CoordinationDecisionStatus.FALLBACK
     if _valid_baseline(baseline):
-        corroborating_causes = {
-            finding.related_cause_type
-            for finding in active
-            if finding.finding_type
-            in {AgentFindingType.ROOT_CAUSE, AgentFindingType.SIGNAL}
-            and finding.related_cause_type not in {None, CauseType.UNKNOWN}
-            and finding.confidence >= LOW_CONFIDENCE
-            and finding.evidence_ids
-        }
-        if contradicted or any(
-            cause != baseline.cause_type for cause in corroborating_causes
-        ):
+        if contradicted or any(cause != baseline.cause_type for cause in causes):
             return CoordinationDecisionStatus.CONFLICT
-        if baseline.cause_type in corroborating_causes:
+        if baseline.cause_type in causes:
             return CoordinationDecisionStatus.AGREEMENT
         return CoordinationDecisionStatus.FALLBACK
     if len(causes) > 1 or contradicted:
@@ -119,6 +111,11 @@ def build_hybrid_coordination_review(
     run_status: MultiAgentRunStatus,
     summary: str,
     uncertainty: str,
+    *,
+    model_provider: ModelProvider,
+    model_name: str | None,
+    primary_stabilization_category: StabilizationCategory | None = None,
+    secondary_stabilization_categories: list[StabilizationCategory] | None = None,
 ) -> CoordinationReview:
     """Validate references, build candidates, and assign status in code."""
     for finding in findings:
@@ -126,6 +123,8 @@ def build_hybrid_coordination_review(
             raise ValueError("Finding investigation does not match review investigation")
     _validate_references(findings, evidence, hypotheses)
     active = _active_sdk_findings(findings)
+    candidates = _build_candidates(active, hypotheses)
+    validate_agent_semantics(evidence, active, candidates)
 
     baseline = hypotheses[0] if hypotheses else None
     decision_status = (
@@ -142,7 +141,6 @@ def build_hybrid_coordination_review(
     else:
         selected_cause_type = baseline.cause_type if baseline is not None else None
 
-    candidates = _build_candidates(active, hypotheses)
     by_cause = {candidate.cause_type: candidate for candidate in candidates}
     contradicted_causes = {
         finding.related_cause_type
@@ -187,6 +185,7 @@ def build_hybrid_coordination_review(
     for rank, candidate in enumerate(candidates, start=1):
         candidate.rank = rank
         candidate.summary = f"{candidate.cause_type} is candidate #{rank}."
+    validate_agent_semantics(evidence, active, candidates)
 
     return CoordinationReview(
         investigation_id=investigation_id,
@@ -196,6 +195,10 @@ def build_hybrid_coordination_review(
         decision_status=decision_status,
         baseline_cause_type=baseline.cause_type if baseline is not None else None,
         selected_cause_type=selected_cause_type,
+        model_provider=model_provider,
+        model_name=model_name,
+        primary_stabilization_category=primary_stabilization_category,
+        secondary_stabilization_categories=secondary_stabilization_categories or [],
         summary=summary,
         uncertainty=uncertainty,
     )
@@ -266,6 +269,7 @@ def _active_conclusions(
             finding.finding_type != AgentFindingType.ROOT_CAUSE
             or finding.related_cause_type in {None, CauseType.UNKNOWN}
             or finding.confidence < LOW_CONFIDENCE
+            or not finding.evidence_ids
         ):
             continue
         previous = conclusions.get(finding.agent_name)
@@ -300,7 +304,10 @@ def _build_candidates(
     contradictions: dict[CauseType, list[AgentFinding]] = defaultdict(list)
     for finding in findings:
         cause_type = finding.related_cause_type
-        if cause_type is None or finding.finding_type == AgentFindingType.GAP:
+        if cause_type is None or finding.finding_type in {
+            AgentFindingType.GAP,
+            AgentFindingType.SIGNAL,
+        }:
             continue
         target = (
             contradictions

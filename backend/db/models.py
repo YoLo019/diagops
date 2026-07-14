@@ -12,6 +12,7 @@ from backend.domain.hypotheses import Hypothesis
 from backend.domain.llm_analysis import LLMAnalysis
 from backend.domain.reports import IncidentReport
 from backend.providers.results import ProviderResult
+from backend.safety.redaction import redact_text
 
 
 class InvestigationStatus(StrEnum):
@@ -38,3 +39,33 @@ class InvestigationRecord(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     completed_at: datetime | None = None
+
+
+class InvestigationSummary(BaseModel):
+    id: str
+    status: str
+    service: str
+    title: str
+    top_cause_type: str
+    confidence: float
+    action_count: int = 0
+    verification_count: int = 0
+    failure_reason: str | None = None
+
+    @classmethod
+    def from_record(cls, record: InvestigationRecord) -> "InvestigationSummary":
+        """从完整调查记录生成不含详情集合的安全列表投影。"""
+        top = record.hypotheses[0] if record.hypotheses else None
+        return cls(
+            id=record.id,
+            status=record.status.value,
+            service=redact_text(record.event.service),
+            title=redact_text(record.event.title),
+            top_cause_type=top.cause_type.value if top else "unknown",
+            confidence=top.confidence if top else 0.0,
+            action_count=len(record.actions),
+            verification_count=len(record.verification_suggestions),
+            failure_reason=(
+                redact_text(record.failure_reason) if record.failure_reason else None
+            ),
+        )

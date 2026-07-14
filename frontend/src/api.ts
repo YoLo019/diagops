@@ -13,6 +13,55 @@ export type VerificationStatus = "pending" | "passed" | "failed" | "skipped";
 export type AgentExecutionLayer = "custom" | "openai_agents_sdk";
 export type CoordinationDecisionStatus = "agreement" | "conflict" | "agent_leads" | "fallback";
 export type MultiAgentRunStatus = "completed" | "partial" | "failed" | "skipped";
+export type ModelProvider = "openai" | "deepseek";
+export type ResultValidationCategory =
+  | "task_contract"
+  | "execution_contract"
+  | "finding_contract"
+  | "finding_revision_contract"
+  | "review_attribution"
+  | "review_contract"
+  | "semantic_reference"
+  | "run_status_contract";
+export type ExecutionStepKind =
+  | "initial_coordination"
+  | "specialist_collection"
+  | "specialist_recollection"
+  | "final_synthesis"
+  | "reference_validation"
+  | "hybrid_arbitration"
+  | "review_persistence"
+  | "result_validation";
+export type FailureCategory =
+  | "none"
+  | "not_configured"
+  | "authentication"
+  | "rate_limit"
+  | "quota"
+  | "timeout"
+  | "cancelled"
+  | "transport"
+  | "invalid_output"
+  | "invalid_reference"
+  | "missing_specialist"
+  | "unsafe_output"
+  | "persistence"
+  | "unknown";
+export type StabilizationCategory =
+  | "reference_validation"
+  | "unsafe_output"
+  | "cancelled_or_timeout"
+  | "provider_or_sdk_transport"
+  | "coordinator_output_contract"
+  | "specialist_output_contract"
+  | "evidence_cause_mapping"
+  | "genuine_conflict"
+  | "missing_specialist"
+  | "final_synthesis"
+  | "review_persistence"
+  | "hybrid_contract"
+  | "result_validation"
+  | "unknown";
 
 export type IncidentEvent = {
   source: string;
@@ -65,6 +114,9 @@ export type VerificationSuggestion = {
   expected_signal: string;
   status: VerificationStatus;
   result_note?: string | null;
+  result_evidence_ids: string[];
+  related_action_ids: string[];
+  related_cause_types: string[];
 };
 
 export type IncidentReport = {
@@ -141,6 +193,12 @@ export type AgentExecution = {
   status: string;
   execution_layer?: AgentExecutionLayer;
   analysis_round?: 1 | 2 | null;
+  step_kind?: ExecutionStepKind | null;
+  attempt?: number;
+  failure_category?: FailureCategory;
+  result_validation_category?: ResultValidationCategory | null;
+  model_provider?: ModelProvider | null;
+  model_name?: string | null;
   tool_call_ids: string[];
   evidence_ids: string[];
   summary?: string | null;
@@ -243,12 +301,27 @@ export type CoordinationReview = {
   selected_cause_type?: string | null;
   summary?: string;
   uncertainty?: string;
+  model_provider?: ModelProvider | null;
+  model_name?: string | null;
+  primary_stabilization_category?: StabilizationCategory | null;
+  secondary_stabilization_categories?: StabilizationCategory[];
   created_at: string;
 };
 
 export type MultiAgentRunSummary = {
   status: MultiAgentRunStatus;
   failure_reason?: string | null;
+  model_provider?: ModelProvider | null;
+  model_name?: string | null;
+  primary_stabilization_category?: StabilizationCategory | null;
+  secondary_stabilization_categories?: StabilizationCategory[];
+};
+
+export type AgentConfig = {
+  provider: ModelProvider;
+  model?: string | null;
+  implementation_status: "implemented" | "unsupported";
+  certification_status: "certified" | "failed" | "not_run";
 };
 
 export type RcaWorkbench = {
@@ -259,6 +332,7 @@ export type RcaWorkbench = {
   coordination_review?: CoordinationReview | null;
   agent_executions?: AgentExecution[];
   multi_agent_run?: MultiAgentRunSummary | null;
+  agent_config?: AgentConfig | null;
   graph_seed: {
     nodes: Array<{
       id: string;
@@ -271,30 +345,6 @@ export type RcaWorkbench = {
       target: string;
     }>;
   };
-};
-
-export type ReActTraceStep = {
-  step_number: number;
-  assistant_text?: string | null;
-  tool_name?: string | null;
-  tool_input: Record<string, unknown>;
-  tool_call_id?: string | null;
-  observation?: string | null;
-  output_evidence_ids: string[];
-  status: string;
-  error_message?: string | null;
-  started_at: string;
-  completed_at?: string | null;
-};
-
-export type ReActTrace = {
-  id: string;
-  investigation_id: string;
-  status: string;
-  final_answer?: string | null;
-  steps: ReActTraceStep[];
-  created_at: string;
-  completed_at?: string | null;
 };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -312,7 +362,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       const body = (await response.json()) as { detail?: string };
       detail = body.detail ?? detail;
     } catch {
-      // Keep the HTTP status text when the body is not JSON.
+      // 响应体不是 JSON 时保留 HTTP 状态文本。
     }
     throw new Error(detail);
   }
@@ -321,7 +371,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export function listInvestigations() {
-  return request<InvestigationRecord[]>("/investigations");
+  return request<InvestigationSummary[]>("/investigations/summaries");
 }
 
 export function getInvestigation(id: string) {
@@ -368,8 +418,8 @@ export function getRcaWorkbench(id: string) {
   return request<RcaWorkbench>(`/investigations/${id}/rca-workbench`);
 }
 
-export function getReActTrace(id: string) {
-  return request<ReActTrace | null>(`/investigations/${id}/react-trace`);
+export function getAgentConfig() {
+  return request<AgentConfig>("/config/agents");
 }
 
 export function createManualInvestigation(payload: ManualInvestigationPayload) {
@@ -396,12 +446,21 @@ export function updateVerificationStatus(
   verificationId: string,
   status: VerificationStatus,
   resultNote: string,
+  resultEvidenceIds: string[],
+  relatedActionIds: string[],
+  relatedCauseTypes: string[],
 ) {
   return request<VerificationSuggestion>(
     `/investigations/${investigationId}/verifications/${verificationId}`,
     {
       method: "PATCH",
-      body: JSON.stringify({ status, result_note: resultNote || null }),
+      body: JSON.stringify({
+        status,
+        result_note: resultNote || null,
+        result_evidence_ids: resultEvidenceIds,
+        related_action_ids: relatedActionIds,
+        related_cause_types: relatedCauseTypes,
+      }),
     },
   );
 }

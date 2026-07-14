@@ -2,7 +2,7 @@ import logging
 from time import perf_counter
 
 from backend.config.settings import AppSettings
-from backend.domain.events import IncidentEvent
+from backend.domain.events import IncidentEvent, IncidentSource
 from backend.domain.evidence import EvidenceItem, EvidenceProvider
 from backend.providers.base import EvidenceProviderProtocol
 from backend.providers.file_deployments import FileDeploymentProvider
@@ -16,26 +16,37 @@ from backend.providers.mock_related_alerts import MockRelatedAlertProvider
 from backend.providers.mock_service_catalog import MockServiceCatalogProvider
 from backend.providers.prometheus import PrometheusProvider
 from backend.providers.results import ProviderResult, ProviderStatus
+from backend.safety.redaction import redact_model, safe_failure
 
 logger = logging.getLogger(__name__)
 
 
 class ProviderRegistry:
-    def __init__(self, providers: list[EvidenceProviderProtocol]) -> None:
+    def __init__(
+        self,
+        providers: list[EvidenceProviderProtocol],
+        simulation_providers: list[EvidenceProviderProtocol] | None = None,
+    ) -> None:
         self.providers = providers
+        self.simulation_providers = simulation_providers or []
+
+    def _providers_for(self, event: IncidentEvent) -> list[EvidenceProviderProtocol]:
+        if event.source == IncidentSource.SIMULATED:
+            return [*self.providers, *self.simulation_providers]
+        return list(self.providers)
 
     def collect_results(self, event: IncidentEvent) -> list[ProviderResult]:
         results: list[ProviderResult] = []
-        for provider in self.providers:
+        for provider in self._providers_for(event):
             started = perf_counter()
             try:
-                result = provider.collect(event)
-            except Exception as exc:
+                result = redact_model(provider.collect(event))
+            except Exception:
                 provider_name = getattr(provider, "provider", EvidenceProvider.LOG)
                 result = ProviderResult(
                     provider=provider_name,
                     status=ProviderStatus.FAILED,
-                    error_message=str(exc),
+                    error_message=safe_failure("provider_failure"),
                     duration_ms=int((perf_counter() - started) * 1000),
                 )
             logger.info(
@@ -46,13 +57,27 @@ class ProviderRegistry:
                 len(result.evidence_items),
             )
             results.append(result)
+        configured = {result.provider for result in results}
+        results.extend(
+            ProviderResult(
+                provider=provider,
+                status=ProviderStatus.SKIPPED,
+                error_message=f"{provider.value} provider not configured",
+            )
+            for provider in EvidenceProvider
+            if provider not in configured
+        )
         return results
 
     def evidence_from_results(self, results: list[ProviderResult]) -> list[EvidenceItem]:
         evidence: list[EvidenceItem] = []
         for result in results:
             evidence.extend(result.evidence_items)
-            if result.status in {ProviderStatus.FAILED, ProviderStatus.PARTIAL}:
+            if result.status in {
+                ProviderStatus.FAILED,
+                ProviderStatus.PARTIAL,
+                ProviderStatus.SKIPPED,
+            }:
                 evidence.append(result.to_error_evidence())
         return sorted(evidence, key=lambda item: item.timestamp)
 
@@ -62,7 +87,8 @@ class ProviderRegistry:
 
 def build_mock_provider_registry() -> ProviderRegistry:
     return ProviderRegistry(
-        providers=[
+        providers=[],
+        simulation_providers=[
             MockLogProvider(),
             MockMetricProvider(),
             MockDeployProvider(),
@@ -75,9 +101,10 @@ def build_mock_provider_registry() -> ProviderRegistry:
 
 def build_provider_registry_from_settings(settings: AppSettings) -> ProviderRegistry:
     providers: list[EvidenceProviderProtocol] = []
+    simulation_providers: list[EvidenceProviderProtocol] = []
 
     if settings.providers.mock.enabled:
-        providers.extend(
+        simulation_providers.extend(
             [
                 MockLogProvider(),
                 MockMetricProvider(),
@@ -100,4 +127,7 @@ def build_provider_registry_from_settings(settings: AppSettings) -> ProviderRegi
     if settings.providers.prometheus.enabled:
         providers.append(PrometheusProvider(settings.providers.prometheus.base_url))
 
-    return ProviderRegistry(providers=providers)
+    return ProviderRegistry(
+        providers=providers,
+        simulation_providers=simulation_providers,
+    )

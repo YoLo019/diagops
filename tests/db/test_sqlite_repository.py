@@ -1,9 +1,10 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import inspect, select
+import pytest
+from sqlalchemy import inspect, select, update
 
 from backend.db.models import InvestigationRecord, InvestigationStatus
-from backend.db.schema import schema_version
+from backend.db.schema import evidence_items, llm_analyses, schema_version
 from backend.db.session import create_db_engine, initialize_database
 from backend.db.sqlite_repository import SQLiteInvestigationRepository
 from backend.diagnosis.action_planner import ActionPlanner
@@ -91,16 +92,6 @@ def completed_record() -> InvestigationRecord:
         ],
         hypotheses=hypotheses,
         report=report,
-        llm_analysis=LLMAnalysis.create(
-            investigation_id="inv-sqlite",
-            existing_evidence_ids={evidence[0].id},
-            summary="Read-only analysis found deployment evidence gaps.",
-            missing_evidence=["Add logs from the incident window."],
-            risk_notes=["Avoid irreversible actions until logs are reviewed."],
-            suggested_questions=["Did errors start after the deployment?"],
-            referenced_evidence_ids=[evidence[0].id],
-            created_at=datetime(2026, 7, 3, 10, 4, tzinfo=UTC),
-        ),
         actions=actions,
         verification_suggestions=verifications,
         created_at=datetime(2026, 7, 3, 10, 0, tzinfo=UTC),
@@ -118,7 +109,78 @@ def test_schema_initialization_creates_schema_version(tmp_path):
         version = connection.execute(select(schema_version.c.version)).scalar_one()
 
     assert "schema_version" in tables
-    assert version == 4
+    assert version == 5
+
+
+def test_aggregate_save_updates_parent_in_place_and_preserves_legacy_rows(tmp_path):
+    repository, engine = build_repository(tmp_path)
+    record = completed_record()
+    repository.save(record)
+    analysis = LLMAnalysis.create(
+        investigation_id=record.id,
+        existing_evidence_ids={record.evidence[0].id},
+        summary="Historical analysis.",
+        referenced_evidence_ids=[record.evidence[0].id],
+    )
+    with engine.begin() as connection:
+        connection.execute(
+            llm_analyses.insert().values(
+                investigation_id=record.id,
+                payload=analysis.model_dump(mode="json"),
+            )
+        )
+    with engine.connect() as connection:
+        before_rowid = connection.exec_driver_sql(
+            "SELECT rowid FROM investigations WHERE id = ?", (record.id,)
+        ).scalar_one()
+        before_llm = connection.execute(
+            select(llm_analyses.c.payload).where(
+                llm_analyses.c.investigation_id == record.id
+            )
+        ).scalar_one()
+
+    record.event = record.event.model_copy(update={"title": "updated title"})
+    repository.save(record)
+
+    with engine.connect() as connection:
+        after_rowid = connection.exec_driver_sql(
+            "SELECT rowid FROM investigations WHERE id = ?", (record.id,)
+        ).scalar_one()
+        after_llm = connection.execute(
+            select(llm_analyses.c.payload).where(
+                llm_analyses.c.investigation_id == record.id
+            )
+        ).scalar_one()
+    assert after_rowid == before_rowid
+    assert after_llm == before_llm
+
+
+def test_aggregate_save_rolls_back_parent_and_children_on_replacement_failure(
+    tmp_path, monkeypatch
+):
+    repository, _engine = build_repository(tmp_path)
+    original = completed_record()
+    repository.save(original)
+    expected = repository.get(original.id)
+    replacement = expected.model_copy(deep=True)
+    replacement.event.title = "must roll back"
+    replacement.evidence[0].summary = "must roll back child"
+    original_replace = repository._replace_children
+    calls = 0
+
+    def fail_midway(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        original_replace(*args, **kwargs)
+        if calls == 2:
+            raise RuntimeError("injected child failure")
+
+    monkeypatch.setattr(repository, "_replace_children", fail_midway)
+
+    with pytest.raises(RuntimeError, match="injected child failure"):
+        repository.save(replacement)
+
+    assert repository.get(original.id) == expected
 
 
 def test_save_get_list_round_trips_completed_investigation(tmp_path):
@@ -130,6 +192,40 @@ def test_save_get_list_round_trips_completed_investigation(tmp_path):
     stored = repository.get(record.id)
     assert stored == record
     assert repository.list() == [record]
+
+
+def test_summary_query_is_newest_first_and_does_not_load_detail_payloads(tmp_path):
+    repository, engine = build_repository(tmp_path)
+    older = completed_record()
+    newer_time = datetime(2026, 7, 3, 11, 0, tzinfo=UTC)
+    newer = InvestigationRecord(
+        id="inv-newer",
+        event=older.event,
+        status=InvestigationStatus.COMPLETED,
+        hypotheses=[older.hypotheses[0].model_copy(update={"id": "hyp-newer"})],
+        actions=[older.actions[0].model_copy(update={"id": "act-newer"})],
+        verification_suggestions=[
+            older.verification_suggestions[0].model_copy(update={"id": "ver-newer"})
+        ],
+        created_at=newer_time,
+        updated_at=newer_time,
+        completed_at=newer_time,
+    )
+    repository.save(older)
+    repository.save(newer)
+    with engine.begin() as connection:
+        connection.execute(
+            update(evidence_items)
+            .where(evidence_items.c.investigation_id == older.id)
+            .values(payload={"invalid": "historical detail"})
+        )
+
+    summaries = repository.list_summaries()
+
+    assert [summary.id for summary in summaries] == [newer.id, older.id]
+    assert summaries[0].top_cause_type == CauseType.DEPLOYMENT_REGRESSION
+    assert summaries[0].action_count == len(newer.actions)
+    assert summaries[0].verification_count == len(newer.verification_suggestions)
 
 
 def test_round_trips_provider_and_specialist_results(tmp_path):
@@ -144,14 +240,54 @@ def test_round_trips_provider_and_specialist_results(tmp_path):
     assert stored.provider_results[0].evidence_items == record.evidence
 
 
-def test_round_trips_llm_analysis(tmp_path):
-    repository, _engine = build_repository(tmp_path)
+def test_aggregate_save_does_not_write_new_llm_analysis(tmp_path):
+    repository, engine = build_repository(tmp_path)
     record = completed_record()
+    record.llm_analysis = LLMAnalysis.create(
+        investigation_id=record.id,
+        existing_evidence_ids={record.evidence[0].id},
+        summary="Retired writer must be ignored.",
+        referenced_evidence_ids=[record.evidence[0].id],
+    )
 
     repository.save(record)
 
-    stored = repository.get(record.id)
-    assert stored.llm_analysis == record.llm_analysis
+    with engine.connect() as connection:
+        stored = connection.execute(
+            select(llm_analyses).where(
+                llm_analyses.c.investigation_id == record.id
+            )
+        ).one_or_none()
+    assert stored is None
+
+
+def test_new_repository_reads_directly_inserted_historical_llm_analysis(tmp_path):
+    database_url = sqlite_url(tmp_path)
+    engine = create_db_engine(database_url)
+    initialize_database(engine)
+    repository = SQLiteInvestigationRepository(engine)
+    record = completed_record()
+    repository.save(record)
+    analysis = LLMAnalysis.create(
+        investigation_id=record.id,
+        existing_evidence_ids={record.evidence[0].id},
+        summary="Historical analysis.",
+        referenced_evidence_ids=[record.evidence[0].id],
+    )
+    with engine.begin() as connection:
+        connection.execute(
+            llm_analyses.insert().values(
+                investigation_id=record.id,
+                payload=analysis.model_dump(mode="json"),
+            )
+        )
+    engine.dispose()
+
+    restarted_engine = create_db_engine(database_url)
+    initialize_database(restarted_engine)
+    restarted = SQLiteInvestigationRepository(restarted_engine)
+
+    assert restarted.get(record.id).llm_analysis == analysis
 
 
 def test_failed_provider_results_are_persisted(tmp_path):
@@ -230,11 +366,15 @@ def test_update_verification_status_persists_status_and_result_note(tmp_path):
         record.verification_suggestions[0].id,
         status=VerificationStatus.PASSED,
         result_note="5xx recovered",
+        result_evidence_ids=[record.evidence[0].id],
+        related_action_ids=[record.actions[0].id],
     )
 
     stored = repository.get(record.id)
     assert updated.status == VerificationStatus.PASSED
     assert updated.result_note == "5xx recovered"
+    assert updated.result_evidence_ids == [record.evidence[0].id]
+    assert updated.related_action_ids == [record.actions[0].id]
     assert stored.verification_suggestions[0].status == VerificationStatus.PASSED
     assert stored.verification_suggestions[0].result_note == "5xx recovered"
 

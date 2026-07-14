@@ -1,7 +1,11 @@
 import logging
+from datetime import UTC, datetime
 
+from backend.domain.events import IncidentEvent, IncidentSource, Severity
 from backend.domain.evidence import EvidenceKind, EvidenceProvider, EvidenceStatus
 from backend.providers.registry import ProviderRegistry, build_mock_provider_registry
+from backend.providers.results import ProviderResult, ProviderStatus
+from backend.rca.analyzer import RcaAnalyzer
 from backend.services.incident_cases import load_incident_case
 
 
@@ -55,10 +59,11 @@ def test_registry_converts_provider_failure_to_error_evidence():
 
     evidence = registry.collect_all(event)
 
-    assert len(evidence) == 1
-    assert evidence[0].kind == EvidenceKind.PROVIDER_ERROR
-    assert evidence[0].status == EvidenceStatus.FAILED
-    assert evidence[0].error_message == "provider exploded"
+    failed = next(item for item in evidence if item.provider == EvidenceProvider.LOG)
+    assert failed.kind == EvidenceKind.PROVIDER_ERROR
+    assert failed.status == EvidenceStatus.FAILED
+    assert failed.error_message == "provider collection failed"
+    assert sum(item.status == EvidenceStatus.SKIPPED for item in evidence) == 5
 
 
 def test_provider_registry_logs_provider_status(caplog):
@@ -74,3 +79,35 @@ def test_provider_registry_logs_provider_status(caplog):
     assert "status=success" in messages
     assert "duration_ms" in messages
     assert "evidence_count=" in messages
+
+
+def test_simulation_provider_is_not_called_for_manual_event() -> None:
+    class RecordingProvider:
+        provider = EvidenceProvider.LOG
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def collect(self, event: IncidentEvent) -> ProviderResult:
+            self.calls += 1
+            return ProviderResult(provider=self.provider)
+
+    recording = RecordingProvider()
+    registry = ProviderRegistry(providers=[], simulation_providers=[recording])
+    event = IncidentEvent(
+        source=IncidentSource.MANUAL,
+        service="checkout-service",
+        environment="prod",
+        severity=Severity.WARNING,
+        title="manual incident",
+        description="no configured real provider",
+        started_at=datetime(2026, 7, 13, tzinfo=UTC),
+    )
+
+    results = registry.collect_results(event)
+
+    assert recording.calls == 0
+    assert {result.provider for result in results} == set(EvidenceProvider)
+    assert all(result.status == ProviderStatus.SKIPPED for result in results)
+    hypotheses = RcaAnalyzer().analyze(event, registry.evidence_from_results(results))
+    assert hypotheses[0].cause_type == "unknown"

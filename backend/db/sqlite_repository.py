@@ -4,10 +4,15 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import delete, insert, select
+from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.engine import Engine
 
-from backend.db.models import InvestigationRecord, InvestigationStatus
+from backend.db.models import (
+    InvestigationRecord,
+    InvestigationStatus,
+    InvestigationSummary,
+)
+from backend.db.repositories import _validate_multi_agent_result
 from backend.db.schema import (
     agent_executions,
     agent_findings,
@@ -34,9 +39,16 @@ from backend.domain.actions import ActionStatus, VerificationStatus
 from backend.domain.agent_context import ContextFact
 from backend.domain.agent_findings import AgentFinding, CoordinationReview
 from backend.domain.agent_plan import AgentExecution, DiagnosisPlan, DiagnosisTask
+from backend.domain.human_transitions import (
+    validate_action_transition,
+    validate_verification_transition,
+)
+from backend.domain.hypotheses import CauseType
 from backend.domain.memory import MemoryItem
+from backend.domain.multi_agent import AgentExecutionLayer
 from backend.domain.react_trace import ReActTrace
 from backend.domain.tool_calls import ToolCallRecord
+from backend.safety.redaction import redact_text
 
 
 class SQLiteInvestigationRepository:
@@ -46,9 +58,25 @@ class SQLiteInvestigationRepository:
     def save(self, record: InvestigationRecord) -> InvestigationRecord:
         rows = record_to_rows(record)
         with self.engine.begin() as connection:
-            self._delete_record_rows(connection, record.id)
+            exists = connection.execute(
+                select(investigations.c.id).where(investigations.c.id == record.id)
+            ).scalar_one_or_none()
+            if exists is None:
+                connection.execute(insert(investigations).values(rows["investigation"]))
+            else:
+                connection.execute(
+                    update(investigations)
+                    .where(investigations.c.id == record.id)
+                    .values(
+                        **{
+                            key: value
+                            for key, value in rows["investigation"].items()
+                            if key != "id"
+                        }
+                    )
+                )
             connection.execute(
-                insert(investigations).values(rows["investigation"])
+                delete(events).where(events.c.investigation_id == record.id)
             )
             connection.execute(
                 insert(events).values(investigation_id=record.id, payload=rows["events"][0])
@@ -75,6 +103,9 @@ class SQLiteInvestigationRepository:
             self._replace_children(
                 connection, specialist_results, record.id, rows["specialist_results"]
             )
+            connection.execute(
+                delete(reports).where(reports.c.investigation_id == record.id)
+            )
             if rows["report"] is not None:
                 connection.execute(
                     insert(reports).values(
@@ -82,41 +113,11 @@ class SQLiteInvestigationRepository:
                         payload=rows["report"],
                     )
                 )
-            if rows["llm_analysis"] is not None:
-                connection.execute(insert(llm_analyses).values(rows["llm_analysis"]))
         return record
 
     def get(self, investigation_id: str) -> InvestigationRecord:
         with self.engine.connect() as connection:
-            investigation = connection.execute(
-                select(investigations).where(investigations.c.id == investigation_id)
-            ).mappings().one_or_none()
-            if investigation is None:
-                raise ValueError(f"Unknown investigation: {investigation_id}")
-            rows = {
-                "investigation": dict(investigation),
-                "evidence_items": self._fetch_children(
-                    connection, evidence_items, investigation_id
-                ),
-                "hypotheses": self._fetch_children(
-                    connection, hypotheses, investigation_id
-                ),
-                "recommended_actions": self._fetch_children(
-                    connection, recommended_actions, investigation_id
-                ),
-                "verification_suggestions": self._fetch_children(
-                    connection, verification_suggestions, investigation_id
-                ),
-                "provider_results": self._fetch_children(
-                    connection, provider_results, investigation_id
-                ),
-                "specialist_results": self._fetch_children(
-                    connection, specialist_results, investigation_id
-                ),
-                "report": self._fetch_report(connection, investigation_id),
-                "llm_analysis": self._fetch_llm_analysis(connection, investigation_id),
-            }
-        return rows_to_record(rows)
+            return self._get_with_connection(connection, investigation_id)
 
     def list(self) -> list[InvestigationRecord]:
         with self.engine.connect() as connection:
@@ -129,6 +130,62 @@ class SQLiteInvestigationRepository:
                 )
             ]
         return [self.get(investigation_id) for investigation_id in investigation_ids]
+
+    def list_summaries(self) -> list[InvestigationSummary]:
+        """直接查询列表所需列，避免加载可能损坏或体积较大的历史详情。"""
+        top_hypothesis = (
+            select(hypotheses.c.payload)
+            .where(hypotheses.c.investigation_id == investigations.c.id)
+            .order_by(hypotheses.c.position)
+            .limit(1)
+            .scalar_subquery()
+        )
+        action_count = (
+            select(func.count())
+            .select_from(recommended_actions)
+            .where(recommended_actions.c.investigation_id == investigations.c.id)
+            .scalar_subquery()
+        )
+        verification_count = (
+            select(func.count())
+            .select_from(verification_suggestions)
+            .where(verification_suggestions.c.investigation_id == investigations.c.id)
+            .scalar_subquery()
+        )
+        statement = select(
+            investigations.c.id,
+            investigations.c.status,
+            investigations.c.event,
+            investigations.c.failure_reason,
+            top_hypothesis.label("top_hypothesis"),
+            action_count.label("action_count"),
+            verification_count.label("verification_count"),
+        ).order_by(investigations.c.created_at.desc())
+        with self.engine.connect() as connection:
+            rows = connection.execute(statement).mappings().all()
+
+        summaries = []
+        for row in rows:
+            event = row["event"]
+            top = row["top_hypothesis"]
+            summaries.append(
+                InvestigationSummary(
+                    id=row["id"],
+                    status=row["status"],
+                    service=redact_text(event["service"]),
+                    title=redact_text(event["title"]),
+                    top_cause_type=top["cause_type"] if top else "unknown",
+                    confidence=top["confidence"] if top else 0.0,
+                    action_count=row["action_count"],
+                    verification_count=row["verification_count"],
+                    failure_reason=(
+                        redact_text(row["failure_reason"])
+                        if row["failure_reason"]
+                        else None
+                    ),
+                )
+            )
+        return summaries
 
     def update_status(
         self,
@@ -154,16 +211,31 @@ class SQLiteInvestigationRepository:
         status: ActionStatus | str,
         note: str | None = None,
     ):
-        record = self.get(investigation_id)
-        parsed_status = ActionStatus(status)
-        for action in record.actions:
-            if action.id == action_id:
-                action.status = parsed_status
-                action.note = note
-                record.updated_at = datetime.now(UTC)
-                self.save(record)
-                return action
-        raise ValueError(f"Unknown action: {action_id}")
+        with self.engine.connect() as connection:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            try:
+                record = self._get_with_connection(connection, investigation_id)
+                updated = validate_action_transition(record, action_id, status, note)
+                result = connection.execute(
+                    update(recommended_actions)
+                    .where(
+                        recommended_actions.c.investigation_id == investigation_id,
+                        recommended_actions.c.id == action_id,
+                    )
+                    .values(payload=updated.model_dump(mode="json"))
+                )
+                if result.rowcount != 1:
+                    raise ValueError(f"Unknown action: {action_id}")
+                connection.execute(
+                    update(investigations)
+                    .where(investigations.c.id == investigation_id)
+                    .values(updated_at=datetime.now(UTC).isoformat())
+                )
+                connection.commit()
+                return updated
+            except Exception:
+                connection.rollback()
+                raise
 
     def update_verification_status(
         self,
@@ -172,17 +244,45 @@ class SQLiteInvestigationRepository:
         *,
         status: VerificationStatus | str,
         result_note: str | None = None,
+        result_evidence_ids: list[str] | None = None,
+        related_action_ids: list[str] | None = None,
+        related_cause_types: list[CauseType | str] | None = None,
     ):
-        record = self.get(investigation_id)
-        parsed_status = VerificationStatus(status)
-        for suggestion in record.verification_suggestions:
-            if suggestion.id == verification_id:
-                suggestion.status = parsed_status
-                suggestion.result_note = result_note
-                record.updated_at = datetime.now(UTC)
-                self.save(record)
-                return suggestion
-        raise ValueError(f"Unknown verification suggestion: {verification_id}")
+        with self.engine.connect() as connection:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            try:
+                record = self._get_with_connection(connection, investigation_id)
+                updated = validate_verification_transition(
+                    record,
+                    verification_id,
+                    status,
+                    result_note,
+                    result_evidence_ids or [],
+                    related_action_ids or [],
+                    related_cause_types or [],
+                )
+                result = connection.execute(
+                    update(verification_suggestions)
+                    .where(
+                        verification_suggestions.c.investigation_id == investigation_id,
+                        verification_suggestions.c.id == verification_id,
+                    )
+                    .values(payload=updated.model_dump(mode="json"))
+                )
+                if result.rowcount != 1:
+                    raise ValueError(
+                        f"Unknown verification suggestion: {verification_id}"
+                    )
+                connection.execute(
+                    update(investigations)
+                    .where(investigations.c.id == investigation_id)
+                    .values(updated_at=datetime.now(UTC).isoformat())
+                )
+                connection.commit()
+                return updated
+            except Exception:
+                connection.rollback()
+                raise
 
     def save_plan(self, plan: DiagnosisPlan) -> DiagnosisPlan:
         payload = plan.model_dump(mode="json")
@@ -359,6 +459,73 @@ class SQLiteInvestigationRepository:
             connection.execute(insert(coordination_reviews).values(row))
         return review
 
+    def save_multi_agent_result(
+        self,
+        investigation_id: str,
+        findings: Sequence[AgentFinding],
+        executions: Sequence[AgentExecution],
+        review: CoordinationReview | None,
+    ) -> None:
+        """在单个事务中替换一次 SDK Agent 运行的完整持久化投影。"""
+        validated_findings, validated_executions, validated_review = (
+            _validate_multi_agent_result(
+                investigation_id, list(findings), list(executions), review
+            )
+        )
+        finding_rows = []
+        for finding in validated_findings:
+            row = self._agent_payload_row(investigation_id, finding, status=None)
+            row["agent_name"] = row["payload"]["agent_name"]
+            finding_rows.append(row)
+        execution_rows = [
+            self._agent_payload_row(
+                investigation_id, execution, task_id=execution.task_id
+            )
+            for execution in validated_executions
+        ]
+        review_row = None
+        if validated_review is not None:
+            payload = validated_review.model_dump(mode="json")
+            review_row = {
+                "id": validated_review.id,
+                "investigation_id": investigation_id,
+                "created_at": payload["created_at"],
+                "payload": payload,
+            }
+
+        with self.engine.begin() as connection:
+            self._delete_sdk_agent_rows(
+                connection, agent_findings, investigation_id
+            )
+            self._delete_sdk_agent_rows(
+                connection, agent_executions, investigation_id
+            )
+            self._upsert_payload_rows(connection, agent_findings, finding_rows)
+            self._upsert_payload_rows(connection, agent_executions, execution_rows)
+
+            existing_review = connection.execute(
+                select(coordination_reviews).where(
+                    coordination_reviews.c.investigation_id == investigation_id
+                )
+            ).mappings().one_or_none()
+            if review_row is not None:
+                connection.execute(
+                    delete(coordination_reviews).where(
+                        coordination_reviews.c.investigation_id == investigation_id
+                    )
+                )
+                self._insert_multi_agent_review(connection, review_row)
+            elif (
+                existing_review is not None
+                and existing_review["payload"].get("execution_layer")
+                == AgentExecutionLayer.OPENAI_AGENTS_SDK.value
+            ):
+                connection.execute(
+                    delete(coordination_reviews).where(
+                        coordination_reviews.c.investigation_id == investigation_id
+                    )
+                )
+
     def get_coordination_review(
         self,
         investigation_id: str,
@@ -370,23 +537,6 @@ class SQLiteInvestigationRepository:
                 )
             ).mappings().one_or_none()
         return None if row is None else CoordinationReview(**row["payload"])
-
-    def save_react_trace(self, trace: ReActTrace) -> ReActTrace:
-        payload = trace.model_dump(mode="json")
-        row = {
-            "id": trace.id,
-            "investigation_id": trace.investigation_id,
-            "payload": payload,
-            "created_at": payload["created_at"],
-        }
-        with self.engine.begin() as connection:
-            connection.execute(
-                delete(react_traces).where(
-                    react_traces.c.investigation_id == trace.investigation_id
-                )
-            )
-            connection.execute(insert(react_traces).values(row))
-        return trace
 
     def get_react_trace(self, investigation_id: str) -> ReActTrace | None:
         with self.engine.connect() as connection:
@@ -410,23 +560,67 @@ class SQLiteInvestigationRepository:
         if rows:
             connection.execute(insert(table), rows)
 
-    def _delete_record_rows(self, connection: Any, investigation_id: str) -> None:
-        for table in (
-            events,
-            evidence_items,
-            hypotheses,
-            recommended_actions,
-            verification_suggestions,
-            reports,
-            provider_results,
-            specialist_results,
-            llm_analyses,
-        ):
-            connection.execute(
-                delete(table).where(table.c.investigation_id == investigation_id)
+    def _delete_sdk_agent_rows(
+        self,
+        connection: Any,
+        table: Any,
+        investigation_id: str,
+    ) -> None:
+        rows = connection.execute(
+            select(table.c.id, table.c.payload).where(
+                table.c.investigation_id == investigation_id
             )
-        connection.execute(
-            delete(investigations).where(investigations.c.id == investigation_id)
+        ).mappings()
+        sdk_ids = [
+            row["id"]
+            for row in rows
+            if row["payload"].get("execution_layer")
+            == AgentExecutionLayer.OPENAI_AGENTS_SDK.value
+        ]
+        if sdk_ids:
+            connection.execute(delete(table).where(table.c.id.in_(sdk_ids)))
+
+    def _insert_multi_agent_review(
+        self,
+        connection: Any,
+        row: dict[str, Any],
+    ) -> None:
+        connection.execute(insert(coordination_reviews).values(row))
+
+    def _get_with_connection(
+        self, connection: Any, investigation_id: str
+    ) -> InvestigationRecord:
+        investigation = connection.execute(
+            select(investigations).where(investigations.c.id == investigation_id)
+        ).mappings().one_or_none()
+        if investigation is None:
+            raise ValueError(f"Unknown investigation: {investigation_id}")
+        return rows_to_record(
+            {
+                "investigation": dict(investigation),
+                "evidence_items": self._fetch_children(
+                    connection, evidence_items, investigation_id
+                ),
+                "hypotheses": self._fetch_children(
+                    connection, hypotheses, investigation_id
+                ),
+                "recommended_actions": self._fetch_children(
+                    connection, recommended_actions, investigation_id
+                ),
+                "verification_suggestions": self._fetch_children(
+                    connection, verification_suggestions, investigation_id
+                ),
+                "provider_results": self._fetch_children(
+                    connection, provider_results, investigation_id
+                ),
+                "specialist_results": self._fetch_children(
+                    connection, specialist_results, investigation_id
+                ),
+                "report": self._fetch_report(connection, investigation_id),
+                "llm_analysis": self._fetch_llm_analysis(
+                    connection, investigation_id
+                ),
+            }
         )
 
     def _fetch_children(

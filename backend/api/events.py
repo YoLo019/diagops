@@ -1,7 +1,6 @@
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
 
-from backend.db.models import InvestigationRecord
+from backend.db.models import InvestigationRecord, InvestigationSummary
 from backend.domain.events import IncidentEvent
 from backend.services.container import get_container
 from backend.services.incident_cases import list_case_ids, load_incident_case
@@ -9,31 +8,8 @@ from backend.services.incident_cases import list_case_ids, load_incident_case
 router = APIRouter(prefix="/events", tags=["events"])
 
 
-class InvestigationSummary(BaseModel):
-    id: str
-    status: str
-    service: str
-    title: str
-    top_cause_type: str
-    confidence: float
-    action_count: int = 0
-    verification_count: int = 0
-    failure_reason: str | None = None
-
-
 def to_summary(record: InvestigationRecord) -> InvestigationSummary:
-    top = record.hypotheses[0] if record.hypotheses else None
-    return InvestigationSummary(
-        id=record.id,
-        status=record.status,
-        service=record.event.service,
-        title=record.event.title,
-        top_cause_type=top.cause_type if top else "unknown",
-        confidence=top.confidence if top else 0.0,
-        action_count=len(record.actions),
-        verification_count=len(record.verification_suggestions),
-        failure_reason=record.failure_reason,
-    )
+    return InvestigationSummary.from_record(record)
 
 
 @router.post("", response_model=InvestigationSummary)
