@@ -4,13 +4,14 @@ This file is the mutable routing and status entry point for the current version.
 
 It does not override an approved spec or plan, current code contracts, or the long-term product goal and production safety boundary in `AGENT.md`.
 
-Updated: 2026-07-13
+Updated: 2026-07-14
 
 ## Implemented Baseline
 
-V7 real multi-agent runtime is the implemented baseline.
+V8.1 reliability hardening and explicit OpenAI/DeepSeek Provider compatibility
+are the implemented baseline.
 
-Implemented baseline commit: `928a32b`
+Implemented baseline commit: `87489de3336514040154d61f3d4ba3e4819d71d6`
 
 The current platform uses SQLite by default, retains an in-memory repository for tests and explicit configuration, and includes an optional default-off OpenAI Agents SDK runtime with deterministic RCA fallback.
 
@@ -18,19 +19,19 @@ The current platform uses SQLite by default, retains an in-memory repository for
 
 Version: V8.1
 
-Main goal: close the remaining V7 live-reliability gaps and make the project-owned multi-agent RCA runtime work consistently with explicitly supported OpenAI-compatible model providers.
+Main goal: harden the deterministic platform and legacy boundaries, close the remaining V7 live-reliability gaps, and make the project-owned multi-agent RCA runtime work consistently with explicitly supported OpenAI-compatible model providers.
 
-Iteration status: `ready`
+Iteration status: `complete`
 
 Spec status: `approved`
 
 Plan status: `approved`
 
-Implementation status: `not_started`
+Implementation status: `complete`
 
-Completion commit: `none`
+Completion commit: `87489de3336514040154d61f3d4ba3e4819d71d6`
 
-Verification evidence: `none`
+Verification evidence: Ruff passed; full pytest 774 passed with one existing Starlette warning; migration/concurrency/redaction 24 passed; frontend build passed with existing TanStack warnings; git diff check passed; canonical artifact attribution/reference/action/safety/classification scans passed; OpenAI run `v8-1-live-20260714T060212861267Z-b5f43e64` certified; DeepSeek run `v8-1-live-20260714T080700796242Z-ffee9018` failed; final DeepSeek diagnostic `v8-1-diagnostic-20260714T090134835432Z-405b87b3` stopped below its gate at 2/5 correct real reviews
 
 Blocker: `none`
 
@@ -58,7 +59,13 @@ State consistency rules:
 
 ```text
 docs/superpowers/specs/2026-07-12-diagops-v8.1-reliability-and-provider-compatibility-design.md
+docs/superpowers/specs/2026-07-14-diagops-v8.1-live-validation-and-timeout-amendment-design.md
+docs/superpowers/specs/2026-07-14-diagops-v8.1-specialist-finding-and-fallback-review-amendment-design.md
+docs/superpowers/specs/2026-07-14-diagops-v8.1-diagnostic-entry-policy-amendment-design.md
 docs/superpowers/plans/2026-07-12-diagops-v8.1-reliability-and-provider-compatibility-implementation-plan.md
+docs/superpowers/plans/2026-07-14-diagops-v8.1-live-validation-and-timeout-amendment-implementation-plan.md
+docs/superpowers/plans/2026-07-14-diagops-v8.1-specialist-finding-and-fallback-review-amendment-implementation-plan.md
+docs/superpowers/plans/2026-07-14-diagops-v8.1-diagnostic-entry-policy-amendment-implementation-plan.md
 ```
 
 ## Entry-Gated Next Iteration
