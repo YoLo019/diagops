@@ -1,6 +1,7 @@
 from backend.diagnosis.context import SpecialistStatus
 from backend.diagnosis.coordinator import DiagnosisCoordinator
-from backend.providers.registry import build_mock_provider_registry
+from backend.domain.evidence import EvidenceKind, EvidenceProvider
+from backend.providers.registry import ProviderRegistry, build_mock_provider_registry
 from backend.services.incident_cases import load_incident_case
 
 
@@ -33,11 +34,21 @@ def test_coordinator_records_failed_provider_as_failed_specialist():
             raise RuntimeError("provider exploded")
 
     event = load_incident_case("deployment_regression")
-    coordinator = DiagnosisCoordinator(build_mock_provider_registry())
-    coordinator.providers.providers = [FailingProvider()]
+    coordinator = DiagnosisCoordinator(
+        ProviderRegistry(providers=[], simulation_providers=[FailingProvider()])
+    )
 
     result = coordinator.collect(event)
 
-    assert result.evidence[0].kind == "provider_error"
-    assert result.specialist_results[0].status == SpecialistStatus.FAILED
-    assert result.specialist_results[0].errors == ["provider exploded"]
+    provider_error = next(
+        item
+        for item in result.evidence
+        if item.provider == EvidenceProvider.LOG
+        and item.kind == EvidenceKind.PROVIDER_ERROR
+    )
+    log_specialist = next(
+        item for item in result.specialist_results if item.agent_name == "LogAnalyst"
+    )
+    assert provider_error.error_message == "provider collection failed"
+    assert log_specialist.status == SpecialistStatus.FAILED
+    assert log_specialist.errors == ["provider collection failed"]

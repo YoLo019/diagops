@@ -3,9 +3,15 @@ from enum import StrEnum
 from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
-from backend.domain.multi_agent import AgentExecutionLayer
+from backend.domain.multi_agent import (
+    AgentExecutionLayer,
+    ExecutionStepKind,
+    FailureCategory,
+    ModelProvider,
+    ResultValidationCategory,
+)
 
 
 class DiagnosisTaskType(StrEnum):
@@ -60,12 +66,20 @@ class DiagnosisPlan(BaseModel):
 
 
 class AgentExecution(BaseModel):
+    model_config = ConfigDict(protected_namespaces=("model_validate", "model_dump"))
+
     id: str = Field(default_factory=lambda: f"exec-{uuid4().hex}")
     task_id: str
     agent_name: str
     status: AgentExecutionStatus = AgentExecutionStatus.PENDING
     execution_layer: AgentExecutionLayer = AgentExecutionLayer.CUSTOM
     analysis_round: Literal[1, 2] | None = None
+    step_kind: ExecutionStepKind | None = None
+    attempt: int = Field(default=1, ge=1)
+    failure_category: FailureCategory = FailureCategory.NONE
+    result_validation_category: ResultValidationCategory | None = None
+    model_provider: ModelProvider | None = None
+    model_name: str | None = None
     tool_call_ids: list[str] = Field(default_factory=list)
     evidence_ids: list[str] = Field(default_factory=list)
     summary: str | None = None

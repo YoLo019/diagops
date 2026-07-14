@@ -1,27 +1,40 @@
 import asyncio
+import json
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
+import httpx
+import openai
 import pytest
+from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
+from pydantic import ValidationError
 
+import backend.diagnosis.agents_runtime as agents_runtime
 from backend.diagnosis.agents_runtime import (
     AgentsRcaRuntime,
     AgentsRcaRuntimeResult,
     _CapturedDraft,
     _CoordinatorProposal,
+    _failure_category,
     _json_dump,
+    _output_contract,
     _project_evidence,
-    _redact,
     _review_prompt,
     _SdkTurnResult,
+    _specialist_instructions,
     _specialist_prompt,
     _SpecialistDraft,
     _synthesis_prompt,
     _usage,
+    _validate_agent_output,
+    stabilization_categories_from_executions,
 )
 from backend.diagnosis.coordination_review import conflicting_agent_names
+from backend.diagnosis.deepseek_model import DeepSeekChatCompletionsModel
 from backend.domain.agent_findings import AgentFinding, AgentFindingType, AgentName
 from backend.domain.agent_plan import (
+    AgentExecution,
     AgentExecutionStatus,
     DiagnosisTaskStatus,
     DiagnosisTaskType,
@@ -37,8 +50,13 @@ from backend.domain.hypotheses import CauseType, Hypothesis
 from backend.domain.multi_agent import (
     AgentExecutionLayer,
     CoordinationDecisionStatus,
+    ExecutionStepKind,
+    FailureCategory,
+    ModelProvider,
     MultiAgentRunStatus,
+    StabilizationCategory,
 )
+from backend.safety.redaction import redact_text as _redact
 
 
 class TurnStub:
@@ -228,7 +246,7 @@ def test_redaction_minimizes_sensitive_evidence_without_hiding_injection_text():
 
     assert "rollback production" in projected
     assert "run rm -rf /" in projected
-    assert projected.count("[REDACTED]") >= 4
+    assert projected.count("[REDACTED") >= 4
     for secret in ["abc.def.ghi", "topsecret", "hunter2", "user@example.com"]:
         assert secret not in projected
 
@@ -373,10 +391,31 @@ def test_all_model_data_uses_fixed_projection_and_recursive_redaction():
         "next-action-secret",
     ]:
         assert secret not in combined
-    assert combined.count("[REDACTED]") >= 5
+    assert combined.count("[REDACTED") >= 5
     assert "next_actions" not in synthesis
     assert "created_at" not in synthesis
     assert "execution_layer" not in synthesis
+
+
+def test_specialist_instructions_define_finding_types_without_expected_causes():
+    text = _specialist_instructions(AgentName.METRIC)
+
+    for value in ("root_cause", "contradiction", "signal", "gap"):
+        assert value in text
+    assert "directly supports" in text
+    assert "directly contradicts" in text
+    assert "does not support a root-cause" in text
+    assert "absent or insufficient" in text
+    for cause in CauseType:
+        assert cause.value not in text
+
+
+def test_specialist_schema_describes_cause_and_evidence_requirements():
+    properties = _SpecialistDraft.model_json_schema()["properties"]
+
+    assert "finding type" in properties["finding_type"]["description"].lower()
+    assert "supplied evidence" in properties["evidence_ids"]["description"].lower()
+    assert "root_cause" in properties["related_cause_type"]["description"]
 
 
 def test_conflict_review_projects_only_direct_context_and_matching_evidence():
@@ -542,6 +581,298 @@ async def test_synthesis_always_runs_with_baseline_findings_and_all_evidence(mon
         evidence.id in synthesis["coordinator_input"] for evidence in _all_evidence()
     )
     assert result.review.decision_status == CoordinationDecisionStatus.AGREEMENT
+    assert result.review.model_provider == ModelProvider.OPENAI
+    assert result.review.model_name == "fake"
+    assert result.review.primary_stabilization_category is None
+    assert result.review.secondary_stabilization_categories == []
+    assert [execution.step_kind for execution in result.executions] == [
+        ExecutionStepKind.INITIAL_COORDINATION,
+        ExecutionStepKind.SPECIALIST_COLLECTION,
+        ExecutionStepKind.SPECIALIST_COLLECTION,
+        ExecutionStepKind.SPECIALIST_COLLECTION,
+        ExecutionStepKind.FINAL_SYNTHESIS,
+    ]
+    assert all(execution.attempt == 1 for execution in result.executions)
+    assert all(
+        execution.failure_category == FailureCategory.NONE
+        for execution in result.executions
+    )
+    assert all(
+        execution.model_provider == ModelProvider.OPENAI
+        and execution.model_name == "fake"
+        for execution in result.executions
+    )
+    assert result.run_summary.model_provider == ModelProvider.OPENAI
+    assert result.run_summary.model_name == "fake"
+    assert result.run_summary.primary_stabilization_category is None
+
+
+@pytest.fixture
+def deepseek_model():
+    return DeepSeekChatCompletionsModel(
+        model="deepseek-v4-pro",
+        api_key="not-used",
+    )
+
+
+@pytest.mark.parametrize("value", ["", "```json\n{}\n```", "not json", "[]"])
+def test_deepseek_output_rejects_non_json_object_text(deepseek_model, value):
+    with pytest.raises((ValueError, ValidationError)):
+        _validate_agent_output(deepseek_model, value, _CoordinatorProposal)
+
+
+def test_deepseek_output_validates_entire_json_object(deepseek_model):
+    value = json.dumps(
+        {
+            "summary": "specialists agree",
+            "uncertainty": "none",
+            "proposed_cause": "deployment_regression",
+        }
+    )
+
+    proposal = _validate_agent_output(deepseek_model, value, _CoordinatorProposal)
+
+    assert proposal.proposed_cause == CauseType.DEPLOYMENT_REGRESSION
+    with pytest.raises(ValueError):
+        _validate_agent_output(
+            deepseek_model,
+            f"prefix {value}",
+            _CoordinatorProposal,
+        )
+
+
+def test_deepseek_output_validation_failure_maps_to_invalid_output(deepseek_model):
+    with pytest.raises(ValueError) as caught:
+        _validate_agent_output(deepseek_model, "not json", _CoordinatorProposal)
+
+    assert _failure_category(caught.value) == FailureCategory.INVALID_OUTPUT
+
+
+def test_openai_model_keeps_sdk_structured_output():
+    output_type, model_settings, validator, suffix = _output_contract(
+        "gpt-test", _CoordinatorProposal
+    )
+
+    assert output_type is _CoordinatorProposal
+    assert model_settings is None
+    assert validator is None
+    assert suffix == ""
+
+
+def test_deepseek_model_uses_json_object_output_contract(deepseek_model):
+    output_type, model_settings, validator, suffix = _output_contract(
+        deepseek_model, _CoordinatorProposal
+    )
+
+    assert output_type is str
+    assert model_settings.extra_body == {
+        "response_format": {"type": "json_object"},
+        "thinking": {"type": "disabled"},
+    }
+    assert model_settings.tool_choice == "auto"
+    assert validator is not None
+    assert "JSON object" in suffix
+
+
+def test_deepseek_coordinator_requires_a_supplied_specialist_tool(deepseek_model):
+    _, model_settings, _, _ = _output_contract(
+        deepseek_model,
+        _CoordinatorProposal,
+        require_tool=True,
+    )
+
+    assert model_settings.tool_choice == "required"
+
+
+@pytest.mark.parametrize("schema", [_SpecialistDraft, _CoordinatorProposal])
+def test_deepseek_schema_instruction_matches_pydantic_contract(
+    deepseek_model,
+    schema,
+):
+    _, _, _, suffix = _output_contract(deepseek_model, schema)
+    marker = " Required JSON Schema: "
+
+    assert marker in suffix
+    assert json.loads(suffix.split(marker, 1)[1]) == schema.model_json_schema()
+
+
+def test_deepseek_specialist_cause_ontology_has_no_expected_answer(
+    deepseek_model,
+):
+    _, _, _, specialist_suffix = _output_contract(deepseek_model, _SpecialistDraft)
+    _, _, _, coordinator_suffix = _output_contract(
+        deepseek_model,
+        _CoordinatorProposal,
+    )
+
+    marker = "CauseType semantics:"
+    assert marker in specialist_suffix
+    assert marker not in coordinator_suffix
+    for cause_type in CauseType:
+        assert f"{cause_type.value}=" in specialist_suffix
+    assert "direct causal Evidence" in specialist_suffix
+    assert "correlation without causal support" in specialist_suffix
+    for forbidden in ("BASELINE=", "expected candidate", "case ID"):
+        assert forbidden not in specialist_suffix
+
+
+def _bounded_model_context(events, model):
+    @asynccontextmanager
+    async def context(model_name, timeout_seconds):
+        events.append(("enter", model_name, timeout_seconds))
+        try:
+            yield model
+        finally:
+            events.append(("exit", model_name, timeout_seconds))
+
+    return context
+
+
+@pytest.mark.anyio
+async def test_default_openai_runtime_uses_one_model_context_for_all_turns(
+    monkeypatch,
+):
+    monkeypatch.setenv("OPENAI_API_KEY", "present")
+    sentinel = object()
+    events = []
+    stub = TurnStub(_turn(_all_first_round()), _turn())
+    monkeypatch.setattr(agents_runtime, "_run_sdk_turn", stub)
+    monkeypatch.setattr(
+        agents_runtime,
+        "openai_responses_model",
+        _bounded_model_context(events, sentinel),
+        raising=False,
+    )
+
+    result = await AgentsRcaRuntime(model=" gpt-test ", timeout_seconds=7).run(
+        "inv-1", _incident(), _all_evidence(), [_baseline()]
+    )
+
+    assert result.run_summary.status == MultiAgentRunStatus.COMPLETED
+    assert [call["model"] for call in stub.calls] == [sentinel, sentinel]
+    assert events == [("enter", "gpt-test", 7), ("exit", "gpt-test", 7)]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("outcome", ["transport", "timeout"])
+async def test_default_openai_runtime_closes_model_context_on_failure(
+    monkeypatch,
+    outcome,
+):
+    monkeypatch.setenv("OPENAI_API_KEY", "present")
+    sentinel = object()
+    events = []
+
+    async def hang():
+        await asyncio.Event().wait()
+
+    stub = TurnStub(
+        RuntimeError("transport failed") if outcome == "transport" else hang
+    )
+    monkeypatch.setattr(agents_runtime, "_run_sdk_turn", stub)
+    monkeypatch.setattr(
+        agents_runtime,
+        "openai_responses_model",
+        _bounded_model_context(events, sentinel),
+        raising=False,
+    )
+
+    result = await AgentsRcaRuntime(
+        model="gpt-test",
+        timeout_seconds=0.01 if outcome == "timeout" else 7,
+    ).run("inv-1", _incident(), _all_evidence(), [_baseline()])
+
+    assert result.run_summary.status == MultiAgentRunStatus.FAILED
+    assert [item[0] for item in events] == ["enter", "exit"]
+
+
+@pytest.mark.anyio
+async def test_default_openai_runtime_closes_model_context_on_cancellation(
+    monkeypatch,
+):
+    monkeypatch.setenv("OPENAI_API_KEY", "present")
+    events = []
+    started = asyncio.Event()
+
+    async def hang():
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(agents_runtime, "_run_sdk_turn", TurnStub(hang))
+    monkeypatch.setattr(
+        agents_runtime,
+        "openai_responses_model",
+        _bounded_model_context(events, object()),
+        raising=False,
+    )
+    task = asyncio.create_task(
+        AgentsRcaRuntime(model="gpt-test").run(
+            "inv-1", _incident(), _all_evidence(), [_baseline()]
+        )
+    )
+    await started.wait()
+
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert [item[0] for item in events] == ["enter", "exit"]
+
+
+@pytest.mark.anyio
+async def test_default_sdk_turn_projects_outer_deadline_as_timeout(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "present")
+
+    async def hang(*_args, **_kwargs):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(agents_runtime.Runner, "run", hang)
+
+    result = await AgentsRcaRuntime(
+        model="gpt-test",
+        timeout_seconds=0.01,
+    ).run("inv-1", _incident(), _all_evidence(), [_baseline()])
+
+    assert result.run_summary.status == MultiAgentRunStatus.FAILED
+    categories = [execution.failure_category for execution in result.executions]
+    assert FailureCategory.TIMEOUT in categories
+    assert FailureCategory.CANCELLED not in categories
+    assert (
+        result.run_summary.primary_stabilization_category
+        == StabilizationCategory.CANCELLED_OR_TIMEOUT
+    )
+
+
+@pytest.mark.anyio
+async def test_custom_turn_and_missing_credentials_do_not_build_openai_model(
+    monkeypatch,
+):
+    calls = 0
+
+    @asynccontextmanager
+    async def forbidden_context(*_args):
+        nonlocal calls
+        calls += 1
+        yield object()
+
+    monkeypatch.setattr(
+        agents_runtime,
+        "openai_responses_model",
+        forbidden_context,
+        raising=False,
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "present")
+    stub = TurnStub(_turn(_all_first_round()), _turn())
+
+    await AgentsRcaRuntime(model="fake", turn=stub).run(
+        "inv-1", _incident(), _all_evidence(), [_baseline()]
+    )
+    monkeypatch.delenv("OPENAI_API_KEY")
+    await AgentsRcaRuntime(model="gpt-test").run(
+        "inv-2", _incident(), _all_evidence(), [_baseline()]
+    )
+
+    assert calls == 0
 
 
 @pytest.mark.anyio
@@ -559,7 +890,7 @@ async def test_synthesis_proposal_is_redacted_before_review(monkeypatch):
     ).run("inv-1", _incident(), _all_evidence(), [_baseline()])
 
     assert result.review is not None
-    assert result.review.summary == "Bearer [REDACTED]"
+    assert result.review.summary == "[REDACTED]"
     assert result.review.uncertainty == "password=[REDACTED]"
     assert "proposal-secret" not in str(result)
     assert "two words" not in str(result)
@@ -615,6 +946,83 @@ async def test_conflict_exposes_only_conflicting_specialists_and_valid_revisions
 
 
 @pytest.mark.anyio
+async def test_final_synthesis_records_unrequested_known_specialist_output(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "present")
+    unexpected = _draft(AgentName.LOG, "ev-log", round_two=True)
+
+    result = await AgentsRcaRuntime(
+        model="fake", turn=TurnStub(_turn(_all_first_round()), _turn([unexpected]))
+    ).run("inv-1", _incident(), _all_evidence(), [_baseline()])
+
+    assert len(result.findings) == 3
+    invalid = [
+        execution
+        for execution in result.executions
+        if execution.agent_name == AgentName.LOG.value
+        and execution.analysis_round == 2
+    ]
+    assert len(invalid) == 1
+    assert invalid[0].status == AgentExecutionStatus.FAILED
+    assert invalid[0].step_kind == ExecutionStepKind.SPECIALIST_COLLECTION
+    assert invalid[0].attempt == 1
+    assert invalid[0].failure_category == FailureCategory.INVALID_OUTPUT
+    assert invalid[0].model_provider == ModelProvider.OPENAI
+    assert invalid[0].model_name == "fake"
+    assert result.run_summary.status == MultiAgentRunStatus.PARTIAL
+    assert (
+        result.run_summary.primary_stabilization_category
+        == StabilizationCategory.SPECIALIST_OUTPUT_CONTRACT
+    )
+
+
+@pytest.mark.anyio
+async def test_final_synthesis_records_duplicate_specialist_output_separately(
+    monkeypatch,
+):
+    monkeypatch.setenv("OPENAI_API_KEY", "present")
+    first = _all_first_round()
+    first[0] = _draft(AgentName.LOG, "ev-log", CauseType.TRAFFIC_SPIKE)
+    revision = _draft(
+        AgentName.LOG,
+        "ev-log",
+        CauseType.DEPLOYMENT_REGRESSION,
+        round_two=True,
+    )
+
+    result = await AgentsRcaRuntime(
+        model="fake", turn=TurnStub(_turn(first), _turn([revision, revision]))
+    ).run("inv-1", _incident(), _all_evidence(), [_baseline()])
+
+    round_two_log = [
+        execution
+        for execution in result.executions
+        if execution.agent_name == AgentName.LOG.value
+        and execution.analysis_round == 2
+    ]
+    assert len(round_two_log) == 2
+    assert {execution.status for execution in round_two_log} == {
+        AgentExecutionStatus.COMPLETED,
+        AgentExecutionStatus.FAILED,
+    }
+    failed = next(
+        execution
+        for execution in round_two_log
+        if execution.status == AgentExecutionStatus.FAILED
+    )
+    assert failed.failure_category == FailureCategory.INVALID_OUTPUT
+    assert failed.step_kind == ExecutionStepKind.SPECIALIST_COLLECTION
+    assert failed.attempt == 1
+    assert any(
+        finding.agent_name == AgentName.LOG and finding.analysis_round == 2
+        for finding in result.findings
+    )
+    assert (
+        result.run_summary.primary_stabilization_category
+        == StabilizationCategory.SPECIALIST_OUTPUT_CONTRACT
+    )
+
+
+@pytest.mark.anyio
 async def test_missing_specialist_and_invalid_evidence_preserve_partial_work(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "present")
     invalid = _draft(AgentName.METRIC, "ev-invented")
@@ -656,10 +1064,60 @@ async def test_missing_specialist_is_recollected_once_and_can_complete(monkeypat
     assert stub.calls[1]["specialist_names"] == [AgentName.METRIC]
     assert stub.calls[1]["analysis_round"] == 1
     assert result.run_summary.status == MultiAgentRunStatus.COMPLETED
-    assert all(task.status == DiagnosisTaskStatus.COMPLETED for task in result.tasks)
-    assert all(
-        execution.status == AgentExecutionStatus.COMPLETED
+    metric_tasks = [
+        task for task in result.tasks if task.agent_name == AgentName.METRIC.value
+    ]
+    assert [task.status for task in metric_tasks] == [
+        DiagnosisTaskStatus.FAILED,
+        DiagnosisTaskStatus.COMPLETED,
+    ]
+    metric_executions = [
+        execution
         for execution in result.executions
+        if execution.agent_name == AgentName.METRIC.value
+    ]
+    assert [
+        (
+            execution.status,
+            execution.step_kind,
+            execution.attempt,
+            execution.failure_category,
+        )
+        for execution in metric_executions
+    ] == [
+        (
+            AgentExecutionStatus.FAILED,
+            ExecutionStepKind.SPECIALIST_COLLECTION,
+            1,
+            FailureCategory.MISSING_SPECIALIST,
+        ),
+        (
+            AgentExecutionStatus.COMPLETED,
+            ExecutionStepKind.SPECIALIST_RECOLLECTION,
+            2,
+            FailureCategory.NONE,
+        ),
+    ]
+    recollection = [
+        execution
+        for execution in result.executions
+        if execution.agent_name == AgentName.METRIC.value
+    ][-1]
+    assert recollection.step_kind == ExecutionStepKind.SPECIALIST_RECOLLECTION
+    assert recollection.attempt == 2
+    recollection_coordinator = next(
+        execution
+        for execution in result.executions
+        if execution.agent_name == "CoordinatorAgent" and execution.attempt == 2
+    )
+    assert (
+        recollection_coordinator.step_kind
+        == ExecutionStepKind.SPECIALIST_RECOLLECTION
+    )
+    assert all(
+        execution.step_kind == ExecutionStepKind.SPECIALIST_RECOLLECTION
+        for execution in result.executions
+        if execution.attempt == 2
     )
 
 
@@ -679,6 +1137,41 @@ async def test_missing_specialist_recollection_failure_remains_partial(monkeypat
     assert stub.calls[1]["specialist_names"] == [AgentName.METRIC, AgentName.DEPLOYMENT]
     assert result.run_summary.status == MultiAgentRunStatus.PARTIAL
     assert any(task.status == DiagnosisTaskStatus.FAILED for task in result.tasks)
+
+
+@pytest.mark.anyio
+async def test_missing_specialist_is_classified_at_recollection_boundary(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "present")
+    stub = TurnStub(
+        _turn([_draft(AgentName.LOG, "ev-log")]),
+        _turn([_draft(AgentName.METRIC, "ev-metric")]),
+        _turn(),
+    )
+
+    result = await AgentsRcaRuntime(model="fake", turn=stub).run(
+        "inv-1", _incident(), _all_evidence(), [_baseline()]
+    )
+
+    missing = next(
+        execution
+        for execution in result.executions
+        if execution.agent_name == AgentName.DEPLOYMENT.value
+        and execution.attempt == 2
+    )
+    assert missing.failure_category == FailureCategory.MISSING_SPECIALIST
+    assert (
+        result.run_summary.primary_stabilization_category
+        == StabilizationCategory.MISSING_SPECIALIST
+    )
+    assert result.review is not None
+    assert (
+        result.review.primary_stabilization_category
+        == result.run_summary.primary_stabilization_category
+    )
+    assert (
+        result.review.secondary_stabilization_categories
+        == result.run_summary.secondary_stabilization_categories
+    )
 
 
 @pytest.mark.anyio
@@ -834,7 +1327,17 @@ async def test_invalid_first_evidence_failure_survives_successful_recollection(
     assert any(
         execution.agent_name == AgentName.METRIC.value
         and execution.status == AgentExecutionStatus.FAILED
+        and execution.failure_category == FailureCategory.INVALID_REFERENCE
         for execution in result.executions
+    )
+    assert (
+        result.run_summary.primary_stabilization_category
+        == StabilizationCategory.REFERENCE_VALIDATION
+    )
+    assert result.review is not None
+    assert (
+        result.review.primary_stabilization_category
+        == StabilizationCategory.REFERENCE_VALIDATION
     )
 
 
@@ -854,6 +1357,39 @@ async def test_overall_timeout_covers_missing_specialist_recollection(monkeypatc
     assert len(stub.calls) == 2
     assert result.run_summary.status == MultiAgentRunStatus.FAILED
     assert "timeout" in (result.run_summary.failure_reason or "").lower()
+    failed = result.executions[-1]
+    assert failed.failure_category == FailureCategory.TIMEOUT
+    assert failed.step_kind == ExecutionStepKind.SPECIALIST_RECOLLECTION
+    assert failed.attempt == 2
+    assert (
+        result.run_summary.primary_stabilization_category
+        == StabilizationCategory.CANCELLED_OR_TIMEOUT
+    )
+
+
+@pytest.mark.anyio
+async def test_timeout_after_recollection_records_final_synthesis_progress(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "present")
+
+    async def hang():
+        await asyncio.Event().wait()
+
+    stub = TurnStub(
+        _turn([_draft(AgentName.LOG, "ev-log")]),
+        _turn([_draft(AgentName.METRIC, "ev-metric")]),
+        hang,
+    )
+
+    result = await AgentsRcaRuntime(
+        model="fake", turn=stub, timeout_seconds=0.01
+    ).run("inv-1", _incident(), _all_evidence(), [_baseline()])
+
+    failed = result.executions[-1]
+    assert len(stub.calls) == 3
+    assert failed.failure_category == FailureCategory.TIMEOUT
+    assert failed.step_kind == ExecutionStepKind.FINAL_SYNTHESIS
+    assert failed.attempt == 1
+    assert failed.analysis_round == 2
 
 
 @pytest.mark.anyio
@@ -911,6 +1447,10 @@ async def test_invalid_specialist_output_is_rejected_without_escaping(
 
     assert [finding.agent_name for finding in result.findings] == [AgentName.LOG]
     assert result.run_summary.status == MultiAgentRunStatus.PARTIAL
+    assert any(
+        execution.failure_category == FailureCategory.INVALID_OUTPUT
+        for execution in result.executions
+    )
 
 
 @pytest.mark.anyio
@@ -930,6 +1470,52 @@ async def test_sdk_failure_does_not_escape_run_and_keeps_valid_findings(monkeypa
 
 
 @pytest.mark.anyio
+async def test_provider_failure_propagates_structured_summary_attribution(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "present")
+    request = httpx.Request("POST", "https://api.openai.com/v1/responses")
+    response = httpx.Response(401, request=request)
+    error = openai.AuthenticationError(
+        "authentication failed", response=response, body={"code": "invalid_api_key"}
+    )
+
+    result = await AgentsRcaRuntime(
+        model="fake", turn=TurnStub(error)
+    ).run("inv-1", _incident(), _all_evidence(), [_baseline()])
+
+    assert result.executions[-1].failure_category == FailureCategory.AUTHENTICATION
+    assert result.run_summary.model_provider == ModelProvider.OPENAI
+    assert result.run_summary.model_name == "fake"
+    assert (
+        result.run_summary.primary_stabilization_category
+        == StabilizationCategory.PROVIDER_OR_SDK_TRANSPORT
+    )
+
+
+@pytest.mark.anyio
+async def test_openai_model_object_propagates_public_model_name(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "present")
+    client = openai.AsyncOpenAI(api_key="not-used")
+    model = OpenAIChatCompletionsModel(
+        model="gpt-object-test",
+        openai_client=client,
+    )
+    try:
+        result = await AgentsRcaRuntime(
+            model=model, turn=TurnStub(_turn(_all_first_round()), _turn())
+        ).run("inv-1", _incident(), _all_evidence(), [_baseline()])
+    finally:
+        await client.close()
+
+    assert all(
+        execution.model_name == "gpt-object-test"
+        for execution in result.executions
+    )
+    assert result.review is not None
+    assert result.review.model_name == "gpt-object-test"
+    assert result.run_summary.model_name == "gpt-object-test"
+
+
+@pytest.mark.anyio
 async def test_first_turn_error_without_findings_stops_before_synthesis(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "present")
     stub = TurnStub(_turn(proposal=False, error="safe SDK failure"))
@@ -942,6 +1528,24 @@ async def test_first_turn_error_without_findings_stops_before_synthesis(monkeypa
     assert result.findings == []
     assert result.run_summary.status == MultiAgentRunStatus.FAILED
     assert result.review is None
+
+
+@pytest.mark.anyio
+async def test_invalid_coordinator_output_has_structured_failure(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "present")
+    stub = TurnStub(_turn(_all_first_round()), _turn(proposal=False))
+
+    result = await AgentsRcaRuntime(model="fake", turn=stub).run(
+        "inv-1", _incident(), _all_evidence(), [_baseline()]
+    )
+
+    failed = result.executions[-1]
+    assert failed.step_kind == ExecutionStepKind.FINAL_SYNTHESIS
+    assert failed.failure_category == FailureCategory.INVALID_OUTPUT
+    assert (
+        result.run_summary.primary_stabilization_category
+        == StabilizationCategory.COORDINATOR_OUTPUT_CONTRACT
+    )
 
 
 @pytest.mark.anyio
@@ -982,7 +1586,31 @@ async def test_missing_model_skips_without_sdk_call(monkeypatch, model):
     assert result.tasks[0].status == DiagnosisTaskStatus.SKIPPED
     assert result.executions[0].agent_name == "CoordinatorAgent"
     assert result.executions[0].status == AgentExecutionStatus.SKIPPED
+    assert result.executions[0].failure_category == FailureCategory.NOT_CONFIGURED
+    assert result.run_summary.model_provider == ModelProvider.OPENAI
     assert "do-not-read" not in str(result)
+
+
+@pytest.mark.anyio
+async def test_skipped_runtime_retains_selected_provider_and_model(monkeypatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    runtime = AgentsRcaRuntime(
+        model=None,
+        model_provider=ModelProvider.DEEPSEEK,
+        model_name="deepseek-test",
+    )
+
+    result = await runtime.run(
+        "inv-1", _incident(), _all_evidence(), [_baseline()]
+    )
+
+    assert result.review is None
+    assert result.run_summary.status == MultiAgentRunStatus.SKIPPED
+    assert result.run_summary.model_provider == ModelProvider.DEEPSEEK
+    assert result.run_summary.model_name == "deepseek-test"
+    assert result.executions[0].model_provider == ModelProvider.DEEPSEEK
+    assert result.executions[0].model_name == "deepseek-test"
+    assert result.executions[0].failure_category == FailureCategory.NOT_CONFIGURED
 
 
 @pytest.mark.anyio
@@ -1104,6 +1732,139 @@ def test_usage_deduplicates_response_identity_and_counts_targeted_review_once():
     ) == (281, 53)
 
 
+def test_stabilization_categories_use_fixed_priority_not_execution_order():
+    executions = [
+        AgentExecution(
+            task_id="missing",
+            agent_name=AgentName.LOG.value,
+            failure_category=FailureCategory.MISSING_SPECIALIST,
+        ),
+        AgentExecution(
+            task_id="invalid-output",
+            agent_name=AgentName.METRIC.value,
+            failure_category=FailureCategory.INVALID_OUTPUT,
+        ),
+        AgentExecution(
+            task_id="duplicate-missing",
+            agent_name=AgentName.DEPLOYMENT.value,
+            failure_category=FailureCategory.MISSING_SPECIALIST,
+        ),
+        AgentExecution(
+            task_id="invalid-reference",
+            agent_name="CoordinatorAgent",
+            failure_category=FailureCategory.INVALID_REFERENCE,
+        ),
+    ]
+
+    assert stabilization_categories_from_executions(executions) == [
+        StabilizationCategory.REFERENCE_VALIDATION,
+        StabilizationCategory.SPECIALIST_OUTPUT_CONTRACT,
+        StabilizationCategory.MISSING_SPECIALIST,
+    ]
+
+
+def test_stabilization_priority_comes_directly_from_enum():
+    assert not hasattr(agents_runtime, "_STABILIZATION_PRIORITY")
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [
+        (asyncio.CancelledError(), FailureCategory.CANCELLED),
+        (TimeoutError(), FailureCategory.TIMEOUT),
+        (RuntimeError("authentication failed"), FailureCategory.UNKNOWN),
+        (RuntimeError("401 unauthorized"), FailureCategory.UNKNOWN),
+        (RuntimeError("request forbidden"), FailureCategory.UNKNOWN),
+        (RuntimeError("missing api key"), FailureCategory.UNKNOWN),
+        (RuntimeError("quota exceeded"), FailureCategory.UNKNOWN),
+        (RuntimeError("rate limit"), FailureCategory.UNKNOWN),
+        (RuntimeError("rate_limit"), FailureCategory.UNKNOWN),
+        (RuntimeError("429 response"), FailureCategory.UNKNOWN),
+        (RuntimeError("transport disconnected"), FailureCategory.UNKNOWN),
+        (RuntimeError("connection reset"), FailureCategory.UNKNOWN),
+        (RuntimeError("network unavailable"), FailureCategory.UNKNOWN),
+        (RuntimeError("request timed out"), FailureCategory.UNKNOWN),
+        (RuntimeError("invalid json"), FailureCategory.UNKNOWN),
+        (RuntimeError("validation error"), FailureCategory.UNKNOWN),
+        (RuntimeError("invalid output"), FailureCategory.UNKNOWN),
+        (RuntimeError("failed to generate response"), FailureCategory.UNKNOWN),
+    ],
+)
+def test_failure_category_does_not_infer_from_generic_exception_text(exc, expected):
+    assert _failure_category(exc) == expected
+
+
+def test_failure_category_uses_openai_exception_types_and_quota_code():
+    request = httpx.Request("POST", "https://api.openai.com/v1/responses")
+    response = httpx.Response(429, request=request)
+    cases = [
+        (
+            openai.AuthenticationError(
+                "unauthorized", response=response, body={"code": "invalid_api_key"}
+            ),
+            FailureCategory.AUTHENTICATION,
+        ),
+        (
+            openai.RateLimitError("limited", response=response, body={}),
+            FailureCategory.RATE_LIMIT,
+        ),
+        (
+            openai.RateLimitError(
+                "limited",
+                response=response,
+                body={"error": {"code": "insufficient_quota"}},
+            ),
+            FailureCategory.QUOTA,
+        ),
+        (
+            openai.APIConnectionError(request=request),
+            FailureCategory.TRANSPORT,
+        ),
+    ]
+
+    assert [_failure_category(exc) for exc, _ in cases] == [
+        expected for _, expected in cases
+    ]
+
+
+def test_failure_category_maps_deepseek_http_402_to_quota():
+    request = httpx.Request("POST", "https://api.deepseek.com/chat/completions")
+    response = httpx.Response(402, request=request)
+    exc = openai.APIStatusError(
+        "insufficient balance",
+        response=response,
+        body={"error": {"message": "sensitive provider detail"}},
+    )
+
+    assert _failure_category(exc) == FailureCategory.QUOTA
+
+
+def test_failure_category_recognizes_openai_api_timeout_type():
+    exc = openai.APITimeoutError(
+        request=httpx.Request("POST", "https://api.openai.com/v1/responses")
+    )
+
+    assert _failure_category(exc) == FailureCategory.TIMEOUT
+
+
+@pytest.mark.anyio
+async def test_openai_api_timeout_propagates_structured_runtime_failure(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "present")
+    exc = openai.APITimeoutError(
+        request=httpx.Request("POST", "https://api.openai.com/v1/responses")
+    )
+
+    result = await AgentsRcaRuntime(model="fake", turn=TurnStub(exc)).run(
+        "inv-1", _incident(), _all_evidence(), [_baseline()]
+    )
+
+    assert result.executions[-1].failure_category == FailureCategory.TIMEOUT
+    assert (
+        result.run_summary.primary_stabilization_category
+        == StabilizationCategory.CANCELLED_OR_TIMEOUT
+    )
+
+
 def test_failed_result_builds_one_matching_coordinator_record():
     result = AgentsRcaRuntimeResult.failed("inv-1", "redacted reason")
 
@@ -1114,6 +1875,15 @@ def test_failed_result_builds_one_matching_coordinator_record():
     assert result.executions[0].agent_name == "CoordinatorAgent"
     assert result.tasks[0].analysis_round is None
     assert result.executions[0].analysis_round is None
+    assert result.executions[0].model_provider is None
+    assert result.executions[0].model_name is None
+    assert result.executions[0].failure_category == FailureCategory.UNKNOWN
     assert "round None" not in result.tasks[0].title
     assert result.findings == [] and result.review is None
     assert result.run_summary.status == MultiAgentRunStatus.FAILED
+    assert result.run_summary.model_provider is None
+    assert result.run_summary.model_name is None
+    assert (
+        result.run_summary.primary_stabilization_category
+        == StabilizationCategory.UNKNOWN
+    )

@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from pydantic import ValidationError
 
@@ -9,7 +11,12 @@ from backend.domain.agent_findings import (
     RootCauseCandidate,
 )
 from backend.domain.hypotheses import CauseType
-from backend.domain.multi_agent import AgentExecutionLayer, MultiAgentRunStatus
+from backend.domain.multi_agent import (
+    AgentExecutionLayer,
+    ModelProvider,
+    MultiAgentRunStatus,
+    StabilizationCategory,
+)
 
 
 def test_agent_finding_requires_evidence_unless_gap():
@@ -120,6 +127,7 @@ def test_old_coordination_review_payload_gets_multi_agent_defaults():
     review = CoordinationReview.model_validate(
         {"investigation_id": "inv-1", "candidates": []}
     )
+    another = CoordinationReview(investigation_id="inv-2")
 
     assert review.execution_layer == AgentExecutionLayer.CUSTOM
     assert review.run_status == MultiAgentRunStatus.COMPLETED
@@ -128,3 +136,34 @@ def test_old_coordination_review_payload_gets_multi_agent_defaults():
     assert review.selected_cause_type is None
     assert review.summary == ""
     assert review.uncertainty == ""
+    assert review.model_provider is None
+    assert review.model_name is None
+    assert review.primary_stabilization_category is None
+    assert review.secondary_stabilization_categories == []
+    assert review.secondary_stabilization_categories is not (
+        another.secondary_stabilization_categories
+    )
+
+
+def test_coordination_review_uses_pydantic_28_protected_namespaces():
+    assert CoordinationReview.model_config["protected_namespaces"] == (
+        "model_validate",
+        "model_dump",
+    )
+
+
+def test_coordination_review_dumps_enum_values_as_json_strings():
+    review = CoordinationReview(
+        investigation_id="inv-1",
+        model_provider=ModelProvider.OPENAI,
+        model_name="gpt-test",
+        primary_stabilization_category=StabilizationCategory.GENUINE_CONFLICT,
+        secondary_stabilization_categories=[StabilizationCategory.HYBRID_CONTRACT],
+    )
+
+    dumped = review.model_dump(mode="json")
+    json.dumps(dumped)
+
+    assert dumped["model_provider"] == "openai"
+    assert dumped["primary_stabilization_category"] == "genuine_conflict"
+    assert dumped["secondary_stabilization_categories"] == ["hybrid_contract"]

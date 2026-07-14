@@ -17,7 +17,13 @@ from backend.domain.agent_plan import (
 )
 from backend.domain.evidence import EvidenceProvider
 from backend.domain.memory import MemoryItem, MemoryType
-from backend.domain.multi_agent import AgentExecutionLayer
+from backend.domain.multi_agent import (
+    AgentExecutionLayer,
+    ExecutionStepKind,
+    FailureCategory,
+    ModelProvider,
+    ResultValidationCategory,
+)
 from backend.domain.tool_calls import ToolCallRecord, ToolCallStatus, ToolSpec
 
 
@@ -50,6 +56,43 @@ def test_agent_models_defaults_are_readable_and_empty_lists_are_fresh():
     assert task.analysis_round is None
     assert execution.execution_layer == AgentExecutionLayer.CUSTOM
     assert execution.analysis_round is None
+    assert execution.step_kind is None
+    assert execution.attempt == 1
+    assert execution.failure_category == FailureCategory.NONE
+    assert execution.result_validation_category is None
+    assert execution.model_provider is None
+    assert execution.model_name is None
+
+
+def test_agent_execution_rejects_attempt_below_one():
+    with pytest.raises(ValidationError):
+        AgentExecution(task_id="task-1", agent_name="LogAgent", attempt=0)
+
+
+def test_agent_execution_round_trips_result_validation_category():
+    execution = AgentExecution(
+        task_id="task-validation",
+        agent_name="CoordinatorAgent",
+        status="failed",
+        execution_layer="openai_agents_sdk",
+        step_kind="result_validation",
+        failure_category="invalid_output",
+        result_validation_category="review_contract",
+    )
+
+    reloaded = AgentExecution.model_validate_json(execution.model_dump_json())
+
+    assert (
+        reloaded.result_validation_category
+        == ResultValidationCategory.REVIEW_CONTRACT
+    )
+
+
+def test_agent_execution_uses_pydantic_28_protected_namespaces():
+    assert AgentExecution.model_config["protected_namespaces"] == (
+        "model_validate",
+        "model_dump",
+    )
 
 
 @pytest.mark.parametrize("model", [DiagnosisTask, AgentExecution])
@@ -153,9 +196,22 @@ def test_agent_models_dump_json_payloads():
         evidence_ids=["ev-1"],
         tool_calls=[tool_call],
     )
+    execution = AgentExecution(
+        task_id=task.id,
+        agent_name="LogAgent",
+        step_kind=ExecutionStepKind.SPECIALIST_COLLECTION,
+        failure_category=FailureCategory.TIMEOUT,
+        model_provider=ModelProvider.DEEPSEEK,
+        model_name="deepseek-test",
+    )
 
     dumped = DiagnosisPlan(investigation_id="inv-1", tasks=[task]).model_dump(mode="json")
+    execution_dumped = execution.model_dump(mode="json")
     json.dumps(dumped)
     json.dumps(context.model_dump(mode="json"))
+    json.dumps(execution_dumped)
 
     assert dumped["tasks"][0]["status"] == "pending"
+    assert execution_dumped["step_kind"] == "specialist_collection"
+    assert execution_dumped["failure_category"] == "timeout"
+    assert execution_dumped["model_provider"] == "deepseek"

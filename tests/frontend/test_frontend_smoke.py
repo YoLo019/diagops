@@ -120,22 +120,62 @@ def test_api_exposes_v4_agent_process_methods_and_v5_rca_workbench_methods() -> 
         assert f"function {method_name}" in api
 
 
-def test_api_exposes_v6_react_trace_method() -> None:
+def test_api_uses_summary_list_and_omits_retired_react_trace_method() -> None:
     api = (FRONTEND / "src" / "api.ts").read_text(encoding="utf-8")
 
-    assert "export type ReActTrace" in api
-    assert "getReActTrace" in api
-    assert "/react-trace" in api
+    assert 'request<InvestigationSummary[]>("/investigations/summaries")' in api
+    assert "export type ReActTrace" not in api
+    assert "getReActTrace" not in api
 
 
-def test_app_contains_react_trace_panel_copy() -> None:
+def test_app_omits_react_panel_and_loads_agent_resources_independently() -> None:
     app = (FRONTEND / "src" / "App.tsx").read_text(encoding="utf-8")
 
-    assert "ReAct 推理过程" in app
-    assert "只读" in app
-    assert "输入:" in app
-    assert "tool_input" in app
-    assert "getReActTrace" in app
+    assert "ReActTracePanel" not in app
+    assert "getReActTrace" not in app
+    assert "Promise.all" not in app
+    for query_key in [
+        'queryKey: ["plan", investigationId]',
+        'queryKey: ["tasks", investigationId]',
+        'queryKey: ["agent-executions", investigationId]',
+        'queryKey: ["context", investigationId]',
+        'queryKey: ["tool-calls", investigationId]',
+        'queryKey: ["memory", investigationId]',
+        'queryKey: ["task-graph", investigationId]',
+    ]:
+        assert query_key in app
+
+
+def test_v8_1_frontend_types_and_compact_diagnostics_are_present() -> None:
+    api = (FRONTEND / "src" / "api.ts").read_text(encoding="utf-8")
+    app = (FRONTEND / "src" / "App.tsx").read_text(encoding="utf-8")
+
+    for field in [
+        "step_kind?: ExecutionStepKind | null",
+        "failure_category?: FailureCategory",
+        "result_validation_category?: ResultValidationCategory | null",
+        "model_provider?: ModelProvider | null",
+        "model_name?: string | null",
+        "primary_stabilization_category?: StabilizationCategory | null",
+        "secondary_stabilization_categories?: StabilizationCategory[]",
+    ]:
+        assert field in api
+    for projection in [
+        "execution.step_kind",
+        "execution.failure_category",
+        "execution.result_validation_category",
+        "execution.model_provider",
+        "review.model_provider",
+        "review.model_name",
+        "run.primary_stabilization_category",
+    ]:
+        assert projection in app
+    assert "Promise.all" not in app
+    assert "Validation:" in app
+    assert (
+        'execution.execution_layer !== "openai_agents_sdk" && execution.error_message'
+        in app
+    )
 
 
 def test_app_contains_v7_hybrid_rca_copy() -> None:
@@ -443,6 +483,9 @@ def test_api_exposes_v7_workbench_fields() -> None:
         "coordination_review",
         "agent_executions",
         "multi_agent_run",
+        "agent_config",
+        "implementation_status",
+        "certification_status",
     ]:
         assert field in api
 
@@ -450,6 +493,11 @@ def test_api_exposes_v7_workbench_fields() -> None:
     assert diagnosis_task is not None
     assert "execution_layer?: AgentExecutionLayer" in diagnosis_task.group("body")
     assert "analysis_round?: 1 | 2 | null" in diagnosis_task.group("body")
+
+    app = (FRONTEND / "src" / "App.tsx").read_text(encoding="utf-8")
+    assert "agentConfig.implementation_status" in app
+    assert "agentConfig.certification_status" in app
+    assert "DEEPSEEK_API_KEY" not in app
 
 
 def test_frontend_uses_vite_proxy_by_default() -> None:
@@ -500,3 +548,21 @@ def test_ui_does_not_claim_production_changes_are_automatic() -> None:
 
     for claim in forbidden_claims:
         assert claim not in app
+
+
+def test_frontend_sends_verification_references_and_limits_human_transitions() -> None:
+    api = (FRONTEND / "src" / "api.ts").read_text(encoding="utf-8")
+    app = (FRONTEND / "src" / "App.tsx").read_text(encoding="utf-8")
+
+    for field in (
+        "result_evidence_ids",
+        "related_action_ids",
+        "related_cause_types",
+    ):
+        assert field in api
+    assert "allowedActionTargets(action)" in app
+    assert "allowedVerificationTargets(verification.status)" in app
+    assert "disabled={allowedActionTargets(action).length === 0}" in app
+    assert "disabled={allowedVerificationTargets(verification.status).length === 0}" in app
+    assert "选择结果 Evidence" in app
+    assert "选择关联 action 或 cause" in app

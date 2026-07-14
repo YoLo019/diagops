@@ -18,11 +18,9 @@ providers:
     enabled: true
     path: config/services.yaml
 
-llm:
-  enabled: false
-
 agents:
   enabled: false
+  provider: openai
   model: null
   max_turns: 8
   timeout_seconds: 60

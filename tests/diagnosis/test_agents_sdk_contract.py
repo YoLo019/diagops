@@ -4,10 +4,12 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
+import httpx
 import pytest
 from agents import Model, ModelResponse
 from agents.models.interface import ModelTracing
 from agents.usage import Usage
+from openai import AsyncOpenAI
 from openai.types.responses import (
     ResponseFunctionToolCall,
     ResponseOutputMessage,
@@ -19,6 +21,10 @@ from backend.diagnosis.agents_runtime import (
     _CoordinatorProposal,
     _run_sdk_turn,
     _SpecialistDraft,
+)
+from backend.diagnosis.deepseek_model import (
+    DEEPSEEK_BASE_URL,
+    create_deepseek_model,
 )
 from backend.domain.agent_findings import AgentFindingType, AgentName
 from backend.domain.agent_plan import AgentExecutionStatus
@@ -153,6 +159,120 @@ def _message_response(text: str, usage: Usage) -> ModelResponse:
         usage=usage,
         response_id="response",
     )
+
+
+@pytest.mark.anyio
+async def test_deepseek_chat_request_serializes_json_object_and_tools(monkeypatch):
+    request_bodies = []
+    http_clients = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        request_bodies.append(body)
+        call_number = len(request_bodies)
+        if call_number == 1:
+            message = {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call-log",
+                        "type": "function",
+                        "function": {
+                            "name": AgentName.LOG.value,
+                            "arguments": json.dumps({"input": "read logs"}),
+                        },
+                    }
+                ],
+            }
+            finish_reason = "tool_calls"
+        elif call_number == 2:
+            message = {
+                "role": "assistant",
+                "content": _SpecialistDraft(
+                    finding_type=AgentFindingType.ROOT_CAUSE,
+                    summary="deployment errors",
+                    confidence=0.9,
+                    evidence_ids=["ev-log"],
+                    related_cause_type=CauseType.DEPLOYMENT_REGRESSION,
+                ).model_dump_json(),
+            }
+            finish_reason = "stop"
+        else:
+            message = {
+                "role": "assistant",
+                "content": _CoordinatorProposal(
+                    summary="deployment regression",
+                    uncertainty="none",
+                    proposed_cause=CauseType.DEPLOYMENT_REGRESSION,
+                ).model_dump_json(),
+            }
+            finish_reason = "stop"
+        return httpx.Response(
+            200,
+            json={
+                "id": f"chatcmpl-{call_number}",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "deepseek-v4-pro",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": message,
+                        "finish_reason": finish_reason,
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                },
+            },
+        )
+
+    def build_client(**kwargs):
+        assert kwargs == {
+            "api_key": "local-secret",
+            "base_url": DEEPSEEK_BASE_URL,
+        }
+        http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        http_clients.append(http_client)
+        return AsyncOpenAI(
+            api_key=kwargs["api_key"],
+            base_url=kwargs["base_url"],
+            http_client=http_client,
+        )
+
+    monkeypatch.setattr("backend.diagnosis.deepseek_model.AsyncOpenAI", build_client)
+    model = create_deepseek_model("deepseek-v4-pro", "local-secret")
+    assert model is not None
+    result = await _run_sdk_turn(
+        model=model,
+        coordinator_input="Request log specialist",
+        specialist_inputs={AgentName.LOG: "Evidence only for LogAgent"},
+        specialist_names=[AgentName.LOG],
+        max_turns=8,
+    )
+
+    assert result.error is None
+    assert http_clients
+    assert all(client.is_closed for client in http_clients)
+    assert all(body["thinking"] == {"type": "disabled"} for body in request_bodies)
+    first_body = request_bodies[0]
+    assert first_body["response_format"] == {"type": "json_object"}
+    assert "json_schema" not in json.dumps(first_body["response_format"])
+    assert first_body["tools"]
+    assert first_body["tool_choice"] == "required"
+    system_messages = [body["messages"][0]["content"] for body in request_bodies]
+    assert any(
+        '"finding_type"' in message and '"confidence"' in message
+        for message in system_messages
+    )
+    assert any(
+        '"summary"' in message and '"uncertainty"' in message
+        for message in system_messages
+    )
+    assert any("CauseType semantics:" in message for message in system_messages)
 
 
 @pytest.mark.anyio

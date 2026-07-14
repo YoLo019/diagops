@@ -1,7 +1,12 @@
 from collections.abc import Callable
 
 from backend.domain.events import IncidentEvent
-from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
+from backend.domain.evidence import (
+    EvidenceItem,
+    EvidenceKind,
+    EvidenceProvider,
+    EvidenceStatus,
+)
 from backend.domain.hypotheses import CauseType, Hypothesis
 from backend.rca.scoring import confidence_from_score, contains_any, parse_percentage
 
@@ -13,6 +18,12 @@ class RcaAnalyzer:
     def analyze(
         self, event: IncidentEvent, evidence: list[EvidenceItem]
     ) -> list[Hypothesis]:
+        evidence = [
+            item
+            for item in evidence
+            if item.status in {EvidenceStatus.SUCCESS, EvidenceStatus.PARTIAL}
+            and item.kind != EvidenceKind.PROVIDER_ERROR
+        ]
         candidates = [
             self._deployment_regression(event, evidence),
             self._traffic_spike(event, evidence),

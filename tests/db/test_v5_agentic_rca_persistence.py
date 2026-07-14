@@ -13,11 +13,16 @@ from backend.domain.agent_findings import (
     CoordinationReview,
     RootCauseCandidate,
 )
+from backend.domain.agent_plan import AgentExecution, AgentExecutionStatus
 from backend.domain.hypotheses import CauseType
 from backend.domain.multi_agent import (
     AgentExecutionLayer,
     CoordinationDecisionStatus,
+    ExecutionStepKind,
+    FailureCategory,
+    ModelProvider,
     MultiAgentRunStatus,
+    StabilizationCategory,
 )
 
 
@@ -66,6 +71,97 @@ def review(review_id: str, confidence: float = 0.9) -> CoordinationReview:
         ],
         created_at=dt(3),
     )
+
+
+def attributed_execution(execution_id: str = "execution-v8-1") -> AgentExecution:
+    return AgentExecution(
+        id=execution_id,
+        task_id="task-v8-1",
+        agent_name="CoordinatorAgent",
+        status=AgentExecutionStatus.FAILED,
+        execution_layer=AgentExecutionLayer.OPENAI_AGENTS_SDK,
+        step_kind=ExecutionStepKind.FINAL_SYNTHESIS,
+        attempt=1,
+        failure_category=FailureCategory.INVALID_OUTPUT,
+        model_provider=ModelProvider.OPENAI,
+        model_name="gpt-test",
+        started_at=dt(2),
+    )
+
+
+def attributed_review(review_id: str = "review-v8-1") -> CoordinationReview:
+    return review(review_id).model_copy(
+        update={
+            "execution_layer": AgentExecutionLayer.OPENAI_AGENTS_SDK,
+            "run_status": MultiAgentRunStatus.PARTIAL,
+            "model_provider": ModelProvider.OPENAI,
+            "model_name": "gpt-test",
+            "primary_stabilization_category": StabilizationCategory.FINAL_SYNTHESIS,
+            "secondary_stabilization_categories": [
+                StabilizationCategory.SPECIALIST_OUTPUT_CONTRACT
+            ],
+        }
+    )
+
+
+@pytest.mark.parametrize("repository_kind", ["memory", "sqlite"])
+def test_v8_1_multi_agent_result_round_trips_atomically(
+    repository_kind, tmp_path
+):
+    if repository_kind == "memory":
+        repository = InMemoryInvestigationRepository()
+
+        def reopen():
+            return repository
+    else:
+        database_path = tmp_path / "v8-1-result.db"
+        engine = create_engine(f"sqlite:///{database_path}")
+        metadata.create_all(engine)
+        repository = SQLiteInvestigationRepository(engine)
+
+        def reopen():
+            engine.dispose()
+            return SQLiteInvestigationRepository(
+                create_engine(f"sqlite:///{database_path}")
+            )
+
+    saved_finding = finding("finding-v8-1")
+    saved_execution = attributed_execution()
+    saved_review = attributed_review()
+
+    repository.save_multi_agent_result(
+        "inv-1", [saved_finding], [saved_execution], saved_review
+    )
+    reloaded = reopen()
+
+    assert reloaded.list_agent_findings("inv-1") == [saved_finding]
+    assert reloaded.list_executions("inv-1") == [saved_execution]
+    assert reloaded.get_coordination_review("inv-1") == saved_review
+
+
+def test_sqlite_multi_agent_result_rolls_back_rows_when_review_insert_fails():
+    class FailingReviewRepository(SQLiteInvestigationRepository):
+        def _insert_multi_agent_review(self, connection, row):
+            del connection, row
+            raise RuntimeError("injected review insert failure")
+
+    engine = create_engine("sqlite:///:memory:")
+    metadata.create_all(engine)
+    repository = FailingReviewRepository(engine)
+    original_review = review("review-existing")
+    repository.save_coordination_review(original_review)
+
+    with pytest.raises(RuntimeError, match="injected review insert failure"):
+        repository.save_multi_agent_result(
+            "inv-1",
+            [finding("finding-v8-1")],
+            [attributed_execution()],
+            attributed_review(),
+        )
+
+    assert repository.list_agent_findings("inv-1") == []
+    assert repository.list_executions("inv-1") == []
+    assert repository.get_coordination_review("inv-1") == original_review
 
 
 def test_in_memory_repository_saves_lists_and_replaces_agentic_rca_payloads():

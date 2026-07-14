@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 
+from backend.db.models import InvestigationRecord
 from backend.db.repositories import InMemoryInvestigationRepository
 from backend.db.session import create_db_engine, initialize_database
 from backend.db.sqlite_repository import SQLiteInvestigationRepository
@@ -280,6 +281,7 @@ def test_sqlite_repository_round_trips_engine_plan_tasks_executions_and_tool_cal
     engine = create_db_engine(f"sqlite:///{tmp_path / 'diagops-execution.db'}")
     initialize_database(engine)
     repository = SQLiteInvestigationRepository(engine)
+    repository.save(InvestigationRecord(id="inv-1", event=event()))
     registry = ToolRegistry()
     register_tool(registry, "read_logs", ToolCallStatus.SUCCESS, ["ev-log"])
     plan = DiagnosisPlan(investigation_id="inv-1", tasks=[task("task-log")])

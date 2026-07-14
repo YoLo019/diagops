@@ -7,7 +7,6 @@ import pytest
 from backend.config.settings import (
     AgentsSettings,
     AppSettings,
-    LlmSettings,
     StorageSettings,
 )
 from backend.db.models import InvestigationRecord, InvestigationStatus
@@ -18,9 +17,8 @@ from backend.diagnosis.action_planner import ActionPlanner
 from backend.diagnosis.agents_runtime import AgentsRcaRuntimeResult
 from backend.diagnosis.coordination_review import build_hybrid_coordination_review
 from backend.diagnosis.coordinator import DiagnosisCoordinator
-from backend.diagnosis.execution_engine import DiagnosisExecutionEngine
+from backend.diagnosis.evidence_validation import EvidenceContractError
 from backend.diagnosis.orchestrator import DiagnosisOrchestrator
-from backend.diagnosis.react_agent import ReActInvestigationAgent, ReActLlmResponse
 from backend.domain.actions import (
     ActionRiskLevel,
     ActionType,
@@ -29,22 +27,29 @@ from backend.domain.actions import (
 )
 from backend.domain.agent_findings import AgentFindingType, AgentName
 from backend.domain.agent_plan import AgentExecutionStatus, DiagnosisTaskStatus
-from backend.domain.evidence import EvidenceProvider
+from backend.domain.evidence import (
+    EvidenceKind,
+    EvidenceProvider,
+    EvidenceStatus,
+)
 from backend.domain.hypotheses import CauseType
 from backend.domain.multi_agent import (
     AgentExecutionLayer,
     CoordinationDecisionStatus,
+    ExecutionStepKind,
+    FailureCategory,
+    ModelProvider,
     MultiAgentRunStatus,
     MultiAgentRunSummary,
+    ResultValidationCategory,
+    StabilizationCategory,
 )
-from backend.domain.react_trace import ReActTraceStatus
 from backend.providers.registry import ProviderRegistry, build_mock_provider_registry
 from backend.providers.results import ProviderResult
 from backend.rca.analyzer import RcaAnalyzer
 from backend.reports.generator import ReportGenerator
 from backend.services.container import AppContainer
 from backend.services.incident_cases import load_incident_case
-from backend.tools.provider_tools import build_provider_tool_registry
 
 
 def build_v2_orchestrator(
@@ -129,16 +134,73 @@ def sdk_result(repository, investigation_id, status, *, review=True):
         status,
         "SDK review",
         "",
-    ).model_copy(
-        update={"id": f"review-sdk-{status}"}
-    )
+        model_provider=ModelProvider.OPENAI,
+        model_name="gpt-test",
+    ).model_copy(update={"id": f"review-sdk-{status}"})
     return AgentsRcaRuntimeResult(
         tasks=tasks,
         executions=executions,
         findings=[finding],
         review=sdk_review if review else None,
-        run_summary=MultiAgentRunSummary(status=status),
+        run_summary=MultiAgentRunSummary(
+            status=status,
+            model_provider=ModelProvider.OPENAI,
+            model_name="gpt-test",
+        ),
     )
+
+
+def completed_recollection_result(
+    repository,
+    investigation_id,
+    *,
+    initial_failure=FailureCategory.MISSING_SPECIALIST,
+    recovery_agent=AgentName.METRIC,
+):
+    result = sdk_result(
+        repository, investigation_id, MultiAgentRunStatus.COMPLETED
+    )
+    initial_task = result.tasks[0].model_copy(
+        update={
+            "id": "task-recollection-attempt-1",
+            "agent_name": AgentName.METRIC.value,
+            "status": DiagnosisTaskStatus.FAILED,
+        }
+    )
+    recollection_task = result.tasks[0].model_copy(
+        update={
+            "id": "task-recollection-attempt-2",
+            "agent_name": recovery_agent.value,
+            "status": DiagnosisTaskStatus.COMPLETED,
+        }
+    )
+    initial_execution = result.executions[0].model_copy(
+        update={
+            "id": "exec-recollection-attempt-1",
+            "task_id": initial_task.id,
+            "agent_name": initial_task.agent_name,
+            "status": AgentExecutionStatus.FAILED,
+            "step_kind": ExecutionStepKind.SPECIALIST_COLLECTION,
+            "attempt": 1,
+            "failure_category": initial_failure,
+            "error_message": "missing specialist",
+        }
+    )
+    recollection_execution = result.executions[0].model_copy(
+        update={
+            "id": "exec-recollection-attempt-2",
+            "task_id": recollection_task.id,
+            "agent_name": recollection_task.agent_name,
+            "status": AgentExecutionStatus.COMPLETED,
+            "step_kind": ExecutionStepKind.SPECIALIST_RECOLLECTION,
+            "attempt": 2,
+            "failure_category": FailureCategory.NONE,
+            "error_message": None,
+        }
+    )
+    result.tasks = [initial_task, recollection_task]
+    result.executions = [initial_execution, recollection_execution]
+    return result
 
 
 class StubAgentsRuntime:
@@ -150,7 +212,12 @@ class StubAgentsRuntime:
     async def run(self, *, investigation_id, event, evidence, hypotheses):
         persisted = self.repository.get(investigation_id)
         assert event == persisted.event
-        assert evidence == persisted.evidence
+        assert evidence == [
+            item
+            for item in persisted.evidence
+            if item.status in {EvidenceStatus.SUCCESS, EvidenceStatus.PARTIAL}
+            and item.kind != EvidenceKind.PROVIDER_ERROR
+        ]
         assert hypotheses == persisted.hypotheses
         assert self.repository.list_agent_findings(investigation_id)
         assert self.repository.get_coordination_review(investigation_id) is not None
@@ -171,9 +238,7 @@ def corrupt_sdk_result(result, repository, investigation_id, case):
     elif case == "missing_execution":
         result.tasks.append(task.model_copy(update={"id": "task-sdk-unexecuted"}))
     elif case == "duplicate_per_task":
-        result.executions.append(
-            execution.model_copy(update={"id": "exec-sdk-duplicate-task"})
-        )
+        result.executions.append(execution.model_copy(update={"id": "exec-sdk-duplicate-task"}))
     elif case == "task_layer":
         task.execution_layer = AgentExecutionLayer.CUSTOM
     elif case == "duplicate_execution_id":
@@ -205,9 +270,7 @@ def corrupt_sdk_result(result, repository, investigation_id, case):
         finding.revises_finding_id = "finding-unknown"
     elif case == "round2_cross_layer":
         finding.analysis_round = 2
-        finding.revises_finding_id = repository.list_agent_findings(
-            investigation_id
-        )[0].id
+        finding.revises_finding_id = repository.list_agent_findings(investigation_id)[0].id
     return result
 
 
@@ -277,6 +340,28 @@ def invalid_run_result(repository, investigation_id, case):
     elif case == "candidate_without_evidence_chain":
         result.review.candidates[0].supporting_evidence_ids = []
         result.review.candidates[0].contradicting_evidence_ids = []
+    return result
+
+
+def invalid_boundary_result(repository, investigation_id, case):
+    result = sdk_result(
+        repository,
+        investigation_id,
+        MultiAgentRunStatus.COMPLETED,
+    )
+    if case in {
+        "empty_tasks",
+        "empty_executions",
+        "finding_layer",
+        "round2_unknown",
+    }:
+        return corrupt_sdk_result(result, repository, investigation_id, case)
+    if case == "missing_review_attribution":
+        result.review.model_provider = None
+    elif case == "invalid_review":
+        result.review.investigation_id = "inv-wrong"
+    elif case == "completed_review_none":
+        result.review = None
     return result
 
 
@@ -393,8 +478,7 @@ def test_orchestrator_runs_v7_after_v5_and_persists_valid_work(status):
                     for task in self.list_tasks(investigation_id)
                 )
                 assert any(
-                    execution.execution_layer
-                    == AgentExecutionLayer.OPENAI_AGENTS_SDK
+                    execution.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK
                     for execution in self.list_executions(investigation_id)
                 )
                 assert any(
@@ -414,20 +498,326 @@ def test_orchestrator_runs_v7_after_v5_and_persists_valid_work(status):
     assert record.status == InvestigationStatus.COMPLETED
     assert record.hypotheses and record.actions and record.verification_suggestions
     assert record.report is not None
-    assert {
-        task.execution_layer for task in repository.list_tasks(record.id)
-    } == {AgentExecutionLayer.CUSTOM, AgentExecutionLayer.OPENAI_AGENTS_SDK}
-    assert {
-        execution.execution_layer
-        for execution in repository.list_executions(record.id)
-    } == {AgentExecutionLayer.CUSTOM, AgentExecutionLayer.OPENAI_AGENTS_SDK}
-    assert {
-        finding.execution_layer
-        for finding in repository.list_agent_findings(record.id)
-    } == {AgentExecutionLayer.CUSTOM, AgentExecutionLayer.OPENAI_AGENTS_SDK}
+    assert {task.execution_layer for task in repository.list_tasks(record.id)} == {
+        AgentExecutionLayer.CUSTOM,
+        AgentExecutionLayer.OPENAI_AGENTS_SDK,
+    }
+    assert {execution.execution_layer for execution in repository.list_executions(record.id)} == {
+        AgentExecutionLayer.CUSTOM,
+        AgentExecutionLayer.OPENAI_AGENTS_SDK,
+    }
+    assert {finding.execution_layer for finding in repository.list_agent_findings(record.id)} == {
+        AgentExecutionLayer.CUSTOM,
+        AgentExecutionLayer.OPENAI_AGENTS_SDK,
+    }
     review = repository.get_coordination_review(record.id)
     assert review.id == f"review-sdk-{status}"
     assert review.run_status == status
+
+
+def test_orchestrator_accepts_attributed_review_without_public_model_name():
+    class UnnamedModelRuntime(StubAgentsRuntime):
+        async def run(self, **kwargs):
+            result = await super().run(**kwargs)
+            result.review = result.review.model_copy(update={"model_name": None})
+            result.run_summary = result.run_summary.model_copy(
+                update={"model_name": None}
+            )
+            return result
+
+    class CapturingReportGenerator(ReportGenerator):
+        def generate(self, *args, **kwargs):
+            self.multi_agent_run = kwargs.get("multi_agent_run")
+            return super().generate(*args, **kwargs)
+
+    repository = InMemoryInvestigationRepository()
+    runtime = UnnamedModelRuntime(repository)
+    report_generator = CapturingReportGenerator()
+
+    record = build_v2_orchestrator(
+        repository=repository,
+        report_generator=report_generator,
+        agents_runtime=runtime,
+    ).run(load_incident_case("deployment_regression"))
+
+    review = repository.get_coordination_review(record.id)
+    assert review.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK
+    assert review.model_provider == ModelProvider.OPENAI
+    assert review.model_name is None
+    assert report_generator.multi_agent_run.status == MultiAgentRunStatus.COMPLETED
+
+
+def test_orchestrator_accepts_code_owned_signal_fallback():
+    repository = InMemoryInvestigationRepository()
+
+    class SignalFallbackRuntime(StubAgentsRuntime):
+        async def run(self, **kwargs):
+            result = await super().run(**kwargs)
+            persisted = self.repository.get(kwargs["investigation_id"])
+            signal = result.findings[0].model_copy(
+                update={"finding_type": AgentFindingType.SIGNAL}
+            )
+            result.findings = [signal]
+            result.review = build_hybrid_coordination_review(
+                kwargs["investigation_id"],
+                result.findings,
+                persisted.evidence,
+                persisted.hypotheses,
+                result.run_summary.status,
+                "SDK fallback review",
+                "No conclusive Specialist finding",
+                model_provider=ModelProvider.OPENAI,
+                model_name="gpt-test",
+            )
+            return result
+
+    record = build_v2_orchestrator(
+        repository=repository,
+        agents_runtime=SignalFallbackRuntime(repository),
+    ).run(load_incident_case("traffic_spike"))
+
+    review = repository.get_coordination_review(record.id)
+    sdk_executions = [
+        item
+        for item in repository.list_executions(record.id)
+        if item.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK
+    ]
+
+    assert review.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK
+    assert review.decision_status == CoordinationDecisionStatus.FALLBACK
+    assert all(
+        not candidate.supporting_finding_ids
+        and not candidate.contradicting_finding_ids
+        and (
+            candidate.supporting_evidence_ids
+            or candidate.contradicting_evidence_ids
+        )
+        for candidate in review.candidates
+    )
+    assert all(
+        item.step_kind != ExecutionStepKind.RESULT_VALIDATION
+        for item in sdk_executions
+    )
+
+
+def test_orchestrator_rejects_conclusive_review_without_finding_support():
+    repository = InMemoryInvestigationRepository()
+
+    class UnsupportedAgreementRuntime(StubAgentsRuntime):
+        async def run(self, **kwargs):
+            result = await super().run(**kwargs)
+            for candidate in result.review.candidates:
+                candidate.supporting_finding_ids = []
+                candidate.contradicting_finding_ids = []
+            return result
+
+    record = build_v2_orchestrator(
+        repository=repository,
+        agents_runtime=UnsupportedAgreementRuntime(repository),
+    ).run(load_incident_case("deployment_regression"))
+    sdk_executions = [
+        item
+        for item in repository.list_executions(record.id)
+        if item.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK
+    ]
+
+    assert len(sdk_executions) == 1
+    assert sdk_executions[0].step_kind == ExecutionStepKind.RESULT_VALIDATION
+    assert (
+        sdk_executions[0].result_validation_category
+        == ResultValidationCategory.REVIEW_CONTRACT
+    )
+    assert repository.get_coordination_review(record.id).execution_layer == (
+        AgentExecutionLayer.CUSTOM
+    )
+
+
+def test_orchestrator_accepts_completed_run_with_resolved_missing_specialist():
+    class RecollectionRuntime:
+        async def run(self, *, investigation_id, **_kwargs):
+            return completed_recollection_result(repository, investigation_id)
+
+    class CapturingReportGenerator(ReportGenerator):
+        def generate(self, *args, **kwargs):
+            self.multi_agent_run = kwargs.get("multi_agent_run")
+            return super().generate(*args, **kwargs)
+
+    class CapturingOrchestrator(DiagnosisOrchestrator):
+        def _reload_v7_result(self, *args, **kwargs):
+            reloaded = super()._reload_v7_result(*args, **kwargs)
+            if reloaded is not None:
+                self.reloaded_v7_result = reloaded
+            return reloaded
+
+    repository = InMemoryInvestigationRepository()
+    providers = build_mock_provider_registry()
+    report_generator = CapturingReportGenerator()
+    orchestrator = CapturingOrchestrator(
+        repository=repository,
+        providers=providers,
+        analyzer=RcaAnalyzer(),
+        report_generator=report_generator,
+        coordinator=DiagnosisCoordinator(providers),
+        action_planner=ActionPlanner(),
+        agents_runtime=RecollectionRuntime(),
+    )
+
+    record = orchestrator.run(load_incident_case("deployment_regression"))
+
+    expected_task_ids = {
+        "task-recollection-attempt-1",
+        "task-recollection-attempt-2",
+    }
+    expected_execution_ids = {
+        "exec-recollection-attempt-1",
+        "exec-recollection-attempt-2",
+    }
+    assert expected_task_ids <= {
+        task.id for task in repository.list_tasks(record.id)
+    }
+    assert expected_execution_ids <= {
+        execution.id for execution in repository.list_executions(record.id)
+    }
+    assert {task.id for task in orchestrator.reloaded_v7_result.tasks} == (
+        expected_task_ids
+    )
+    assert {
+        execution.id for execution in orchestrator.reloaded_v7_result.executions
+    } == expected_execution_ids
+    assert repository.get_coordination_review(record.id).execution_layer == (
+        AgentExecutionLayer.OPENAI_AGENTS_SDK
+    )
+    assert report_generator.multi_agent_run.status == MultiAgentRunStatus.COMPLETED
+
+
+@pytest.mark.parametrize(
+    ("initial_failure", "recovery_agent"),
+    [
+        (FailureCategory.INVALID_OUTPUT, AgentName.METRIC),
+        (FailureCategory.MISSING_SPECIALIST, AgentName.LOG),
+    ],
+)
+def test_orchestrator_rejects_unresolved_failed_task_in_completed_run(
+    initial_failure, recovery_agent
+):
+    class InvalidCompletedRuntime:
+        async def run(self, *, investigation_id, **_kwargs):
+            return completed_recollection_result(
+                repository,
+                investigation_id,
+                initial_failure=initial_failure,
+                recovery_agent=recovery_agent,
+            )
+
+    repository = InMemoryInvestigationRepository()
+    record = build_v2_orchestrator(
+        repository=repository,
+        agents_runtime=InvalidCompletedRuntime(),
+    ).run(load_incident_case("deployment_regression"))
+
+    assert repository.get_coordination_review(record.id).execution_layer == (
+        AgentExecutionLayer.CUSTOM
+    )
+    assert "task-recollection-attempt-1" not in {
+        task.id for task in repository.list_tasks(record.id)
+    }
+
+
+@pytest.mark.parametrize(
+    ("status", "failure_reason", "primary_category", "secondary_categories"),
+    [
+        (MultiAgentRunStatus.COMPLETED, None, None, []),
+        (
+            MultiAgentRunStatus.PARTIAL,
+            None,
+            StabilizationCategory.MISSING_SPECIALIST,
+            [StabilizationCategory.FINAL_SYNTHESIS],
+        ),
+        (
+            MultiAgentRunStatus.FAILED,
+            "persisted failure reason",
+            StabilizationCategory.PROVIDER_OR_SDK_TRANSPORT,
+            [],
+        ),
+        (
+            MultiAgentRunStatus.SKIPPED,
+            "persisted skip reason",
+            StabilizationCategory.UNKNOWN,
+            [],
+        ),
+    ],
+)
+def test_orchestrator_reload_preserves_structured_run_summary(
+    status, failure_reason, primary_category, secondary_categories
+):
+    class StructuredSummaryRuntime:
+        async def run(self, *, investigation_id, **_kwargs):
+            if status in {
+                MultiAgentRunStatus.COMPLETED,
+                MultiAgentRunStatus.PARTIAL,
+            }:
+                result = sdk_result(repository, investigation_id, status)
+                result.review = result.review.model_copy(
+                    update={
+                        "model_provider": ModelProvider.DEEPSEEK,
+                        "model_name": "deepseek-test",
+                        "primary_stabilization_category": primary_category,
+                        "secondary_stabilization_categories": secondary_categories,
+                    }
+                )
+                runtime_provider = ModelProvider.DEEPSEEK
+                runtime_model_name = "deepseek-test"
+            else:
+                result = AgentsRcaRuntimeResult.failed(
+                    investigation_id, failure_reason
+                )
+                if status == MultiAgentRunStatus.SKIPPED:
+                    result.tasks[0].status = DiagnosisTaskStatus.SKIPPED
+                    result.executions[0].status = AgentExecutionStatus.SKIPPED
+                result.executions[0].model_provider = ModelProvider.DEEPSEEK
+                result.executions[0].model_name = "deepseek-test"
+                result.executions[0].failure_category = (
+                    FailureCategory.TRANSPORT
+                    if status == MultiAgentRunStatus.FAILED
+                    else FailureCategory.NOT_CONFIGURED
+                )
+                runtime_provider = ModelProvider.OPENAI
+                runtime_model_name = "runtime-only-model"
+            result.run_summary = MultiAgentRunSummary(
+                status=status,
+                failure_reason="runtime-only reason",
+                model_provider=runtime_provider,
+                model_name=runtime_model_name,
+                primary_stabilization_category=StabilizationCategory.UNSAFE_OUTPUT,
+                secondary_stabilization_categories=[
+                    StabilizationCategory.REVIEW_PERSISTENCE
+                ],
+            )
+            return result
+
+    class CapturingReportGenerator(ReportGenerator):
+        def generate(self, *args, **kwargs):
+            self.multi_agent_run = kwargs.get("multi_agent_run")
+            return super().generate(*args, **kwargs)
+
+    expected_summary = MultiAgentRunSummary(
+        status=status,
+        failure_reason=failure_reason,
+        model_provider=ModelProvider.DEEPSEEK,
+        model_name="deepseek-test",
+        primary_stabilization_category=primary_category,
+        secondary_stabilization_categories=secondary_categories,
+    )
+    repository = InMemoryInvestigationRepository()
+    report_generator = CapturingReportGenerator()
+
+    build_v2_orchestrator(
+        repository=repository,
+        report_generator=report_generator,
+        agents_runtime=StructuredSummaryRuntime(),
+    ).run(load_incident_case("deployment_regression"))
+
+    assert report_generator.multi_agent_run == expected_summary
 
 
 def test_orchestrator_accepts_aggregate_review_finding_reference():
@@ -503,9 +893,7 @@ def test_orchestrator_rejects_forged_agreement_selected_cause(selected_cause):
                 }
             )
             second_agent = (
-                AgentName.METRIC
-                if first.agent_name != AgentName.METRIC
-                else AgentName.LOG
+                AgentName.METRIC if first.agent_name != AgentName.METRIC else AgentName.LOG
             )
             second = first.model_copy(
                 update={"id": "finding-sdk-agreement-2", "agent_name": second_agent}
@@ -613,6 +1001,84 @@ def test_orchestrator_validates_entire_v7_batch_before_any_write(case):
     )
 
 
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    [
+        ("empty_tasks", ResultValidationCategory.TASK_CONTRACT),
+        ("empty_executions", ResultValidationCategory.EXECUTION_CONTRACT),
+        ("finding_layer", ResultValidationCategory.FINDING_CONTRACT),
+        (
+            "round2_unknown",
+            ResultValidationCategory.FINDING_REVISION_CONTRACT,
+        ),
+        (
+            "missing_review_attribution",
+            ResultValidationCategory.REVIEW_ATTRIBUTION,
+        ),
+        ("invalid_review", ResultValidationCategory.REVIEW_CONTRACT),
+        ("semantic_reference", ResultValidationCategory.SEMANTIC_REFERENCE),
+        (
+            "completed_review_none",
+            ResultValidationCategory.RUN_STATUS_CONTRACT,
+        ),
+    ],
+)
+def test_orchestrator_persists_exact_safe_result_validation_category(
+    case,
+    expected,
+    monkeypatch,
+):
+    repository = InMemoryInvestigationRepository()
+
+    class InvalidBoundaryRuntime:
+        async def run(self, *, investigation_id, **_kwargs):
+            return invalid_boundary_result(repository, investigation_id, case)
+
+    if case == "semantic_reference":
+        calls = 0
+
+        def reject_sdk_semantics(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls > 1:
+                raise EvidenceContractError("cause_support_mismatch")
+
+        monkeypatch.setattr(
+            "backend.diagnosis.orchestrator.validate_agent_semantics",
+            reject_sdk_semantics,
+        )
+
+    record = build_v2_orchestrator(
+        repository=repository,
+        agents_runtime=InvalidBoundaryRuntime(),
+    ).run(load_incident_case("deployment_regression"))
+    sdk_executions = [
+        item
+        for item in repository.list_executions(record.id)
+        if item.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK
+    ]
+
+    assert record.status == InvestigationStatus.COMPLETED
+    assert len(sdk_executions) == 1
+    execution = sdk_executions[0]
+    assert execution.step_kind == ExecutionStepKind.RESULT_VALIDATION
+    assert execution.result_validation_category == expected
+    assert execution.failure_category == (
+        FailureCategory.INVALID_REFERENCE
+        if expected == ResultValidationCategory.SEMANTIC_REFERENCE
+        else FailureCategory.INVALID_OUTPUT
+    )
+    assert execution.model_provider == ModelProvider.OPENAI
+    assert execution.model_name == "gpt-test"
+    assert repository.get_coordination_review(record.id).execution_layer == (
+        AgentExecutionLayer.CUSTOM
+    )
+    assert all(
+        item.execution_layer == AgentExecutionLayer.CUSTOM
+        for item in repository.list_agent_findings(record.id)
+    )
+
+
 @pytest.mark.parametrize("record_type", ["task", "execution"])
 def test_orchestrator_rejects_v7_id_collision_with_v4(record_type):
     class CollidingRuntime:
@@ -646,13 +1112,16 @@ def test_orchestrator_rejects_v7_id_collision_with_v4(record_type):
     collided = next(item for item in records if item.id == runtime.collided_id)
     assert record.status == InvestigationStatus.COMPLETED
     assert collided.execution_layer == AgentExecutionLayer.CUSTOM
-    assert len(
-        [
-            item
-            for item in records
-            if item.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK
-        ]
-    ) == 1
+    assert (
+        len(
+            [
+                item
+                for item in records
+                if item.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK
+            ]
+        )
+        == 1
+    )
 
 
 @pytest.mark.parametrize(
@@ -743,9 +1212,7 @@ def test_orchestrator_persists_failed_or_skipped_v7_and_keeps_v5_review(status):
         if execution.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK
     ]
     assert [task.status for task in sdk_tasks] == [DiagnosisTaskStatus(status)]
-    assert [execution.status for execution in sdk_executions] == [
-        AgentExecutionStatus(status)
-    ]
+    assert [execution.status for execution in sdk_executions] == [AgentExecutionStatus(status)]
     assert repository.get_coordination_review(record.id).execution_layer == (
         AgentExecutionLayer.CUSTOM
     )
@@ -764,9 +1231,7 @@ def test_orchestrator_rejects_invalid_v7_review_before_any_batch_write():
                     "supporting_evidence_ids": ["ev-unknown"],
                 }
             )
-            result.review = result.review.model_copy(
-                update={"candidates": [invalid_candidate]}
-            )
+            result.review = result.review.model_copy(update={"candidates": [invalid_candidate]})
             return result
 
     repository = InMemoryInvestigationRepository()
@@ -856,8 +1321,7 @@ def test_orchestrator_marks_investigation_cancelled_and_reraises():
     record = repository.list()[0]
     assert record.status == InvestigationStatus.CANCELLED
     assert all(
-        item.status != DiagnosisTaskStatus.PENDING
-        for item in repository.list_tasks(record.id)
+        item.status != DiagnosisTaskStatus.PENDING for item in repository.list_tasks(record.id)
     )
     assert all(
         item.status != AgentExecutionStatus.PENDING
@@ -912,49 +1376,159 @@ def test_orchestrator_durably_reloads_v7_result_states(tmp_path, status):
 
     assert reloaded.get(record.id).status == InvestigationStatus.COMPLETED
     assert any(item.execution_layer == AgentExecutionLayer.CUSTOM for item in tasks)
-    assert any(
-        item.execution_layer == AgentExecutionLayer.CUSTOM for item in findings
-    )
-    assert any(
-        item.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK
-        for item in tasks
-    )
-    assert any(
-        item.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK
-        for item in executions
-    )
+    assert any(item.execution_layer == AgentExecutionLayer.CUSTOM for item in findings)
+    assert any(item.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK for item in tasks)
+    assert any(item.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK for item in executions)
     if status == MultiAgentRunStatus.PARTIAL:
         assert any(
-            item.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK
-            for item in findings
+            item.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK for item in findings
         )
         assert review.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK
         assert review.run_status == status
     else:
-        assert all(
-            item.execution_layer == AgentExecutionLayer.CUSTOM for item in findings
-        )
+        assert all(item.execution_layer == AgentExecutionLayer.CUSTOM for item in findings)
         assert review.execution_layer == AgentExecutionLayer.CUSTOM
     reloaded_engine.dispose()
 
 
-def test_orchestrator_retries_v7_persistence_idempotently_once(tmp_path):
-    class OneShotExecutionFailureRepository(SQLiteInvestigationRepository):
-        failed_once = False
+def test_orchestrator_durably_records_validation_category_without_secret(
+    tmp_path,
+):
+    secret = "validation-secret-value"
 
-        def save_executions(self, investigation_id, executions):
-            if not self.failed_once and any(
-                item.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK
-                for item in executions
-            ):
-                self.failed_once = True
+    class SecretDumpTask:
+        def model_dump(self, **_kwargs):
+            raise ValueError(secret)
+
+    class InvalidRuntime:
+        async def run(self, *, investigation_id, **_kwargs):
+            result = sdk_result(
+                repository,
+                investigation_id,
+                MultiAgentRunStatus.COMPLETED,
+            )
+            result.tasks = [SecretDumpTask()]
+            return result
+
+    database_path = tmp_path / "diagops-validation.db"
+    engine = create_db_engine(f"sqlite:///{database_path}")
+    initialize_database(engine)
+    repository = SQLiteInvestigationRepository(engine)
+    record = build_v2_orchestrator(
+        repository=repository,
+        agents_runtime=InvalidRuntime(),
+    ).run(load_incident_case("deployment_regression"))
+    engine.dispose()
+
+    reloaded_engine = create_db_engine(f"sqlite:///{database_path}")
+    initialize_database(reloaded_engine)
+    reloaded = SQLiteInvestigationRepository(reloaded_engine)
+    execution = next(
+        item
+        for item in reloaded.list_executions(record.id)
+        if item.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK
+    )
+
+    assert execution.step_kind == ExecutionStepKind.RESULT_VALIDATION
+    assert (
+        execution.result_validation_category
+        == ResultValidationCategory.TASK_CONTRACT
+    )
+    assert execution.error_message == "Agents result validation failed"
+    assert secret.encode() not in database_path.read_bytes()
+    reloaded_engine.dispose()
+
+
+def test_orchestrator_rolls_back_agent_rows_and_records_persistence_projection(
+    tmp_path,
+):
+    class ReviewInsertFailureRepository(SQLiteInvestigationRepository):
+        def _insert_multi_agent_review(self, connection, row):
+            del connection, row
+            raise RuntimeError("secret review insert failure")
+
+    database_url = f"sqlite:///{tmp_path / 'diagops-v8-1-rollback.db'}"
+    engine = create_db_engine(database_url)
+    initialize_database(engine)
+    repository = ReviewInsertFailureRepository(engine)
+
+    record = build_v2_orchestrator(
+        repository=repository,
+        agents_runtime=StubAgentsRuntime(repository),
+    ).run(load_incident_case("deployment_regression"))
+    engine.dispose()
+
+    reloaded_engine = create_db_engine(database_url)
+    initialize_database(reloaded_engine)
+    reloaded = SQLiteInvestigationRepository(reloaded_engine)
+    sdk_findings = [
+        item
+        for item in reloaded.list_agent_findings(record.id)
+        if item.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK
+    ]
+    sdk_executions = [
+        item
+        for item in reloaded.list_executions(record.id)
+        if item.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK
+    ]
+
+    assert record.status == InvestigationStatus.COMPLETED
+    assert sdk_findings == []
+    assert len(sdk_executions) == 1
+    assert sdk_executions[0].step_kind == ExecutionStepKind.REVIEW_PERSISTENCE
+    assert sdk_executions[0].failure_category == FailureCategory.PERSISTENCE
+    assert sdk_executions[0].status == AgentExecutionStatus.FAILED
+    assert "secret" not in (sdk_executions[0].error_message or "").lower()
+    assert reloaded.get_coordination_review(record.id).execution_layer == (
+        AgentExecutionLayer.CUSTOM
+    )
+    reloaded_engine.dispose()
+
+
+def test_orchestrator_keeps_deterministic_result_when_recovery_write_fails(
+    caplog,
+):
+    class DoubleFailureRepository(InMemoryInvestigationRepository):
+        def save_multi_agent_result(self, *args, **kwargs):
+            del args, kwargs
+            raise RuntimeError("secret persistence failure")
+
+    repository = DoubleFailureRepository()
+    with caplog.at_level(logging.WARNING):
+        record = build_v2_orchestrator(
+            repository=repository,
+            agents_runtime=StubAgentsRuntime(repository),
+        ).run(load_incident_case("deployment_regression"))
+
+    assert record.status == InvestigationStatus.COMPLETED
+    assert record.hypotheses and record.actions and record.verification_suggestions
+    assert record.report is not None
+    assert all(
+        item.execution_layer == AgentExecutionLayer.CUSTOM
+        for item in repository.list_agent_findings(record.id)
+    )
+    assert all(
+        item.execution_layer == AgentExecutionLayer.CUSTOM
+        for item in repository.list_executions(record.id)
+    )
+    assert "secret persistence failure" not in caplog.text
+    assert "failure_category=persistence" in caplog.text
+
+
+def test_orchestrator_does_not_retry_failed_multi_agent_batch(tmp_path):
+    class OneShotAtomicFailureRepository(SQLiteInvestigationRepository):
+        calls = 0
+
+        def save_multi_agent_result(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
                 raise RuntimeError("transient write failure")
-            return super().save_executions(investigation_id, executions)
+            return super().save_multi_agent_result(*args, **kwargs)
 
     database_url = f"sqlite:///{tmp_path / 'diagops-v7-retry.db'}"
     engine = create_db_engine(database_url)
     initialize_database(engine)
-    repository = OneShotExecutionFailureRepository(engine)
+    repository = OneShotAtomicFailureRepository(engine)
     record = build_v2_orchestrator(
         repository=repository,
         agents_runtime=StubAgentsRuntime(repository),
@@ -966,9 +1540,7 @@ def test_orchestrator_retries_v7_persistence_idempotently_once(tmp_path):
     reloaded = SQLiteInvestigationRepository(reloaded_engine)
     tasks = reloaded.list_tasks(record.id)
     sdk_tasks = [
-        item
-        for item in tasks
-        if item.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK
+        item for item in tasks if item.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK
     ]
     sdk_executions = [
         item
@@ -983,9 +1555,14 @@ def test_orchestrator_retries_v7_persistence_idempotently_once(tmp_path):
 
     assert reloaded.get(record.id).status == InvestigationStatus.COMPLETED
     assert len({item.id for item in tasks}) == len(tasks)
-    assert len(sdk_tasks) == len(sdk_executions) == len(sdk_findings) == 1
+    assert repository.calls == 2
+    assert len(sdk_tasks) == 1
+    assert len(sdk_executions) == 1
+    assert sdk_executions[0].step_kind == ExecutionStepKind.REVIEW_PERSISTENCE
+    assert sdk_executions[0].failure_category == FailureCategory.PERSISTENCE
+    assert sdk_findings == []
     assert reloaded.get_coordination_review(record.id).execution_layer == (
-        AgentExecutionLayer.OPENAI_AGENTS_SDK
+        AgentExecutionLayer.CUSTOM
     )
     reloaded_engine.dispose()
 
@@ -1050,39 +1627,6 @@ def test_orchestrator_default_off_adds_no_sdk_records():
     )
 
 
-class OneShotReactLlm:
-    def generate(self, messages, tools):
-        return ReActLlmResponse(content="Read-only ReAct review complete.")
-
-
-def test_orchestrator_records_v6_react_trace_when_agent_is_configured():
-    repository = InMemoryInvestigationRepository()
-    providers = build_mock_provider_registry()
-    tool_registry = build_provider_tool_registry(providers)
-    orchestrator = DiagnosisOrchestrator(
-        repository=repository,
-        providers=providers,
-        analyzer=RcaAnalyzer(),
-        report_generator=ReportGenerator(),
-        execution_engine=DiagnosisExecutionEngine(
-            repository=repository,
-            tool_registry=tool_registry,
-        ),
-        react_agent=ReActInvestigationAgent(
-            llm=OneShotReactLlm(),
-            tool_registry=tool_registry,
-            max_steps=1,
-        ),
-    )
-
-    record = orchestrator.run(load_incident_case("deployment_regression"))
-    trace = repository.get_react_trace(record.id)
-
-    assert trace is not None
-    assert trace.status == ReActTraceStatus.COMPLETED
-    assert trace.final_answer == "Read-only ReAct review complete."
-
-
 def test_orchestrator_persists_failed_record_when_report_generation_fails():
     class BrokenReportGenerator:
         def generate(self, *args, **kwargs):
@@ -1100,7 +1644,7 @@ def test_orchestrator_persists_failed_record_when_report_generation_fails():
 
     assert record.status == InvestigationStatus.FAILED
     assert saved.status == InvestigationStatus.FAILED
-    assert saved.failure_reason == "markdown exploded"
+    assert saved.failure_reason == "operation failed"
     assert saved.evidence
     assert saved.hypotheses
 
@@ -1126,7 +1670,7 @@ def test_orchestrator_preserves_context_when_action_planner_fails():
     saved = repository.get(record.id)
 
     assert saved.status == InvestigationStatus.FAILED
-    assert saved.failure_reason == "planner exploded"
+    assert saved.failure_reason == "operation failed"
     assert saved.evidence
     assert saved.hypotheses
     assert saved.provider_results
@@ -1212,13 +1756,13 @@ def test_repository_updates_action_and_verification_status():
     updated_verification = repository.update_verification_status(
         record.id,
         verification.id,
-        status="passed",
+        status="skipped",
         result_note="5xx is normal",
     )
 
     assert updated_action.status == "approved"
     assert updated_action.note == "owner approved"
-    assert updated_verification.status == "passed"
+    assert updated_verification.status == "skipped"
     assert updated_verification.result_note == "5xx is normal"
 
 
@@ -1234,31 +1778,6 @@ def test_orchestrator_logs_investigation_lifecycle(caplog):
     assert record.id in messages
     assert "investigation started" in messages
     assert "investigation completed" in messages
-
-
-def test_orchestrator_does_not_call_analyst_when_not_configured():
-    repository = InMemoryInvestigationRepository()
-    orchestrator = build_v2_orchestrator(repository=repository)
-    orchestrator.llm_analyst = None
-
-    record = orchestrator.run(load_incident_case("deployment_regression"))
-
-    assert record.status == InvestigationStatus.COMPLETED
-    assert record.llm_analysis is None
-
-
-def test_container_disables_analyst_when_llm_config_disabled():
-    container = AppContainer(
-        AppSettings(
-            storage=StorageSettings(url="memory://"),
-            llm=LlmSettings(enabled=False),
-        )
-    )
-
-    record = container.orchestrator.run(load_incident_case("deployment_regression"))
-
-    assert container.orchestrator.llm_analyst is None
-    assert record.llm_analysis is None
 
 
 def test_container_builds_one_agents_runtime_only_when_enabled(monkeypatch):
@@ -1298,26 +1817,97 @@ def test_container_builds_one_agents_runtime_only_when_enabled(monkeypatch):
         "model": "gpt-test",
         "max_turns": 4,
         "timeout_seconds": 12,
+        "model_provider": ModelProvider.OPENAI,
+        "model_name": "gpt-test",
     }
 
 
-def test_orchestrator_persists_llm_analysis_when_analyst_configured():
-    class StubAnalyst:
-        def analyze(self, *, investigation_id, evidence, hypotheses):
-            from backend.domain.llm_analysis import LLMAnalysis
+def test_container_selects_deepseek_adapter_without_openai_fallback(monkeypatch):
+    import backend.services.container as container_module
 
-            return LLMAnalysis.create(
-                investigation_id=investigation_id,
-                existing_evidence_ids={item.id for item in evidence},
-                summary="stub summary",
-                referenced_evidence_ids=[evidence[0].id],
-            )
+    sentinel = object()
+    adapter_calls = []
+    runtime_calls = []
 
-    repository = InMemoryInvestigationRepository()
-    orchestrator = build_v2_orchestrator(repository=repository)
-    orchestrator.llm_analyst = StubAnalyst()
+    def build_adapter(model_name, api_key):
+        adapter_calls.append((model_name, api_key))
+        return sentinel
 
-    record = orchestrator.run(load_incident_case("deployment_regression"))
+    class StubRuntime:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            runtime_calls.append(self)
 
-    assert record.llm_analysis is not None
-    assert repository.get(record.id).llm_analysis == record.llm_analysis
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "local-deepseek-secret")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(container_module, "create_deepseek_model", build_adapter)
+    monkeypatch.setattr(container_module, "AgentsRcaRuntime", StubRuntime)
+
+    container = AppContainer(
+        AppSettings(
+            storage=StorageSettings(url="memory://"),
+            agents=AgentsSettings(
+                enabled=True,
+                provider=ModelProvider.DEEPSEEK,
+                model="deepseek-v4-pro",
+            ),
+        )
+    )
+
+    assert adapter_calls == [("deepseek-v4-pro", "local-deepseek-secret")]
+    assert runtime_calls == [container.orchestrator.agents_runtime]
+    assert runtime_calls[0].kwargs["model"] is sentinel
+    assert runtime_calls[0].kwargs["model_provider"] == ModelProvider.DEEPSEEK
+    assert runtime_calls[0].kwargs["model_name"] == "deepseek-v4-pro"
+
+
+def test_container_missing_deepseek_key_keeps_attributed_skipped_runtime(monkeypatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-be-used")
+    container = AppContainer(
+        AppSettings(
+            storage=StorageSettings(url="memory://"),
+            agents=AgentsSettings(
+                enabled=True,
+                provider=ModelProvider.DEEPSEEK,
+                model="deepseek-v4-pro",
+            ),
+        )
+    )
+
+    result = asyncio.run(
+        container.orchestrator.agents_runtime.run(
+            "inv-deepseek-missing",
+            load_incident_case("deployment_regression"),
+            [],
+            [],
+        )
+    )
+
+    assert result.run_summary.status == MultiAgentRunStatus.SKIPPED
+    assert result.run_summary.model_provider == ModelProvider.DEEPSEEK
+    assert result.run_summary.model_name == "deepseek-v4-pro"
+    assert result.executions[0].failure_category == FailureCategory.NOT_CONFIGURED
+
+
+def test_container_sdk_construction_failure_preserves_deterministic_result(monkeypatch):
+    import backend.services.container as container_module
+
+    class BrokenRuntime:
+        def __init__(self, **_kwargs):
+            raise RuntimeError("secret-sdk-construction-failure")
+
+    monkeypatch.setattr(container_module, "AgentsRcaRuntime", BrokenRuntime)
+    container = AppContainer(
+        AppSettings(
+            storage=StorageSettings(url="memory://"),
+            agents=AgentsSettings(enabled=True, model="gpt-test"),
+        )
+    )
+
+    record = container.orchestrator.run(load_incident_case("deployment_regression"))
+
+    assert container.orchestrator.agents_runtime is None
+    assert record.status == InvestigationStatus.COMPLETED
+    assert record.hypotheses and record.actions and record.verification_suggestions
+    assert record.report is not None

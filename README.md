@@ -1,17 +1,17 @@
 # DiagOps
 
-DiagOps is an event-driven SRE RCA agent MVP for application service incidents.
+DiagOps is an event-driven, evidence-backed SRE incident diagnosis platform for
+application service incidents. Production integrations remain read-only.
 
-V3 turns the first backend prototype into a local read-only investigation
-platform:
+The local platform includes:
 
 - FastAPI backend with SQLite persistence.
 - Mock, local log, deployment file, service catalog, and optional Prometheus
   evidence providers.
 - Rule-based RCA, evidence-backed Markdown reports, recommended actions, and
   verification tracking.
-- Read-only LLM analyst stub that is disabled by default and does not call any
-  network API.
+- An optional, default-off OpenAI Agents SDK review layer with deterministic RCA
+  fallback.
 - Vite React investigation console for list/detail, evidence, hypotheses,
   action status, verification results, and reports.
 
@@ -108,25 +108,33 @@ Useful environment overrides:
 ```powershell
 $env:DIAGOPS_DATABASE_URL = "sqlite:///data/diagops.db"
 $env:DIAGOPS_PROVIDER_MOCK_ENABLED = "true"
-$env:DIAGOPS_LLM_ENABLED = "false"
 ```
 
-OpenAI Agents SDK integration is disabled by default:
+The Agents SDK integration is disabled by default and keeps OpenAI as the
+backward-compatible Provider default:
 
 ```yaml
 agents:
   enabled: false
+  provider: openai
   model: null
   max_turns: 8
   timeout_seconds: 60
 ```
 
 Override these settings for a local process with
-`DIAGOPS_AGENTS_ENABLED`, `DIAGOPS_AGENTS_MODEL`,
+`DIAGOPS_AGENTS_ENABLED`, `DIAGOPS_AGENTS_PROVIDER`, `DIAGOPS_AGENTS_MODEL`,
 `DIAGOPS_AGENTS_MAX_TURNS`, and `DIAGOPS_AGENTS_TIMEOUT_SECONDS`.
-Keep `OPENAI_API_KEY` only in the local process environment; never put it in
-settings, YAML, source code, logs, or commit history. Choose the model
-explicitly when enabling the integration.
+`DIAGOPS_AGENTS_PROVIDER` accepts only `openai` or `deepseek`. Keep the matching
+`OPENAI_API_KEY` or `DEEPSEEK_API_KEY` only in the local process environment;
+never put it in settings, YAML, source code, logs, or commit history. Choose the
+model explicitly when enabling the integration. Current official DeepSeek V4
+model names are `deepseek-v4-flash` and `deepseek-v4-pro`.
+
+`GET /config/agents` and the RCA workbench expose only Provider, model,
+implementation status, and certification status. `implemented` means the
+key-free adapter and validation contracts passed; it does not mean that the
+Provider/model has passed its independent paid live gate.
 
 ## Sample Local Data
 
@@ -232,62 +240,127 @@ GET /investigations/{id}/coordination-review
 GET /investigations/{id}/rca-workbench
 ```
 
-## V6 Single-Agent ReAct
+## Historical V6 And LLM Compatibility
 
-DiagOps V6 adds an optional read-only ReAct trace. A single
-ReActInvestigationAgent requests one read-only tool call at a time across logs,
-metrics, deployments, dependencies, service catalog, and memory lookup.
+V8.1 no longer constructs or executes the retired V6 ReAct runtime or the
+pseudo-LLM analyst, and it creates no new `react_traces` or `llm_analyses`
+rows. Existing rows remain readable through persisted investigation records and
+the historical read-only ReAct API. New optional model analysis uses only the
+unified Agents SDK runtime described below.
 
-The trace records assistant text, tool calls, observations, evidence IDs,
-status, and the final answer. Deterministic RCA remains the source of truth.
+## V8.1 Multi-Agent Reliability Artifacts
 
-V6 does not execute shell commands, SSH, rollback, restart, scaling,
-configuration changes, or remediation.
+The deterministic reliability run is safe for key-free verification and does
+not read live credentials:
 
-### V6 ReAct API
-
-```text
-GET /investigations/{id}/react-trace
+```powershell
+uv run python -m backend.services.v7_live_acceptance --mode deterministic
 ```
 
-## V7 Live Multi-Agent Reliability Gate
-
-The paid V7 gate remains disabled during automated verification. After the
-implementation and key-free tests pass, configure these names only in the
-local process environment:
+The paid live gate remains disabled during automated verification. After the
+implementation and key-free tests pass, configure these names only in the local
+process environment:
 
 ```text
-OPENAI_API_KEY
+DIAGOPS_AGENTS_PROVIDER=openai|deepseek
 DIAGOPS_AGENTS_MODEL
 DIAGOPS_AGENTS_TIMEOUT_SECONDS (optional, defaults to 60)
 DIAGOPS_INPUT_COST_PER_MILLION
 DIAGOPS_OUTPUT_COST_PER_MILLION
+OPENAI_API_KEY (only when Provider is openai)
+DEEPSEEK_API_KEY (only when Provider is deepseek)
 ```
 
 Never paste credential values into chat, code, YAML, or committed files. The
-runner does not write credential values to its artifact. It uses five existing
-simulated cases three times: 12 clean runs and 3 adversarial safety probes.
+runner uses five existing simulated cases three times: 12 clean runs and 3
+adversarial safety probes.
 
-Run the gate locally with:
-
-```powershell
-uv run python -m backend.services.v7_live_acceptance
-```
-
-Before changing prompts or arbitration, run the five clean investigations in
-diagnostic mode and review the resulting artifact:
+For DeepSeek V4 Pro certification, use the current cache-miss prices and an
+explicit 180-second overall budget. The adapter disables the model's default
+thinking mode for this bounded structured workflow; the longer budget covers
+the required Coordinator and Specialist turns without changing the gate:
 
 ```powershell
-uv run python -m backend.services.v7_live_acceptance --runs-per-case 1
+$env:DIAGOPS_AGENTS_PROVIDER = "deepseek"
+$env:DIAGOPS_AGENTS_MODEL = "deepseek-v4-pro"
+$env:DIAGOPS_AGENTS_TIMEOUT_SECONDS = "180"
+$env:DIAGOPS_INPUT_COST_PER_MILLION = "0.435"
+$env:DIAGOPS_OUTPUT_COST_PER_MILLION = "0.87"
 ```
 
-This writes a schema-v2 diagnostic artifact without evaluating or weakening the
-reliability gate. The artifact contains no prompts, raw responses, reasoning,
-credentials, or free-text findings.
+Before running the canonical live gate, run the five clean investigations in
+diagnostic mode:
 
-Results are written to
-`artifacts/v7-live-acceptance-<UTC timestamp>.json`. The runner is read-only and
-does not execute rollback, restart, scaling, SSH, or configuration changes.
+```powershell
+uv run python -m backend.services.v7_live_acceptance --mode live --runs-per-case 1
+```
+
+Diagnostic mode does not evaluate the reliability thresholds and does not claim
+PASS. Review its structured failure categories before making any prompt,
+mapping, timeout, or arbitration change. Run the unchanged canonical live gate
+only after the diagnostic stop gate permits it:
+
+The OpenAI transport timeout is five seconds shorter than the configured
+overall runtime timeout, with a one-second minimum reserved for short test
+budgets. Client-level automatic retries are disabled so a request cannot start
+a retry outside that budget. Post-runtime rejection exposes only a frozen
+validation boundary category; any remaining `unknown` category blocks the
+canonical gate.
+
+```powershell
+uv run python -m backend.services.v7_live_acceptance --mode live
+```
+
+Every mode writes a schema-v3 JSON artifact to
+`output/reliability/<run_id>/result.json` and a concise Markdown summary to
+`output/reliability/<run_id>/summary.md`. Artifacts contain only allowlisted
+structured diagnostics. They omit credentials, API keys, Base URL values,
+prompts, raw response data, reasoning, and free-text model payloads. The runner
+is read-only: it records diagnostic results but does not execute remediation,
+rollback, restart, scaling, SSH, or configuration changes.
+
+### V8.1 OpenAI Canonical Baseline
+
+The OpenAI canonical gate passed on 2026-07-14:
+
+```text
+Provider: openai
+Model: gpt-5.6-sol
+Run: v8-1-live-20260714T060212861267Z-b5f43e64
+Completed: 2026-07-14T06:02:12.861267Z
+Result: passed
+```
+
+The artifact contains 15/15 structurally valid real Agent reviews, 15/15
+correct candidates, 3/3 correct results for every case, 15/15 valid references,
+15/15 valid agreement and executed-action claim contracts, zero unsafe tools,
+zero successful prompt injections, and zero wrong agreements. Non-fatal tracing
+403 messages observed by the local runner did not produce model execution
+failures and are not part of the certification artifact.
+
+### V8.1 DeepSeek Certification
+
+The DeepSeek V4 Pro adapter is implemented, but its independent canonical gate
+did not pass on 2026-07-14:
+
+```text
+Provider: deepseek
+Model: deepseek-v4-pro
+Run: v8-1-live-20260714T080700796242Z-ffee9018
+Completed: 2026-07-14T08:07:00.796242Z
+Implementation: implemented
+Certification: failed
+```
+
+The live artifact contains 15 unique canonical rows with valid Provider/model
+attribution, references, agreement contracts, executed-action claim contracts,
+and zero unsafe tools, successful prompt injections, wrong agreements, or
+sensitive payload fields. It produced no passing real-review cohort. Bounded
+transport, generated-schema, and CauseType-ontology remediations improved later
+five-case diagnostics, but the final diagnostic
+`v8-1-diagnostic-20260714T090134835432Z-405b87b3` remained below the stop gate
+at 2/5 correct real reviews. No later diagnostic is counted as certification,
+and the canonical thresholds were not weakened.
 
 ## V2 Platform Loop
 
@@ -315,8 +388,8 @@ curl -X PATCH http://127.0.0.1:8000/investigations/<investigation_id>/actions/<a
   -d '{"status":"approved","note":"owner approved"}'
 ```
 
-Approval only changes state in V2. It does not execute rollback, restart,
-scaling, or configuration changes.
+`approved` and `done` are human-recorded workflow states only. Neither state
+means DiagOps executed rollback, restart, scaling, or a configuration change.
 
 ## Record A Verification Result
 

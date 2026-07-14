@@ -1,7 +1,12 @@
 from datetime import datetime
 
 from backend.domain.events import IncidentEvent, IncidentSource, Severity
-from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
+from backend.domain.evidence import (
+    EvidenceItem,
+    EvidenceKind,
+    EvidenceProvider,
+    EvidenceStatus,
+)
 from backend.domain.hypotheses import CauseType
 from backend.providers.registry import build_mock_provider_registry
 from backend.rca.analyzer import RcaAnalyzer
@@ -123,3 +128,16 @@ def test_deployment_detection_uses_structured_fields_when_summary_is_neutral():
     hypotheses = RcaAnalyzer().analyze(event, evidence)
 
     assert hypotheses[0].cause_type == CauseType.DEPLOYMENT_REGRESSION
+
+
+def test_failed_evidence_cannot_support_concrete_cause():
+    event = _event(signals={"qps": "high"})
+    evidence = [
+        _metric_evidence({"qps_change": "+90%"}).model_copy(
+            update={"status": EvidenceStatus.FAILED}
+        )
+    ]
+
+    hypotheses = RcaAnalyzer().analyze(event, evidence)
+
+    assert hypotheses[0].cause_type == CauseType.UNKNOWN

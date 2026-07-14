@@ -50,8 +50,9 @@ def test_evidence_payload_contains_query_names_and_observed_values(monkeypatch):
 
     assert evidence.payload["service"] == "checkout-service"
     assert evidence.payload["environment"] == "prod"
-    assert evidence.payload["base_url"] == "http://prometheus.test"
-    assert set(evidence.payload["queries"]) == {
+    assert "base_url" not in evidence.payload
+    assert "queries" not in evidence.payload
+    assert set(evidence.payload["query_names"]) == {
         "qps",
         "5xx_rate",
         "p95_latency",
@@ -79,12 +80,11 @@ def test_connection_failure_returns_failed_provider_result_through_registry(monk
 
     assert results[0].provider == EvidenceProvider.METRIC
     assert results[0].status == ProviderStatus.FAILED
-    assert results[0].error_message == "connection refused"
-    assert len(evidence) == 1
-    assert evidence[0].kind == EvidenceKind.PROVIDER_ERROR
-    assert evidence[0].provider == EvidenceProvider.METRIC
-    assert evidence[0].status == EvidenceStatus.FAILED
-    assert evidence[0].error_message == "connection refused"
+    assert "connection refused" in (results[0].error_message or "")
+    failed = next(item for item in evidence if item.provider == EvidenceProvider.METRIC)
+    assert failed.kind == EvidenceKind.PROVIDER_ERROR
+    assert failed.status == EvidenceStatus.FAILED
+    assert "connection refused" in (failed.error_message or "")
 
 
 def test_enabled_prometheus_provider_is_added_by_settings_builder(monkeypatch):
@@ -106,8 +106,33 @@ def test_enabled_prometheus_provider_is_added_by_settings_builder(monkeypatch):
     results = registry.collect_results(_event())
 
     assert any(isinstance(provider, PrometheusProvider) for provider in registry.providers)
-    assert len(results) == 1
-    assert results[0].evidence_items[0].payload["base_url"] == "http://prometheus.test"
+    metric_result = next(
+        result for result in results if result.provider == EvidenceProvider.METRIC
+    )
+    assert "base_url" not in metric_result.evidence_items[0].payload
+    assert sum(result.status == ProviderStatus.SKIPPED for result in results) == 5
+
+
+def test_prometheus_partial_response_retains_valid_observations(monkeypatch):
+    seen_times: list[str] = []
+
+    def partial_urlopen(request, timeout):
+        params = urllib.parse.parse_qs(urllib.parse.urlsplit(request.full_url).query)
+        seen_times.extend(params["time"])
+        query = params["query"][0]
+        if "container_memory_usage_bytes" in query:
+            raise TimeoutError("memory query timed out")
+        return _urlopen_success(request, timeout)
+
+    monkeypatch.setattr("urllib.request.urlopen", partial_urlopen)
+
+    result = PrometheusProvider("http://prometheus.test").collect(_event())
+
+    assert result.status == ProviderStatus.PARTIAL
+    assert len(result.evidence_items) == 1
+    assert "memory" not in result.evidence_items[0].payload["observed_values"]
+    assert len(seen_times) == 5
+    assert set(seen_times) == {str(_event().started_at.timestamp())}
 
 
 class _FakeResponse:

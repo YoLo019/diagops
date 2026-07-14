@@ -3,6 +3,7 @@ from typing import Any
 
 from backend.db.models import InvestigationRecord
 from backend.domain.memory import MemoryItem, MemoryType
+from backend.safety.redaction import redact_model, redact_text
 
 
 class MemoryStore:
@@ -13,7 +14,7 @@ class MemoryStore:
         return self.save_many([item])[0]
 
     def save_many(self, items: Sequence[MemoryItem]) -> list[MemoryItem]:
-        return self.repository.save_memory_items(items)
+        return self.repository.save_memory_items([redact_model(item) for item in items])
 
     def list(
         self,
@@ -38,7 +39,9 @@ class MemoryStore:
             "note": note,
         }
         summary = "Human feedback: " + "; ".join(
-            f"{key}={value}" for key, value in fields.items() if value is not None
+            f"{key}={redact_text(str(value))}"
+            for key, value in fields.items()
+            if value is not None
         )
         tags = [
             f"{key}:{str(value).lower()}"

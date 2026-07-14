@@ -63,7 +63,7 @@ def test_file_service_catalog_format_error_becomes_failed_registry_result(tmp_pa
     results = registry.collect_results(_event(service="checkout-service"))
 
     assert results[0].status == ProviderStatus.FAILED
-    assert "services mapping" in (results[0].error_message or "")
+    assert results[0].error_message == "provider collection failed"
 
 
 def test_build_provider_registry_from_settings_adds_file_service_catalog(tmp_path):
@@ -109,7 +109,7 @@ def test_build_provider_registry_from_settings_preserves_mock_providers():
 
     registry = build_provider_registry_from_settings(settings)
 
-    assert {provider.provider for provider in registry.providers} >= {
+    assert {provider.provider for provider in registry.simulation_providers} >= {
         EvidenceProvider.LOG,
         EvidenceProvider.METRIC,
         EvidenceProvider.DEPLOY,
@@ -117,6 +117,30 @@ def test_build_provider_registry_from_settings_preserves_mock_providers():
         EvidenceProvider.SERVICE_CATALOG,
         EvidenceProvider.RELATED_ALERT,
     }
+
+
+def test_catalog_environment_allowlist_excludes_wrong_environment(tmp_path):
+    path = tmp_path / "services.yaml"
+    path.write_text(
+        "services:\n  checkout-service:\n    environments: [staging]\n",
+        encoding="utf-8",
+    )
+
+    result = FileServiceCatalogProvider(path).collect(
+        _event("checkout-service", environment="prod")
+    )
+
+    assert result.status == ProviderStatus.SKIPPED
+    assert result.evidence_items == []
+
+
+def test_catalog_records_global_environment_scope() -> None:
+    evidence = FileServiceCatalogProvider(Path("config/services.yaml")).collect(
+        _event("checkout-service", environment="prod")
+    ).evidence_items[0]
+
+    assert evidence.payload["environment_scope"] == "global"
+    assert evidence.payload["time_filter"] == "not_applicable"
 
 
 def _event(service: str, environment: str = "prod") -> IncidentEvent:

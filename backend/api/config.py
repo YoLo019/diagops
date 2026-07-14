@@ -1,9 +1,13 @@
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
+from backend.diagnosis.deepseek_model import implementation_status
+from backend.domain.multi_agent import ModelProvider
 from backend.services.container import get_container
+from backend.services.reliability_artifacts import latest_certification
 
 router = APIRouter(prefix="/config", tags=["config"])
 
@@ -16,6 +20,13 @@ class ProviderConfig(BaseModel):
 
 class ProvidersConfigResponse(BaseModel):
     providers: list[ProviderConfig]
+
+
+class AgentConfigResponse(BaseModel):
+    provider: ModelProvider
+    model: str | None
+    implementation_status: Literal["implemented", "unsupported"]
+    certification_status: Literal["certified", "failed", "not_run"]
 
 
 def _path(value: Path) -> str:
@@ -53,3 +64,34 @@ def get_provider_config() -> ProvidersConfigResponse:
             ),
         ]
     )
+
+
+def build_agent_config() -> AgentConfigResponse:
+    settings = get_container().settings.agents
+    provider = settings.provider
+    model = settings.model.strip() if settings.model and settings.model.strip() else None
+    provider_implementation = (
+        implementation_status()
+        if provider == ModelProvider.DEEPSEEK
+        else "implemented"
+    )
+    certification = (
+        latest_certification(
+            Path("output/reliability"),
+            provider.value,
+            model,
+        )
+        if model is not None
+        else "not_run"
+    )
+    return AgentConfigResponse(
+        provider=provider,
+        model=model,
+        implementation_status=provider_implementation,
+        certification_status=certification,
+    )
+
+
+@router.get("/agents", response_model=AgentConfigResponse)
+def get_agent_config() -> AgentConfigResponse:
+    return build_agent_config()

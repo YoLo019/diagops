@@ -28,6 +28,7 @@ from backend.domain.hypotheses import CauseType, Hypothesis
 from backend.domain.multi_agent import (
     AgentExecutionLayer,
     CoordinationDecisionStatus,
+    ModelProvider,
     MultiAgentRunStatus,
     MultiAgentRunSummary,
 )
@@ -225,7 +226,7 @@ def test_report_generator_renders_stable_chinese_headings_and_raw_fields():
     ]:
         assert f"## {heading}" in report.markdown
 
-    assert "[deploy/deployment]" in report.markdown
+    assert "[`deploy/deployment`]" in report.markdown
     assert "`deployment_regression`" in report.markdown
     assert "`traffic_spike`" in report.markdown
     assert "`check`" in report.markdown
@@ -525,12 +526,12 @@ def test_report_generator_keeps_v5_text_unchanged(claim):
 @pytest.mark.parametrize(
     ("failure_reason", "safe_category"),
     [
-        ("Bearer abc token=secret user@example.com postgres://u:p@db", "unknown failed"),
-        ("request timeout; Bearer abc", "timeout"),
-        ("401 unauthorized token=secret", "auth"),
-        ("429 rate limit for user@example.com", "rate"),
-        ("quota exceeded for postgres://u:p@db", "quota"),
-        ("JSON validation error token=secret", "invalid output"),
+        ("Bearer abc token=secret user@example.com postgres://u:p@db", "operation failed"),
+        ("request timeout; Bearer abc", "operation failed"),
+        ("401 unauthorized token=secret", "operation failed"),
+        ("429 rate limit for user@example.com", "operation failed"),
+        ("quota exceeded for postgres://u:p@db", "operation failed"),
+        ("JSON validation error token=secret", "operation failed"),
     ],
 )
 def test_report_generator_redacts_v7_failure_reason(failure_reason, safe_category):
@@ -570,7 +571,7 @@ def test_report_generator_does_not_treat_v5_review_as_v7():
     section = _section(report.markdown, "混合 RCA 裁决", "建议动作")
 
     assert DECISION_LABELS["fallback"] in section
-    assert "安全失败分类：`unknown failed`" in section
+    assert "安全失败分类：`operation failed`" in section
     assert "未用 V7 review 替换确定性 RCA" in section
 
 
@@ -717,18 +718,14 @@ def test_orchestrator_passes_persisted_v7_result_to_report():
         saved_sdk_findings = None
         saved_sdk_review = None
 
-        def save_agent_findings(self, investigation_id, findings):
-            if any(
-                item.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK
-                for item in findings
-            ):
-                self.saved_sdk_findings = findings
-            return super().save_agent_findings(investigation_id, findings)
-
-        def save_coordination_review(self, review):
-            if review.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK:
-                self.saved_sdk_review = review
-            return super().save_coordination_review(review)
+        def save_multi_agent_result(
+            self, investigation_id, findings, executions, review
+        ):
+            self.saved_sdk_findings = findings
+            self.saved_sdk_review = review
+            return super().save_multi_agent_result(
+                investigation_id, findings, executions, review
+            )
 
     repository = TrackingRepository()
     report_generator = _CapturingReportGenerator()
@@ -755,7 +752,7 @@ def test_orchestrator_passes_persisted_v7_result_to_report():
     assert "## 混合 RCA 裁决" in record.report.markdown
 
 
-def test_orchestrator_omits_v7_when_persistence_fails_before_any_write():
+def test_orchestrator_reports_structured_recovery_when_task_write_fails():
     class FailingV7Repository(InMemoryInvestigationRepository):
         v7_attempts = 0
 
@@ -777,34 +774,31 @@ def test_orchestrator_omits_v7_when_persistence_fails_before_any_write():
         report_generator,
     ).run(load_incident_case("deployment_regression"))
 
-    assert repository.v7_attempts == 2
+    assert repository.v7_attempts == 1
     assert record.status == InvestigationStatus.COMPLETED
-    assert "multi_agent_run" not in report_generator.kwargs
-    assert "## 混合 RCA 裁决" not in record.report.markdown
+    assert report_generator.kwargs["coordination_review"] is None
+    assert report_generator.kwargs["agent_findings"] == []
+    assert report_generator.kwargs["multi_agent_run"].status == (
+        MultiAgentRunStatus.FAILED
+    )
+    assert (
+        report_generator.kwargs[
+            "multi_agent_run"
+        ].primary_stabilization_category.value
+        == "review_persistence"
+    )
 
 
 @pytest.mark.parametrize("failed_phase", ["executions", "findings"])
-def test_orchestrator_omits_v7_when_persistence_is_incomplete(failed_phase):
+def test_orchestrator_recovers_once_when_atomic_agent_write_fails(failed_phase):
     class IncompleteV7Repository(InMemoryInvestigationRepository):
         v7_attempts = 0
 
-        def save_executions(self, investigation_id, executions):
-            if failed_phase == "executions" and any(
-                item.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK
-                for item in executions
-            ):
-                self.v7_attempts += 1
-                raise RuntimeError("execution persistence failed")
-            return super().save_executions(investigation_id, executions)
-
-        def save_agent_findings(self, investigation_id, findings):
-            if failed_phase == "findings" and any(
-                item.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK
-                for item in findings
-            ):
-                self.v7_attempts += 1
-                raise RuntimeError("finding persistence failed")
-            return super().save_agent_findings(investigation_id, findings)
+        def save_multi_agent_result(self, *args, **kwargs):
+            self.v7_attempts += 1
+            if self.v7_attempts == 1:
+                raise RuntimeError(f"{failed_phase} persistence failed")
+            return super().save_multi_agent_result(*args, **kwargs)
 
     repository = IncompleteV7Repository()
     report_generator = _CapturingReportGenerator()
@@ -817,18 +811,21 @@ def test_orchestrator_omits_v7_when_persistence_is_incomplete(failed_phase):
 
     assert repository.v7_attempts == 2
     assert record.status == InvestigationStatus.COMPLETED
-    assert "multi_agent_run" not in report_generator.kwargs
-    assert "## 混合 RCA 裁决" not in record.report.markdown
+    assert report_generator.kwargs["coordination_review"] is None
+    assert report_generator.kwargs["agent_findings"] == []
+    assert report_generator.kwargs["multi_agent_run"].status == (
+        MultiAgentRunStatus.FAILED
+    )
 
 
-def test_orchestrator_uses_v7_when_review_write_succeeded_before_error():
+def test_orchestrator_never_exposes_completed_review_after_acknowledgement_error():
     class WriteThenRaiseRepository(InMemoryInvestigationRepository):
         v7_attempts = 0
 
-        def save_coordination_review(self, review):
-            saved = super().save_coordination_review(review)
-            if review.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK:
-                self.v7_attempts += 1
+        def save_multi_agent_result(self, *args, **kwargs):
+            self.v7_attempts += 1
+            saved = super().save_multi_agent_result(*args, **kwargs)
+            if self.v7_attempts == 1:
                 raise RuntimeError("review write acknowledgement failed")
             return saved
 
@@ -841,37 +838,33 @@ def test_orchestrator_uses_v7_when_review_write_succeeded_before_error():
         report_generator,
     ).run(load_incident_case("deployment_regression"))
 
-    assert repository.v7_attempts == 1
+    assert repository.v7_attempts == 2
     assert record.status == InvestigationStatus.COMPLETED
-    assert report_generator.kwargs["coordination_review"].execution_layer == (
-        AgentExecutionLayer.OPENAI_AGENTS_SDK
+    assert report_generator.kwargs["coordination_review"] is None
+    assert report_generator.kwargs["multi_agent_run"].status == (
+        MultiAgentRunStatus.FAILED
     )
     assert "## 混合 RCA 裁决" in record.report.markdown
-    assert "Persisted V7 review" in record.report.markdown
 
 
 @pytest.mark.parametrize("mutated_payload", ["finding", "review"])
 def test_orchestrator_omits_v7_for_same_id_different_payload(mutated_payload):
     class MutatingRepository(InMemoryInvestigationRepository):
-        def save_agent_findings(self, investigation_id, findings):
+        def save_multi_agent_result(
+            self, investigation_id, findings, executions, review
+        ):
             if mutated_payload == "finding":
                 findings = [
                     item.model_copy(update={"summary": "mutated persisted finding"})
-                    if item.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK
-                    else item
                     for item in findings
                 ]
-            return super().save_agent_findings(investigation_id, findings)
-
-        def save_coordination_review(self, review):
-            if (
-                mutated_payload == "review"
-                and review.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK
-            ):
+            if mutated_payload == "review" and review is not None:
                 review = review.model_copy(
                     update={"summary": "mutated persisted review"}
                 )
-            return super().save_coordination_review(review)
+            return super().save_multi_agent_result(
+                investigation_id, findings, executions, review
+            )
 
     repository = MutatingRepository()
     report_generator = _CapturingReportGenerator()
@@ -884,18 +877,23 @@ def test_orchestrator_omits_v7_for_same_id_different_payload(mutated_payload):
 
     assert record.status == InvestigationStatus.COMPLETED
     assert "multi_agent_run" not in report_generator.kwargs
-    assert "## 混合 RCA 裁决" not in record.report.markdown
 
 
-def test_orchestrator_omits_v7_when_write_then_raise_persisted_mutated_review():
+def test_orchestrator_recovers_when_mutated_review_write_raises():
     class MutatingWriteThenRaiseRepository(InMemoryInvestigationRepository):
-        def save_coordination_review(self, review):
-            if review.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK:
-                super().save_coordination_review(
-                    review.model_copy(update={"uncertainty": "mutated uncertainty"})
+        def save_multi_agent_result(
+            self, investigation_id, findings, executions, review
+        ):
+            if review is not None:
+                review = review.model_copy(
+                    update={"uncertainty": "mutated uncertainty"}
                 )
+            saved = super().save_multi_agent_result(
+                investigation_id, findings, executions, review
+            )
+            if review is not None:
                 raise RuntimeError("review acknowledgement failed")
-            return super().save_coordination_review(review)
+            return saved
 
     repository = MutatingWriteThenRaiseRepository()
     report_generator = _CapturingReportGenerator()
@@ -907,8 +905,11 @@ def test_orchestrator_omits_v7_when_write_then_raise_persisted_mutated_review():
     ).run(load_incident_case("deployment_regression"))
 
     assert record.status == InvestigationStatus.COMPLETED
-    assert "multi_agent_run" not in report_generator.kwargs
-    assert "## 混合 RCA 裁决" not in record.report.markdown
+    assert report_generator.kwargs["coordination_review"] is None
+    assert report_generator.kwargs["agent_findings"] == []
+    assert report_generator.kwargs["multi_agent_run"].status == (
+        MultiAgentRunStatus.FAILED
+    )
 
 
 def _evidence(
@@ -1047,13 +1048,19 @@ class _ReportRuntime:
             MultiAgentRunStatus.COMPLETED,
             "Persisted V7 review",
             "Review uncertainty",
+            model_provider=ModelProvider.OPENAI,
+            model_name="gpt-test",
         )
         self.result = AgentsRcaRuntimeResult(
             tasks=[task],
             executions=[execution],
             findings=[finding],
             review=review,
-            run_summary=MultiAgentRunSummary(status=MultiAgentRunStatus.COMPLETED),
+            run_summary=MultiAgentRunSummary(
+                status=MultiAgentRunStatus.COMPLETED,
+                model_provider=ModelProvider.OPENAI,
+                model_name="gpt-test",
+            ),
         )
         return self.result
 
@@ -1087,3 +1094,20 @@ def _hypothesis(
         contradicting_evidence_ids=contradicting_evidence_ids or [],
         next_actions=["Compare with the previous deployment."],
     )
+
+
+def test_report_escapes_dynamic_fields_and_shows_evidence_id_and_status():
+    event, evidence, hypotheses = _v7_baseline()
+    event = event.model_copy(
+        update={"service": "checkout ## forged", "title": "Bearer report-secret"}
+    )
+    evidence[0] = evidence[0].model_copy(
+        update={"summary": "## injected\nowner@example.com"}
+    )
+
+    report = ReportGenerator().generate("inv-1", event, evidence, hypotheses)
+
+    assert "report-secret" not in report.markdown
+    assert "owner@example.com" not in report.markdown
+    assert "\n## injected" not in report.markdown
+    assert "`ev-baseline` [`success`] [`deploy/deployment`]" in report.markdown

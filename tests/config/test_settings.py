@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from backend.config.settings import AppSettings, load_settings
+from backend.domain.multi_agent import ModelProvider
 
 
 def test_default_settings_use_d_drive_project_paths(monkeypatch):
@@ -13,6 +14,7 @@ def test_default_settings_use_d_drive_project_paths(monkeypatch):
     monkeypatch.delenv("DIAGOPS_LLM_ENABLED", raising=False)
     monkeypatch.delenv("DIAGOPS_REACT_ENABLED", raising=False)
     monkeypatch.delenv("DIAGOPS_AGENTS_ENABLED", raising=False)
+    monkeypatch.delenv("DIAGOPS_AGENTS_PROVIDER", raising=False)
     monkeypatch.delenv("DIAGOPS_AGENTS_MODEL", raising=False)
     monkeypatch.delenv("DIAGOPS_AGENTS_MAX_TURNS", raising=False)
     monkeypatch.delenv("DIAGOPS_AGENTS_TIMEOUT_SECONDS", raising=False)
@@ -24,10 +26,10 @@ def test_default_settings_use_d_drive_project_paths(monkeypatch):
     assert settings.providers.service_catalog.path == Path("config/services.yaml")
     assert settings.providers.deployment_file.path == Path("data/deployments/deployments.json")
     assert settings.providers.log_file.paths == [Path("data/sample-logs/checkout-service.log")]
-    assert settings.llm.enabled is False
-    assert settings.react.enabled is False
-    assert settings.react.max_steps == 5
+    assert not hasattr(settings, "llm")
+    assert not hasattr(settings, "react")
     assert settings.agents.enabled is False
+    assert settings.agents.provider == ModelProvider.OPENAI
     assert settings.agents.model is None
     assert settings.agents.max_turns == 8
     assert settings.agents.timeout_seconds == 60
@@ -57,8 +59,8 @@ def test_environment_boolean_overrides(monkeypatch, tmp_path):
     settings = load_settings()
 
     assert settings.providers.mock.enabled is False
-    assert settings.llm.enabled is True
-    assert settings.react.enabled is True
+    assert not hasattr(settings, "llm")
+    assert not hasattr(settings, "react")
     assert settings.agents.enabled is True
     assert settings.agents.model == "test-model"
     assert settings.agents.max_turns == 12
@@ -89,3 +91,25 @@ def test_missing_config_file_uses_safe_defaults(monkeypatch, tmp_path):
 
     assert isinstance(settings, AppSettings)
     assert settings.providers.prometheus.enabled is False
+
+
+def test_agents_provider_defaults_to_openai(monkeypatch, tmp_path):
+    monkeypatch.setenv("DIAGOPS_CONFIG", str(tmp_path / "missing.yaml"))
+    monkeypatch.delenv("DIAGOPS_AGENTS_PROVIDER", raising=False)
+
+    assert load_settings().agents.provider == ModelProvider.OPENAI
+
+
+def test_agents_provider_environment_selects_deepseek(monkeypatch, tmp_path):
+    monkeypatch.setenv("DIAGOPS_CONFIG", str(tmp_path / "missing.yaml"))
+    monkeypatch.setenv("DIAGOPS_AGENTS_PROVIDER", "deepseek")
+
+    assert load_settings().agents.provider == ModelProvider.DEEPSEEK
+
+
+def test_invalid_agents_provider_is_rejected(monkeypatch, tmp_path):
+    monkeypatch.setenv("DIAGOPS_CONFIG", str(tmp_path / "missing.yaml"))
+    monkeypatch.setenv("DIAGOPS_AGENTS_PROVIDER", "compatible")
+
+    with pytest.raises(ValidationError):
+        load_settings()

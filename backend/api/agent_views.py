@@ -3,18 +3,24 @@ from typing import Any
 
 from fastapi import APIRouter
 
+from backend.api.config import build_agent_config
 from backend.api.investigations import _get_investigation_record
+from backend.diagnosis.agents_runtime import (
+    stabilization_categories_from_executions,
+)
 from backend.domain.agent_context import ContextFact
 from backend.domain.agent_findings import AgentFinding, CoordinationReview
 from backend.domain.agent_plan import AgentExecution, DiagnosisPlan, DiagnosisTask
 from backend.domain.memory import MemoryItem
 from backend.domain.multi_agent import (
     AgentExecutionLayer,
+    FailureCategory,
     MultiAgentRunStatus,
     MultiAgentRunSummary,
 )
 from backend.domain.react_trace import ReActTrace
 from backend.domain.tool_calls import ToolCallRecord
+from backend.safety.redaction import redact_model
 from backend.services.container import get_container
 
 router = APIRouter(prefix="/investigations", tags=["agent-views"])
@@ -28,46 +34,43 @@ def _list_agent_findings(investigation_id: str) -> list[AgentFinding]:
     list_findings = getattr(_repository(), "list_agent_findings", None)
     if not callable(list_findings):
         return []
-    return list_findings(investigation_id)
+    return [redact_model(item) for item in list_findings(investigation_id)]
 
 
 def _get_coordination_review(investigation_id: str) -> CoordinationReview | None:
     get_review = getattr(_repository(), "get_coordination_review", None)
     if not callable(get_review):
         return None
-    return get_review(investigation_id)
+    review = get_review(investigation_id)
+    return None if review is None else redact_model(review)
 
 
 def _get_react_trace(investigation_id: str) -> ReActTrace | None:
     get_trace = getattr(_repository(), "get_react_trace", None)
     if not callable(get_trace):
         return None
-    return get_trace(investigation_id)
+    trace = get_trace(investigation_id)
+    return None if trace is None else redact_model(trace)
 
 
-def _safe_agents_failure_reason(message: str | None) -> str:
-    text = (message or "").lower()
-    categories = (
-        (
-            ("not configured", "not locally configured", "missing model", "missing api key"),
-            "Agents runtime not configured",
-        ),
-        (("timed out", "timeout"), "Agents runtime timed out"),
-        (("rate limit", "rate_limit", "429"), "Agents runtime rate limited"),
-        (("quota",), "Agents runtime quota exceeded"),
-        (
-            ("invalid output", "invalid model output", "validation error"),
-            "Agents runtime returned invalid output",
-        ),
-        (
-            ("authentication", "unauthorized", "forbidden", "api key"),
-            "Agents runtime authentication failed",
-        ),
-    )
-    return next(
-        (label for markers, label in categories if any(marker in text for marker in markers)),
-        "Agents runtime failed",
-    )
+_SAFE_FAILURE_LABELS = {
+    FailureCategory.NOT_CONFIGURED: "Agents runtime not configured",
+    FailureCategory.AUTHENTICATION: "Agents runtime authentication failed",
+    FailureCategory.RATE_LIMIT: "Agents runtime rate limited",
+    FailureCategory.QUOTA: "Agents runtime quota exceeded",
+    FailureCategory.TIMEOUT: "Agents runtime timed out",
+    FailureCategory.CANCELLED: "Agents runtime cancelled",
+    FailureCategory.TRANSPORT: "Agents runtime transport failed",
+    FailureCategory.INVALID_OUTPUT: "Agents runtime returned invalid output",
+    FailureCategory.INVALID_REFERENCE: "Agents runtime returned invalid references",
+    FailureCategory.MISSING_SPECIALIST: "Agents runtime missed a required specialist",
+    FailureCategory.UNSAFE_OUTPUT: "Agents runtime returned unsafe output",
+    FailureCategory.PERSISTENCE: "Agents review persistence failed",
+}
+
+
+def _safe_failure_label(category: FailureCategory) -> str:
+    return _SAFE_FAILURE_LABELS.get(category, "Agents runtime failed")
 
 
 def _execution_timestamp(execution: AgentExecution) -> float:
@@ -89,7 +92,17 @@ def _multi_agent_run_summary(
         and review.run_status
         in {MultiAgentRunStatus.COMPLETED, MultiAgentRunStatus.PARTIAL}
     ):
-        return MultiAgentRunSummary(status=review.run_status)
+        return MultiAgentRunSummary(
+            status=review.run_status,
+            model_provider=review.model_provider,
+            model_name=review.model_name,
+            primary_stabilization_category=(
+                review.primary_stabilization_category
+            ),
+            secondary_stabilization_categories=(
+                review.secondary_stabilization_categories
+            ),
+        )
 
     attempts = [
         execution
@@ -111,26 +124,30 @@ def _multi_agent_run_summary(
         MultiAgentRunStatus.SKIPPED.value,
     }:
         return None
+    categories = stabilization_categories_from_executions(executions)
     return MultiAgentRunSummary(
         status=MultiAgentRunStatus(latest.status.value),
-        failure_reason=(
-            "Agents runtime not configured"
-            if latest.status.value == MultiAgentRunStatus.SKIPPED.value
-            else _safe_agents_failure_reason(latest.error_message)
-        ),
+        failure_reason=_safe_failure_label(latest.failure_category),
+        model_provider=latest.model_provider,
+        model_name=latest.model_name,
+        primary_stabilization_category=(categories[0] if categories else None),
+        secondary_stabilization_categories=categories[1:],
     )
 
 
 @router.get("/{investigation_id}/plan", response_model=DiagnosisPlan | None)
 def get_investigation_plan(investigation_id: str) -> DiagnosisPlan | None:
     _get_investigation_record(investigation_id)
-    return _repository().get_plan(investigation_id)
+    plan = _repository().get_plan(investigation_id)
+    return None if plan is None else redact_model(plan)
 
 
 @router.get("/{investigation_id}/tasks", response_model=list[DiagnosisTask])
 def list_investigation_tasks(investigation_id: str) -> list[DiagnosisTask]:
     _get_investigation_record(investigation_id)
-    return _repository().list_tasks(investigation_id)
+    return [
+        redact_model(item) for item in _repository().list_tasks(investigation_id)
+    ]
 
 
 @router.get("/{investigation_id}/agent-executions", response_model=list[AgentExecution])
@@ -138,7 +155,10 @@ def list_investigation_agent_executions(
     investigation_id: str,
 ) -> list[AgentExecution]:
     _get_investigation_record(investigation_id)
-    return _repository().list_executions(investigation_id)
+    return [
+        redact_model(item)
+        for item in _repository().list_executions(investigation_id)
+    ]
 
 
 @router.get("/{investigation_id}/context", response_model=list[ContextFact])
@@ -147,13 +167,16 @@ def list_investigation_context(investigation_id: str) -> list[ContextFact]:
     list_context_facts = getattr(_repository(), "list_context_facts", None)
     if not callable(list_context_facts):
         return []
-    return list_context_facts(investigation_id)
+    return [redact_model(item) for item in list_context_facts(investigation_id)]
 
 
 @router.get("/{investigation_id}/tool-calls", response_model=list[ToolCallRecord])
 def list_investigation_tool_calls(investigation_id: str) -> list[ToolCallRecord]:
     _get_investigation_record(investigation_id)
-    return _repository().list_tool_calls(investigation_id)
+    return [
+        redact_model(item)
+        for item in _repository().list_tool_calls(investigation_id)
+    ]
 
 
 @router.get("/{investigation_id}/memory", response_model=list[MemoryItem])
@@ -162,7 +185,10 @@ def list_investigation_memory(investigation_id: str) -> list[MemoryItem]:
     list_memory = getattr(_repository(), "list_memory", None)
     if not callable(list_memory):
         return []
-    return list_memory(record.event.service, record.event.environment)
+    return [
+        redact_model(item)
+        for item in list_memory(record.event.service, record.event.environment)
+    ]
 
 
 @router.get("/{investigation_id}/agent-findings", response_model=list[AgentFinding])
@@ -195,7 +221,10 @@ def get_investigation_rca_workbench(investigation_id: str) -> dict[str, Any]:
     record = _get_investigation_record(investigation_id)
     findings = _list_agent_findings(investigation_id)
     review = _get_coordination_review(investigation_id)
-    executions = _repository().list_executions(investigation_id)
+    executions = [
+        redact_model(item)
+        for item in _repository().list_executions(investigation_id)
+    ]
     candidates = [] if review is None else review.candidates
     return {
         "investigation": record,
@@ -206,6 +235,7 @@ def get_investigation_rca_workbench(investigation_id: str) -> dict[str, Any]:
         "coordination_review": review,
         "agent_executions": executions,
         "multi_agent_run": _multi_agent_run_summary(review, executions),
+        "agent_config": build_agent_config(),
     }
 
 

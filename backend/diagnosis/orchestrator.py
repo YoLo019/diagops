@@ -5,19 +5,36 @@ from datetime import UTC, datetime
 from backend.db.models import InvestigationRecord, InvestigationStatus
 from backend.db.repositories import InMemoryInvestigationRepository
 from backend.diagnosis.action_planner import ActionPlanner
-from backend.diagnosis.agents_runtime import AgentsRcaRuntime, AgentsRcaRuntimeResult
+from backend.diagnosis.agents_runtime import (
+    AgentsRcaRuntime,
+    AgentsRcaRuntimeResult,
+    stabilization_categories_from_executions,
+)
 from backend.diagnosis.coordination_review import (
     build_coordination_review,
     build_hybrid_coordination_review,
 )
 from backend.diagnosis.coordinator import DiagnosisCoordinator
+from backend.diagnosis.evidence_validation import (
+    EvidenceContractError,
+    validate_agent_semantics,
+    validate_hypotheses,
+    validate_investigation_evidence,
+)
 from backend.diagnosis.execution_engine import DiagnosisExecutionEngine
 from backend.diagnosis.finding_builders import build_agent_findings
-from backend.diagnosis.llm_analyst import ReadOnlyLlmAnalyst
 from backend.diagnosis.planner import DiagnosisTaskPlanner
-from backend.diagnosis.react_agent import ReActInvestigationAgent
-from backend.domain.agent_findings import AgentFinding, CoordinationReview
-from backend.domain.agent_plan import AgentExecution, DiagnosisTask
+from backend.diagnosis.result_validation import AgentResultValidationError
+from backend.domain.agent_findings import (
+    AgentFinding,
+    CoordinationReview,
+    RootCauseCandidate,
+)
+from backend.domain.agent_plan import (
+    AgentExecution,
+    AgentExecutionStatus,
+    DiagnosisTask,
+)
 from backend.domain.events import IncidentEvent
 from backend.domain.evidence import (
     EvidenceItem,
@@ -28,16 +45,25 @@ from backend.domain.evidence import (
 from backend.domain.hypotheses import Hypothesis
 from backend.domain.multi_agent import (
     AgentExecutionLayer,
+    CoordinationDecisionStatus,
+    ExecutionStepKind,
+    FailureCategory,
     MultiAgentRunStatus,
     MultiAgentRunSummary,
+    ResultValidationCategory,
 )
 from backend.providers.registry import ProviderRegistry
 from backend.providers.results import ProviderResult
 from backend.rca.analyzer import RcaAnalyzer
 from backend.reports.generator import ReportGenerator
+from backend.safety.redaction import redact_model, safe_failure
 from backend.tools.provider_tools import build_provider_tool_registry
 
 logger = logging.getLogger(__name__)
+
+
+def _candidate_contract(candidate: RootCauseCandidate) -> dict[str, object]:
+    return candidate.model_dump(mode="python", exclude={"id"})
 
 
 class DiagnosisOrchestrator:
@@ -49,10 +75,8 @@ class DiagnosisOrchestrator:
         report_generator: ReportGenerator,
         coordinator: DiagnosisCoordinator | None = None,
         action_planner: ActionPlanner | None = None,
-        llm_analyst: ReadOnlyLlmAnalyst | None = None,
         task_planner: DiagnosisTaskPlanner | None = None,
         execution_engine: DiagnosisExecutionEngine | None = None,
-        react_agent: ReActInvestigationAgent | None = None,
         agents_runtime: AgentsRcaRuntime | None = None,
     ) -> None:
         self.repository = repository
@@ -61,40 +85,48 @@ class DiagnosisOrchestrator:
         self.report_generator = report_generator
         self.coordinator = coordinator or DiagnosisCoordinator(providers)
         self.action_planner = action_planner or ActionPlanner()
-        self.llm_analyst = llm_analyst
         self.task_planner = task_planner or DiagnosisTaskPlanner()
         self.execution_engine = execution_engine or DiagnosisExecutionEngine(
             repository=repository,
             tool_registry=build_provider_tool_registry(providers),
         )
-        self.react_agent = react_agent
         self.agents_runtime = agents_runtime
 
     def run(self, event: IncidentEvent) -> InvestigationRecord:
+        safe_event = redact_model(event)
         record = self.repository.save(
-            InvestigationRecord(event=event, status=InvestigationStatus.PENDING)
+            InvestigationRecord(event=safe_event, status=InvestigationStatus.PENDING)
         )
-        logger.info("investigation started id=%s service=%s", record.id, event.service)
+        logger.info(
+            "investigation started id=%s service=%s", record.id, safe_event.service
+        )
         self.repository.update_status(record.id, InvestigationStatus.RUNNING)
 
         try:
             context = self.coordinator.collect(event)
+            validated = validate_investigation_evidence(context.provider_results)
             evidence = context.evidence
+            supporting_evidence = validated.supporting_evidence
             record.provider_results = context.provider_results
             record.specialist_results = context.specialist_results
             record.evidence = evidence
             record.updated_at = datetime.now(UTC)
             self.repository.save(record)
-            self._record_v4_execution(record.id, event, context.provider_results)
+            self._record_v4_execution(record.id, safe_event, context.provider_results)
 
-            hypotheses = self.analyzer.analyze(event, evidence)
+            hypotheses = self.analyzer.analyze(safe_event, supporting_evidence)
+            validate_hypotheses(supporting_evidence, hypotheses)
             record.hypotheses = hypotheses
             record.updated_at = datetime.now(UTC)
             self.repository.save(record)
-            self._record_v5_coordination(record.id, event, evidence, hypotheses)
+            self._record_v5_coordination(
+                record.id, safe_event, supporting_evidence, hypotheses
+            )
             v7_result = self._record_v7_coordination(record.id)
 
-            actions, verifications = self.action_planner.plan(event, evidence, hypotheses)
+            actions, verifications = self.action_planner.plan(
+                safe_event, supporting_evidence, hypotheses
+            )
             evidence = self._ensure_action_evidence(evidence, actions)
 
             record.evidence = evidence
@@ -102,16 +134,9 @@ class DiagnosisOrchestrator:
             record.verification_suggestions = verifications
             record.updated_at = datetime.now(UTC)
             self.repository.save(record)
-            self._record_v6_react_trace(record.id, event, evidence)
-            if self.llm_analyst is not None:
-                record.llm_analysis = self.llm_analyst.analyze(
-                    investigation_id=record.id,
-                    evidence=evidence,
-                    hypotheses=hypotheses,
-                )
             report = self.report_generator.generate(
                 record.id,
-                event,
+                safe_event,
                 evidence,
                 hypotheses,
                 actions=actions,
@@ -154,14 +179,19 @@ class DiagnosisOrchestrator:
                 )
             raise
         except Exception as exc:
-            logger.exception("investigation failed id=%s reason=%s", record.id, exc)
-            record.failure_reason = str(exc)
+            logger.error(
+                "investigation failed id=%s error_type=%s",
+                record.id,
+                type(exc).__name__,
+            )
+            failure_reason = safe_failure("investigation_failure")
+            record.failure_reason = failure_reason
             record.updated_at = datetime.now(UTC)
             self.repository.save(record)
             return self.repository.update_status(
                 record.id,
                 InvestigationStatus.FAILED,
-                failure_reason=str(exc),
+                failure_reason=failure_reason,
             )
 
     def _record_v5_coordination(
@@ -181,22 +211,21 @@ class DiagnosisOrchestrator:
                     finding.related_cause_type, len(cause_rank)
                 )
             )
-            save_findings = getattr(self.repository, "save_agent_findings", None)
-            if save_findings is not None:
-                save_findings(investigation_id, findings)
-
             review = build_coordination_review(
                 investigation_id, findings, evidence, hypotheses
             )
+            validate_agent_semantics(evidence, findings, review.candidates)
+            save_findings = getattr(self.repository, "save_agent_findings", None)
+            if save_findings is not None:
+                save_findings(investigation_id, findings)
             save_review = getattr(self.repository, "save_coordination_review", None)
             if save_review is not None:
                 save_review(review)
         except Exception as exc:
             logger.warning(
-                "v5 coordination recording failed id=%s reason=%s",
+                "v5 coordination recording failed id=%s error_type=%s",
                 investigation_id,
-                exc,
-                exc_info=True,
+                type(exc).__name__,
             )
 
     def _record_v7_coordination(
@@ -215,6 +244,9 @@ class DiagnosisOrchestrator:
             persisted = self.repository.get(investigation_id)
             evidence = persisted.evidence
             hypotheses = persisted.hypotheses
+            supporting_evidence = validate_investigation_evidence(
+                persisted.provider_results
+            ).supporting_evidence
             existing_task_ids = {
                 item.id for item in self.repository.list_tasks(investigation_id)
             }
@@ -229,7 +261,7 @@ class DiagnosisOrchestrator:
                 self.agents_runtime.run(
                     investigation_id=investigation_id,
                     event=persisted.event,
-                    evidence=persisted.evidence,
+                    evidence=supporting_evidence,
                     hypotheses=persisted.hypotheses,
                 )
             )
@@ -246,6 +278,25 @@ class DiagnosisOrchestrator:
             result = self._validate_v7_result(
                 investigation_id,
                 result,
+                evidence,
+                hypotheses,
+                existing_task_ids,
+                existing_execution_ids,
+                existing_finding_ids,
+            )
+        except AgentResultValidationError as exc:
+            logger.warning(
+                "v7 agents validation failed id=%s validation_category=%s",
+                investigation_id,
+                exc.category.value,
+            )
+            result = self._validate_v7_result(
+                investigation_id,
+                AgentsRcaRuntimeResult.validation_failed(
+                    exc.category,
+                    model_provider=result.run_summary.model_provider,
+                    model_name=result.run_summary.model_name,
+                ),
                 evidence,
                 hypotheses,
                 existing_task_ids,
@@ -269,20 +320,13 @@ class DiagnosisOrchestrator:
                 existing_finding_ids,
             )
 
-        for attempt in range(2):
-            try:
-                self._persist_v7_result(investigation_id, result)
-            except Exception as exc:
-                if attempt == 1:
-                    logger.warning(
-                        "v7 agents persistence failed id=%s error_type=%s",
-                        investigation_id,
-                        type(exc).__name__,
-                    )
-            reloaded = self._reload_v7_result(investigation_id, result)
-            if reloaded is not None:
-                return reloaded
-        return None
+        try:
+            self._persist_v7_result(investigation_id, result)
+        except Exception:
+            return self._record_v7_persistence_failure(
+                investigation_id, result
+            )
+        return self._reload_v7_result(investigation_id, result)
 
     def _validate_v7_result(
         self,
@@ -295,21 +339,15 @@ class DiagnosisOrchestrator:
         existing_finding_ids: set[str],
     ) -> AgentsRcaRuntimeResult:
         evidence_ids = {item.id for item in evidence}
-        tasks = [
-            DiagnosisTask.model_validate(item.model_dump(mode="python"))
-            for item in result.tasks
-        ]
-        executions = [
-            AgentExecution.model_validate(item.model_dump(mode="python"))
-            for item in result.executions
-        ]
-        findings = [
-            AgentFinding.model_validate(item.model_dump(mode="python"))
-            for item in result.findings
-        ]
-        summary = MultiAgentRunSummary.model_validate(
-            result.run_summary.model_dump(mode="python")
-        )
+        try:
+            tasks = [
+                DiagnosisTask.model_validate(item.model_dump(mode="python"))
+                for item in result.tasks
+            ]
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise AgentResultValidationError(
+                ResultValidationCategory.TASK_CONTRACT
+            ) from exc
         task_by_id = {item.id: item for item in tasks}
         if (
             not tasks
@@ -320,10 +358,22 @@ class DiagnosisOrchestrator:
                 for item in tasks
             )
         ):
-            raise ValueError("Invalid V7 tasks")
+            raise AgentResultValidationError(
+                ResultValidationCategory.TASK_CONTRACT
+            )
 
+        try:
+            executions = [
+                AgentExecution.model_validate(item.model_dump(mode="python"))
+                for item in result.executions
+            ]
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise AgentResultValidationError(
+                ResultValidationCategory.EXECUTION_CONTRACT
+            ) from exc
         execution_ids = {item.id for item in executions}
         execution_task_ids = [item.task_id for item in executions]
+        execution_by_task_id = {item.task_id: item for item in executions}
         if (
             not executions
             or len(execution_ids) != len(executions)
@@ -339,8 +389,19 @@ class DiagnosisOrchestrator:
                 for item in executions
             )
         ):
-            raise ValueError("Invalid V7 executions")
+            raise AgentResultValidationError(
+                ResultValidationCategory.EXECUTION_CONTRACT
+            )
 
+        try:
+            findings = [
+                AgentFinding.model_validate(item.model_dump(mode="python"))
+                for item in result.findings
+            ]
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise AgentResultValidationError(
+                ResultValidationCategory.FINDING_CONTRACT
+            ) from exc
         finding_by_id = {item.id: item for item in findings}
         if (
             len(finding_by_id) != len(findings)
@@ -352,7 +413,9 @@ class DiagnosisOrchestrator:
                 for item in findings
             )
         ):
-            raise ValueError("Invalid V7 findings")
+            raise AgentResultValidationError(
+                ResultValidationCategory.FINDING_CONTRACT
+            )
         for finding in findings:
             if finding.analysis_round != 2:
                 continue
@@ -363,13 +426,33 @@ class DiagnosisOrchestrator:
                 or revised.agent_name != finding.agent_name
                 or revised.investigation_id != investigation_id
             ):
-                raise ValueError("Invalid V7 finding revision")
+                raise AgentResultValidationError(
+                    ResultValidationCategory.FINDING_REVISION_CONTRACT
+                )
+
+        try:
+            summary = MultiAgentRunSummary.model_validate(
+                result.run_summary.model_dump(mode="python")
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise AgentResultValidationError(
+                ResultValidationCategory.RUN_STATUS_CONTRACT
+            ) from exc
 
         review = None
         if result.review is not None:
-            review = CoordinationReview.model_validate(
-                result.review.model_dump(mode="python")
-            )
+            try:
+                review = CoordinationReview.model_validate(
+                    result.review.model_dump(mode="python")
+                )
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise AgentResultValidationError(
+                    ResultValidationCategory.REVIEW_CONTRACT
+                ) from exc
+            if review.model_provider is None:
+                raise AgentResultValidationError(
+                    ResultValidationCategory.REVIEW_ATTRIBUTION
+                )
             expected = build_hybrid_coordination_review(
                 investigation_id,
                 findings,
@@ -378,6 +461,29 @@ class DiagnosisOrchestrator:
                 summary.status,
                 review.summary,
                 review.uncertainty,
+                model_provider=review.model_provider,
+                model_name=review.model_name,
+                primary_stabilization_category=(
+                    review.primary_stabilization_category
+                ),
+                secondary_stabilization_categories=(
+                    review.secondary_stabilization_categories
+                ),
+            )
+            candidate_contracts = [
+                _candidate_contract(candidate) for candidate in review.candidates
+            ]
+            expected_candidate_contracts = [
+                _candidate_contract(candidate) for candidate in expected.candidates
+            ]
+            has_finding_support = any(
+                candidate.supporting_finding_ids
+                or candidate.contradicting_finding_ids
+                for candidate in review.candidates
+            )
+            allows_deterministic_fallback = (
+                review.decision_status == CoordinationDecisionStatus.FALLBACK
+                and candidate_contracts == expected_candidate_contracts
             )
             if (
                 summary.status
@@ -385,6 +491,8 @@ class DiagnosisOrchestrator:
                 or review.investigation_id != investigation_id
                 or review.execution_layer != AgentExecutionLayer.OPENAI_AGENTS_SDK
                 or review.run_status != summary.status
+                or review.model_provider != summary.model_provider
+                or review.model_name != summary.model_name
                 or (
                     review.decision_status,
                     review.baseline_cause_type,
@@ -396,11 +504,7 @@ class DiagnosisOrchestrator:
                     expected.selected_cause_type,
                 )
                 or not review.candidates
-                or not any(
-                    candidate.supporting_finding_ids
-                    or candidate.contradicting_finding_ids
-                    for candidate in review.candidates
-                )
+                or not (has_finding_support or allows_deterministic_fallback)
                 or any(
                     not (
                         candidate.supporting_evidence_ids
@@ -417,9 +521,51 @@ class DiagnosisOrchestrator:
                     for candidate in review.candidates
                 )
             ):
-                raise ValueError("Invalid V7 coordination review")
+                raise AgentResultValidationError(
+                    ResultValidationCategory.REVIEW_CONTRACT
+                )
+            try:
+                validate_agent_semantics(
+                    [
+                        item
+                        for item in evidence
+                        if item.status
+                        in {EvidenceStatus.SUCCESS, EvidenceStatus.PARTIAL}
+                        and item.kind != EvidenceKind.PROVIDER_ERROR
+                    ],
+                    findings,
+                    review.candidates,
+                )
+            except EvidenceContractError as exc:
+                raise AgentResultValidationError(
+                    ResultValidationCategory.SEMANTIC_REFERENCE
+                ) from exc
 
-        statuses = {item.status.value for item in tasks}
+        recovered_agents = {
+            execution.agent_name
+            for execution in executions
+            if execution.attempt == 2
+            and execution.step_kind == ExecutionStepKind.SPECIALIST_RECOLLECTION
+            and execution.status.value == "completed"
+        }
+        resolved_failure_task_ids = {
+            task.id
+            for task in tasks
+            if task.status.value == "failed"
+            and (
+                execution := execution_by_task_id[task.id]
+            ).status.value
+            == "failed"
+            and execution.step_kind == ExecutionStepKind.SPECIALIST_COLLECTION
+            and execution.attempt == 1
+            and execution.failure_category == FailureCategory.MISSING_SPECIALIST
+            and execution.agent_name in recovered_agents
+        }
+        statuses = {
+            task.status.value
+            for task in tasks
+            if task.id not in resolved_failure_task_ids
+        }
         valid_run = {
             MultiAgentRunStatus.COMPLETED: review is not None
             and statuses == {"completed"}
@@ -435,7 +581,9 @@ class DiagnosisOrchestrator:
             and not findings,
         }[summary.status]
         if not valid_run:
-            raise ValueError("Invalid V7 run status")
+            raise AgentResultValidationError(
+                ResultValidationCategory.RUN_STATUS_CONTRACT
+            )
 
         return AgentsRcaRuntimeResult(
             tasks=tasks,
@@ -459,10 +607,58 @@ class DiagnosisOrchestrator:
             investigation_id,
             list(tasks.values()),
         )
-        self.repository.save_executions(investigation_id, result.executions)
-        self.repository.save_agent_findings(investigation_id, result.findings)
-        if result.review is not None:
-            self.repository.save_coordination_review(result.review)
+        self.repository.save_multi_agent_result(
+            investigation_id,
+            result.findings,
+            result.executions,
+            result.review,
+        )
+
+    def _record_v7_persistence_failure(
+        self,
+        investigation_id: str,
+        result: AgentsRcaRuntimeResult,
+    ) -> AgentsRcaRuntimeResult | None:
+        execution = AgentExecution(
+            task_id=f"task-review-persistence-{investigation_id}",
+            agent_name="CoordinatorAgent",
+            status=AgentExecutionStatus.FAILED,
+            execution_layer=AgentExecutionLayer.OPENAI_AGENTS_SDK,
+            step_kind=ExecutionStepKind.REVIEW_PERSISTENCE,
+            attempt=1,
+            failure_category=FailureCategory.PERSISTENCE,
+            model_provider=result.run_summary.model_provider,
+            model_name=result.run_summary.model_name,
+            error_message="Agents review persistence failed",
+        )
+        recovery = AgentsRcaRuntimeResult(
+            tasks=[],
+            executions=[execution],
+            findings=[],
+            review=None,
+            run_summary=MultiAgentRunSummary(
+                status=MultiAgentRunStatus.FAILED,
+                failure_reason="Agents review persistence failed",
+                model_provider=result.run_summary.model_provider,
+                model_name=result.run_summary.model_name,
+                primary_stabilization_category=(
+                    stabilization_categories_from_executions([execution])[0]
+                ),
+            ),
+        )
+        try:
+            self.repository.save_multi_agent_result(
+                investigation_id, [], [execution], None
+            )
+        except Exception:
+            logger.warning(
+                "v7 agents persistence recovery failed id=%s "
+                "failure_category=%s",
+                investigation_id,
+                FailureCategory.PERSISTENCE.value,
+            )
+            return None
+        return self._reload_v7_result(investigation_id, recovery)
 
     def _reload_v7_result(
         self,
@@ -525,9 +721,16 @@ class DiagnosisOrchestrator:
                 if coordinator is None:
                     return None
                 review = None
+                categories = stabilization_categories_from_executions(executions)
                 summary = MultiAgentRunSummary(
                     status=MultiAgentRunStatus(coordinator.status.value),
                     failure_reason=coordinator.error_message,
+                    model_provider=coordinator.model_provider,
+                    model_name=coordinator.model_name,
+                    primary_stabilization_category=(
+                        categories[0] if categories else None
+                    ),
+                    secondary_stabilization_categories=categories[1:],
                 )
             else:
                 persisted_review = self.repository.get_coordination_review(
@@ -542,7 +745,17 @@ class DiagnosisOrchestrator:
                     mode="json"
                 ):
                     return None
-                summary = MultiAgentRunSummary(status=review.run_status)
+                summary = MultiAgentRunSummary(
+                    status=review.run_status,
+                    model_provider=review.model_provider,
+                    model_name=review.model_name,
+                    primary_stabilization_category=(
+                        review.primary_stabilization_category
+                    ),
+                    secondary_stabilization_categories=(
+                        review.secondary_stabilization_categories
+                    ),
+                )
 
             return AgentsRcaRuntimeResult(
                 tasks=tasks,
@@ -573,36 +786,9 @@ class DiagnosisOrchestrator:
             self.execution_engine.run(plan, event, provider_results=provider_results)
         except Exception as exc:
             logger.warning(
-                "v4 execution recording failed id=%s reason=%s",
+                "v4 execution recording failed id=%s error_type=%s",
                 investigation_id,
-                exc,
-                exc_info=True,
-            )
-
-    def _record_v6_react_trace(
-        self,
-        investigation_id: str,
-        event: IncidentEvent,
-        evidence: list[EvidenceItem],
-    ) -> None:
-        if self.react_agent is None:
-            return
-
-        try:
-            trace = self.react_agent.run(
-                investigation_id=investigation_id,
-                event=event,
-                existing_evidence_ids=[item.id for item in evidence],
-            )
-            save_trace = getattr(self.repository, "save_react_trace", None)
-            if callable(save_trace):
-                save_trace(trace)
-        except Exception as exc:
-            logger.warning(
-                "v6 react trace failed id=%s reason=%s",
-                investigation_id,
-                exc,
-                exc_info=True,
+                type(exc).__name__,
             )
 
     def _ensure_action_evidence(
