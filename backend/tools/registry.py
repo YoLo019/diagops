@@ -1,10 +1,20 @@
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from backend.domain.events import IncidentEvent
-from backend.domain.evidence import JsonValue
+from backend.domain.evidence import EvidenceItem, JsonValue
 from backend.domain.tool_calls import ToolCallRecord, ToolSpec
+from backend.providers.results import ProviderResult
 
-ToolHandler = Callable[..., ToolCallRecord]
+
+@dataclass(frozen=True)
+class ToolInvocationResult:
+    call: ToolCallRecord
+    evidence: list[EvidenceItem]
+    provider_results: list[ProviderResult]
+
+
+ToolHandler = Callable[..., ToolInvocationResult | ToolCallRecord]
 
 
 class ToolRegistry:
@@ -34,12 +44,32 @@ class ToolRegistry:
         agent_name: str,
         input: dict[str, JsonValue] | None = None,
     ) -> ToolCallRecord:
+        return self.invoke_detailed(
+            tool_name,
+            event=event,
+            task_id=task_id,
+            agent_name=agent_name,
+            input=input,
+        ).call
+
+    def invoke_detailed(
+        self,
+        tool_name: str,
+        *,
+        event: IncidentEvent,
+        task_id: str,
+        agent_name: str,
+        input: dict[str, JsonValue] | None = None,
+    ) -> ToolInvocationResult:
         if tool_name not in self._handlers:
             raise ValueError(f"unknown tool: {tool_name}")
-        return self._handlers[tool_name](
+        result = self._handlers[tool_name](
             tool_name=tool_name,
             event=event,
             task_id=task_id,
             agent_name=agent_name,
             input=input,
         )
+        if isinstance(result, ToolCallRecord):
+            return ToolInvocationResult(call=result, evidence=[], provider_results=[])
+        return result

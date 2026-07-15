@@ -1,10 +1,11 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from backend.domain.events import IncidentEvent, IncidentSource, Severity
 from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
 from backend.domain.tool_calls import ToolCallStatus
+from backend.domain.tool_queries import LogQuery
 from backend.providers.registry import ProviderRegistry
 from backend.providers.results import ProviderResult, ProviderStatus
 from backend.tools.provider_tools import build_provider_tool_registry
@@ -25,6 +26,41 @@ def test_provider_tool_specs_exist_and_are_read_only():
         "query_dependencies",
     }
     assert all(spec.read_only for spec in specs.values())
+
+
+def test_tool_specs_publish_strict_pydantic_schema():
+    registry = build_provider_tool_registry(ProviderRegistry([]))
+
+    schema = registry.get("read_logs").input_schema
+
+    assert schema["additionalProperties"] is False
+    assert set(schema["required"]) >= {"start_time", "end_time", "reason"}
+
+
+def test_parameterized_tool_uses_only_declared_capability():
+    log = QueryProvider("read_logs", EvidenceProvider.LOG, "ev-log")
+    metric = QueryProvider("query_metrics", EvidenceProvider.METRIC, "ev-metric")
+    registry = build_provider_tool_registry(ProviderRegistry([log, metric]))
+    incident = event()
+
+    result = registry.invoke_detailed(
+        "read_logs",
+        event=incident,
+        task_id="task-log",
+        agent_name="LogAgent",
+        input={
+            "start_time": incident.started_at.isoformat(),
+            "end_time": (incident.started_at + timedelta(minutes=15)).isoformat(),
+            "reason": "验证超时日志",
+            "keywords": ["timeout"],
+        },
+    )
+
+    assert result.call.output_evidence_ids == ["ev-log"]
+    assert [item.id for item in result.evidence] == ["ev-log"]
+    assert log.calls == 1
+    assert metric.calls == 0
+    assert isinstance(log.query, LogQuery)
 
 
 @pytest.mark.parametrize(
@@ -160,6 +196,33 @@ class StaticProvider:
                     kind=_KIND_BY_PROVIDER[self.provider],
                     timestamp=event.started_at,
                     summary=f"{self.provider} evidence",
+                )
+            ],
+        )
+
+
+class QueryProvider:
+    def __init__(
+        self, tool_name: str, provider: EvidenceProvider, evidence_id: str
+    ) -> None:
+        self.supported_tools = frozenset({tool_name})
+        self.provider = provider
+        self.evidence_id = evidence_id
+        self.calls = 0
+        self.query = None
+
+    def collect(self, event: IncidentEvent, query) -> ProviderResult:
+        self.calls += 1
+        self.query = query
+        return ProviderResult(
+            provider=self.provider,
+            evidence_items=[
+                EvidenceItem(
+                    id=self.evidence_id,
+                    provider=self.provider,
+                    kind=_KIND_BY_PROVIDER[self.provider],
+                    timestamp=event.started_at,
+                    summary=f"{self.provider} query evidence",
                 )
             ],
         )

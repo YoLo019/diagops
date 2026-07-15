@@ -20,6 +20,15 @@ from backend.safety.redaction import redact_model, safe_failure
 
 logger = logging.getLogger(__name__)
 
+_PROVIDER_BY_TOOL = {
+    "read_logs": EvidenceProvider.LOG,
+    "query_metrics": EvidenceProvider.METRIC,
+    "query_prometheus": EvidenceProvider.METRIC,
+    "read_deployments": EvidenceProvider.DEPLOY,
+    "read_service_catalog": EvidenceProvider.SERVICE_CATALOG,
+    "query_dependencies": EvidenceProvider.DEPENDENCY,
+}
+
 
 class ProviderRegistry:
     def __init__(
@@ -67,6 +76,36 @@ class ProviderRegistry:
             for provider in EvidenceProvider
             if provider not in configured
         )
+        return results
+
+    def query_results(self, event, tool_name, query) -> list[ProviderResult]:
+        providers = [
+            provider
+            for provider in self._providers_for(event)
+            if tool_name in getattr(provider, "supported_tools", ())
+        ]
+        if not providers:
+            return [
+                ProviderResult(
+                    provider=_PROVIDER_BY_TOOL[tool_name],
+                    status=ProviderStatus.SKIPPED,
+                    error_message=f"{tool_name} provider not configured",
+                )
+            ]
+
+        results: list[ProviderResult] = []
+        for provider in providers:
+            started = perf_counter()
+            try:
+                result = redact_model(provider.collect(event, query))
+            except Exception:
+                result = ProviderResult(
+                    provider=getattr(provider, "provider", _PROVIDER_BY_TOOL[tool_name]),
+                    status=ProviderStatus.FAILED,
+                    error_message=safe_failure("provider_failure"),
+                    duration_ms=int((perf_counter() - started) * 1000),
+                )
+            results.append(result)
         return results
 
     def evidence_from_results(self, results: list[ProviderResult]) -> list[EvidenceItem]:
