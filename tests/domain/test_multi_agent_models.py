@@ -1,8 +1,11 @@
 from backend.domain.multi_agent import (
+    AdaptiveRunStatus,
+    AdaptiveStopReason,
     AgentExecutionLayer,
     CoordinationDecisionStatus,
     ExecutionStepKind,
     FailureCategory,
+    InvestigationStrategy,
     ModelProvider,
     MultiAgentRunStatus,
     MultiAgentRunSummary,
@@ -12,6 +15,14 @@ from backend.domain.multi_agent import (
 
 
 def test_multi_agent_contract_values_are_stable():
+    assert [item.value for item in InvestigationStrategy] == ["fixed", "adaptive"]
+    assert [item.value for item in AdaptiveRunStatus] == [
+        "not_applicable", "completed", "degraded", "skipped"
+    ]
+    assert [item.value for item in AdaptiveStopReason] == [
+        "sufficient_evidence", "budget_exhausted", "no_new_evidence",
+        "duplicate_query", "round_limit", "timeout", "failed",
+    ]
     assert [item.value for item in AgentExecutionLayer] == [
         "custom",
         "openai_agents_sdk",
@@ -101,6 +112,12 @@ def test_multi_agent_run_summary_defaults_failure_reason():
     assert summary.secondary_stabilization_categories is not (
         another.secondary_stabilization_categories
     )
+    assert summary.strategy == InvestigationStrategy.FIXED
+    assert summary.adaptive_status == AdaptiveRunStatus.NOT_APPLICABLE
+    assert summary.adaptive_stop_reason is None
+    assert summary.tool_call_count == 0
+    assert summary.max_tool_calls_per_specialist == 3
+    assert summary.max_total_tool_calls == 8
 
 
 def test_multi_agent_run_summary_uses_pydantic_28_protected_namespaces():

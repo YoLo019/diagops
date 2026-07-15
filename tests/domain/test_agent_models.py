@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
@@ -8,6 +9,7 @@ from backend.domain.agent_context import (
     ContextFactType,
     SharedInvestigationContext,
 )
+from backend.domain.agent_findings import CoordinationReview, RootCauseAttribution
 from backend.domain.agent_plan import (
     AgentExecution,
     DiagnosisPlan,
@@ -16,6 +18,7 @@ from backend.domain.agent_plan import (
     DiagnosisTaskType,
 )
 from backend.domain.evidence import EvidenceProvider
+from backend.domain.hypotheses import CauseType
 from backend.domain.memory import MemoryItem, MemoryType
 from backend.domain.multi_agent import (
     AgentExecutionLayer,
@@ -25,6 +28,39 @@ from backend.domain.multi_agent import (
     ResultValidationCategory,
 )
 from backend.domain.tool_calls import ToolCallRecord, ToolCallStatus, ToolSpec
+
+
+def test_v82_cause_types_are_available():
+    assert {item.value for item in CauseType} >= {
+        "resource_saturation",
+        "network_fault",
+        "configuration_error",
+        "process_or_container_failure",
+        "infrastructure_fault",
+    }
+
+
+def test_root_cause_attribution_requires_grounded_non_empty_values():
+    attribution = RootCauseAttribution(
+        root_cause_component="checkout-service",
+        root_cause_occurred_at=datetime(2026, 7, 15, 8, tzinfo=UTC),
+        root_cause_reason="CPU saturation aligned with latency increase.",
+        supporting_evidence_ids=["ev-metric-1"],
+    )
+
+    assert attribution.supporting_evidence_ids == ["ev-metric-1"]
+    assert CoordinationReview(investigation_id="inv-1").root_causes == []
+
+    for changes in (
+        {"root_cause_component": ""},
+        {"root_cause_reason": ""},
+        {"root_cause_occurred_at": datetime(2026, 7, 15, 8)},
+        {"supporting_evidence_ids": []},
+    ):
+        values = attribution.model_dump()
+        values.update(changes)
+        with pytest.raises(ValidationError):
+            RootCauseAttribution.model_validate(values)
 
 
 def test_agent_models_defaults_are_readable_and_empty_lists_are_fresh():

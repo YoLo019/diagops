@@ -4,7 +4,7 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
-from backend.domain.multi_agent import ModelProvider
+from backend.domain.multi_agent import InvestigationStrategy, ModelProvider
 
 
 class StorageSettings(BaseModel):
@@ -57,6 +57,10 @@ class AgentsSettings(BaseModel):
     model: str | None = None
     max_turns: int = Field(default=8, ge=1)
     timeout_seconds: int = Field(default=60, ge=1)
+    strategy: InvestigationStrategy = InvestigationStrategy.FIXED
+    max_tool_calls_per_specialist: int = Field(default=3, ge=1, le=10)
+    max_total_tool_calls: int = Field(default=8, ge=1, le=30)
+    tool_timeout_seconds: int = Field(default=10, ge=1, le=60)
 
 
 class AppSettings(BaseModel):
@@ -99,6 +103,18 @@ def _apply_environment_overrides(settings: AppSettings) -> None:
 
     if agents_timeout_seconds := _get_env("DIAGOPS_AGENTS_TIMEOUT_SECONDS"):
         settings.agents.timeout_seconds = int(agents_timeout_seconds)
+
+    if agents_strategy := _get_env("DIAGOPS_AGENTS_STRATEGY"):
+        settings.agents.strategy = agents_strategy.strip().lower()
+
+    if value := _get_env("DIAGOPS_AGENTS_MAX_TOOL_CALLS_PER_SPECIALIST"):
+        settings.agents.max_tool_calls_per_specialist = int(value)
+
+    if value := _get_env("DIAGOPS_AGENTS_MAX_TOTAL_TOOL_CALLS"):
+        settings.agents.max_total_tool_calls = int(value)
+
+    if value := _get_env("DIAGOPS_AGENTS_TOOL_TIMEOUT_SECONDS"):
+        settings.agents.tool_timeout_seconds = int(value)
 
 
 def _parse_bool(value: str) -> bool:

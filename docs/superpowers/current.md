@@ -21,13 +21,13 @@ Version: V8.2
 
 Main goal: add bounded Specialist-owned parameterized evidence tools and publish a reproducible OpenRCA fixed-versus-adaptive benchmark.
 
-Iteration status: `ready`
+Iteration status: `implementing`
 
 Spec status: `approved`
 
 Plan status: `approved`
 
-Implementation status: `not_started`
+Implementation status: `in_progress`
 
 Completion commit: `none`
 

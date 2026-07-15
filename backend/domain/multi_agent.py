@@ -22,6 +22,28 @@ class MultiAgentRunStatus(StrEnum):
     SKIPPED = "skipped"
 
 
+class InvestigationStrategy(StrEnum):
+    FIXED = "fixed"
+    ADAPTIVE = "adaptive"
+
+
+class AdaptiveRunStatus(StrEnum):
+    NOT_APPLICABLE = "not_applicable"
+    COMPLETED = "completed"
+    DEGRADED = "degraded"
+    SKIPPED = "skipped"
+
+
+class AdaptiveStopReason(StrEnum):
+    SUFFICIENT_EVIDENCE = "sufficient_evidence"
+    BUDGET_EXHAUSTED = "budget_exhausted"
+    NO_NEW_EVIDENCE = "no_new_evidence"
+    DUPLICATE_QUERY = "duplicate_query"
+    ROUND_LIMIT = "round_limit"
+    TIMEOUT = "timeout"
+    FAILED = "failed"
+
+
 class ModelProvider(StrEnum):
     OPENAI = "openai"
     DEEPSEEK = "deepseek"
@@ -94,6 +116,12 @@ class MultiAgentRunSummary(BaseModel):
     secondary_stabilization_categories: list[StabilizationCategory] = Field(
         default_factory=list
     )
+    strategy: InvestigationStrategy = InvestigationStrategy.FIXED
+    adaptive_status: AdaptiveRunStatus = AdaptiveRunStatus.NOT_APPLICABLE
+    adaptive_stop_reason: AdaptiveStopReason | None = None
+    tool_call_count: int = Field(default=0, ge=0)
+    max_tool_calls_per_specialist: int = Field(default=3, ge=1)
+    max_total_tool_calls: int = Field(default=8, ge=1)
 
     @model_serializer(mode="wrap", when_used="json")
     def serialize_without_unset_reliability_fields(self, handler):
@@ -103,6 +131,12 @@ class MultiAgentRunSummary(BaseModel):
             "model_name",
             "primary_stabilization_category",
             "secondary_stabilization_categories",
+            "strategy",
+            "adaptive_status",
+            "adaptive_stop_reason",
+            "tool_call_count",
+            "max_tool_calls_per_specialist",
+            "max_total_tool_calls",
         ):
             if field_name not in self.model_fields_set:
                 data.pop(field_name, None)

@@ -76,12 +76,28 @@ class RootCauseCandidate(BaseModel):
     uncertainty: str = ""
 
 
+class RootCauseAttribution(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    root_cause_occurred_at: datetime
+    root_cause_component: str = Field(min_length=1)
+    root_cause_reason: str = Field(min_length=1)
+    supporting_evidence_ids: list[str] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_timestamp(self) -> "RootCauseAttribution":
+        if self.root_cause_occurred_at.tzinfo is None:
+            raise ValueError("root_cause_occurred_at must be timezone-aware")
+        return self
+
+
 class CoordinationReview(BaseModel):
     model_config = ConfigDict(protected_namespaces=("model_validate", "model_dump"))
 
     id: str = Field(default_factory=lambda: f"coordination-{uuid4().hex}")
     investigation_id: str
     candidates: list[RootCauseCandidate] = Field(default_factory=list)
+    root_causes: list[RootCauseAttribution] = Field(default_factory=list)
     execution_layer: AgentExecutionLayer = AgentExecutionLayer.CUSTOM
     run_status: MultiAgentRunStatus = MultiAgentRunStatus.COMPLETED
     decision_status: CoordinationDecisionStatus | None = None

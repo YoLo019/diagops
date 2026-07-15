@@ -10,6 +10,11 @@ class CauseType(StrEnum):
     DOWNSTREAM_DEPENDENCY_FAILURE = "downstream_dependency_failure"
     DATABASE_SLOWDOWN = "database_slowdown"
     SINGLE_INSTANCE_ISSUE = "single_instance_issue"
+    RESOURCE_SATURATION = "resource_saturation"
+    NETWORK_FAULT = "network_fault"
+    CONFIGURATION_ERROR = "configuration_error"
+    PROCESS_OR_CONTAINER_FAILURE = "process_or_container_failure"
+    INFRASTRUCTURE_FAULT = "infrastructure_fault"
     UNKNOWN = "unknown"
 
 

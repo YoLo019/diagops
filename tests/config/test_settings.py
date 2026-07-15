@@ -4,7 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from backend.config.settings import AppSettings, load_settings
-from backend.domain.multi_agent import ModelProvider
+from backend.domain.multi_agent import InvestigationStrategy, ModelProvider
 
 
 def test_default_settings_use_d_drive_project_paths(monkeypatch):
@@ -18,6 +18,10 @@ def test_default_settings_use_d_drive_project_paths(monkeypatch):
     monkeypatch.delenv("DIAGOPS_AGENTS_MODEL", raising=False)
     monkeypatch.delenv("DIAGOPS_AGENTS_MAX_TURNS", raising=False)
     monkeypatch.delenv("DIAGOPS_AGENTS_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("DIAGOPS_AGENTS_STRATEGY", raising=False)
+    monkeypatch.delenv("DIAGOPS_AGENTS_MAX_TOOL_CALLS_PER_SPECIALIST", raising=False)
+    monkeypatch.delenv("DIAGOPS_AGENTS_MAX_TOTAL_TOOL_CALLS", raising=False)
+    monkeypatch.delenv("DIAGOPS_AGENTS_TOOL_TIMEOUT_SECONDS", raising=False)
 
     settings = load_settings()
 
@@ -33,6 +37,10 @@ def test_default_settings_use_d_drive_project_paths(monkeypatch):
     assert settings.agents.model is None
     assert settings.agents.max_turns == 8
     assert settings.agents.timeout_seconds == 60
+    assert settings.agents.strategy == InvestigationStrategy.FIXED
+    assert settings.agents.max_tool_calls_per_specialist == 3
+    assert settings.agents.max_total_tool_calls == 8
+    assert settings.agents.tool_timeout_seconds == 10
 
 
 def test_environment_database_url_override(monkeypatch, tmp_path):
@@ -110,6 +118,43 @@ def test_agents_provider_environment_selects_deepseek(monkeypatch, tmp_path):
 def test_invalid_agents_provider_is_rejected(monkeypatch, tmp_path):
     monkeypatch.setenv("DIAGOPS_CONFIG", str(tmp_path / "missing.yaml"))
     monkeypatch.setenv("DIAGOPS_AGENTS_PROVIDER", "compatible")
+
+    with pytest.raises(ValidationError):
+        load_settings()
+
+
+def test_adaptive_agent_environment_overrides(monkeypatch, tmp_path):
+    monkeypatch.setenv("DIAGOPS_CONFIG", str(tmp_path / "missing.yaml"))
+    monkeypatch.setenv("DIAGOPS_AGENTS_STRATEGY", "adaptive")
+    monkeypatch.setenv("DIAGOPS_AGENTS_MAX_TOOL_CALLS_PER_SPECIALIST", "5")
+    monkeypatch.setenv("DIAGOPS_AGENTS_MAX_TOTAL_TOOL_CALLS", "12")
+    monkeypatch.setenv("DIAGOPS_AGENTS_TOOL_TIMEOUT_SECONDS", "20")
+
+    settings = load_settings()
+
+    assert settings.agents.strategy == InvestigationStrategy.ADAPTIVE
+    assert settings.agents.max_tool_calls_per_specialist == 5
+    assert settings.agents.max_total_tool_calls == 12
+    assert settings.agents.tool_timeout_seconds == 20
+
+
+@pytest.mark.parametrize(
+    "name, value",
+    [
+        ("DIAGOPS_AGENTS_STRATEGY", "automatic"),
+        ("DIAGOPS_AGENTS_MAX_TOOL_CALLS_PER_SPECIALIST", "0"),
+        ("DIAGOPS_AGENTS_MAX_TOOL_CALLS_PER_SPECIALIST", "11"),
+        ("DIAGOPS_AGENTS_MAX_TOTAL_TOOL_CALLS", "0"),
+        ("DIAGOPS_AGENTS_MAX_TOTAL_TOOL_CALLS", "31"),
+        ("DIAGOPS_AGENTS_TOOL_TIMEOUT_SECONDS", "0"),
+        ("DIAGOPS_AGENTS_TOOL_TIMEOUT_SECONDS", "61"),
+    ],
+)
+def test_invalid_adaptive_agent_environment_is_rejected(
+    monkeypatch, tmp_path, name, value
+):
+    monkeypatch.setenv("DIAGOPS_CONFIG", str(tmp_path / "missing.yaml"))
+    monkeypatch.setenv(name, value)
 
     with pytest.raises(ValidationError):
         load_settings()
