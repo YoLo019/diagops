@@ -37,7 +37,7 @@ _DESCRIPTIONS: dict[str, str] = {
     "lookup_memory": "Lookup prior investigation memory.",
 }
 
-_QUERY_MODELS = {
+QUERY_MODELS_BY_TOOL = {
     "read_logs": LogQuery,
     "query_metrics": MetricQuery,
     "read_deployments": DeploymentQuery,
@@ -55,7 +55,7 @@ def build_provider_tool_registry(provider_registry: ProviderRegistry) -> ToolReg
             ToolSpec(
                 name=name,
                 description=_DESCRIPTIONS[name],
-                input_schema=_QUERY_MODELS[name].model_json_schema(),
+                input_schema=QUERY_MODELS_BY_TOOL[name].model_json_schema(),
                 read_only=True,
                 provider=provider,
             ),
@@ -94,7 +94,7 @@ def invoke_provider_tool(
             ]
             record_input = None
         else:
-            query = _QUERY_MODELS[tool_name].model_validate(input)
+            query = QUERY_MODELS_BY_TOOL[tool_name].model_validate(input)
             results = provider_registry.query_results(event, tool_name, query)
             record_input = query.model_dump(mode="json")
         call = _record(
