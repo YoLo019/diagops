@@ -13,7 +13,7 @@ The local platform includes:
 - An optional, default-off OpenAI Agents SDK review layer with deterministic RCA
   fallback.
 - Vite React investigation console for list/detail, evidence, hypotheses,
-  action status, verification results, and reports.
+  action status, verification results, reports, and frozen OpenRCA results.
 
 ## Local Development
 
@@ -120,11 +120,18 @@ agents:
   model: null
   max_turns: 8
   timeout_seconds: 60
+  strategy: fixed
+  max_tool_calls_per_specialist: 3
+  max_total_tool_calls: 8
+  tool_timeout_seconds: 10
 ```
 
 Override these settings for a local process with
 `DIAGOPS_AGENTS_ENABLED`, `DIAGOPS_AGENTS_PROVIDER`, `DIAGOPS_AGENTS_MODEL`,
-`DIAGOPS_AGENTS_MAX_TURNS`, and `DIAGOPS_AGENTS_TIMEOUT_SECONDS`.
+`DIAGOPS_AGENTS_MAX_TURNS`, `DIAGOPS_AGENTS_TIMEOUT_SECONDS`,
+`DIAGOPS_AGENTS_STRATEGY`, `DIAGOPS_AGENTS_MAX_TOOL_CALLS_PER_SPECIALIST`,
+`DIAGOPS_AGENTS_MAX_TOTAL_TOOL_CALLS`, and
+`DIAGOPS_AGENTS_TOOL_TIMEOUT_SECONDS`.
 `DIAGOPS_AGENTS_PROVIDER` accepts only `openai` or `deepseek`. Keep the matching
 `OPENAI_API_KEY` or `DEEPSEEK_API_KEY` only in the local process environment;
 never put it in settings, YAML, source code, logs, or commit history. Choose the
@@ -132,9 +139,10 @@ model explicitly when enabling the integration. Current official DeepSeek V4
 model names are `deepseek-v4-flash` and `deepseek-v4-pro`.
 
 `GET /config/agents` and the RCA workbench expose only Provider, model,
-implementation status, and certification status. `implemented` means the
-key-free adapter and validation contracts passed; it does not mean that the
-Provider/model has passed its independent paid live gate.
+implementation status, certification status, strategy, and bounded tool
+budgets. `implemented` means the key-free adapter and validation contracts
+passed; it does not mean that the Provider/model has passed its independent
+paid live gate.
 
 ## Sample Local Data
 
@@ -361,6 +369,151 @@ five-case diagnostics, but the final diagnostic
 `v8-1-diagnostic-20260714T090134835432Z-405b87b3` remained below the stop gate
 at 2/5 correct real reviews. No later diagnostic is counted as certification,
 and the canonical thresholds were not weakened.
+
+## V8.2 Adaptive Investigation And OpenRCA
+
+V8.2 keeps `fixed` as the default investigation strategy. `fixed` uses the
+existing bounded seed collection and deterministic RCA fallback. `adaptive`
+gives LogAgent, MetricAgent, and DeploymentAgent their own registered read-only
+tools so they can request additional evidence within the configured budget.
+Select the strategy on a manual investigation or set `agents.strategy` in
+`config/diagops.yaml`.
+
+Adaptive queries support these bounded parameters:
+
+- Every query: timezone-aware `start_time`, `end_time`, `reason`, and `limit`.
+- Logs: `keywords`, `levels`, and `instance`.
+- Metrics: `metric_names`, `aggregation`, and `instance`.
+- Prometheus: the allowlisted `qps`, `5xx_rate`, `p95_latency`, `cpu`, and
+  `memory` templates; no arbitrary PromQL.
+- Deployments: `version` and `instance`.
+- Service catalog: whether to include direct dependencies.
+- Dependencies: `direction`, an allowlisted `target`, and depth fixed at one.
+
+DiagOps still does not accept arbitrary log DSL, PromQL, file paths, URLs,
+Shell commands, or write tools from an Agent. Production Providers remain
+read-only. Tool inputs are validated and scoped to the incident; output is
+redacted, bounded, evidence-linked, and audited. Adaptive failure never removes
+the deterministic RCA result.
+
+### OpenRCA Prerequisites
+
+Download the OpenRCA telemetry dataset separately from the link in the
+[Microsoft OpenRCA README](https://github.com/microsoft/OpenRCA). Do not commit
+or redistribute the dataset from this repository. Microsoft recommends at
+least 80 GB of storage and 32 GB of memory for the complete data. The expected
+layout is:
+
+```text
+dataset/
+  Bank/{query.csv,record.csv,telemetry/}
+  Telecom/{query.csv,record.csv,telemetry/}
+  Market/cloudbed-1/{query.csv,record.csv,telemetry/}
+  Market/cloudbed-2/{query.csv,record.csv,telemetry/}
+```
+
+`prepare` is the only runtime-preparation step allowed to read `record.csv` and
+the `scoring_points` column. It writes a frozen case manifest and a separate
+`runtime-cases.json` containing no ground truth. Benchmark execution receives
+only that safe index, and telemetry Providers can open only CSV files beneath
+each allowlisted case directory. `evaluate` reads ground truth after execution;
+never place its selected query output inside a frozen run directory.
+
+### Prepare, Run, And Evaluate
+
+The commands below select 10 cases from each partition with seed 42, run the
+same pinned OpenAI model and prompt for both strategies, and create the local
+compatible report. Keep the API key only in the process environment and supply
+current model prices explicitly; no price is hardcoded.
+
+```powershell
+$datasetRoot = "D:\data\OpenRCA\dataset"
+$prepared = "output\openrca-prepared"
+$results = "output\benchmarks\openrca"
+
+uv run python -m backend.benchmarks.openrca prepare `
+  --dataset-root $datasetRoot `
+  --output $prepared `
+  --per-partition 10 `
+  --seed 42
+
+uv run python -m backend.benchmarks.openrca run `
+  --dataset-root $datasetRoot `
+  --safe-index "$prepared\runtime-cases.json" `
+  --strategy both `
+  --model $env:DIAGOPS_AGENTS_MODEL `
+  --input-cost-per-million $env:DIAGOPS_INPUT_COST_PER_MILLION `
+  --output-cost-per-million $env:DIAGOPS_OUTPUT_COST_PER_MILLION `
+  --output $results
+
+$runId = (Get-Content -Raw "$results\latest-run.txt").Trim()
+$runDir = (Resolve-Path "$results\$runId").Path
+$officialQueries = Join-Path (Resolve-Path ".").Path "output\openrca-official-queries\$runId"
+
+uv run python -m backend.benchmarks.openrca evaluate `
+  --query-root $datasetRoot `
+  --run-dir $runDir `
+  --official-query-output $officialQueries
+
+$officialQueries = (Resolve-Path $officialQueries).Path
+```
+
+The local command writes `compatible-report.csv`; it must not be renamed to or
+presented as an upstream result. From a separate Microsoft OpenRCA checkout,
+run its evaluator against the four partition prediction files for each
+strategy. The selected query files are sorted by the original `row_id`, as is
+the upstream evaluator's prediction input.
+
+```powershell
+python -m main.evaluate `
+  -p `
+    "$runDir\fixed-Bank.csv" `
+    "$runDir\fixed-Market-cloudbed-1.csv" `
+    "$runDir\fixed-Market-cloudbed-2.csv" `
+    "$runDir\fixed-Telecom.csv" `
+    "$runDir\adaptive-Bank.csv" `
+    "$runDir\adaptive-Market-cloudbed-1.csv" `
+    "$runDir\adaptive-Market-cloudbed-2.csv" `
+    "$runDir\adaptive-Telecom.csv" `
+  -q `
+    "$officialQueries\Bank-query.csv" `
+    "$officialQueries\Market-cloudbed-1-query.csv" `
+    "$officialQueries\Market-cloudbed-2-query.csv" `
+    "$officialQueries\Telecom-query.csv" `
+    "$officialQueries\Bank-query.csv" `
+    "$officialQueries\Market-cloudbed-1-query.csv" `
+    "$officialQueries\Market-cloudbed-2-query.csv" `
+    "$officialQueries\Telecom-query.csv" `
+  -r official-report.csv
+
+Copy-Item official-report.csv "$runDir\official-report.csv"
+```
+
+The frozen run contains `run-manifest.json`, combined and per-partition
+prediction CSV files, `summary.json`, the local `compatible-report.csv`, and,
+only after upstream verification, `official-report.csv`. The manifest records
+the case manifest hash, model, prompt, Git commit, strategy budgets, timestamps,
+and caller-supplied cost rates. The summary records total and per-partition
+scores, completion and Evidence validity, tool calls, duplicate rejections,
+latency, tokens, cost, read-only violations, and every failed case.
+
+Start the API and frontend, then open the `OpenRCA Benchmark` view. The read-only
+API serves the latest valid frozen summary and only these download names:
+
+```text
+GET /benchmarks/openrca/latest
+GET /benchmarks/openrca/latest/run-manifest.json
+GET /benchmarks/openrca/latest/fixed-predictions.csv
+GET /benchmarks/openrca/latest/adaptive-predictions.csv
+GET /benchmarks/openrca/latest/official-report.csv
+GET /benchmarks/openrca/latest/summary.json
+```
+
+V8.2 is complete only after a real 40-case paired run has 40 predictions per
+strategy, Adaptive completion of at least 95%, 100% valid Evidence references,
+zero mutation or out-of-scope executions, and an upstream official Adaptive
+partial score not below Fixed. Failed cases and unfavorable results must remain
+in the frozen artifacts.
 
 ## V2 Platform Loop
 

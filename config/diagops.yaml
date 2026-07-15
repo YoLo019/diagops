@@ -24,3 +24,10 @@ agents:
   model: null
   max_turns: 8
   timeout_seconds: 60
+  strategy: fixed
+  max_tool_calls_per_specialist: 3
+  max_total_tool_calls: 8
+  tool_timeout_seconds: 10
+
+benchmark:
+  results_path: output/benchmarks/openrca
