@@ -1,0 +1,5 @@
+startTime,service,name,value
+1783990800,telecom-api,packet_loss,1
+1783994400000,telecom-api,packet_loss,2
+1783998000,telecom-api,packet_loss,1
+1784001900000,telecom-api,packet_loss,40

@@ -1,0 +1,4 @@
+timestamp,service,level,message,instance
+2026-07-14T12:01:00+08:00,bank-api,INFO,request completed,bank-api-1
+2026-07-14T12:02:00+08:00,bank-api,ERROR,upstream timeout while charging,bank-api-2
+2026-07-14T12:03:00+08:00,bank-api,ERROR,database timeout while charging,bank-api-2

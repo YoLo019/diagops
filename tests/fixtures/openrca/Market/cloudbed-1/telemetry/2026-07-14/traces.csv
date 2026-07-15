@@ -1,0 +1,5 @@
+traceId,id,pid,serviceName,startTime,elapsedTime,status_code
+trace-1,span-parent,,checkoutservice,1784001660000,100,200
+trace-1,span-child,span-parent,paymentservice,1784001660100,2400,500
+trace-2,span-parent-2,,checkoutservice,1784001720000,110,200
+trace-2,span-child-2,span-parent-2,paymentservice,1784001720110,1800,500
