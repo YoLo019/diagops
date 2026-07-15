@@ -10,6 +10,8 @@ from backend.diagnosis.agents_runtime import AgentsRcaRuntimeResult
 from backend.domain.agent_findings import CoordinationReview
 from backend.domain.agent_plan import AgentExecution, AgentExecutionStatus
 from backend.domain.multi_agent import (
+    AdaptiveRunStatus,
+    AdaptiveStopReason,
     AgentExecutionLayer,
     CoordinationDecisionStatus,
     ExecutionStepKind,
@@ -17,6 +19,7 @@ from backend.domain.multi_agent import (
     InvestigationStrategy,
     ModelProvider,
     MultiAgentRunStatus,
+    MultiAgentRunSummary,
     ResultValidationCategory,
     StabilizationCategory,
 )
@@ -144,7 +147,18 @@ def test_workbench_contains_adaptive_trace_metadata(
     repository = get_container().repository
     record = repository.get(investigation_id)
     record.strategy = InvestigationStrategy.ADAPTIVE
+    record.multi_agent_run = MultiAgentRunSummary(
+        status=MultiAgentRunStatus.COMPLETED,
+        strategy=InvestigationStrategy.ADAPTIVE,
+        adaptive_status=AdaptiveRunStatus.COMPLETED,
+        adaptive_stop_reason=AdaptiveStopReason.SUFFICIENT_EVIDENCE,
+        tool_call_count=1,
+        max_tool_calls_per_specialist=4,
+        max_total_tool_calls=9,
+    )
     repository.save(record)
+    get_container().settings.agents.max_tool_calls_per_specialist = 1
+    get_container().settings.agents.max_total_tool_calls = 1
     failed = AgentsRcaRuntimeResult.failed(investigation_id, "runtime timeout")
     task = failed.tasks[0].model_copy(update={"analysis_round": 1})
     execution = failed.executions[0].model_copy(
@@ -187,8 +201,11 @@ def test_workbench_contains_adaptive_trace_metadata(
     body = response.json()
 
     assert body["multi_agent_run"]["strategy"] == "adaptive"
-    assert body["multi_agent_run"]["adaptive_status"] == "degraded"
+    assert body["multi_agent_run"]["adaptive_status"] == "completed"
+    assert body["multi_agent_run"]["adaptive_stop_reason"] == "sufficient_evidence"
     assert body["multi_agent_run"]["tool_call_count"] == 1
+    assert body["multi_agent_run"]["max_tool_calls_per_specialist"] == 4
+    assert body["multi_agent_run"]["max_total_tool_calls"] == 9
     assert body["tool_calls"][0]["input"]["reason"] == "inspect incident logs"
     assert "tool-secret-value" not in response.text
 

@@ -37,10 +37,12 @@ class AdaptiveToolSession:
         event: IncidentEvent,
         seed_evidence: list[EvidenceItem],
         registry: ToolRegistry,
-        task_ids: dict[AgentName | tuple[AgentName, int], str],
+        task_ids: dict[
+            AgentName | tuple[AgentName, int] | tuple[AgentName, int, int], str
+        ],
         max_tool_calls_per_specialist: int = 3,
         max_total_tool_calls: int = 8,
-        tool_timeout_seconds: int = 10,
+        tool_timeout_seconds: float = 10,
         allowed_targets: set[str] | None = None,
     ) -> None:
         self.event = event
@@ -66,7 +68,9 @@ class AdaptiveToolSession:
                     value for value in dependencies if isinstance(value, str)
                 )
 
-    def tools_for(self, agent_name: AgentName, round_number: int) -> list[FunctionTool]:
+    def tools_for(
+        self, agent_name: AgentName, round_number: int, attempt: int = 1
+    ) -> list[FunctionTool]:
         tools: list[FunctionTool] = []
         for tool_name in sorted(TOOLS_BY_AGENT[agent_name]):
             spec = self.registry.get(tool_name)
@@ -80,7 +84,9 @@ class AdaptiveToolSession:
                 name: str = tool_name,
                 agent: AgentName = agent_name,
             ):
-                return await self.invoke(agent, name, raw_input, round_number)
+                return await self.invoke(
+                    agent, name, raw_input, round_number, attempt=attempt
+                )
 
             tools.append(
                 FunctionTool(
@@ -89,7 +95,7 @@ class AdaptiveToolSession:
                     params_json_schema=dict(spec.input_schema),
                     on_invoke_tool=invoke,
                     strict_json_schema=True,
-                    timeout_seconds=self.tool_timeout_seconds,
+                    timeout_seconds=self.tool_timeout_seconds + 1,
                     timeout_behavior="error_as_result",
                 )
             )
@@ -101,10 +107,9 @@ class AdaptiveToolSession:
         tool_name: str,
         raw_input: str,
         round_number: int,
+        attempt: int = 1,
     ) -> str:
-        task_id = self.task_ids.get(
-            (agent_name, round_number), self.task_ids[agent_name]
-        )
+        task_id = self.task_id_for(agent_name, round_number, attempt)
         parsed = self._parse_input(raw_input)
         self._attempts[agent_name] += 1
         self._total_attempts += 1
@@ -178,14 +183,29 @@ class AdaptiveToolSession:
             )
 
         self._fingerprints.add(fingerprint)
-        result = await asyncio.to_thread(
-            self.registry.invoke_detailed,
-            tool_name,
-            event=self.event,
-            task_id=task_id,
-            agent_name=agent_name.value,
-            input=query.model_dump(mode="json"),
-        )
+        try:
+            # asyncio 无法终止已进入线程的同步 Provider；超时后只记录失败，晚到结果不写回 Session。
+            result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.registry.invoke_detailed,
+                    tool_name,
+                    event=self.event,
+                    task_id=task_id,
+                    agent_name=agent_name.value,
+                    input=query.model_dump(mode="json"),
+                ),
+                timeout=self.tool_timeout_seconds,
+            )
+        except TimeoutError:
+            return self._reject(
+                agent_name,
+                tool_name,
+                query.model_dump(mode="json"),
+                ToolCallStatus.FAILED,
+                "tool invocation timeout",
+                AdaptiveStopReason.TIMEOUT,
+                task_id=task_id,
+            )
         self.tool_calls.append(result.call)
         self.provider_results.extend(result.provider_results)
 
@@ -208,6 +228,36 @@ class AdaptiveToolSession:
             warning=_result_warning(result.provider_results),
             stop_reason=stop_reason,
         )
+
+    def task_id_for(
+        self, agent_name: AgentName, round_number: int, attempt: int = 1
+    ) -> str:
+        return self.task_ids.get(
+            (agent_name, round_number, attempt),
+            self.task_ids.get((agent_name, round_number), self.task_ids[agent_name]),
+        )
+
+    def evidence_ids_for(
+        self, agent_name: AgentName, round_number: int, attempt: int = 1
+    ) -> set[str]:
+        task_id = self.task_id_for(agent_name, round_number, attempt)
+        return {
+            evidence_id
+            for call in self.tool_calls
+            if call.task_id == task_id
+            for evidence_id in call.output_evidence_ids
+        }
+
+    def identity_for_task_id(
+        self, task_id: str
+    ) -> tuple[AgentName, int, int] | None:
+        for identity, candidate in self.task_ids.items():
+            if candidate != task_id or not isinstance(identity, tuple):
+                continue
+            if len(identity) == 3:
+                return identity
+            return identity[0], identity[1], 1
+        return None
 
     def _validate_scope(self, query: QueryWindow) -> None:
         window = timedelta(minutes=self.event.time_window_minutes)

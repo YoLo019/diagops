@@ -18,6 +18,8 @@ from backend.domain.agent_plan import AgentExecution, AgentExecutionStatus
 from backend.domain.events import IncidentEvent, IncidentSource, Severity
 from backend.domain.hypotheses import CauseType
 from backend.domain.multi_agent import (
+    AdaptiveRunStatus,
+    AdaptiveStopReason,
     AgentExecutionLayer,
     CoordinationDecisionStatus,
     ExecutionStepKind,
@@ -25,6 +27,7 @@ from backend.domain.multi_agent import (
     InvestigationStrategy,
     ModelProvider,
     MultiAgentRunStatus,
+    MultiAgentRunSummary,
     StabilizationCategory,
 )
 
@@ -52,11 +55,22 @@ def test_sqlite_investigation_strategy_round_trips_without_schema_change():
             started_at=dt(0),
         ),
         strategy=InvestigationStrategy.ADAPTIVE,
+        multi_agent_run=MultiAgentRunSummary(
+            status=MultiAgentRunStatus.COMPLETED,
+            strategy=InvestigationStrategy.ADAPTIVE,
+            adaptive_status=AdaptiveRunStatus.COMPLETED,
+            adaptive_stop_reason=AdaptiveStopReason.SUFFICIENT_EVIDENCE,
+            tool_call_count=2,
+            max_tool_calls_per_specialist=4,
+            max_total_tool_calls=9,
+        ),
     )
 
     repository.save(record)
 
-    assert repository.get(record.id).strategy == InvestigationStrategy.ADAPTIVE
+    persisted = repository.get(record.id)
+    assert persisted.strategy == InvestigationStrategy.ADAPTIVE
+    assert persisted.multi_agent_run == record.multi_agent_run
 
 
 def finding(

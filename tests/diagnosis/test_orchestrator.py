@@ -40,6 +40,7 @@ from backend.domain.evidence import (
 from backend.domain.hypotheses import CauseType
 from backend.domain.multi_agent import (
     AdaptiveRunStatus,
+    AdaptiveStopReason,
     AgentExecutionLayer,
     CoordinationDecisionStatus,
     ExecutionStepKind,
@@ -254,7 +255,16 @@ class AdaptiveStubAgentsRuntime:
             provider=EvidenceProvider.LOG,
             kind=EvidenceKind.LOG_PATTERN,
             timestamp=persisted.event.started_at,
-            summary="Adaptive log evidence",
+            summary=f"{persisted.event.service} adaptive log evidence",
+            payload={
+                "root_cause_claims": [
+                    {
+                        "component": persisted.event.service,
+                        "reason": "adaptive log evidence",
+                        "occurred_at": persisted.event.started_at.isoformat(),
+                    }
+                ]
+            },
         )
         result = sdk_result(
             self.repository, investigation_id, MultiAgentRunStatus.COMPLETED
@@ -1425,6 +1435,24 @@ def test_orchestrator_persists_failed_or_skipped_v7_and_keeps_v5_review(status):
     assert record.report is not None
 
 
+def test_adaptive_runtime_exception_persists_degraded_adaptive_summary():
+    class RaisingRuntime:
+        async def run(self, **_kwargs):
+            raise RuntimeError("provider boundary failed")
+
+    record = build_v2_orchestrator(
+        agents_runtime=RaisingRuntime(),
+    ).run(
+        load_incident_case("deployment_regression"),
+        strategy=InvestigationStrategy.ADAPTIVE,
+    )
+
+    assert record.strategy == InvestigationStrategy.ADAPTIVE
+    assert record.multi_agent_run.strategy == InvestigationStrategy.ADAPTIVE
+    assert record.multi_agent_run.adaptive_status == AdaptiveRunStatus.DEGRADED
+    assert record.multi_agent_run.adaptive_stop_reason == AdaptiveStopReason.FAILED
+
+
 def test_orchestrator_rejects_invalid_v7_review_before_any_batch_write():
     class InvalidReviewRuntime(StubAgentsRuntime):
         async def run(self, **kwargs):
@@ -2115,13 +2143,20 @@ def test_container_sdk_construction_failure_preserves_deterministic_result(monke
     container = AppContainer(
         AppSettings(
             storage=StorageSettings(url="memory://"),
-            agents=AgentsSettings(enabled=True, model="gpt-test"),
+            agents=AgentsSettings(
+                enabled=True,
+                model="gpt-test",
+                strategy=InvestigationStrategy.ADAPTIVE,
+            ),
         )
     )
 
     record = container.orchestrator.run(load_incident_case("deployment_regression"))
 
     assert container.orchestrator.agents_runtime is None
+    assert record.strategy == InvestigationStrategy.ADAPTIVE
+    assert record.multi_agent_run.strategy == InvestigationStrategy.ADAPTIVE
+    assert record.multi_agent_run.adaptive_status == AdaptiveRunStatus.SKIPPED
     assert record.status == InvestigationStatus.COMPLETED
     assert record.hypotheses and record.actions and record.verification_suggestions
     assert record.report is not None

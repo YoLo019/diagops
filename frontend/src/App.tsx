@@ -1067,6 +1067,12 @@ function AgentProcessPanels({ investigationId }: { investigationId: string }) {
               : displayedToolCalls.length}
           </span>
         </div>
+        {adaptiveRun ? (
+          <div className="process-detail trace-run-status">
+            <span>调查策略: {adaptiveRun.strategy}</span>
+            <span>Adaptive 状态: {adaptiveRun.adaptive_status ?? "not_applicable"}</span>
+          </div>
+        ) : null}
         {adaptiveRun?.adaptive_stop_reason ? (
           <p className="trace-stop-reason">
             停止原因: {adaptiveStopLabels[adaptiveRun.adaptive_stop_reason] ?? adaptiveRun.adaptive_stop_reason}

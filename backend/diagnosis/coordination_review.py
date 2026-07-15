@@ -59,6 +59,8 @@ def conflicting_agent_names(
     if _valid_baseline(baseline):
         contradiction_targets.add(baseline.cause_type)
     for finding in active:
+        if finding.finding_type == AgentFindingType.GAP and finding.blocking:
+            conflicting.add(finding.agent_name)
         if (
             finding.finding_type != AgentFindingType.CONTRADICTION
             or finding.related_cause_type not in contradiction_targets

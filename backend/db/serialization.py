@@ -8,18 +8,23 @@ from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem
 from backend.domain.hypotheses import Hypothesis
 from backend.domain.llm_analysis import LLMAnalysis
-from backend.domain.multi_agent import InvestigationStrategy
+from backend.domain.multi_agent import InvestigationStrategy, MultiAgentRunSummary
 from backend.domain.reports import IncidentReport
 from backend.providers.results import ProviderResult
 from backend.safety.redaction import assert_safe_value
 
 _STRATEGY_KEY = "_diagops_investigation_strategy"
+_MULTI_AGENT_RUN_KEY = "_diagops_multi_agent_run"
 
 
 def record_to_rows(record: InvestigationRecord) -> dict[str, Any]:
     event_payload = record.event.model_dump(mode="json")
     # V8.2 将 additive strategy 写入现有 JSON，避免为 V5 历史库增加物理迁移。
     investigation_event = {**event_payload, _STRATEGY_KEY: record.strategy.value}
+    if record.multi_agent_run is not None:
+        investigation_event[_MULTI_AGENT_RUN_KEY] = record.multi_agent_run.model_dump(
+            mode="json"
+        )
     rows = {
         "investigation": {
             "id": record.id,
@@ -54,6 +59,13 @@ def rows_to_record(rows: Mapping[str, Any]) -> InvestigationRecord:
         event=IncidentEvent(**investigation["event"]),
         strategy=investigation["event"].get(
             _STRATEGY_KEY, InvestigationStrategy.FIXED
+        ),
+        multi_agent_run=(
+            MultiAgentRunSummary.model_validate(
+                investigation["event"][_MULTI_AGENT_RUN_KEY]
+            )
+            if investigation["event"].get(_MULTI_AGENT_RUN_KEY) is not None
+            else None
         ),
         status=InvestigationStatus(investigation["status"]),
         evidence=[

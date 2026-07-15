@@ -192,12 +192,15 @@ def test_v8_2_adaptive_strategy_and_tool_trace_are_present() -> None:
         "max_total_tool_calls: number",
         "tool_timeout_seconds: number",
         "tool_calls: ToolCallRecord[]",
+        "blocking: boolean",
     ]:
         assert field in api
     for projection in [
         "setStrategy",
         "value={strategy}",
         "groupToolCallsByAgentAndRound",
+        "调查策略",
+        "Adaptive 状态",
         "调用原因",
         "查询参数",
         "耗时",

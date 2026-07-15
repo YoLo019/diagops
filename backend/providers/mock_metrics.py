@@ -22,7 +22,19 @@ class MockMetricProvider:
                     kind=EvidenceKind.METRIC_TREND,
                     timestamp=event.started_at - timedelta(minutes=2),
                     summary="QPS increased sharply before latency and errors increased",
-                    payload={"qps_change": "+260%", "latency_p95": "1800ms"},
+                    payload={
+                        "qps_change": "+260%",
+                        "latency_p95": "1800ms",
+                        "root_cause_claims": [
+                            {
+                                "component": event.service,
+                                "reason": "traffic spike",
+                                "occurred_at": (
+                                    event.started_at - timedelta(minutes=2)
+                                ).isoformat(),
+                            }
+                        ],
+                    },
                 )
             )
         elif event.service == "payment-service":
@@ -47,6 +59,13 @@ class MockMetricProvider:
                         "instance": "profile-service-3",
                         "cpu": "94%",
                         "error_rate": "18%",
+                        "root_cause_claims": [
+                            {
+                                "component": "profile-service-3",
+                                "reason": "resource saturation",
+                                "occurred_at": event.started_at.isoformat(),
+                            }
+                        ],
                     },
                 )
             )
@@ -61,7 +80,19 @@ class MockMetricProvider:
                         "Database query latency increased before "
                         "report-service latency increased"
                     ),
-                    payload={"db_p95": "2400ms", "endpoint": "/reports/daily"},
+                    payload={
+                        "db_p95": "2400ms",
+                        "endpoint": "/reports/daily",
+                        "root_cause_claims": [
+                            {
+                                "component": "database",
+                                "reason": "database slowdown",
+                                "occurred_at": (
+                                    event.started_at - timedelta(minutes=1)
+                                ).isoformat(),
+                            }
+                        ],
+                    },
                 )
             )
 
@@ -78,6 +109,10 @@ class MockMetricProvider:
                         for name in query.metric_names
                         if name in item.payload
                     }
+                    if "root_cause_claims" in item.payload:
+                        payload["root_cause_claims"] = item.payload[
+                            "root_cause_claims"
+                        ]
                     if not payload:
                         continue
                     item = item.model_copy(update={"payload": payload})

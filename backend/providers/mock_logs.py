@@ -25,6 +25,15 @@ class MockLogProvider:
                         "exception": "NullPointerException",
                         "endpoint": "/pay/confirm",
                         "count": 120,
+                        "root_cause_claims": [
+                            {
+                                "component": event.service,
+                                "reason": "process or container failure",
+                                "occurred_at": (
+                                    event.started_at + timedelta(minutes=1)
+                                ).isoformat(),
+                            }
+                        ],
                     },
                 )
             ]

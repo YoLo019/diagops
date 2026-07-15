@@ -67,6 +67,11 @@ class AppContainer:
             coordinator=DiagnosisCoordinator(providers),
             action_planner=ActionPlanner(),
             agents_runtime=agents_runtime,
+            default_strategy=self.settings.agents.strategy,
+            max_tool_calls_per_specialist=(
+                self.settings.agents.max_tool_calls_per_specialist
+            ),
+            max_total_tool_calls=self.settings.agents.max_total_tool_calls,
         )
 
     def _build_repository(self):

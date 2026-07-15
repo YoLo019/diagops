@@ -316,7 +316,8 @@ def get_investigation_rca_workbench(investigation_id: str) -> dict[str, Any]:
         "coordination_review": review,
         "agent_executions": executions,
         "tool_calls": workbench_tool_calls,
-        "multi_agent_run": _multi_agent_run_summary(
+        "multi_agent_run": record.multi_agent_run
+        or _multi_agent_run_summary(
             review,
             executions,
             strategy=record.strategy,

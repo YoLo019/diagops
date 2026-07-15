@@ -206,7 +206,20 @@ def _all_evidence():
     return [
         _evidence("ev-log", EvidenceProvider.LOG),
         _evidence("ev-metric", EvidenceProvider.METRIC),
-        _evidence("ev-deploy", EvidenceProvider.DEPLOY),
+        _evidence(
+            "ev-deploy",
+            EvidenceProvider.DEPLOY,
+            summary="checkout deployment regression",
+            payload={
+                "root_cause_claims": [
+                    {
+                        "component": "checkout",
+                        "reason": "deployment regression",
+                        "occurred_at": _incident().started_at.isoformat(),
+                    }
+                ]
+            },
+        ),
         _evidence("ev-dependency", EvidenceProvider.DEPENDENCY),
     ]
 
@@ -224,7 +237,6 @@ class AdaptiveLogProvider:
     supported_tools = frozenset({"read_logs"})
 
     def collect(self, event, query):
-        del event
         return ProviderResult(
             provider=self.provider,
             status=ProviderStatus.PARTIAL,
@@ -234,7 +246,16 @@ class AdaptiveLogProvider:
                     provider=self.provider,
                     kind=EvidenceKind.LOG_PATTERN,
                     timestamp=query.end_time,
-                    summary="adaptive log evidence",
+                    summary="checkout deployment regression adaptive log evidence",
+                    payload={
+                        "root_cause_claims": [
+                            {
+                                "component": "checkout",
+                                "reason": "deployment regression",
+                                "occurred_at": event.started_at.isoformat(),
+                            }
+                        ]
+                    },
                 )
             ],
             error_message="one log source unavailable",
@@ -271,6 +292,30 @@ def test_projection_includes_failed_and_partial_matching_provider(status):
     assert "provider unavailable" in projected
     assert "must-not-leak" not in projected
     assert "payload" not in projected
+
+
+def test_projection_exposes_only_explicit_root_cause_claims_from_payload():
+    evidence = _evidence(
+        "ev-log-claim",
+        EvidenceProvider.LOG,
+        payload={
+            "root_cause_claims": [
+                {
+                    "component": "checkout",
+                    "reason": "process failure",
+                    "occurred_at": "2026-07-10T10:00:00+00:00",
+                }
+            ],
+            "raw": "must-not-leak",
+        },
+    )
+
+    projected = _project_evidence([evidence])
+
+    assert "root_cause_claims" in projected
+    assert "checkout" in projected
+    assert "process failure" in projected
+    assert "must-not-leak" not in projected
 
 
 def test_adaptive_deployment_prompt_adds_catalog_and_dependency_evidence():
@@ -753,6 +798,9 @@ async def test_adaptive_timeout_preserves_completed_tool_artifacts(monkeypatch):
     assert result.tool_calls[0].output_evidence_ids == ["ev-adaptive-log"]
     assert result.provider_results[0].status == ProviderStatus.PARTIAL
     assert any(item.id == "ev-adaptive-log" for item in result.evidence)
+    assert {call.task_id for call in result.tool_calls} <= {
+        task.id for task in result.tasks
+    }
 
 
 @pytest.mark.anyio
@@ -1141,6 +1189,124 @@ async def test_conflict_exposes_only_conflicting_specialists_and_valid_revisions
 
 
 @pytest.mark.anyio
+async def test_blocking_gap_exposes_only_affected_specialist(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "present")
+    first = _all_first_round()
+    first[1] = _CapturedDraft(
+        agent_name=AgentName.METRIC,
+        draft=_SpecialistDraft(
+            finding_type=AgentFindingType.GAP,
+            summary="Metric evidence is insufficient",
+            confidence=0.2,
+            gaps=["missing saturation metric"],
+            blocking=True,
+        ),
+    )
+    stub = TurnStub(
+        _turn(first),
+        _turn([_draft(AgentName.METRIC, "ev-metric", round_two=True)]),
+    )
+
+    await AgentsRcaRuntime(model="fake", turn=stub).run(
+        "inv-1", _incident(), _all_evidence(), [_baseline()]
+    )
+
+    assert stub.calls[1]["specialist_names"] == [AgentName.METRIC]
+
+
+@pytest.mark.anyio
+async def test_non_blocking_gap_does_not_expose_specialist(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "present")
+    first = _all_first_round()
+    first[1] = _CapturedDraft(
+        agent_name=AgentName.METRIC,
+        draft=_SpecialistDraft(
+            finding_type=AgentFindingType.GAP,
+            summary="An optional comparison is unavailable",
+            confidence=0.6,
+            gaps=["missing optional baseline"],
+            blocking=False,
+        ),
+    )
+    stub = TurnStub(_turn(first), _turn())
+
+    await AgentsRcaRuntime(model="fake", turn=stub).run(
+        "inv-1", _incident(), _all_evidence(), [_baseline()]
+    )
+
+    assert stub.calls[1]["specialist_names"] == []
+
+
+@pytest.mark.anyio
+async def test_round_two_can_reference_evidence_collected_in_same_turn(monkeypatch):
+    calls = 0
+
+    async def turn(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first = _all_first_round()
+            first[0] = _draft(AgentName.LOG, "ev-log", CauseType.TRAFFIC_SPIKE)
+            return _turn(first)
+        await kwargs["adaptive_session"].invoke(
+            AgentName.LOG,
+            "read_logs",
+            json.dumps(
+                {
+                    "start_time": "2026-07-10T09:55:00+00:00",
+                    "end_time": "2026-07-10T10:05:00+00:00",
+                    "reason": "verify the conflicting log cause",
+                }
+            ),
+            2,
+        )
+        return _turn(
+            [_draft(AgentName.LOG, "ev-adaptive-log", round_two=True)]
+        )
+
+    result = await _adaptive_runtime(monkeypatch, turn).run(
+        "inv-1", _incident(), _all_evidence(), [_baseline()]
+    )
+
+    revision = next(
+        finding
+        for finding in result.findings
+        if finding.agent_name == AgentName.LOG and finding.analysis_round == 2
+    )
+    assert revision.evidence_ids == ["ev-adaptive-log"]
+
+
+@pytest.mark.anyio
+async def test_round_two_rejects_domain_evidence_not_in_prompt_or_current_tools(
+    monkeypatch,
+):
+    async def turn(**kwargs):
+        if kwargs["analysis_round"] == 1:
+            first = _all_first_round()
+            first[0] = _draft(AgentName.LOG, "ev-log", CauseType.TRAFFIC_SPIKE)
+            return _turn(first)
+        return _turn([_draft(AgentName.LOG, "ev-log-unused", round_two=True)])
+
+    evidence = [
+        *_all_evidence(),
+        _evidence("ev-log-unused", EvidenceProvider.LOG),
+    ]
+    result = await _adaptive_runtime(monkeypatch, turn).run(
+        "inv-1", _incident(), evidence, [_baseline()]
+    )
+
+    assert not any(
+        finding.analysis_round == 2 and finding.evidence_ids == ["ev-log-unused"]
+        for finding in result.findings
+    )
+    assert any(
+        execution.analysis_round == 2
+        and execution.failure_category == FailureCategory.INVALID_REFERENCE
+        for execution in result.executions
+    )
+
+
+@pytest.mark.anyio
 async def test_final_synthesis_records_unrequested_known_specialist_output(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "present")
     unexpected = _draft(AgentName.LOG, "ev-log", round_two=True)
@@ -1314,6 +1480,32 @@ async def test_missing_specialist_is_recollected_once_and_can_complete(monkeypat
         for execution in result.executions
         if execution.attempt == 2
     )
+
+
+@pytest.mark.anyio
+async def test_adaptive_recollection_uses_unique_task_ids(monkeypatch):
+    calls = 0
+
+    async def turn(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _turn(
+                [
+                    _draft(AgentName.LOG, "ev-log"),
+                    _draft(AgentName.DEPLOYMENT, "ev-deploy"),
+                ]
+            )
+        if calls == 2:
+            return _turn([_draft(AgentName.METRIC, "ev-metric")])
+        return _turn()
+
+    result = await _adaptive_runtime(monkeypatch, turn).run(
+        "inv-1", _incident(), _all_evidence(), [_baseline()]
+    )
+
+    task_ids = [task.id for task in result.tasks]
+    assert len(task_ids) == len(set(task_ids))
 
 
 @pytest.mark.anyio

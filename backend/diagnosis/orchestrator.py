@@ -45,6 +45,7 @@ from backend.domain.evidence import (
 from backend.domain.hypotheses import Hypothesis
 from backend.domain.multi_agent import (
     AdaptiveRunStatus,
+    AdaptiveStopReason,
     AgentExecutionLayer,
     CoordinationDecisionStatus,
     ExecutionStepKind,
@@ -116,6 +117,9 @@ class DiagnosisOrchestrator:
         task_planner: DiagnosisTaskPlanner | None = None,
         execution_engine: DiagnosisExecutionEngine | None = None,
         agents_runtime: AgentsRcaRuntime | None = None,
+        default_strategy: InvestigationStrategy | None = None,
+        max_tool_calls_per_specialist: int = 3,
+        max_total_tool_calls: int = 8,
     ) -> None:
         self.repository = repository
         self.providers = providers
@@ -129,20 +133,19 @@ class DiagnosisOrchestrator:
             tool_registry=build_provider_tool_registry(providers),
         )
         self.agents_runtime = agents_runtime
+        self.default_strategy = InvestigationStrategy(
+            default_strategy
+            or getattr(agents_runtime, "strategy", InvestigationStrategy.FIXED)
+        )
+        self.max_tool_calls_per_specialist = max_tool_calls_per_specialist
+        self.max_total_tool_calls = max_total_tool_calls
 
     def run(
         self,
         event: IncidentEvent,
         strategy: InvestigationStrategy | None = None,
     ) -> InvestigationRecord:
-        effective_strategy = InvestigationStrategy(
-            strategy
-            or getattr(
-                self.agents_runtime,
-                "strategy",
-                InvestigationStrategy.FIXED,
-            )
-        )
+        effective_strategy = InvestigationStrategy(strategy or self.default_strategy)
         safe_event = redact_model(event)
         record = self.repository.save(
             InvestigationRecord(
@@ -180,6 +183,12 @@ class DiagnosisOrchestrator:
                 record.id, effective_strategy
             )
             persisted = self.repository.get(record.id)
+            persisted.multi_agent_run = self._resolved_run_summary(
+                effective_strategy, v7_result
+            )
+            persisted.updated_at = datetime.now(UTC)
+            persisted = self.repository.save(persisted)
+            record.multi_agent_run = persisted.multi_agent_run
             record.provider_results = persisted.provider_results
             evidence = persisted.evidence
 
@@ -334,6 +343,18 @@ class DiagnosisOrchestrator:
                 type(exc).__name__,
             )
             result = AgentsRcaRuntimeResult.failed(investigation_id, reason)
+            if strategy == InvestigationStrategy.ADAPTIVE:
+                result.run_summary = result.run_summary.model_copy(
+                    update={
+                        "strategy": strategy,
+                        "adaptive_status": AdaptiveRunStatus.DEGRADED,
+                        "adaptive_stop_reason": AdaptiveStopReason.FAILED,
+                        "max_tool_calls_per_specialist": (
+                            self.max_tool_calls_per_specialist
+                        ),
+                        "max_total_tool_calls": self.max_total_tool_calls,
+                    }
+                )
 
         try:
             evidence = self._persist_adaptive_artifacts(
@@ -403,6 +424,23 @@ class DiagnosisOrchestrator:
                 investigation_id, result
             )
         return self._reload_v7_result(investigation_id, result)
+
+    def _resolved_run_summary(
+        self,
+        strategy: InvestigationStrategy,
+        result: AgentsRcaRuntimeResult | None,
+    ) -> MultiAgentRunSummary | None:
+        if result is not None:
+            return result.run_summary
+        if strategy != InvestigationStrategy.ADAPTIVE:
+            return None
+        return MultiAgentRunSummary(
+            status=MultiAgentRunStatus.SKIPPED,
+            strategy=strategy,
+            adaptive_status=AdaptiveRunStatus.SKIPPED,
+            max_tool_calls_per_specialist=self.max_tool_calls_per_specialist,
+            max_total_tool_calls=self.max_total_tool_calls,
+        )
 
     def _persist_adaptive_artifacts(
         self,

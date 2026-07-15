@@ -1,4 +1,6 @@
+import asyncio
 import json
+import time
 from datetime import UTC, datetime
 
 import pytest
@@ -180,6 +182,36 @@ async def test_failed_tool_can_be_corrected_with_remaining_budget():
 
 
 @pytest.mark.anyio
+async def test_session_records_provider_timeout_before_sdk_cancels_tool():
+    provider = SlowProvider()
+    session = AdaptiveToolSession(
+        event=_event(),
+        seed_evidence=[],
+        registry=build_provider_tool_registry(ProviderRegistry([provider])),
+        task_ids=_task_ids(),
+        tool_timeout_seconds=0.01,
+    )
+
+    response = json.loads(
+        await session.invoke(
+            AgentName.LOG,
+            "read_logs",
+            json.dumps(_query_payload()),
+            1,
+        )
+    )
+
+    assert response["status"] == "failed"
+    assert response["stop_reason"] == "timeout"
+    assert session.tool_calls[0].status == ToolCallStatus.FAILED
+    assert "timeout" in (session.tool_calls[0].error_message or "")
+    await asyncio.sleep(0.06)
+    assert len(session.tool_calls) == 1
+    assert session.provider_results == []
+    assert session.new_evidence == []
+
+
+@pytest.mark.anyio
 async def test_tool_call_uses_round_specific_task_id():
     provider = QueryProvider("read_logs", EvidenceProvider.LOG, "ev-round-two")
     session = AdaptiveToolSession(
@@ -288,6 +320,15 @@ class FailingOnceProvider(QueryProvider):
                 )
             ],
         )
+
+
+class SlowProvider(QueryProvider):
+    def __init__(self):
+        super().__init__("read_logs", EvidenceProvider.LOG, "ev-too-late")
+
+    def collect(self, event, query):
+        time.sleep(0.05)
+        return super().collect(event, query)
 
 
 def _session(providers, *, seed=None, per_agent=3, total=8):

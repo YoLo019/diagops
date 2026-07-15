@@ -46,6 +46,7 @@ class AgentFinding(BaseModel):
     severity: AgentFindingSeverity = AgentFindingSeverity.MEDIUM
     rationale: str = ""
     gaps: list[str] = Field(default_factory=list)
+    blocking: bool = False
     execution_layer: AgentExecutionLayer = AgentExecutionLayer.CUSTOM
     analysis_round: Literal[1, 2] = 1
     revises_finding_id: str | None = None
@@ -55,6 +56,10 @@ class AgentFinding(BaseModel):
     def validate_finding(self) -> "AgentFinding":
         if self.finding_type != AgentFindingType.GAP and not self.evidence_ids:
             raise ValueError("evidence_ids required unless finding_type is gap")
+        if self.blocking and (
+            self.finding_type != AgentFindingType.GAP or not self.gaps
+        ):
+            raise ValueError("blocking requires a gap finding with gaps")
         if self.analysis_round == 1 and self.revises_finding_id is not None:
             raise ValueError("round 1 cannot set revises_finding_id")
         if self.analysis_round == 2 and self.revises_finding_id is None:

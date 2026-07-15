@@ -27,6 +27,15 @@ class MockDeployProvider:
                     "version": "v1.8.2",
                     "commit": "abc1234",
                     "changed_module": "PayConfirmHandler",
+                    "root_cause_claims": [
+                        {
+                            "component": event.service,
+                            "reason": "deployment regression",
+                            "occurred_at": (
+                                event.started_at - timedelta(minutes=3)
+                            ).isoformat(),
+                        }
+                    ],
                 },
             )
         ]

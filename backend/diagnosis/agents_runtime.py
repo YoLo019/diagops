@@ -25,6 +25,7 @@ from backend.diagnosis.coordination_review import (
     conflicting_agent_names,
 )
 from backend.diagnosis.deepseek_model import DeepSeekChatCompletionsModel
+from backend.diagnosis.evidence_validation import root_cause_claims
 from backend.diagnosis.openai_model import openai_responses_model
 from backend.domain.agent_findings import (
     AgentFinding,
@@ -89,7 +90,8 @@ SPECIALIST_FINDING_CONTRACT = (
     "related_cause_type; signal when evidence is relevant but does not support a "
     "root-cause or contradiction claim; gap when evidence is absent or insufficient. "
     "root_cause, contradiction, and signal require supplied evidence IDs. Never "
-    "invent a cause or evidence ID."
+    "invent a cause or evidence ID. Set blocking only when a gap prevents any "
+    "evidence-supported final root-cause decision."
 )
 _DEEPSEEK_SPECIALIST_CAUSE_GUIDANCE = (
     " CauseType semantics: "
@@ -141,6 +143,7 @@ class _SpecialistDraft(BaseModel):
     severity: AgentFindingSeverity = AgentFindingSeverity.MEDIUM
     rationale: str = ""
     gaps: list[str] = Field(default_factory=list)
+    blocking: bool = False
 
 
 class _RootCauseAttributionDraft(BaseModel):
@@ -409,11 +412,13 @@ class AgentsRcaRuntime:
             or self.tool_registry is None
         ):
             return None
-        task_ids: dict[AgentName | tuple[AgentName, int], str] = {}
+        task_ids: dict[
+            AgentName | tuple[AgentName, int] | tuple[AgentName, int, int], str
+        ] = {}
         for name in AgentName:
-            for round_number in (1, 2):
-                task_ids[(name, round_number)] = f"task-{uuid4().hex}"
-            task_ids[name] = task_ids[(name, 1)]
+            for round_number, attempt in ((1, 1), (1, 2), (2, 1)):
+                task_ids[(name, round_number, attempt)] = f"task-{uuid4().hex}"
+            task_ids[name] = task_ids[(name, 1, 1)]
         return AdaptiveToolSession(
             event=event,
             seed_evidence=evidence,
@@ -443,6 +448,7 @@ class AgentsRcaRuntime:
         result.tool_calls = list(session.tool_calls)
         result.provider_results = list(session.provider_results)
         result.evidence = list(session.new_evidence)
+        self._materialize_tool_tasks(result, session)
         result.run_summary.tool_call_count = len(session.tool_calls)
         result.run_summary.adaptive_status = (
             AdaptiveRunStatus.COMPLETED
@@ -455,6 +461,40 @@ class AgentsRcaRuntime:
             )[-1]
         elif result.run_summary.status == MultiAgentRunStatus.FAILED:
             result.run_summary.adaptive_stop_reason = AdaptiveStopReason.FAILED
+
+    def _materialize_tool_tasks(
+        self, result: AgentsRcaRuntimeResult, session: AdaptiveToolSession
+    ) -> None:
+        known_task_ids = {task.id for task in result.tasks}
+        for call in session.tool_calls:
+            if call.task_id in known_task_ids:
+                continue
+            identity = session.identity_for_task_id(call.task_id)
+            if identity is None:
+                continue
+            name, analysis_round, attempt = identity
+            task, execution = _records(
+                name.value,
+                TASK_TYPES[name],
+                analysis_round,
+                DiagnosisTaskStatus.FAILED,
+                AgentExecutionStatus.FAILED,
+                step_kind=(
+                    ExecutionStepKind.SPECIALIST_RECOLLECTION
+                    if attempt > 1
+                    else ExecutionStepKind.SPECIALIST_COLLECTION
+                ),
+                attempt=attempt,
+                failure_category=FailureCategory.TIMEOUT,
+                model_provider=self.model_provider,
+                model_name=self._model_name,
+                evidence_ids=call.output_evidence_ids,
+                error="Agents runtime timeout after tool invocation",
+                task_id=call.task_id,
+            )
+            result.tasks.append(task)
+            result.executions.append(execution)
+            known_task_ids.add(task.id)
 
     async def _run_with_effective_model(
         self,
@@ -513,6 +553,10 @@ class AgentsRcaRuntime:
         adaptive_session: AdaptiveToolSession | None,
     ) -> None:
         adaptive = adaptive_session is not None
+        first_allowed = {
+            name: _evidence_ids(evidence, name, adaptive=adaptive)
+            for name in AgentName
+        }
         first_inputs = {
             name: _specialist_prompt(event, evidence, name, adaptive=adaptive)
             for name in AgentName
@@ -531,6 +575,7 @@ class AgentsRcaRuntime:
             specialist_names=list(AgentName),
             max_turns=self.max_turns,
             analysis_round=1,
+            attempt=1,
         )
         _merge_adaptive_evidence(evidence, adaptive_session)
         first_names: list[AgentName] = []
@@ -549,7 +594,12 @@ class AgentsRcaRuntime:
             first,
             requested=list(AgentName),
             allowed_evidence={
-                name: _evidence_ids(evidence, name, adaptive=adaptive)
+                name: first_allowed[name]
+                | (
+                    adaptive_session.evidence_ids_for(name, 1, 1)
+                    if adaptive_session is not None
+                    else set()
+                )
                 for name in AgentName
             },
             investigation_id=investigation_id,
@@ -591,6 +641,7 @@ class AgentsRcaRuntime:
                 specialist_names=missing,
                 max_turns=self.max_turns,
                 analysis_round=1,
+                attempt=2,
             )
             _merge_adaptive_evidence(evidence, adaptive_session)
             self._consume_turn(
@@ -598,7 +649,12 @@ class AgentsRcaRuntime:
                 recollected,
                 requested=missing,
                 allowed_evidence={
-                    name: _evidence_ids(evidence, name, adaptive=adaptive)
+                    name: first_allowed[name]
+                    | (
+                        adaptive_session.evidence_ids_for(name, 1, 2)
+                        if adaptive_session is not None
+                        else set()
+                    )
                     for name in missing
                 },
                 investigation_id=investigation_id,
@@ -653,13 +709,22 @@ class AgentsRcaRuntime:
             specialist_names=selected,
             max_turns=self.max_turns,
             analysis_round=2,
+            attempt=1,
         )
         _merge_adaptive_evidence(evidence, adaptive_session)
         partial |= self._consume_turn(
             result,
             synthesis,
             requested=selected,
-            allowed_evidence={name: review_contexts[name][1] for name in selected},
+            allowed_evidence={
+                name: review_contexts[name][1]
+                | (
+                    adaptive_session.evidence_ids_for(name, 2, 1)
+                    if adaptive_session is not None
+                    else set()
+                )
+                for name in selected
+            },
             investigation_id=investigation_id,
             analysis_round=2,
             seen_responses=seen_responses,
@@ -880,6 +945,7 @@ class AgentsRcaRuntime:
                     severity=draft.severity,
                     rationale=draft.rationale,
                     gaps=draft.gaps,
+                    blocking=draft.blocking,
                     execution_layer=AgentExecutionLayer.OPENAI_AGENTS_SDK,
                     analysis_round=analysis_round,
                     revises_finding_id=revision,
@@ -935,7 +1001,7 @@ class AgentsRcaRuntime:
                 evidence_ids=finding.evidence_ids if finding else [],
                 error=None if completed else "Invalid or missing specialist output",
                 task_id=(
-                    adaptive_session.task_ids.get((name, analysis_round))
+                    adaptive_session.task_id_for(name, analysis_round, attempt)
                     if adaptive_session is not None
                     else None
                 ),
@@ -1004,6 +1070,7 @@ async def _run_sdk_turn(
     specialist_names: list[AgentName],
     max_turns: int,
     analysis_round: int = 1,
+    attempt: int = 1,
     adaptive_session: AdaptiveToolSession | None = None,
 ) -> _SdkTurnResult:
     captured: list[_CapturedDraft] = []
@@ -1031,7 +1098,7 @@ async def _run_sdk_turn(
             instructions=f"{_specialist_instructions(name)}{specialist_suffix}",
             model=model,
             tools=(
-                adaptive_session.tools_for(name, analysis_round)
+                adaptive_session.tools_for(name, analysis_round, attempt)
                 if adaptive_session is not None
                 else []
             ),
@@ -1249,6 +1316,7 @@ def _project_evidence(evidence: list[EvidenceItem]) -> str:
             "summary": redact_text(item.summary),
             "error": redact_text(item.error_message or ""),
             "confidence": item.confidence,
+            "root_cause_claims": root_cause_claims(item),
         }
         for item in evidence
     ]
@@ -1431,6 +1499,7 @@ def _finding_projection(finding: AgentFinding | None) -> dict[str, Any] | None:
         "severity": finding.severity.value,
         "rationale": finding.rationale,
         "gaps": finding.gaps,
+        "blocking": finding.blocking,
         "analysis_round": finding.analysis_round,
         "revises_finding_id": finding.revises_finding_id,
     }
@@ -1448,6 +1517,7 @@ def _draft_projection(draft: _SpecialistDraft) -> dict[str, Any]:
         "severity": draft.severity.value,
         "rationale": draft.rationale,
         "gaps": draft.gaps,
+        "blocking": draft.blocking,
     }
 
 

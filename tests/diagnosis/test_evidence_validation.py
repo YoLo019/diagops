@@ -12,6 +12,7 @@ from backend.domain.agent_findings import (
     AgentFinding,
     AgentFindingType,
     AgentName,
+    RootCauseAttribution,
     RootCauseCandidate,
 )
 from backend.domain.evidence import (
@@ -228,3 +229,108 @@ def test_candidate_ranks_are_unique_and_contiguous() -> None:
 
     with pytest.raises(EvidenceContractError, match="candidate_rank"):
         validate_agent_semantics([evidence], [finding], candidates)
+
+
+@pytest.mark.parametrize(
+    ("occurred_at", "component", "reason", "expected_code"),
+    [
+        (
+            datetime(2026, 7, 13, 3, tzinfo=UTC),
+            "checkout",
+            "cpu exhausted",
+            "root_cause_time_mismatch",
+        ),
+        (
+            datetime(2026, 7, 13, tzinfo=UTC),
+            "inventory",
+            "cpu exhausted",
+            "root_cause_component_mismatch",
+        ),
+        (
+            datetime(2026, 7, 13, tzinfo=UTC),
+            "checkout",
+            "disk failure",
+            "root_cause_reason_mismatch",
+        ),
+    ],
+)
+def test_root_cause_attribution_requires_supported_time_component_and_reason(
+    occurred_at, component, reason, expected_code
+) -> None:
+    evidence = _evidence("ev-root").model_copy(
+        update={
+            "summary": "checkout cpu exhausted",
+            "payload": {
+                "root_cause_claims": [
+                    {
+                        "component": "checkout",
+                        "reason": "cpu exhausted",
+                        "occurred_at": datetime(
+                            2026, 7, 13, tzinfo=UTC
+                        ).isoformat(),
+                    }
+                ],
+            },
+        }
+    )
+    root_cause = RootCauseAttribution(
+        root_cause_occurred_at=occurred_at,
+        root_cause_component=component,
+        root_cause_reason=reason,
+        supporting_evidence_ids=[evidence.id],
+    )
+
+    with pytest.raises(EvidenceContractError, match=expected_code):
+        validate_agent_semantics([evidence], [], [], [root_cause])
+
+
+def test_root_cause_attribution_rejects_partial_token_claim_matches() -> None:
+    evidence = _evidence("ev-root").model_copy(
+        update={
+            "summary": "checkout database healthy",
+            "payload": {
+                "root_cause_claims": [
+                    {
+                        "component": "checkout",
+                        "reason": "database healthy",
+                        "occurred_at": datetime(
+                            2026, 7, 13, tzinfo=UTC
+                        ).isoformat(),
+                    }
+                ],
+            },
+        }
+    )
+    root_cause = RootCauseAttribution(
+        root_cause_occurred_at=evidence.timestamp,
+        root_cause_component="checkout-attacker",
+        root_cause_reason="database total outage caused by ransomware",
+        supporting_evidence_ids=[evidence.id],
+    )
+
+    with pytest.raises(EvidenceContractError, match="root_cause_component_mismatch"):
+        validate_agent_semantics([evidence], [], [], [root_cause])
+
+
+def test_evidence_timestamp_is_not_an_implicit_root_cause_time_claim() -> None:
+    evidence = _evidence("ev-root").model_copy(
+        update={
+            "payload": {
+                "root_cause_claims": [
+                    {
+                        "component": "checkout",
+                        "reason": "cpu exhausted",
+                    }
+                ]
+            }
+        }
+    )
+    root_cause = RootCauseAttribution(
+        root_cause_occurred_at=evidence.timestamp,
+        root_cause_component="checkout",
+        root_cause_reason="cpu exhausted",
+        supporting_evidence_ids=[evidence.id],
+    )
+
+    with pytest.raises(EvidenceContractError, match="root_cause_time_mismatch"):
+        validate_agent_semantics([evidence], [], [], [root_cause])

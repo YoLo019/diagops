@@ -10,7 +10,7 @@ from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem
 from backend.domain.hypotheses import Hypothesis
 from backend.domain.llm_analysis import LLMAnalysis
-from backend.domain.multi_agent import InvestigationStrategy
+from backend.domain.multi_agent import InvestigationStrategy, MultiAgentRunSummary
 from backend.domain.reports import IncidentReport
 from backend.providers.results import ProviderResult
 from backend.safety.redaction import redact_text
@@ -28,6 +28,7 @@ class InvestigationRecord(BaseModel):
     id: str = Field(default_factory=lambda: f"inv-{uuid4().hex}")
     event: IncidentEvent
     strategy: InvestigationStrategy = InvestigationStrategy.FIXED
+    multi_agent_run: MultiAgentRunSummary | None = None
     status: InvestigationStatus = InvestigationStatus.PENDING
     evidence: list[EvidenceItem] = Field(default_factory=list)
     provider_results: list[ProviderResult] = Field(default_factory=list)

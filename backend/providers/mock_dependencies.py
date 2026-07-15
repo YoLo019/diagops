@@ -28,6 +28,15 @@ class MockDependencyProvider:
                         "dependency": "inventory-service",
                         "latency_p95": "3200ms",
                         "error_rate": "8%",
+                        "root_cause_claims": [
+                            {
+                                "component": "inventory-service",
+                                "reason": "downstream dependency failure",
+                                "occurred_at": (
+                                    event.started_at - timedelta(minutes=2)
+                                ).isoformat(),
+                            }
+                        ],
                     },
                 )
             ]

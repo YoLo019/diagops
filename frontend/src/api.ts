@@ -144,6 +144,7 @@ export type InvestigationRecord = {
   event: IncidentEvent;
   status: InvestigationStatus;
   strategy: InvestigationStrategy;
+  multi_agent_run?: MultiAgentRunSummary | null;
   evidence: EvidenceItem[];
   hypotheses: Hypothesis[];
   report?: IncidentReport | null;
@@ -283,6 +284,7 @@ export type AgentFinding = {
   severity: string;
   rationale: string;
   gaps: string[];
+  blocking: boolean;
   execution_layer?: AgentExecutionLayer;
   analysis_round?: 1 | 2;
   revises_finding_id?: string | null;

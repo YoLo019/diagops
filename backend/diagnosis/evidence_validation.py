@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 from backend.domain.agent_findings import (
     AgentFinding,
@@ -12,6 +14,7 @@ from backend.domain.agent_findings import (
 from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider, EvidenceStatus
 from backend.domain.hypotheses import CauseType, Hypothesis
 from backend.providers.results import ProviderResult, ProviderStatus
+from backend.safety.redaction import redact_text
 
 
 class EvidenceContractError(ValueError):
@@ -193,6 +196,7 @@ def validate_agent_semantics(
         _require_usable_references(
             evidence_by_id, root_cause.supporting_evidence_ids
         )
+        _require_root_cause_support(evidence_by_id, root_cause)
 
 
 def _require_usable_references(
@@ -208,6 +212,76 @@ def _require_cause_support(
 ) -> None:
     if evidence.provider not in _CAUSE_SUPPORT_PROVIDERS.get(cause_type, set()):
         raise EvidenceContractError("cause_support_mismatch", owner_id)
+
+
+def _require_root_cause_support(
+    evidence_by_id: dict[str, EvidenceItem], root_cause: RootCauseAttribution
+) -> None:
+    cited = [evidence_by_id[item] for item in root_cause.supporting_evidence_ids]
+    claims = [claim for item in cited for claim in root_cause_claims(item)]
+    time_matches = [
+        claim
+        for claim in claims
+        if abs(
+            datetime.fromisoformat(claim["occurred_at"])
+            - root_cause.root_cause_occurred_at
+        )
+        <= timedelta(minutes=1)
+    ]
+    if not time_matches:
+        raise EvidenceContractError("root_cause_time_mismatch")
+
+    component = _normalize_claim(root_cause.root_cause_component)
+    component_matches = [
+        claim
+        for claim in time_matches
+        if _normalize_claim(claim["component"]) == component
+    ]
+    if not component_matches:
+        raise EvidenceContractError("root_cause_component_mismatch")
+    reason = _normalize_claim(root_cause.root_cause_reason)
+    if not any(
+        _normalize_claim(claim["reason"]) == reason
+        for claim in component_matches
+    ):
+        raise EvidenceContractError("root_cause_reason_mismatch")
+
+
+def root_cause_claims(evidence: EvidenceItem) -> list[dict[str, str]]:
+    """返回可投影、可验证的显式根因三元组；不从 summary 或采集时间推断。"""
+    raw_claims = evidence.payload.get("root_cause_claims")
+    if not isinstance(raw_claims, list):
+        return []
+    claims: list[dict[str, str]] = []
+    for raw in raw_claims:
+        if not isinstance(raw, dict):
+            continue
+        component = raw.get("component")
+        reason = raw.get("reason")
+        occurred_at = raw.get("occurred_at")
+        if not all(
+            isinstance(item, str) and item.strip()
+            for item in (component, reason, occurred_at)
+        ):
+            continue
+        try:
+            timestamp = datetime.fromisoformat(occurred_at)
+        except ValueError:
+            continue
+        if timestamp.tzinfo is None:
+            continue
+        claims.append(
+            {
+                "component": redact_text(component),
+                "reason": redact_text(reason),
+                "occurred_at": timestamp.isoformat(),
+            }
+        )
+    return claims
+
+
+def _normalize_claim(value: str) -> str:
+    return " ".join(re.findall(r"\w+", value.casefold()))
 
 
 def _finding(
