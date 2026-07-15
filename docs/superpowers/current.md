@@ -4,7 +4,7 @@ This file is the mutable routing and status entry point for the current version.
 
 It does not override an approved spec or plan, current code contracts, or the long-term product goal and production safety boundary in `AGENT.md`.
 
-Updated: 2026-07-14
+Updated: 2026-07-15
 
 ## Implemented Baseline
 
@@ -17,21 +17,21 @@ The current platform uses SQLite by default, retains an in-memory repository for
 
 ## Active Iteration
 
-Version: V8.1
+Version: V8.2
 
-Main goal: harden the deterministic platform and legacy boundaries, close the remaining V7 live-reliability gaps, and make the project-owned multi-agent RCA runtime work consistently with explicitly supported OpenAI-compatible model providers.
+Main goal: add bounded Specialist-owned parameterized evidence tools and publish a reproducible OpenRCA fixed-versus-adaptive benchmark.
 
-Iteration status: `complete`
+Iteration status: `ready`
 
 Spec status: `approved`
 
 Plan status: `approved`
 
-Implementation status: `complete`
+Implementation status: `not_started`
 
-Completion commit: `87489de3336514040154d61f3d4ba3e4819d71d6`
+Completion commit: `none`
 
-Verification evidence: Ruff passed; full pytest 774 passed with one existing Starlette warning; migration/concurrency/redaction 24 passed; frontend build passed with existing TanStack warnings; git diff check passed; canonical artifact attribution/reference/action/safety/classification scans passed; OpenAI run `v8-1-live-20260714T060212861267Z-b5f43e64` certified; DeepSeek run `v8-1-live-20260714T080700796242Z-ffee9018` failed; final DeepSeek diagnostic `v8-1-diagnostic-20260714T090134835432Z-405b87b3` stopped below its gate at 2/5 correct real reviews
+Verification evidence: `none`
 
 Blocker: `none`
 
@@ -58,24 +58,8 @@ State consistency rules:
 ## Active Documents
 
 ```text
-docs/superpowers/specs/2026-07-12-diagops-v8.1-reliability-and-provider-compatibility-design.md
-docs/superpowers/specs/2026-07-14-diagops-v8.1-live-validation-and-timeout-amendment-design.md
-docs/superpowers/specs/2026-07-14-diagops-v8.1-specialist-finding-and-fallback-review-amendment-design.md
-docs/superpowers/specs/2026-07-14-diagops-v8.1-diagnostic-entry-policy-amendment-design.md
-docs/superpowers/plans/2026-07-12-diagops-v8.1-reliability-and-provider-compatibility-implementation-plan.md
-docs/superpowers/plans/2026-07-14-diagops-v8.1-live-validation-and-timeout-amendment-implementation-plan.md
-docs/superpowers/plans/2026-07-14-diagops-v8.1-specialist-finding-and-fallback-review-amendment-implementation-plan.md
-docs/superpowers/plans/2026-07-14-diagops-v8.1-diagnostic-entry-policy-amendment-implementation-plan.md
-```
-
-## Entry-Gated Next Iteration
-
-V8.2 bounded follow-up evidence is a proposal, not active implementation.
-
-Entry gate: use the linked V8.2 spec. Do not activate V8.2 until that gate passes and the user approves proceeding.
-
-```text
-docs/superpowers/specs/2026-07-12-diagops-v8.2-bounded-follow-up-evidence-design.md
+docs/superpowers/specs/2026-07-14-diagops-v8.2-adaptive-investigation-openrca-design.md
+docs/superpowers/plans/2026-07-14-diagops-v8.2-adaptive-investigation-openrca-implementation-plan.md
 ```
 
 ## Update Contract
