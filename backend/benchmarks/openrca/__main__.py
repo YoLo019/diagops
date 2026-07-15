@@ -3,7 +3,10 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from backend.benchmarks.openrca.evaluator import evaluate_run
+from backend.benchmarks.openrca.evaluator import (
+    evaluate_run,
+    write_official_query_inputs,
+)
 from backend.benchmarks.openrca.prepare import prepare_cases
 from backend.benchmarks.openrca.runner import (
     OpenRcaDiagnosisRunner,
@@ -37,6 +40,7 @@ def main() -> None:
     evaluate = commands.add_parser("evaluate")
     evaluate.add_argument("--query-root", type=Path, required=True)
     evaluate.add_argument("--run-dir", type=Path, required=True)
+    evaluate.add_argument("--official-query-output", type=Path)
 
     arguments = parser.parse_args()
     if arguments.command == "prepare":
@@ -49,7 +53,14 @@ def main() -> None:
         print(result.manifest.manifest_hash)
         return
     if arguments.command == "evaluate":
-        print(evaluate_run(arguments.query_root, arguments.run_dir))
+        report_path = evaluate_run(arguments.query_root, arguments.run_dir)
+        if arguments.official_query_output is not None:
+            write_official_query_inputs(
+                arguments.query_root,
+                arguments.run_dir,
+                arguments.official_query_output,
+            )
+        print(report_path)
         return
 
     strategies = (

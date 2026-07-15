@@ -49,8 +49,10 @@ def resolve_case_directory(dataset_root: Path, telemetry_dir: str) -> Path:
 def rows_for(directory: Path, *filename_terms: str) -> Iterator[dict[str, str]]:
     if not directory.is_dir():
         return
-    for path in sorted(directory.glob("*.csv")):
-        name = path.name.casefold()
+    for path in sorted(directory.rglob("*.csv")):
+        if not path.resolve().is_relative_to(directory.resolve()):
+            raise ValueError("telemetry file is outside safe case directory")
+        name = path.relative_to(directory).as_posix().casefold()
         if not any(term in name for term in filename_terms):
             continue
         with path.open(encoding="utf-8-sig", newline="") as file:

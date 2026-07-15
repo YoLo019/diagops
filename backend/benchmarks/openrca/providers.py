@@ -260,13 +260,14 @@ class OpenRcaDependencyProvider(_OpenRcaProvider):
             duration = row_duration(row)
             if (
                 timestamp is None
-                or not start <= timestamp <= end
                 or trace_id is None
                 or span_id is None
                 or component is None
                 or duration is None
             ):
                 malformed += 1
+                continue
+            if not start <= timestamp <= end:
                 continue
             spans[(trace_id, span_id)] = {
                 "trace_id": trace_id,

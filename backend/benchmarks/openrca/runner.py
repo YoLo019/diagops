@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import subprocess
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -95,21 +96,7 @@ class OpenRcaDiagnosisRunner:
             agents_runtime=runtime,
             default_strategy=strategy,
         )
-        record = orchestrator.run(
-            IncidentEvent(
-                source=IncidentSource.SIMULATED,
-                service=case.service,
-                environment="openrca",
-                severity=Severity.CRITICAL,
-                title=f"OpenRCA {case.case_id}",
-                description=case.instruction,
-                started_at=case.start_time,
-                time_window_minutes=max(
-                    1, int((case.end_time - case.start_time).total_seconds() / 60)
-                ),
-            ),
-            strategy=strategy,
-        )
+        record = orchestrator.run(_benchmark_event(case), strategy=strategy)
         review = repository.get_coordination_review(record.id)
         root_causes = list(review.root_causes) if review is not None else []
         evidence_ids = {item.id for item in record.evidence}
@@ -165,6 +152,20 @@ class OpenRcaDiagnosisRunner:
 class BenchmarkRunResult:
     run_id: str
     output_dir: Path
+
+
+def _benchmark_event(case: OpenRcaRuntimeCase) -> IncidentEvent:
+    duration = case.end_time - case.start_time
+    return IncidentEvent(
+        source=IncidentSource.SIMULATED,
+        service=case.service,
+        environment="openrca",
+        severity=Severity.CRITICAL,
+        title=f"OpenRCA {case.case_id}",
+        description=case.instruction,
+        started_at=case.start_time + duration / 2,
+        time_window_minutes=max(1, math.ceil(duration.total_seconds() / 120)),
+    )
 
 
 def run_benchmark_pair(
@@ -226,13 +227,24 @@ def run_benchmark_pair(
                 {
                     "case_id": case.case_id,
                     "partition": case.partition.value,
-                    "task_index": case.case_id.rsplit(":", 1)[-1],
+                    "row_id": case.row_id,
+                    "task_index": case.task_index,
                     "prediction": _official_prediction(outcome.root_causes),
                 }
             )
             _write_predictions(
                 output_dir / f"{strategy.value}-predictions.csv",
                 rows[strategy],
+            )
+            partition_rows = [
+                row
+                for row in rows[strategy]
+                if row["partition"] == case.partition.value
+            ]
+            _write_predictions(
+                output_dir
+                / f"{strategy.value}-{case.partition.value.replace('/', '-')}.csv",
+                partition_rows,
             )
 
     completed_at = datetime.now(UTC)
@@ -340,7 +352,13 @@ def _write_predictions(path: Path, rows: list[dict[str, str]]) -> None:
     with temporary.open("w", encoding="utf-8", newline="") as file:
         writer = csv.DictWriter(
             file,
-            fieldnames=("case_id", "partition", "task_index", "prediction"),
+            fieldnames=(
+                "case_id",
+                "partition",
+                "row_id",
+                "task_index",
+                "prediction",
+            ),
         )
         writer.writeheader()
         writer.writerows(rows)

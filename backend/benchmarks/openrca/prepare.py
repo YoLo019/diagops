@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import math
 import random
 import re
 from collections import defaultdict
@@ -23,6 +24,16 @@ from backend.benchmarks.openrca.models import (
 # OpenRCA 现代数据固定使用 UTC+8；固定 offset 避免 Windows 缺少 IANA tzdata 时隐式失败。
 _TIMEZONE = timezone(timedelta(hours=8), "Asia/Shanghai")
 _TIME_PATTERN = re.compile(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+_DATE_PATTERN = re.compile(
+    r"(January|February|March|April|May|June|July|August|September|October|"
+    r"November|December)\s+\d{1,2},\s+\d{4}",
+    re.IGNORECASE,
+)
+_CLOCK_PATTERN = re.compile(
+    r"(\d{1,2}:\d{2})(?::\d{2})?\s+(?:to|and)\s+"
+    r"(\d{1,2}:\d{2})(?::\d{2})?",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -37,6 +48,7 @@ class PrepareResult:
 class _Candidate:
     partition: OpenRcaPartition
     row: dict[str, str]
+    row_id: str
     task_index: str
     difficulty: OpenRcaDifficulty
     failure_mode: OpenRcaFailureMode
@@ -67,12 +79,13 @@ def prepare_cases(
         telemetry_dir = _safe_telemetry_dir(
             dataset_root, candidate.partition, candidate.row
         )
-        case_id = f"{candidate.partition.value}:{candidate.task_index}"
+        case_id = f"{candidate.partition.value}:{candidate.row_id}"
         start_time, end_time = _parse_window(candidate.row.get("instruction", ""))
         manifest_cases.append(
             OpenRcaManifestCase(
                 case_id=case_id,
                 partition=candidate.partition,
+                row_id=candidate.row_id,
                 task_index=candidate.task_index,
                 difficulty=candidate.difficulty,
                 failure_mode=candidate.failure_mode,
@@ -83,6 +96,8 @@ def prepare_cases(
             OpenRcaRuntimeCase(
                 case_id=case_id,
                 partition=candidate.partition,
+                row_id=candidate.row_id,
+                task_index=candidate.task_index,
                 system=candidate.row.get("system", "").strip()
                 or candidate.partition.value,
                 date=candidate.row.get("date", "").strip()
@@ -126,29 +141,40 @@ def _load_candidates(
     directory = dataset_root / Path(partition.value)
     query_rows = _read_csv(directory / "query.csv")
     record_rows = _read_csv(directory / "record.csv")
-    records_by_task: dict[str, list[dict[str, str]]] = defaultdict(list)
+    records_by_window: dict[int, list[dict[str, str]]] = defaultdict(list)
     for row in record_rows:
-        records_by_task[_task_index(row)].append(row)
+        if (window := _record_window(row)) is not None:
+            records_by_window[window].append(row)
 
     candidates = []
-    for row in query_rows:
+    for row_number, row in enumerate(query_rows):
         task_index = _task_index(row)
-        records = records_by_task.get(task_index, [])
+        own_record = record_rows[row_number] if row_number < len(record_rows) else {}
+        window = _record_window(own_record)
+        records = records_by_window.get(window, []) if window is not None else [own_record]
         components = tuple(
             sorted(
                 {
-                    item.get("root_cause_component", "").strip()
+                    (
+                        item.get("component", "")
+                        or item.get("root_cause_component", "")
+                    ).strip()
                     for item in records
-                    if item.get("root_cause_component", "").strip()
+                    if (
+                        item.get("component", "")
+                        or item.get("root_cause_component", "")
+                    ).strip()
                 }
             )
         )
         reasons = tuple(
             sorted(
                 {
-                    item.get("root_cause_reason", "").strip()
+                    (item.get("reason", "") or item.get("root_cause_reason", "")).strip()
                     for item in records
-                    if item.get("root_cause_reason", "").strip()
+                    if (
+                        item.get("reason", "") or item.get("root_cause_reason", "")
+                    ).strip()
                 }
             )
         )
@@ -156,6 +182,7 @@ def _load_candidates(
             _Candidate(
                 partition=partition,
                 row=row,
+                row_id=str(row_number),
                 task_index=task_index,
                 difficulty=_difficulty(task_index),
                 failure_mode=(
@@ -212,9 +239,20 @@ def _task_index(row: dict[str, str]) -> str:
     return value
 
 
+def _record_window(row: dict[str, str]) -> int | None:
+    try:
+        timestamp = float(row.get("timestamp", ""))
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(timestamp):
+        return None
+    # OpenRCA generate.py 将同一半小时桶内的故障合并为一个多根因问题。
+    return int(timestamp // 1800)
+
+
 def _difficulty(task_index: str) -> OpenRcaDifficulty:
     try:
-        index = int(task_index)
+        index = int(task_index.rsplit("_", 1)[-1])
     except ValueError as exc:
         raise ValueError(f"invalid task_index: {task_index}") from exc
     if index <= 3:
@@ -232,7 +270,10 @@ def _safe_telemetry_dir(
     value = row.get("telemetry_dir", "").strip()
     if not value:
         start_time, _ = _parse_window(row.get("instruction", ""))
-        value = f"{partition.value}/telemetry/{start_time.date().isoformat()}"
+        value = (
+            f"{partition.value}/telemetry/"
+            f"{start_time.date().isoformat().replace('-', '_')}"
+        )
     relative = Path(value)
     resolved = (dataset_root / relative).resolve()
     if relative.is_absolute() or not resolved.is_relative_to(dataset_root):
@@ -242,16 +283,25 @@ def _safe_telemetry_dir(
 
 def _parse_window(instruction: str) -> tuple[datetime, datetime]:
     matches = _TIME_PATTERN.findall(instruction)
-    if len(matches) < 2:
-        raise ValueError("OpenRCA instruction is missing an explicit time window")
-    start_time = datetime.strptime(matches[0], "%Y-%m-%d %H:%M:%S").replace(
-        tzinfo=_TIMEZONE
-    )
-    end_time = datetime.strptime(matches[1], "%Y-%m-%d %H:%M:%S").replace(
-        tzinfo=_TIMEZONE
-    )
+    if len(matches) >= 2:
+        start_time = datetime.strptime(matches[0], "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=_TIMEZONE
+        )
+        end_time = datetime.strptime(matches[1], "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=_TIMEZONE
+        )
+    else:
+        date_match = _DATE_PATTERN.search(instruction)
+        clock_match = _CLOCK_PATTERN.search(instruction)
+        if date_match is None or clock_match is None:
+            raise ValueError("OpenRCA instruction is missing an explicit time window")
+        date = datetime.strptime(date_match.group(0).title(), "%B %d, %Y").date()
+        start_clock = datetime.strptime(clock_match.group(1), "%H:%M").time()
+        end_clock = datetime.strptime(clock_match.group(2), "%H:%M").time()
+        start_time = datetime.combine(date, start_clock, _TIMEZONE)
+        end_time = datetime.combine(date, end_clock, _TIMEZONE)
     if end_time <= start_time:
-        raise ValueError("OpenRCA time window must be increasing")
+        end_time += timedelta(days=1)
     return start_time, end_time
 
 

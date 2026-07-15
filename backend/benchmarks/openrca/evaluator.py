@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import csv
 import itertools
-import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -10,11 +9,22 @@ from pathlib import Path
 
 from backend.benchmarks.openrca.models import OpenRcaBenchmarkSummary
 
-_COMPONENT_PATTERN = re.compile(
-    r"root cause component is\s+([^\r\n]+)", re.IGNORECASE
+_PREDICTION_PATTERN = re.compile(
+    r'{\s*'
+    r'(?:(?:"root cause occurrence datetime"):\s*"(.*?)")?,?\s*'
+    r'(?:(?:"root cause component"):\s*"(.*?)")?,?\s*'
+    r'(?:(?:"root cause reason"):\s*"(.*?)")?\s*}'
 )
-_REASON_PATTERN = re.compile(r"root cause reason is\s+([^\r\n]+)", re.IGNORECASE)
-_TIME_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
+_COMPONENT_PATTERN = re.compile(
+    r"The (?:\d+-th|only) predicted root cause component is ([^\n]+)"
+)
+_REASON_PATTERN = re.compile(
+    r"The (?:\d+-th|only) predicted root cause reason is ([^\n]+)"
+)
+_TIME_PATTERN = re.compile(
+    r"The (?:\d+-th|only) root cause occurrence time is within 1 minutes "
+    r"\(i\.e\., <=1min\) of ([^\n]+)"
+)
 _DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
@@ -25,6 +35,9 @@ class EvaluationScore:
     component_score: float
     reason_score: float
     time_score: float
+    component_points: int = 0
+    reason_points: int = 0
+    time_points: int = 0
 
 
 @dataclass(frozen=True)
@@ -40,34 +53,44 @@ def evaluate_prediction(prediction: str, scoring_points: str) -> EvaluationScore
     if not predicted or not expected:
         return EvaluationScore(False, 0.0, 0.0, 0.0, 0.0)
 
+    component_points = sum(item.component is not None for item in expected)
+    reason_points = sum(item.reason is not None for item in expected)
+    time_points = sum(item.occurred_at is not None for item in expected)
+    component_enabled = component_points == len(expected)
+    reason_enabled = reason_points == len(expected)
+    time_enabled = time_points == len(expected)
+    denominator = component_points + reason_points + time_points
+    if len(predicted) != len(expected) or denominator == 0:
+        return EvaluationScore(False, 0.0, 0.0, 0.0, 0.0)
+
     best = (0, 0, 0)
     for ordering in itertools.permutations(predicted):
         component = reason = occurrence = 0
         for actual, target in zip(ordering, expected, strict=False):
-            component += int(
-                target.component is not None and actual.component == target.component
-            )
-            reason += int(target.reason is not None and actual.reason == target.reason)
-            occurrence += int(
-                target.occurred_at is not None
-                and actual.occurred_at is not None
-                and abs(actual.occurred_at - target.occurred_at)
-                <= timedelta(minutes=1)
-            )
+            if component_enabled:
+                component += int(actual.component == target.component)
+            if reason_enabled:
+                reason += int(actual.reason == target.reason)
+            if time_enabled:
+                occurrence += int(
+                    actual.occurred_at is not None
+                    and target.occurred_at is not None
+                    and abs(actual.occurred_at - target.occurred_at)
+                    <= timedelta(minutes=1)
+                )
         best = max(best, (component, reason, occurrence), key=sum)
 
-    expected_components = sum(item.component is not None for item in expected)
-    expected_reasons = sum(item.reason is not None for item in expected)
-    expected_times = sum(item.occurred_at is not None for item in expected)
-    denominator = expected_components + expected_reasons + expected_times
     total_matches = sum(best)
-    strict = len(predicted) == len(expected) and total_matches == denominator
+    partial = round(total_matches / denominator, 2)
     return EvaluationScore(
-        strict=strict,
-        partial_score=total_matches / denominator if denominator else 0.0,
-        component_score=best[0] / expected_components if expected_components else 0.0,
-        reason_score=best[1] / expected_reasons if expected_reasons else 0.0,
-        time_score=best[2] / expected_times if expected_times else 0.0,
+        strict=partial == 1.0,
+        partial_score=partial,
+        component_score=best[0] / component_points if component_points else 0.0,
+        reason_score=best[1] / reason_points if reason_points else 0.0,
+        time_score=best[2] / time_points if time_points else 0.0,
+        component_points=component_points,
+        reason_points=reason_points,
+        time_points=time_points,
     )
 
 
@@ -83,7 +106,7 @@ def evaluate_run(query_root: Path, run_dir: Path) -> Path:
         ) as file:
             predictions = list(csv.DictReader(file))
         for row in predictions:
-            key = (row["partition"], row["task_index"])
+            key = (row["partition"], row["row_id"])
             score = evaluate_prediction(row["prediction"], scoring.get(key, ""))
             report_rows.append(
                 {
@@ -93,8 +116,11 @@ def evaluate_run(query_root: Path, run_dir: Path) -> Path:
                     "strict": int(score.strict),
                     "partial_score": score.partial_score,
                     "component_score": score.component_score,
+                    "component_points": score.component_points,
                     "reason_score": score.reason_score,
+                    "reason_points": score.reason_points,
                     "time_score": score.time_score,
+                    "time_points": score.time_points,
                 }
             )
     report_path = run_dir / "compatible-report.csv"
@@ -103,34 +129,63 @@ def evaluate_run(query_root: Path, run_dir: Path) -> Path:
     return report_path
 
 
+def write_official_query_inputs(
+    query_root: Path, run_dir: Path, output_dir: Path
+) -> list[Path]:
+    """在冻结目录外生成与分区 prediction 等长、同序的官方 query 子集。"""
+    resolved_run = run_dir.resolve()
+    resolved_output = output_dir.resolve()
+    if resolved_output == resolved_run or resolved_output.is_relative_to(resolved_run):
+        raise ValueError("official query output must be outside the frozen run directory")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    written = []
+    for partition in ("Bank", "Market/cloudbed-1", "Market/cloudbed-2", "Telecom"):
+        slug = partition.replace("/", "-")
+        prediction_path = run_dir / f"fixed-{slug}.csv"
+        if not prediction_path.exists():
+            prediction_path = run_dir / f"adaptive-{slug}.csv"
+        with prediction_path.open(encoding="utf-8", newline="") as file:
+            row_ids = sorted(int(row["row_id"]) for row in csv.DictReader(file))
+        with (query_root / partition / "query.csv").open(
+            encoding="utf-8-sig", newline=""
+        ) as file:
+            reader = csv.DictReader(file)
+            fieldnames = reader.fieldnames or []
+            source_rows = list(reader)
+        selected = [source_rows[row_id] for row_id in row_ids]
+        target = output_dir / f"{slug}-query.csv"
+        with target.open("w", encoding="utf-8", newline="") as file:
+            writer = csv.DictWriter(file, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(selected)
+        written.append(target)
+    return written
+
+
 def _parse_prediction(value: str) -> list[_Cause]:
-    try:
-        payload = json.loads(value)
-    except (TypeError, json.JSONDecodeError):
-        return []
-    if not isinstance(payload, dict) or not payload:
-        return []
     causes = []
-    for index, item in enumerate(payload.values(), start=1):
-        if str(index) not in payload or not isinstance(item, dict):
-            return []
-        occurred_at = item.get("root cause occurrence datetime")
-        component = item.get("root cause component")
-        reason = item.get("root cause reason")
-        if not all(isinstance(field, str) for field in (occurred_at, component, reason)):
-            return []
+    for occurred_at, component, reason in _PREDICTION_PATTERN.findall(value):
         try:
             parsed_time = datetime.strptime(occurred_at, _DATETIME_FORMAT)
         except ValueError:
-            return []
-        causes.append(_Cause(parsed_time, component.strip(), reason.strip()))
+            parsed_time = None
+        causes.append(
+            _Cause(
+                parsed_time,
+                component or None,
+                reason or None,
+            )
+        )
     return causes
 
 
 def _parse_scoring_points(value: str) -> list[_Cause]:
-    components = [item.strip() for item in _COMPONENT_PATTERN.findall(value)]
-    reasons = [item.strip() for item in _REASON_PATTERN.findall(value)]
-    times = [datetime.strptime(item, _DATETIME_FORMAT) for item in _TIME_PATTERN.findall(value)]
+    components = _COMPONENT_PATTERN.findall(value)
+    reasons = _REASON_PATTERN.findall(value)
+    times = [
+        datetime.strptime(item, _DATETIME_FORMAT)
+        for item in _TIME_PATTERN.findall(value)
+    ]
     count = max(len(components), len(reasons), len(times))
     return [
         _Cause(
@@ -148,8 +203,8 @@ def _load_scoring_points(query_root: Path) -> dict[tuple[str, str], str]:
         with (query_root / partition / "query.csv").open(
             encoding="utf-8-sig", newline=""
         ) as file:
-            for row in csv.DictReader(file):
-                result[(partition, row["task_index"])] = row.get("scoring_points", "")
+            for row_id, row in enumerate(csv.DictReader(file)):
+                result[(partition, str(row_id))] = row.get("scoring_points", "")
     return result
 
 
@@ -185,15 +240,23 @@ def _update_summary(path: Path, rows: list[dict[str, object]]) -> None:
                     float(row["partial_score"]) for row in selected
                 )
                 / count,
-                "component_score": sum(
-                    float(row["component_score"]) for row in selected
-                )
-                / count,
-                "reason_score": sum(float(row["reason_score"]) for row in selected)
-                / count,
-                "time_score": sum(float(row["time_score"]) for row in selected)
-                / count,
+                "component_score": _field_accuracy(selected, "component"),
+                "reason_score": _field_accuracy(selected, "reason"),
+                "time_score": _field_accuracy(selected, "time"),
                 "per_partition": per_partition,
             }
         )
     path.write_text(summary.model_dump_json(indent=2) + "\n", encoding="utf-8")
+
+
+def _field_accuracy(rows: list[dict[str, object]], field: str) -> float:
+    points_key = f"{field}_points"
+    score_key = f"{field}_score"
+    points = sum(int(row[points_key]) for row in rows)
+    if not points:
+        return 0.0
+    matches = sum(
+        float(row[score_key]) * int(row[points_key])
+        for row in rows
+    )
+    return matches / points

@@ -6,6 +6,10 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
+from backend.benchmarks.openrca import runner as openrca_runner
 from backend.benchmarks.openrca.models import (
     OpenRcaPartition,
     OpenRcaRuntimeCase,
@@ -25,7 +29,10 @@ class FakeRuntime:
     def run_case(
         self, case: OpenRcaRuntimeCase, strategy: InvestigationStrategy
     ) -> BenchmarkCaseOutcome:
-        failed = strategy == InvestigationStrategy.ADAPTIVE and case.case_id.endswith(":2")
+        failed = (
+            strategy == InvestigationStrategy.ADAPTIVE
+            and case.task_index == "task_2"
+        )
         return BenchmarkCaseOutcome(
             root_causes=(
                 []
@@ -55,8 +62,10 @@ class FakeRuntime:
 def safe_index(tmp_path: Path) -> Path:
     cases = [
         OpenRcaRuntimeCase(
-            case_id=f"{partition.value}:{index}",
+            case_id=f"{partition.value}:{index - 1}",
             partition=partition,
+            row_id=str(index - 1),
+            task_index=f"task_{index}",
             instruction="fabricated",
             start_time=datetime(2026, 7, 14, 12, tzinfo=TZ),
             end_time=datetime(2026, 7, 14, 12, 10, tzinfo=TZ),
@@ -76,6 +85,31 @@ def safe_index(tmp_path: Path) -> Path:
     return path
 
 
+def test_runtime_case_requires_official_row_identity():
+    with pytest.raises(ValidationError):
+        OpenRcaRuntimeCase(
+            case_id="Bank:0",
+            partition=OpenRcaPartition.BANK,
+            instruction="fabricated",
+            start_time=datetime(2026, 7, 14, 12, tzinfo=TZ),
+            end_time=datetime(2026, 7, 14, 12, 10, tzinfo=TZ),
+            telemetry_dir="Bank/telemetry/2026-07-14",
+        )
+
+
+def test_benchmark_event_window_matches_runtime_case_window(tmp_path: Path):
+    case = OpenRcaRuntimeIndex.model_validate_json(
+        safe_index(tmp_path).read_text(encoding="utf-8")
+    ).cases[0]
+    event_factory = getattr(openrca_runner, "_benchmark_event", None)
+
+    assert event_factory is not None
+    event = event_factory(case)
+    window = timedelta(minutes=event.time_window_minutes)
+    assert event.started_at - window == case.start_time
+    assert event.started_at + window == case.end_time
+
+
 def test_runner_writes_fixed_and_adaptive_artifacts(tmp_path: Path):
     result = run_benchmark_pair(
         FakeRuntime(),
@@ -88,6 +122,7 @@ def test_runner_writes_fixed_and_adaptive_artifacts(tmp_path: Path):
 
     assert (result.output_dir / "fixed-predictions.csv").exists()
     assert (result.output_dir / "adaptive-predictions.csv").exists()
+    assert (result.output_dir / "adaptive-Bank.csv").exists()
     manifest = json.loads((result.output_dir / "run-manifest.json").read_text())
     summary = json.loads((result.output_dir / "summary.json").read_text())
     assert manifest["model"] == "test-model"
@@ -106,6 +141,8 @@ def test_runner_writes_fixed_and_adaptive_artifacts(tmp_path: Path):
         rows = list(csv.DictReader(file))
     assert len(rows) == 8
     assert json.loads(rows[1]["prediction"]) == {}
+    assert rows[0]["row_id"] == "0"
+    assert rows[0]["task_index"] == "task_1"
 
 
 def test_runner_artifacts_do_not_contain_ground_truth_fields(tmp_path: Path):
@@ -167,7 +204,10 @@ def test_fixture_cli_prepare_run_evaluate_smoke(tmp_path: Path):
         str(fixture_root),
         "--run-dir",
         str(runs / run_id),
+        "--official-query-output",
+        str(tmp_path / "official-queries"),
     )
 
     assert (runs / run_id / "compatible-report.csv").exists()
+    assert (tmp_path / "official-queries" / "Bank-query.csv").exists()
     assert json.loads((runs / run_id / "summary.json").read_text())["case_count"] == 4

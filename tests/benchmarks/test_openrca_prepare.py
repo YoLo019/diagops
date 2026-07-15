@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from backend.benchmarks.openrca.models import OpenRcaFailureMode
 from backend.benchmarks.openrca.prepare import prepare_cases
 
 PARTITIONS = (
@@ -39,27 +40,28 @@ def full_fixture_root(tmp_path: Path) -> Path:
             for index in range(1, 13):
                 writer.writerow(
                     {
-                        "task_index": index,
+                        "task_index": f"task_{(index - 1) % 7 + 1}",
                         "instruction": (
-                            "Diagnose the incident from 2026-07-14 12:00:00 "
-                            "to 2026-07-14 12:10:00."
+                            "On July 14, 2026, within the time range of "
+                            "12:00 to 12:10, diagnose the incident."
                         ),
-                        "telemetry_dir": f"{partition}/telemetry/2026-07-14",
+                        "telemetry_dir": "",
                         "scoring_points": "root cause component is secret",
                     }
                 )
         with (directory / "record.csv").open("w", encoding="utf-8", newline="") as file:
             writer = csv.DictWriter(
                 file,
-                fieldnames=("task_index", "root_cause_component", "root_cause_reason"),
+                fieldnames=("timestamp", "datetime", "component", "reason"),
             )
             writer.writeheader()
             for index in range(1, 13):
                 writer.writerow(
                     {
-                        "task_index": index,
-                        "root_cause_component": f"service-{index}",
-                        "root_cause_reason": "fabricated failure",
+                        "timestamp": str(1784001600 + index * 60),
+                        "datetime": f"2026-07-14 12:{index:02d}:00",
+                        "component": f"service-{index}",
+                        "reason": "fabricated failure",
                     }
                 )
     return root
@@ -81,6 +83,28 @@ def test_prepare_selects_ten_per_partition_with_seed_42(
         case.case_id for case in second.manifest.cases
     ]
     assert first.manifest.manifest_hash == second.manifest.manifest_hash
+    assert len({case.case_id for case in first.manifest.cases}) == 40
+    assert all("/telemetry/2026_07_14" in case.telemetry_dir for case in first.manifest.cases)
+    assert all(
+        case.failure_mode == OpenRcaFailureMode.MULTI
+        for case in first.manifest.cases
+    )
+
+
+def test_committed_fixture_uses_official_query_and_record_headers(fixture_root: Path):
+    for partition in PARTITIONS:
+        with (fixture_root / partition / "query.csv").open(
+            encoding="utf-8-sig", newline=""
+        ) as file:
+            query = next(csv.DictReader(file))
+        with (fixture_root / partition / "record.csv").open(
+            encoding="utf-8-sig", newline=""
+        ) as file:
+            record = next(csv.DictReader(file))
+
+        assert query["task_index"].startswith("task_")
+        assert set(query) == {"task_index", "instruction", "scoring_points"}
+        assert set(record) == {"timestamp", "datetime", "component", "reason"}
 
 
 def test_runtime_index_contains_no_ground_truth(fixture_root: Path, tmp_path: Path):
@@ -98,18 +122,28 @@ def test_runtime_index_contains_no_ground_truth(fixture_root: Path, tmp_path: Pa
 
 
 def test_prepare_rejects_telemetry_path_escape(fixture_root: Path, tmp_path: Path):
-    query_path = fixture_root / "Bank" / "query.csv"
-    original = query_path.read_text(encoding="utf-8")
-    escaped = original.replace("Bank/telemetry/2026-07-14", "../../record.csv")
     copied = tmp_path / "dataset"
     for partition in PARTITIONS:
         source = fixture_root / partition
         target = copied / partition
         target.mkdir(parents=True)
-        (target / "query.csv").write_text(
-            escaped if partition == "Bank" else (source / "query.csv").read_text(encoding="utf-8"),
-            encoding="utf-8",
-        )
+        if partition == "Bank":
+            with (source / "query.csv").open(
+                encoding="utf-8-sig", newline=""
+            ) as file:
+                row = next(csv.DictReader(file))
+            row["telemetry_dir"] = "../../record.csv"
+            with (target / "query.csv").open(
+                "w", encoding="utf-8", newline=""
+            ) as file:
+                writer = csv.DictWriter(file, fieldnames=tuple(row))
+                writer.writeheader()
+                writer.writerow(row)
+        else:
+            (target / "query.csv").write_text(
+                (source / "query.csv").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
         (target / "record.csv").write_text(
             (source / "record.csv").read_text(encoding="utf-8"),
             encoding="utf-8",

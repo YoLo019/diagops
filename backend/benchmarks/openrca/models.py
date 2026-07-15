@@ -27,7 +27,8 @@ class OpenRcaManifestCase(BaseModel):
 
     case_id: str
     partition: OpenRcaPartition
-    task_index: str
+    row_id: str = Field(pattern=r"^\d+$")
+    task_index: str = Field(pattern=r"^task_[1-7]$")
     difficulty: OpenRcaDifficulty
     failure_mode: OpenRcaFailureMode
     telemetry_dir: str
@@ -48,6 +49,8 @@ class OpenRcaRuntimeCase(BaseModel):
 
     case_id: str
     partition: OpenRcaPartition
+    row_id: str = Field(pattern=r"^\d+$")
+    task_index: str = Field(pattern=r"^task_[1-7]$")
     system: str = "openrca"
     date: str = ""
     service: str = "openrca-system"

@@ -27,6 +27,8 @@ def runtime_case(partition: str) -> OpenRcaRuntimeCase:
     return OpenRcaRuntimeCase(
         case_id=f"{partition}:1",
         partition=OpenRcaPartition(partition),
+        row_id="1",
+        task_index="task_1",
         instruction="fabricated incident",
         start_time=datetime(2026, 7, 14, 12, tzinfo=TZ),
         end_time=datetime(2026, 7, 14, 12, 10, tzinfo=TZ),
@@ -111,6 +113,34 @@ def test_dependency_provider_aggregates_parent_child_latency(fixture_root: Path)
     assert edge["child"] == "paymentservice"
 
 
+def test_dependency_provider_ignores_valid_spans_outside_query_window(
+    fixture_root: Path, tmp_path: Path
+):
+    dataset = tmp_path / "dataset"
+    shutil.copytree(fixture_root / "Market", dataset / "Market")
+    traces = (
+        dataset
+        / "Market"
+        / "cloudbed-1"
+        / "telemetry"
+        / "2026-07-14"
+        / "traces.csv"
+    )
+    with traces.open("a", encoding="utf-8") as file:
+        file.write(
+            "trace-out,span-out-parent,,checkoutservice,"
+            "2026-07-14T10:00:00+08:00,100,200\n"
+            "trace-out,span-out-child,span-out-parent,paymentservice,"
+            "2026-07-14T10:00:01+08:00,200,200\n"
+        )
+
+    result = OpenRcaDependencyProvider(
+        dataset, runtime_case("Market/cloudbed-1")
+    ).collect(event("Market/cloudbed-1"), None)
+
+    assert result.status == ProviderStatus.SUCCESS
+
+
 def test_provider_rejects_telemetry_path_escape(fixture_root: Path):
     case = runtime_case("Bank").model_copy(
         update={"telemetry_dir": "../../record.csv"}
@@ -136,3 +166,25 @@ def test_metric_provider_keeps_valid_rows_and_reports_malformed_rows(
     assert result.status == ProviderStatus.PARTIAL
     assert result.evidence_items[0].payload["anomalies"]
     assert "malformed" in (result.error_message or "")
+
+
+def test_metric_provider_reads_official_nested_metric_directory(tmp_path: Path):
+    directory = tmp_path / "Bank" / "telemetry" / "2026_07_14" / "metric"
+    directory.mkdir(parents=True)
+    (directory / "kpi.csv").write_text(
+        "timestamp,cmdb_id,kpi_name,value\n"
+        "2026-07-14T09:00:00+08:00,bank-api,cpu,10\n"
+        "2026-07-14T10:00:00+08:00,bank-api,cpu,11\n"
+        "2026-07-14T11:00:00+08:00,bank-api,cpu,9\n"
+        "2026-07-14T12:05:00+08:00,bank-api,cpu,95\n",
+        encoding="utf-8",
+    )
+    case = runtime_case("Bank").model_copy(
+        update={"telemetry_dir": "Bank/telemetry/2026_07_14"}
+    )
+
+    result = OpenRcaMetricProvider(tmp_path, case).collect(
+        event("Bank"), metric_query()
+    )
+
+    assert result.evidence_items[0].payload["anomalies"]

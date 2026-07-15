@@ -1,2 +1,2 @@
-task_index,instruction,telemetry_dir,scoring_points
-1,Diagnose the incident from 2026-07-14 12:00:00 to 2026-07-14 12:10:00.,Market/cloudbed-1/telemetry/2026-07-14,The only predicted root cause component is checkoutservice
+task_index,instruction,scoring_points
+task_3,"On July 14, 2026, investigate the incident from 12:00 to 12:30.",The only predicted root cause component is checkoutservice
