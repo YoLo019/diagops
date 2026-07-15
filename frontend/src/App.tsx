@@ -1,5 +1,6 @@
 import { FormEvent, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { OpenRcaBenchmark } from "./OpenRcaBenchmark";
 import {
   API_BASE_URL,
   createManualInvestigation,
@@ -1195,10 +1196,14 @@ function ReportPanel({ investigation }: { investigation: InvestigationRecord }) 
 }
 
 export default function App() {
+  const [activeView, setActiveView] = useState<"investigations" | "benchmark">(
+    "investigations",
+  );
   const [selectedId, setSelectedId] = useState<string>();
   const investigationsQuery = useQuery({
     queryKey: ["investigations"],
     queryFn: listInvestigations,
+    enabled: activeView === "investigations",
   });
 
   const investigations = investigationsQuery.data ?? [];
@@ -1207,7 +1212,7 @@ export default function App() {
   const detailQuery = useQuery({
     queryKey: ["investigation", activeId],
     queryFn: () => getInvestigation(activeId as string),
-    enabled: Boolean(activeId),
+    enabled: activeView === "investigations" && Boolean(activeId),
   });
 
   const activeInvestigation = detailQuery.data;
@@ -1219,13 +1224,41 @@ export default function App() {
           <h1>DiagOps 诊断控制台</h1>
           <p>API 地址: {API_BASE_URL}</p>
         </div>
+        <nav className="view-tabs" aria-label="Primary views">
+          <button
+            className={activeView === "investigations" ? "active" : ""}
+            onClick={() => setActiveView("investigations")}
+            type="button"
+          >
+            Investigations
+          </button>
+          <button
+            className={activeView === "benchmark" ? "active" : ""}
+            onClick={() => setActiveView("benchmark")}
+            type="button"
+          >
+            OpenRCA Benchmark
+          </button>
+        </nav>
         <div className="topbar-stats">
-          <span>共 {investigations.length} 条诊断</span>
-          <span>记录审批状态和验证结果</span>
+          {activeView === "investigations" ? (
+            <>
+              <span>共 {investigations.length} 条诊断</span>
+              <span>记录审批状态和验证结果</span>
+            </>
+          ) : (
+            <>
+              <span>Fixed / Adaptive</span>
+              <span>只读冻结结果</span>
+            </>
+          )}
         </div>
       </header>
 
-      <div className="workspace">
+      {activeView === "benchmark" ? (
+        <OpenRcaBenchmark />
+      ) : (
+        <div className="workspace">
         <aside className="left-column">
           <ManualInvestigationForm onCreated={setSelectedId} />
           {investigationsQuery.isError ? (
@@ -1267,7 +1300,8 @@ export default function App() {
             <div className="panel empty-state">审批、验证和报告会显示在这里。</div>
           )}
         </aside>
-      </div>
+        </div>
+      )}
     </main>
   );
 }

@@ -373,6 +373,46 @@ export type RcaWorkbench = {
   };
 };
 
+export type OpenRcaStrategySummary = {
+  case_count: number;
+  completed_count: number;
+  completion_rate: number;
+  evidence_reference_validity: number;
+  invalid_evidence_references: number;
+  read_only_violations: number;
+  average_tool_calls: number;
+  duplicate_query_rejections: number;
+  average_duration_ms: number;
+  input_tokens: number;
+  output_tokens: number;
+  estimated_cost: number;
+  strict_accuracy?: number | null;
+  partial_score?: number | null;
+  component_score?: number | null;
+  reason_score?: number | null;
+  time_score?: number | null;
+  per_partition: Record<string, { strict_accuracy: number; partial_score: number }>;
+  failed_cases: Array<{ case_id: string; category: string }>;
+};
+
+export type OpenRcaBenchmarkSummary = {
+  run_id: string;
+  case_count: number;
+  model: string;
+  prompt_version: string;
+  git_commit: string;
+  started_at: string;
+  completed_at: string;
+  strategies: Record<string, OpenRcaStrategySummary>;
+};
+
+export type OpenRcaArtifactName =
+  | "run-manifest.json"
+  | "fixed-predictions.csv"
+  | "adaptive-predictions.csv"
+  | "official-report.csv"
+  | "summary.json";
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     headers: {
@@ -446,6 +486,14 @@ export function getRcaWorkbench(id: string) {
 
 export function getAgentConfig() {
   return request<AgentConfig>("/config/agents");
+}
+
+export function getLatestOpenRcaBenchmark() {
+  return request<OpenRcaBenchmarkSummary>("/benchmarks/openrca/latest");
+}
+
+export function openRcaArtifactUrl(name: OpenRcaArtifactName) {
+  return `${API_BASE_URL}/benchmarks/openrca/latest/${encodeURIComponent(name)}`;
 }
 
 export function createManualInvestigation(payload: ManualInvestigationPayload) {

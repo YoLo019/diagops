@@ -69,6 +69,29 @@ button {
   white-space: nowrap;
 }
 
+.view-tabs {
+  align-items: center;
+  background: #253243;
+  border: 1px solid #3b4a5d;
+  border-radius: 6px;
+  display: flex;
+  padding: 3px;
+}
+
+.view-tabs button {
+  background: transparent;
+  border-radius: 4px;
+  color: #c9d4df;
+  font-size: 13px;
+  min-height: 32px;
+  padding: 7px 12px;
+}
+
+.view-tabs button.active {
+  background: #f8fafc;
+  color: #17202d;
+}
+
 .workspace {
   display: grid;
   gap: 16px;
@@ -469,6 +492,165 @@ textarea {
   color: #9b2d2d;
 }
 
+.benchmark-view {
+  background: #ffffff;
+  border: 1px solid #d8e0e8;
+  border-radius: 8px;
+  margin: 0 auto;
+  max-width: 1440px;
+  overflow: hidden;
+}
+
+.benchmark-heading {
+  align-items: flex-start;
+  background: #f8fafc;
+  border-bottom: 1px solid #d8e0e8;
+  display: flex;
+  gap: 24px;
+  justify-content: space-between;
+  padding: 18px 20px;
+}
+
+.benchmark-heading h2,
+.benchmark-section h3 {
+  letter-spacing: 0;
+  margin: 0;
+}
+
+.benchmark-heading h2 {
+  font-size: 19px;
+}
+
+.benchmark-heading p,
+.benchmark-run-meta,
+.benchmark-muted {
+  color: #687789;
+  font-size: 13px;
+}
+
+.benchmark-heading p {
+  margin: 5px 0 0;
+}
+
+.benchmark-run-meta {
+  align-items: flex-end;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.benchmark-section {
+  border-bottom: 1px solid #e6ebf0;
+  padding: 18px 20px;
+}
+
+.benchmark-section:last-child {
+  border-bottom: 0;
+}
+
+.benchmark-section h3 {
+  font-size: 15px;
+  margin-bottom: 12px;
+}
+
+.benchmark-table-wrap {
+  overflow-x: auto;
+}
+
+.benchmark-table {
+  border-collapse: collapse;
+  font-size: 13px;
+  min-width: 680px;
+  width: 100%;
+}
+
+.benchmark-table th,
+.benchmark-table td {
+  border-bottom: 1px solid #e6ebf0;
+  padding: 9px 10px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.benchmark-table th:first-child,
+.benchmark-table td:first-child {
+  text-align: left;
+}
+
+.benchmark-table thead th {
+  background: #f8fafc;
+  color: #4a5868;
+  font-weight: 700;
+}
+
+.benchmark-progress-grid {
+  display: grid;
+  gap: 14px 24px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 16px;
+}
+
+.benchmark-progress-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.benchmark-progress-row {
+  align-items: center;
+  display: grid;
+  font-size: 12px;
+  gap: 10px;
+  grid-template-columns: 108px minmax(90px, 1fr) 48px;
+}
+
+.benchmark-progress-row progress {
+  accent-color: #216869;
+  height: 10px;
+  width: 100%;
+}
+
+.benchmark-progress-row strong {
+  text-align: right;
+}
+
+.benchmark-bottom-grid {
+  display: grid;
+  gap: 28px;
+  grid-template-columns: minmax(0, 2fr) minmax(220px, 1fr);
+}
+
+.benchmark-downloads {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.benchmark-downloads a {
+  color: #176263;
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.benchmark-empty {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid #d8e0e8;
+  border-radius: 8px;
+  color: #687789;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  justify-content: center;
+  min-height: 220px;
+  padding: 24px;
+  text-align: center;
+}
+
 @media (max-width: 1180px) {
   .workspace {
     grid-template-columns: 320px minmax(0, 1fr);
@@ -496,6 +678,14 @@ textarea {
     white-space: normal;
   }
 
+  .view-tabs {
+    align-self: stretch;
+  }
+
+  .view-tabs button {
+    flex: 1;
+  }
+
   .workspace,
   .detail-grid {
     grid-template-columns: 1fr;
@@ -508,5 +698,27 @@ textarea {
 
   .control-row select {
     flex-basis: auto;
+  }
+
+  .benchmark-heading,
+  .benchmark-bottom-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .benchmark-heading {
+    flex-direction: column;
+  }
+
+  .benchmark-run-meta {
+    align-items: flex-start;
+    text-align: left;
+  }
+
+  .benchmark-progress-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .benchmark-progress-row {
+    grid-template-columns: 100px minmax(80px, 1fr) 48px;
   }
 }

@@ -210,6 +210,41 @@ def test_v8_2_adaptive_strategy_and_tool_trace_are_present() -> None:
         assert projection in app
 
 
+def test_v8_2_openrca_benchmark_view_is_present() -> None:
+    api = (FRONTEND / "src" / "api.ts").read_text(encoding="utf-8")
+    app = (FRONTEND / "src" / "App.tsx").read_text(encoding="utf-8")
+    benchmark = (FRONTEND / "src" / "OpenRcaBenchmark.tsx").read_text(
+        encoding="utf-8"
+    )
+    vite = (FRONTEND / "vite.config.ts").read_text(encoding="utf-8")
+
+    for field in [
+        "export type OpenRcaBenchmarkSummary",
+        "export type OpenRcaStrategySummary",
+        "getLatestOpenRcaBenchmark",
+        "openRcaArtifactUrl",
+    ]:
+        assert field in api
+    for projection in [
+        "OpenRcaBenchmark",
+        "Investigations",
+        "OpenRCA Benchmark",
+        "setActiveView",
+        'enabled: activeView === "investigations"',
+    ]:
+        assert projection in app
+    for projection in [
+        "Fixed",
+        "Adaptive",
+        "<progress",
+        "失败案例",
+        "下载 artifact",
+        "暂无已冻结的 OpenRCA Benchmark 结果",
+    ]:
+        assert projection in benchmark
+    assert '"/benchmarks": "http://127.0.0.1:8000"' in vite
+
+
 def test_v8_2_tool_calls_group_by_agent_and_task_round() -> None:
     calls = [
         {"id": "call-log-2", "task_id": "task-log-2", "agent_name": "LogAgent"},

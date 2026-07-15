@@ -63,10 +63,15 @@ class AgentsSettings(BaseModel):
     tool_timeout_seconds: int = Field(default=10, ge=1, le=60)
 
 
+class BenchmarkSettings(BaseModel):
+    results_path: Path = Path("output/benchmarks/openrca")
+
+
 class AppSettings(BaseModel):
     storage: StorageSettings = Field(default_factory=StorageSettings)
     providers: ProviderSettings = Field(default_factory=ProviderSettings)
     agents: AgentsSettings = Field(default_factory=AgentsSettings)
+    benchmark: BenchmarkSettings = Field(default_factory=BenchmarkSettings)
 
 
 def load_settings() -> AppSettings:
