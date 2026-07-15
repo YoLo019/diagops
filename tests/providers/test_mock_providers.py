@@ -1,8 +1,18 @@
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from backend.domain.events import IncidentEvent, IncidentSource, Severity
 from backend.domain.evidence import EvidenceKind, EvidenceProvider, EvidenceStatus
+from backend.domain.tool_queries import (
+    DependencyQuery,
+    DeploymentQuery,
+    MetricQuery,
+    ServiceCatalogQuery,
+)
+from backend.providers.mock_dependencies import MockDependencyProvider
+from backend.providers.mock_deploys import MockDeployProvider
+from backend.providers.mock_metrics import MockMetricProvider
+from backend.providers.mock_service_catalog import MockServiceCatalogProvider
 from backend.providers.registry import ProviderRegistry, build_mock_provider_registry
 from backend.providers.results import ProviderResult, ProviderStatus
 from backend.rca.analyzer import RcaAnalyzer
@@ -111,3 +121,30 @@ def test_simulation_provider_is_not_called_for_manual_event() -> None:
     assert all(result.status == ProviderStatus.SKIPPED for result in results)
     hypotheses = RcaAnalyzer().analyze(event, registry.evidence_from_results(results))
     assert hypotheses[0].cause_type == "unknown"
+
+
+def test_mock_queries_filter_metric_deployment_catalog_and_dependency_results():
+    event = load_incident_case("deployment_regression")
+    window = {
+        "start_time": event.started_at - timedelta(minutes=5),
+        "end_time": event.started_at + timedelta(minutes=5),
+        "reason": "验证参数过滤",
+    }
+
+    metrics = MockMetricProvider().collect(
+        event, MetricQuery(**window, metric_names=["error_rate"])
+    ).evidence_items
+    deployments = MockDeployProvider().collect(
+        event, DeploymentQuery(**window, version="missing")
+    ).evidence_items
+    catalog = MockServiceCatalogProvider().collect(
+        event, ServiceCatalogQuery(**window, include_dependencies=False)
+    ).evidence_items[0]
+    dependencies = MockDependencyProvider().collect(
+        event, DependencyQuery(**window, target="missing-service")
+    ).evidence_items
+
+    assert metrics and set(metrics[0].payload) == {"error_rate"}
+    assert deployments == []
+    assert catalog.payload["dependencies"] == []
+    assert dependencies == []

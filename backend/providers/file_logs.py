@@ -5,6 +5,7 @@ from pathlib import Path
 
 from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
+from backend.domain.tool_queries import LogQuery
 from backend.providers.results import ProviderResult
 from backend.safety.redaction import redact_text
 
@@ -24,6 +25,7 @@ MAX_LOG_MATCHES = 100
 
 class FileLogProvider:
     provider = EvidenceProvider.LOG
+    supported_tools = frozenset({"read_logs"})
 
     def __init__(
         self,
@@ -38,10 +40,13 @@ class FileLogProvider:
         self.max_lines = max_lines
         self.max_matches = max_matches
 
-    def collect(self, event: IncidentEvent) -> ProviderResult:
+    def collect(
+        self, event: IncidentEvent, query: LogQuery | None = None
+    ) -> ProviderResult:
         evidence: list[EvidenceItem] = []
+        remaining = min(query.limit, self.max_matches) if query else None
         for path in self.paths:
-            matches = self._matches_for_path(path, event)
+            matches = self._matches_for_path(path, event, query, remaining)
             if not matches:
                 continue
 
@@ -68,20 +73,47 @@ class FileLogProvider:
                     confidence=1.0,
                 )
             )
+            if remaining is not None:
+                remaining -= len(matches)
+                if remaining == 0:
+                    break
 
         return ProviderResult(provider=self.provider, evidence_items=evidence)
 
-    def _matches_for_path(self, path: Path, event: IncidentEvent) -> list["_LogMatch"]:
+    def _matches_for_path(
+        self,
+        path: Path,
+        event: IncidentEvent,
+        query: LogQuery | None,
+        remaining: int | None,
+    ) -> list["_LogMatch"]:
         if path.stat().st_size > self.max_bytes:
             raise ValueError("Log file exceeds size limit")
         window = timedelta(minutes=event.time_window_minutes)
+        limit = remaining if remaining is not None else self.max_matches
         matches: list[_LogMatch] = []
         for line in path.read_text(encoding="utf-8").splitlines()[: self.max_lines]:
             parsed_at = _parse_timestamp(line)
-            if parsed_at is None or abs(parsed_at - event.started_at) > window:
+            if parsed_at is None:
+                continue
+            if query:
+                if not query.start_time <= parsed_at <= query.end_time:
+                    continue
+            elif abs(parsed_at - event.started_at) > window:
                 continue
             if not _contains_scope(line, event.service) or not _contains_scope(
                 line, event.environment
+            ):
+                continue
+            if query and query.instance and not _contains_scope(line, query.instance):
+                continue
+            lower_line = line.lower()
+            if query and query.keywords and not all(
+                keyword.lower() in lower_line for keyword in query.keywords
+            ):
+                continue
+            if query and query.levels and not any(
+                _contains_scope(line.lower(), level.lower()) for level in query.levels
             ):
                 continue
 
@@ -92,7 +124,7 @@ class FileLogProvider:
                 matches.append(
                     _LogMatch(line=line, timestamp=parsed_at, patterns=patterns)
                 )
-                if len(matches) >= self.max_matches:
+                if len(matches) >= limit:
                     break
         return matches
 

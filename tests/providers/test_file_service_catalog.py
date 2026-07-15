@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from backend.config.settings import (
@@ -9,6 +9,7 @@ from backend.config.settings import (
 )
 from backend.domain.events import IncidentEvent, IncidentSource, Severity
 from backend.domain.evidence import EvidenceKind, EvidenceProvider
+from backend.domain.tool_queries import ServiceCatalogQuery
 from backend.providers.file_service_catalog import FileServiceCatalogProvider
 from backend.providers.registry import ProviderRegistry, build_provider_registry_from_settings
 from backend.providers.results import ProviderStatus
@@ -141,6 +142,22 @@ def test_catalog_records_global_environment_scope() -> None:
 
     assert evidence.payload["environment_scope"] == "global"
     assert evidence.payload["time_filter"] == "not_applicable"
+
+
+def test_catalog_query_can_exclude_dependencies() -> None:
+    event = _event("checkout-service")
+    query = ServiceCatalogQuery(
+        start_time=event.started_at,
+        end_time=event.started_at + timedelta(minutes=1),
+        reason="只读取服务元数据",
+        include_dependencies=False,
+    )
+
+    evidence = FileServiceCatalogProvider(Path("config/services.yaml")).collect(
+        event, query
+    ).evidence_items[0]
+
+    assert evidence.payload["dependencies"] == []
 
 
 def _event(service: str, environment: str = "prod") -> IncidentEvent:

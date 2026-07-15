@@ -1,6 +1,6 @@
 import json
 import urllib.parse
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from backend.config.settings import (
     AppSettings,
@@ -13,6 +13,7 @@ from backend.config.settings import (
 )
 from backend.domain.events import IncidentEvent, IncidentSource, Severity
 from backend.domain.evidence import EvidenceKind, EvidenceProvider, EvidenceStatus
+from backend.domain.tool_queries import MetricAggregation, PrometheusMetric, PrometheusQuery
 from backend.providers.prometheus import PrometheusProvider
 from backend.providers.registry import ProviderRegistry, build_provider_registry_from_settings
 from backend.providers.results import ProviderStatus
@@ -133,6 +134,32 @@ def test_prometheus_partial_response_retains_valid_observations(monkeypatch):
     assert "memory" not in result.evidence_items[0].payload["observed_values"]
     assert len(seen_times) == 5
     assert set(seen_times) == {str(_event().started_at.timestamp())}
+
+
+def test_prometheus_query_requests_only_selected_templates(monkeypatch):
+    seen: list[tuple[str, str]] = []
+
+    def recording_urlopen(request, timeout):
+        params = urllib.parse.parse_qs(urllib.parse.urlsplit(request.full_url).query)
+        seen.append((params["query"][0], params["time"][0]))
+        return _urlopen_success(request, timeout)
+
+    monkeypatch.setattr("urllib.request.urlopen", recording_urlopen)
+    event = _event()
+    query = PrometheusQuery(
+        start_time=event.started_at,
+        end_time=event.started_at + timedelta(minutes=10),
+        reason="验证资源饱和",
+        metric_names=[PrometheusMetric.CPU, PrometheusMetric.MEMORY],
+        aggregation=MetricAggregation.MAX,
+    )
+
+    result = PrometheusProvider("http://prometheus.test").collect(event, query)
+
+    assert result.evidence_items[0].payload["query_names"] == ["cpu", "memory"]
+    assert len(seen) == 2
+    assert all(item[0].startswith("max(") for item in seen)
+    assert {item[1] for item in seen} == {str(query.end_time.timestamp())}
 
 
 class _FakeResponse:

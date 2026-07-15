@@ -5,6 +5,7 @@ from typing import Any
 
 from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
+from backend.domain.tool_queries import DeploymentQuery
 from backend.providers.results import ProviderResult
 
 MAX_DEPLOYMENT_BYTES = 2 * 1024 * 1024
@@ -13,6 +14,7 @@ MAX_DEPLOYMENTS = 10_000
 
 class FileDeploymentProvider:
     provider = EvidenceProvider.DEPLOY
+    supported_tools = frozenset({"read_deployments"})
 
     def __init__(
         self,
@@ -25,7 +27,9 @@ class FileDeploymentProvider:
         self.max_bytes = max_bytes
         self.max_deployments = max_deployments
 
-    def collect(self, event: IncidentEvent) -> ProviderResult:
+    def collect(
+        self, event: IncidentEvent, query: DeploymentQuery | None = None
+    ) -> ProviderResult:
         deployments = self._load_deployments()
         window = timedelta(minutes=event.time_window_minutes)
         evidence: list[EvidenceItem] = []
@@ -36,30 +40,42 @@ class FileDeploymentProvider:
                 continue
             if deployment["environment"] != event.environment:
                 continue
-            if abs(deployed_at - event.started_at) > window:
+            if query:
+                if not query.start_time <= deployed_at <= query.end_time:
+                    continue
+                if query.version and deployment["version"] != query.version:
+                    continue
+                if query.instance and deployment["instance"] != query.instance:
+                    continue
+            elif abs(deployed_at - event.started_at) > window:
                 continue
 
             summary = deployment["summary"] or (
                 f"{event.service} {deployment['version']} was deployed near incident start"
             )
+            payload = {
+                "service": deployment["service"],
+                "environment": deployment["environment"],
+                "version": deployment["version"],
+                "deployed_at": deployed_at.isoformat(),
+                "operator": deployment["operator"],
+                "commit": deployment["commit"],
+                "summary": summary,
+            }
+            if deployment["instance"]:
+                payload["instance"] = deployment["instance"]
             evidence.append(
                 EvidenceItem(
                     provider=self.provider,
                     kind=EvidenceKind.DEPLOYMENT,
                     timestamp=deployed_at,
                     summary=summary,
-                    payload={
-                        "service": deployment["service"],
-                        "environment": deployment["environment"],
-                        "version": deployment["version"],
-                        "deployed_at": deployed_at.isoformat(),
-                        "operator": deployment["operator"],
-                        "commit": deployment["commit"],
-                        "summary": summary,
-                    },
+                    payload=payload,
                     confidence=1.0,
                 )
             )
+            if query and len(evidence) >= min(query.limit, self.max_deployments):
+                break
 
         return ProviderResult(provider=self.provider, evidence_items=evidence)
 
@@ -83,6 +99,7 @@ def _deployment_record(item: dict[str, Any]) -> dict[str, Any]:
         "service": _string_value(item, "service"),
         "environment": _string_value(item, "environment"),
         "version": _string_value(item, "version"),
+        "instance": _string_value(item, "instance"),
         "deployed_at": datetime.fromisoformat(_string_value(item, "deployed_at")),
         "operator": _string_value(item, "operator"),
         "commit": _string_value(item, "commit"),

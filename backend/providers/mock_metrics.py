@@ -2,13 +2,17 @@ from datetime import timedelta
 
 from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
+from backend.domain.tool_queries import MetricQuery
 from backend.providers.results import ProviderResult
 
 
 class MockMetricProvider:
     provider = EvidenceProvider.METRIC
+    supported_tools = frozenset({"query_metrics"})
 
-    def collect(self, event: IncidentEvent) -> ProviderResult:
+    def collect(
+        self, event: IncidentEvent, query: MetricQuery | None = None
+    ) -> ProviderResult:
         evidence: list[EvidenceItem] = []
 
         if event.signals.get("qps") == "high":
@@ -61,4 +65,22 @@ class MockMetricProvider:
                 )
             )
 
+        if query:
+            filtered: list[EvidenceItem] = []
+            for item in evidence:
+                if not query.start_time <= item.timestamp <= query.end_time:
+                    continue
+                if query.instance and item.payload.get("instance") != query.instance:
+                    continue
+                if query.metric_names:
+                    payload = {
+                        name: item.payload[name]
+                        for name in query.metric_names
+                        if name in item.payload
+                    }
+                    if not payload:
+                        continue
+                    item = item.model_copy(update={"payload": payload})
+                filtered.append(item)
+            evidence = filtered[: query.limit]
         return ProviderResult(provider=self.provider, evidence_items=evidence)

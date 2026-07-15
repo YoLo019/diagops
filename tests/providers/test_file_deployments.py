@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -12,6 +12,7 @@ from backend.config.settings import (
 )
 from backend.domain.events import IncidentEvent, IncidentSource, Severity
 from backend.domain.evidence import EvidenceKind, EvidenceProvider, EvidenceStatus
+from backend.domain.tool_queries import DeploymentQuery
 from backend.providers.file_deployments import FileDeploymentProvider
 from backend.providers.registry import ProviderRegistry, build_provider_registry_from_settings
 from backend.providers.results import ProviderStatus
@@ -98,6 +99,33 @@ def test_file_deployment_provider_filters_service_and_environment(tmp_path):
 
     assert result.status == ProviderStatus.SUCCESS
     assert result.evidence_items == []
+
+
+def test_deployment_query_filters_version_instance_window_and_limit(tmp_path):
+    path = tmp_path / "deployments.json"
+    path.write_text(
+        """
+[
+  {"service":"payment-service","environment":"prod","version":"v1","instance":"pod-1","deployed_at":"2026-07-03T13:59:00+08:00","operator":"bot","commit":"a","summary":"old"},
+  {"service":"payment-service","environment":"prod","version":"v2","instance":"pod-2","deployed_at":"2026-07-03T14:01:00+08:00","operator":"bot","commit":"b","summary":"selected"},
+  {"service":"payment-service","environment":"prod","version":"v2","instance":"pod-2","deployed_at":"2026-07-03T14:02:00+08:00","operator":"bot","commit":"c","summary":"limited"}
+]
+""".strip(),
+        encoding="utf-8",
+    )
+    event = load_incident_case("deployment_regression")
+    query = DeploymentQuery(
+        start_time=event.started_at - timedelta(minutes=5),
+        end_time=event.started_at + timedelta(minutes=5),
+        reason="确认 pod-2 v2 发布",
+        version="v2",
+        instance="pod-2",
+        limit=1,
+    )
+
+    result = FileDeploymentProvider(path).collect(event, query)
+
+    assert [item.payload["summary"] for item in result.evidence_items] == ["selected"]
 
 
 def test_missing_deployment_file_becomes_provider_error_evidence(tmp_path):

@@ -12,6 +12,7 @@ from backend.domain.evidence import (
     EvidenceStatus,
     JsonValue,
 )
+from backend.domain.tool_queries import MetricAggregation, PrometheusQuery
 from backend.providers.results import ProviderResult, ProviderStatus
 
 _QUERY_TEMPLATES = {
@@ -37,18 +38,22 @@ _QUERY_TEMPLATES = {
 
 class PrometheusProvider:
     provider = EvidenceProvider.METRIC
+    supported_tools = frozenset({"query_prometheus"})
 
     def __init__(self, base_url: str, timeout_seconds: float = 5.0) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
 
-    def collect(self, event: IncidentEvent) -> ProviderResult:
-        queries = _queries_for_event(event)
+    def collect(
+        self, event: IncidentEvent, query: PrometheusQuery | None = None
+    ) -> ProviderResult:
+        queries = _queries_for_event(event, query)
+        query_time = query.end_time.timestamp() if query else event.started_at.timestamp()
         observed_values: dict[str, JsonValue] = {}
         failures: list[str] = []
-        for name, query in queries.items():
+        for name, promql in queries.items():
             try:
-                observed_values[name] = self._query_instant(query, event.started_at.timestamp())
+                observed_values[name] = self._query_instant(promql, query_time)
             except Exception as exc:
                 failures.append(f"{name}: {exc}")
         if not observed_values:
@@ -62,7 +67,7 @@ class PrometheusProvider:
         evidence = EvidenceItem(
             provider=self.provider,
             kind=EvidenceKind.METRIC_TREND,
-            timestamp=event.started_at - timedelta(minutes=1),
+            timestamp=(query.end_time if query else event.started_at) - timedelta(minutes=1),
             summary=(
                 f"Prometheus returned {len(observed_values)} metric observations "
                 f"for {event.service} in {event.environment}"
@@ -97,15 +102,36 @@ class PrometheusProvider:
         return _observed_value(payload)
 
 
-def _queries_for_event(event: IncidentEvent) -> dict[str, str]:
+def _queries_for_event(
+    event: IncidentEvent, query: PrometheusQuery | None = None
+) -> dict[str, str]:
     labels = {
         "service": _escape_label_value(event.service),
         "environment": _escape_label_value(event.environment),
     }
-    return {
-        name: template.format(**labels)
-        for name, template in _QUERY_TEMPLATES.items()
+    names = [item.value for item in query.metric_names] if query else list(_QUERY_TEMPLATES)
+    if query:
+        names = names[: query.limit]
+    queries = {
+        name: _with_aggregation(_QUERY_TEMPLATES[name], query).format(**labels)
+        for name in names
     }
+    if query and query.instance:
+        instance = _escape_label_value(query.instance)
+        queries = {
+            name: value.replace("}", f',instance="{instance}"}}', 1)
+            for name, value in queries.items()
+        }
+    return queries
+
+
+def _with_aggregation(template: str, query: PrometheusQuery | None) -> str:
+    if query is None or template.startswith("histogram_quantile"):
+        return template
+    if not template.startswith("sum("):
+        return template
+    aggregation = MetricAggregation(query.aggregation).value
+    return f"{aggregation}({template[4:]}"
 
 
 def _observed_value(payload: Any) -> JsonValue:

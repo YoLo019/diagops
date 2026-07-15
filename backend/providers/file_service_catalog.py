@@ -5,6 +5,7 @@ import yaml
 
 from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
+from backend.domain.tool_queries import ServiceCatalogQuery
 from backend.providers.results import ProviderResult, ProviderStatus
 
 MAX_CATALOG_BYTES = 2 * 1024 * 1024
@@ -12,12 +13,15 @@ MAX_CATALOG_BYTES = 2 * 1024 * 1024
 
 class FileServiceCatalogProvider:
     provider = EvidenceProvider.SERVICE_CATALOG
+    supported_tools = frozenset({"read_service_catalog"})
 
     def __init__(self, path: Path, *, max_bytes: int = MAX_CATALOG_BYTES) -> None:
         self.path = path
         self.max_bytes = max_bytes
 
-    def collect(self, event: IncidentEvent) -> ProviderResult:
+    def collect(
+        self, event: IncidentEvent, query: ServiceCatalogQuery | None = None
+    ) -> ProviderResult:
         services = self._load_services()
         service = services.get(event.service)
         if service is None:
@@ -45,7 +49,11 @@ class FileServiceCatalogProvider:
                 "team": _string_value(service, "team"),
                 "runtime": _string_value(service, "runtime"),
                 "repository": _string_value(service, "repository"),
-                "dependencies": _list_value(service, "dependencies"),
+                "dependencies": (
+                    _list_value(service, "dependencies")
+                    if query is None or query.include_dependencies
+                    else []
+                ),
                 "dashboards": _list_value(service, "dashboards"),
                 "runbooks": _list_value(service, "runbooks"),
                 "environment": event.environment,

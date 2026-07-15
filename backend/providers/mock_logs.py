@@ -2,13 +2,17 @@ from datetime import timedelta
 
 from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
+from backend.domain.tool_queries import LogQuery
 from backend.providers.results import ProviderResult
 
 
 class MockLogProvider:
     provider = EvidenceProvider.LOG
+    supported_tools = frozenset({"read_logs"})
 
-    def collect(self, event: IncidentEvent) -> ProviderResult:
+    def collect(
+        self, event: IncidentEvent, query: LogQuery | None = None
+    ) -> ProviderResult:
         evidence: list[EvidenceItem] = []
         if event.service == "payment-service":
             evidence = [
@@ -40,4 +44,18 @@ class MockLogProvider:
                 )
             ]
 
+        if query:
+            evidence = [
+                item
+                for item in evidence
+                if query.start_time <= item.timestamp <= query.end_time
+                and (not query.instance or item.payload.get("instance") == query.instance)
+                and (
+                    not query.keywords
+                    or all(
+                        keyword.lower() in f"{item.summary} {item.payload}".lower()
+                        for keyword in query.keywords
+                    )
+                )
+            ][: query.limit]
         return ProviderResult(provider=self.provider, evidence_items=evidence)

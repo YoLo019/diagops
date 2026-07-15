@@ -2,13 +2,17 @@ from datetime import timedelta
 
 from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
+from backend.domain.tool_queries import DeploymentQuery
 from backend.providers.results import ProviderResult
 
 
 class MockDeployProvider:
     provider = EvidenceProvider.DEPLOY
+    supported_tools = frozenset({"read_deployments"})
 
-    def collect(self, event: IncidentEvent) -> ProviderResult:
+    def collect(
+        self, event: IncidentEvent, query: DeploymentQuery | None = None
+    ) -> ProviderResult:
         evidence: list[EvidenceItem] = []
         if event.service != "payment-service":
             return ProviderResult(provider=self.provider, evidence_items=evidence)
@@ -26,4 +30,12 @@ class MockDeployProvider:
                 },
             )
         ]
+        if query:
+            evidence = [
+                item
+                for item in evidence
+                if query.start_time <= item.timestamp <= query.end_time
+                and (not query.version or item.payload.get("version") == query.version)
+                and (not query.instance or item.payload.get("instance") == query.instance)
+            ][: query.limit]
         return ProviderResult(provider=self.provider, evidence_items=evidence)

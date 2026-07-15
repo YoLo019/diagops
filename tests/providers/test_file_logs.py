@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -13,6 +13,7 @@ from backend.config.settings import (
 )
 from backend.domain.events import IncidentEvent, IncidentSource, Severity
 from backend.domain.evidence import EvidenceKind, EvidenceProvider, EvidenceStatus
+from backend.domain.tool_queries import LogQuery
 from backend.providers.file_logs import FileLogProvider
 from backend.providers.registry import ProviderRegistry, build_provider_registry_from_settings
 from backend.providers.results import ProviderStatus
@@ -80,6 +81,61 @@ checkout-service prod ERROR HTTP 500 missing timestamp
     assert sample_lines == [
         "2026-07-06T08:01:00+00:00 checkout-service prod ERROR HTTP 500 included"
     ]
+
+
+def test_log_query_filters_keyword_instance_and_limit(tmp_path):
+    log_path = tmp_path / "checkout.log"
+    log_path.write_text(
+        "\n".join(
+            [
+                "2026-07-06T08:01:00+00:00 checkout-service prod pod-1 ERROR timeout first",
+                "2026-07-06T08:02:00+00:00 checkout-service prod pod-2 ERROR ignored other",
+                "2026-07-06T08:03:00+00:00 checkout-service prod pod-2 ERROR timeout selected",
+                "2026-07-06T08:04:00+00:00 checkout-service prod pod-2 ERROR timeout limited",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    event = _event()
+
+    result = FileLogProvider([log_path]).collect(
+        event,
+        LogQuery(
+            start_time=event.started_at,
+            end_time=event.started_at + timedelta(minutes=10),
+            reason="定位 pod-2 超时",
+            keywords=["timeout"],
+            levels=["ERROR"],
+            instance="pod-2",
+            limit=1,
+        ),
+    )
+
+    assert result.evidence_items[0].payload["error_count"] == 1
+    assert result.evidence_items[0].payload["sample_lines"] == [
+        "2026-07-06T08:03:00+00:00 checkout-service prod pod-2 ERROR timeout selected"
+    ]
+
+
+def test_log_query_limit_applies_across_configured_files(tmp_path):
+    paths = [tmp_path / "one.log", tmp_path / "two.log"]
+    for index, path in enumerate(paths, start=1):
+        path.write_text(
+            f"2026-07-06T08:0{index}:00+00:00 checkout-service prod ERROR timeout\n",
+            encoding="utf-8",
+        )
+    event = _event()
+    query = LogQuery(
+        start_time=event.started_at,
+        end_time=event.started_at + timedelta(minutes=10),
+        reason="限制跨文件返回量",
+        keywords=["timeout"],
+        limit=1,
+    )
+
+    result = FileLogProvider(paths).collect(event, query)
+
+    assert sum(item.payload["error_count"] for item in result.evidence_items) == 1
 
 
 def test_log_provider_rejects_oversized_input(tmp_path):

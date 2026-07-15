@@ -2,13 +2,17 @@ from datetime import timedelta
 
 from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
+from backend.domain.tool_queries import DependencyDirection, DependencyQuery
 from backend.providers.results import ProviderResult
 
 
 class MockDependencyProvider:
     provider = EvidenceProvider.DEPENDENCY
+    supported_tools = frozenset({"query_dependencies"})
 
-    def collect(self, event: IncidentEvent) -> ProviderResult:
+    def collect(
+        self, event: IncidentEvent, query: DependencyQuery | None = None
+    ) -> ProviderResult:
         evidence: list[EvidenceItem] = []
         if event.service == "order-service":
             evidence = [
@@ -39,4 +43,14 @@ class MockDependencyProvider:
                 )
             ]
 
+        if query:
+            evidence = [
+                item
+                for item in evidence
+                if query.direction == DependencyDirection.DOWNSTREAM
+                and query.start_time <= item.timestamp <= query.end_time
+                and (
+                    not query.target or item.payload.get("dependency") == query.target
+                )
+            ][: query.limit]
         return ProviderResult(provider=self.provider, evidence_items=evidence)
