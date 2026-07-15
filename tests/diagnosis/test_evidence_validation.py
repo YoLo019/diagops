@@ -111,6 +111,28 @@ def test_concrete_hypothesis_requires_compatible_support() -> None:
         validate_hypotheses(validated.supporting_evidence, [hypothesis])
 
 
+@pytest.mark.parametrize(
+    ("cause_type", "provider"),
+    [
+        (CauseType.RESOURCE_SATURATION, EvidenceProvider.METRIC),
+        (CauseType.NETWORK_FAULT, EvidenceProvider.DEPENDENCY),
+        (CauseType.CONFIGURATION_ERROR, EvidenceProvider.DEPLOY),
+        (CauseType.PROCESS_OR_CONTAINER_FAILURE, EvidenceProvider.LOG),
+        (CauseType.INFRASTRUCTURE_FAULT, EvidenceProvider.METRIC),
+    ],
+)
+def test_v82_cause_types_accept_compatible_evidence(cause_type, provider) -> None:
+    evidence = _evidence("ev-v82", provider)
+    hypothesis = Hypothesis(
+        cause_type=cause_type,
+        summary="V8.2 generic cause",
+        confidence=0.8,
+        supporting_evidence_ids=[evidence.id],
+    )
+
+    validate_hypotheses([evidence], [hypothesis])
+
+
 def test_failed_evidence_cannot_support_hypothesis() -> None:
     failed = _evidence(
         "ev-failed", EvidenceProvider.METRIC, status=EvidenceStatus.FAILED

@@ -42,6 +42,27 @@ _CAUSE_SUPPORT_PROVIDERS = {
     },
     CauseType.DATABASE_SLOWDOWN: {EvidenceProvider.METRIC},
     CauseType.SINGLE_INSTANCE_ISSUE: {EvidenceProvider.METRIC},
+    CauseType.RESOURCE_SATURATION: {EvidenceProvider.METRIC},
+    CauseType.NETWORK_FAULT: {
+        EvidenceProvider.DEPENDENCY,
+        EvidenceProvider.LOG,
+        EvidenceProvider.METRIC,
+    },
+    CauseType.CONFIGURATION_ERROR: {
+        EvidenceProvider.DEPLOY,
+        EvidenceProvider.LOG,
+        EvidenceProvider.SERVICE_CATALOG,
+    },
+    CauseType.PROCESS_OR_CONTAINER_FAILURE: {
+        EvidenceProvider.DEPLOY,
+        EvidenceProvider.LOG,
+        EvidenceProvider.METRIC,
+    },
+    CauseType.INFRASTRUCTURE_FAULT: {
+        EvidenceProvider.DEPENDENCY,
+        EvidenceProvider.LOG,
+        EvidenceProvider.METRIC,
+    },
 }
 
 
