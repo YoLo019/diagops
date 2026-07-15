@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import itertools
+import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -126,6 +128,7 @@ def evaluate_run(query_root: Path, run_dir: Path) -> Path:
     report_path = run_dir / "compatible-report.csv"
     _write_report(report_path, report_rows)
     _update_summary(run_dir / "summary.json", report_rows)
+    _update_manifest_checksums(run_dir)
     return report_path
 
 
@@ -260,3 +263,42 @@ def _field_accuracy(rows: list[dict[str, object]], field: str) -> float:
         for row in rows
     )
     return matches / points
+
+
+def _update_manifest_checksums(run_dir: Path) -> None:
+    resolved_run = run_dir.resolve()
+    manifest_path = run_dir / "run-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict):
+        raise ValueError("run manifest must be a JSON object")
+    # 只记录冻结契约定义的文件，避免把意外落入 run 目录的本地文件名写入 manifest。
+    fixed_names = {
+        "fixed-predictions.csv",
+        "adaptive-predictions.csv",
+        "compatible-report.csv",
+        "official-report.csv",
+        "summary.json",
+    }
+    artifacts = [
+        path
+        for path in run_dir.iterdir()
+        if path.is_file()
+        and path.resolve().is_relative_to(resolved_run)
+        and (
+            path.name in fixed_names
+            or (
+                path.suffix == ".csv"
+                and path.name.startswith(("fixed-", "adaptive-"))
+            )
+        )
+    ]
+    manifest["artifact_checksums"] = {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(artifacts, key=lambda item: item.name)
+    }
+    temporary = manifest_path.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(manifest_path)

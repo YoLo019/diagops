@@ -336,6 +336,16 @@ def project_tool_evidence(evidence: list[EvidenceItem]) -> list[dict[str, JsonVa
 
 def _query_fingerprint(tool_name: str, query: QueryWindow) -> str:
     values = query.model_dump(mode="json", exclude={"reason"})
+    values["start_time"] = query.start_time.astimezone(UTC).isoformat()
+    values["end_time"] = query.end_time.astimezone(UTC).isoformat()
+    for name in ("keywords", "levels", "metric_names"):
+        items = values.get(name)
+        if not isinstance(items, list):
+            continue
+        normalized = [str(item) for item in items]
+        if name in {"keywords", "levels"}:
+            normalized = [item.casefold() for item in normalized]
+        values[name] = sorted(set(normalized))
     canonical = json.dumps(values, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(f"{tool_name}:{canonical}".encode()).hexdigest()
 

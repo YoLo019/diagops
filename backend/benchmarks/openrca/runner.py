@@ -182,6 +182,9 @@ def run_benchmark_pair(
         InvestigationStrategy.ADAPTIVE,
     ),
 ) -> BenchmarkRunResult:
+    cost_rates = (input_cost_per_million, output_cost_per_million)
+    if any(not math.isfinite(rate) or rate < 0 for rate in cost_rates):
+        raise ValueError("cost rates must be finite and non-negative")
     index = OpenRcaRuntimeIndex.model_validate_json(
         safe_index.read_text(encoding="utf-8")
     )

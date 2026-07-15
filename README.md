@@ -493,9 +493,10 @@ The frozen run contains `run-manifest.json`, combined and per-partition
 prediction CSV files, `summary.json`, the local `compatible-report.csv`, and,
 only after upstream verification, `official-report.csv`. The manifest records
 the case manifest hash, model, prompt, Git commit, strategy budgets, timestamps,
-and caller-supplied cost rates. The summary records total and per-partition
-scores, completion and Evidence validity, tool calls, duplicate rejections,
-latency, tokens, cost, read-only violations, and every failed case.
+caller-supplied cost rates, and SHA-256 checksums for the other frozen run
+artifacts. The summary records total and per-partition scores, completion and
+Evidence validity, tool calls, duplicate rejections, latency, tokens, cost,
+read-only violations, and every failed case.
 
 Start the API and frontend, then open the `OpenRCA Benchmark` view. The read-only
 API serves the latest valid frozen summary and only these download names:

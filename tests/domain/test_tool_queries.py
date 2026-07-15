@@ -98,9 +98,12 @@ def test_specialist_queries_apply_defaults_and_strict_shapes():
     "query_type, values",
     [
         (LogQuery, {"keywords": [str(index) for index in range(9)]}),
+        (LogQuery, {"keywords": ["x" * 121]}),
         (LogQuery, {"keywords": ["error"], "levels": [str(index) for index in range(6)]}),
+        (LogQuery, {"keywords": ["error"], "levels": ["x" * 33]}),
         (LogQuery, {"keywords": ["error"], "instance": "x" * 161}),
         (MetricQuery, {"metric_names": [str(index) for index in range(21)]}),
+        (MetricQuery, {"metric_names": ["x" * 161]}),
         (PrometheusQuery, {"metric_names": []}),
         (PrometheusQuery, {"metric_names": ["qps"] * 6}),
         (DeploymentQuery, {"version": "x" * 121}),

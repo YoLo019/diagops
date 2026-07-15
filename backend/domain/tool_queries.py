@@ -1,8 +1,12 @@
 from datetime import datetime, timedelta
 from enum import StrEnum
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+LogKeyword = Annotated[str, Field(min_length=1, max_length=120)]
+LogLevel = Annotated[str, Field(min_length=1, max_length=32)]
+MetricName = Annotated[str, Field(min_length=1, max_length=160)]
 
 
 class MetricAggregation(StrEnum):
@@ -44,13 +48,13 @@ class QueryWindow(BaseModel):
 
 
 class LogQuery(QueryWindow):
-    keywords: list[str] = Field(default_factory=list, max_length=8)
-    levels: list[str] = Field(default_factory=list, max_length=5)
+    keywords: list[LogKeyword] = Field(default_factory=list, max_length=8)
+    levels: list[LogLevel] = Field(default_factory=list, max_length=5)
     instance: str | None = Field(default=None, max_length=160)
 
 
 class MetricQuery(QueryWindow):
-    metric_names: list[str] = Field(default_factory=list, max_length=20)
+    metric_names: list[MetricName] = Field(default_factory=list, max_length=20)
     aggregation: MetricAggregation = MetricAggregation.AVG
     instance: str | None = Field(default=None, max_length=160)
 

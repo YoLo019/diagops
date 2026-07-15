@@ -1,5 +1,6 @@
 import csv
 import json
+import math
 import os
 import subprocess
 import sys
@@ -145,6 +146,24 @@ def test_runner_writes_fixed_and_adaptive_artifacts(tmp_path: Path):
     assert rows[0]["task_index"] == "task_1"
 
 
+@pytest.mark.parametrize("rate", [-1.0, math.nan, math.inf])
+def test_runner_rejects_invalid_cost_rates_before_creating_run(
+    tmp_path: Path, rate: float
+):
+    output = tmp_path / "runs"
+
+    with pytest.raises(ValueError, match="cost rates"):
+        run_benchmark_pair(
+            FakeRuntime(),
+            safe_index(tmp_path),
+            output,
+            model="test-model",
+            input_cost_per_million=rate,
+        )
+
+    assert not output.exists()
+
+
 def test_runner_artifacts_do_not_contain_ground_truth_fields(tmp_path: Path):
     result = run_benchmark_pair(
         FakeRuntime(), safe_index(tmp_path), tmp_path / "runs", model="test-model"
@@ -211,3 +230,11 @@ def test_fixture_cli_prepare_run_evaluate_smoke(tmp_path: Path):
     assert (runs / run_id / "compatible-report.csv").exists()
     assert (tmp_path / "official-queries" / "Bank-query.csv").exists()
     assert json.loads((runs / run_id / "summary.json").read_text())["case_count"] == 4
+    manifest = json.loads((runs / run_id / "run-manifest.json").read_text())
+    assert set(manifest["artifact_checksums"]) >= {
+        "fixed-predictions.csv",
+        "adaptive-predictions.csv",
+        "compatible-report.csv",
+        "summary.json",
+    }
+    assert "run-manifest.json" not in manifest["artifact_checksums"]

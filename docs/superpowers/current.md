@@ -31,7 +31,7 @@ Implementation status: `in_progress`
 
 Completion commit: `none`
 
-Verification evidence: `2026-07-15 offline: ruff passed; pytest 889 passed with 1 known Starlette warning; npm ci reported 0 vulnerabilities; frontend build passed; fabricated fixture smoke produced 4/4 fixed and 4/4 adaptive predictions plus 4 external query subsets`
+Verification evidence: `2026-07-15 offline: ruff passed; pytest 895 passed with 1 known Starlette warning; npm ci reported 0 vulnerabilities; frontend build passed; fabricated fixture smoke produced 4/4 fixed and 4/4 adaptive predictions, 4 external query subsets, and checksummed frozen artifacts`
 
 Blocker: `release gate pending: OPENAI_API_KEY, pinned model and cost rates, the full OpenRCA dataset, and a Microsoft OpenRCA evaluator checkout are unavailable in this workspace`
 

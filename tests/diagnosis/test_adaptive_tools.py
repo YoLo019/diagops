@@ -23,7 +23,11 @@ from backend.tools.provider_tools import build_provider_tool_registry
 async def test_session_enforces_scope_budget_and_duplicate_fingerprint():
     provider = QueryProvider("read_logs", EvidenceProvider.LOG, "ev-log")
     session = _session([provider])
-    payload = _query_payload(reason="first", keywords=["timeout"])
+    payload = _query_payload(
+        reason="first",
+        keywords=["Timeout", "error"],
+        levels=["ERROR", "Critical"],
+    )
 
     first = json.loads(
         await session.invoke(AgentName.LOG, "read_logs", json.dumps(payload), 1)
@@ -32,7 +36,16 @@ async def test_session_enforces_scope_budget_and_duplicate_fingerprint():
         await session.invoke(
             AgentName.LOG,
             "read_logs",
-            json.dumps({**payload, "reason": "same query, different reason"}),
+            json.dumps(
+                {
+                    **payload,
+                    "reason": "same query, reordered parameters",
+                    "start_time": "2026-07-15T15:50:00+08:00",
+                    "end_time": "2026-07-15T16:10:00+08:00",
+                    "keywords": ["ERROR", "timeout"],
+                    "levels": ["critical", "error"],
+                }
+            ),
             1,
         )
     )
