@@ -67,6 +67,15 @@ class AdaptiveToolSession:
                 self._allowed_targets.update(
                     value for value in dependencies if isinstance(value, str)
                 )
+            edges = item.payload.get("edges", [])
+            if isinstance(edges, list):
+                self._allowed_targets.update(
+                    value
+                    for edge in edges
+                    if isinstance(edge, dict)
+                    for value in (edge.get("parent"), edge.get("child"))
+                    if isinstance(value, str)
+                )
 
     def tools_for(
         self, agent_name: AgentName, round_number: int, attempt: int = 1

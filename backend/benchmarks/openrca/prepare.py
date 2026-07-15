@@ -83,6 +83,13 @@ def prepare_cases(
             OpenRcaRuntimeCase(
                 case_id=case_id,
                 partition=candidate.partition,
+                system=candidate.row.get("system", "").strip()
+                or candidate.partition.value,
+                date=candidate.row.get("date", "").strip()
+                or start_time.date().isoformat(),
+                service=candidate.row.get("service", "").strip()
+                or candidate.row.get("service_scope", "").strip()
+                or candidate.partition.value,
                 instruction=candidate.row.get("instruction", ""),
                 start_time=start_time,
                 end_time=end_time,

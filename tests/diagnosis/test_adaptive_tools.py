@@ -131,6 +131,36 @@ async def test_session_rejects_out_of_window_and_out_of_scope_dependency():
 
 
 @pytest.mark.anyio
+async def test_session_allows_targets_from_seed_dependency_edges():
+    provider = QueryProvider(
+        "query_dependencies", EvidenceProvider.DEPENDENCY, "ev-follow-up"
+    )
+    seed = _evidence(
+        "ev-openrca-edge",
+        EvidenceProvider.DEPENDENCY,
+        EvidenceKind.DEPENDENCY_HEALTH,
+        payload={
+            "edges": [
+                {"parent": "checkout-service", "child": "payment-service"}
+            ]
+        },
+    )
+    session = _session([provider], seed=[seed])
+
+    response = json.loads(
+        await session.invoke(
+            AgentName.DEPLOYMENT,
+            "query_dependencies",
+            json.dumps(_query_payload(target="payment-service")),
+            1,
+        )
+    )
+
+    assert response["status"] == "success"
+    assert provider.calls == 1
+
+
+@pytest.mark.anyio
 async def test_empty_result_stops_later_queries_for_specialist():
     provider = QueryProvider("read_logs", EvidenceProvider.LOG, None)
     session = _session([provider])
