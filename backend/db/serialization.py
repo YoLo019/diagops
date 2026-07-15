@@ -8,16 +8,22 @@ from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem
 from backend.domain.hypotheses import Hypothesis
 from backend.domain.llm_analysis import LLMAnalysis
+from backend.domain.multi_agent import InvestigationStrategy
 from backend.domain.reports import IncidentReport
 from backend.providers.results import ProviderResult
 from backend.safety.redaction import assert_safe_value
 
+_STRATEGY_KEY = "_diagops_investigation_strategy"
+
 
 def record_to_rows(record: InvestigationRecord) -> dict[str, Any]:
+    event_payload = record.event.model_dump(mode="json")
+    # V8.2 将 additive strategy 写入现有 JSON，避免为 V5 历史库增加物理迁移。
+    investigation_event = {**event_payload, _STRATEGY_KEY: record.strategy.value}
     rows = {
         "investigation": {
             "id": record.id,
-            "event": record.event.model_dump(mode="json"),
+            "event": investigation_event,
             "status": record.status.value,
             "failure_reason": record.failure_reason,
             "created_at": record.created_at.isoformat(),
@@ -26,7 +32,7 @@ def record_to_rows(record: InvestigationRecord) -> dict[str, Any]:
                 record.completed_at.isoformat() if record.completed_at is not None else None
             ),
         },
-        "events": [record.event.model_dump(mode="json")],
+        "events": [event_payload],
         "evidence_items": _child_rows(record.id, record.evidence),
         "hypotheses": _child_rows(record.id, record.hypotheses),
         "recommended_actions": _child_rows(record.id, record.actions),
@@ -46,6 +52,9 @@ def rows_to_record(rows: Mapping[str, Any]) -> InvestigationRecord:
     return InvestigationRecord(
         id=investigation["id"],
         event=IncidentEvent(**investigation["event"]),
+        strategy=investigation["event"].get(
+            _STRATEGY_KEY, InvestigationStrategy.FIXED
+        ),
         status=InvestigationStatus(investigation["status"]),
         evidence=[
             EvidenceItem(**item["payload"])

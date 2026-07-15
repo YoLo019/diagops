@@ -29,6 +29,7 @@ from backend.db.schema import (
 from backend.db.session import create_db_engine, initialize_database
 from backend.db.sqlite_repository import SQLiteInvestigationRepository
 from backend.domain.events import IncidentEvent, IncidentSource, Severity
+from backend.domain.multi_agent import InvestigationStrategy
 
 _V3_TABLES = (
     schema_version,
@@ -71,7 +72,10 @@ def test_historical_schema_migrates_to_v5_and_preserves_rows(
     assert versions == [CURRENT_SCHEMA_VERSION]
     assert foreign_keys == 1
     assert llm_payload["summary"] == "historical analysis"
-    assert SQLiteInvestigationRepository(engine).get("inv-history").event.title == "history"
+    restored = SQLiteInvestigationRepository(engine).get("inv-history")
+    assert restored.event.title == "history"
+    assert restored.strategy == InvestigationStrategy.FIXED
+    assert CURRENT_SCHEMA_VERSION == 5
 
 
 def test_v4_schema_with_single_current_marker_migrates_to_v5(tmp_path) -> None:

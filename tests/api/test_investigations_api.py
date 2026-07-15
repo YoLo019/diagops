@@ -58,6 +58,7 @@ def test_list_investigation_summaries_is_newest_first_and_excludes_details():
         "status",
         "service",
         "title",
+        "strategy",
         "top_cause_type",
         "confidence",
         "action_count",

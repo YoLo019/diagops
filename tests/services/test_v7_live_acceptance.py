@@ -476,12 +476,15 @@ def test_capturing_runtime_forwards_to_parent_and_returns_same_result(monkeypatc
     event = load_incident_case("database_slowdown")
     observed = {}
 
-    async def fake_parent_run(self, investigation_id, event, evidence, hypotheses):
+    async def fake_parent_run(
+        self, investigation_id, event, evidence, hypotheses, *, strategy=None
+    ):
         observed.update(
             investigation_id=investigation_id,
             event=event,
             evidence=evidence,
             hypotheses=hypotheses,
+            strategy=strategy,
         )
         return sentinel
 
@@ -497,6 +500,7 @@ def test_capturing_runtime_forwards_to_parent_and_returns_same_result(monkeypatc
         "event": event,
         "evidence": [],
         "hypotheses": [],
+        "strategy": None,
     }
 
 
@@ -596,7 +600,10 @@ class _SubstituteRuntime:
         self.last_result = None
         self.calls = []
 
-    async def run(self, investigation_id, event, evidence, hypotheses):
+    async def run(
+        self, investigation_id, event, evidence, hypotheses, *, strategy=None
+    ):
+        del strategy
         self.calls.append((event, evidence, hypotheses))
         result = AgentsRcaRuntimeResult.failed(investigation_id, "substitute fallback")
         result.input_tokens = 11
@@ -611,8 +618,10 @@ class _StaleCaptureRuntime:
         self.last_result = None
         self.calls = 0
 
-    async def run(self, investigation_id, event, evidence, hypotheses):
-        del event, evidence, hypotheses
+    async def run(
+        self, investigation_id, event, evidence, hypotheses, *, strategy=None
+    ):
+        del event, evidence, hypotheses, strategy
         self.calls += 1
         if self.calls > 1:
             raise RuntimeError("substitute failure")
@@ -626,8 +635,10 @@ class _InvalidReviewRuntime:
     def __init__(self) -> None:
         self.last_result = None
 
-    async def run(self, investigation_id, event, evidence, hypotheses):
-        del event, evidence, hypotheses
+    async def run(
+        self, investigation_id, event, evidence, hypotheses, *, strategy=None
+    ):
+        del event, evidence, hypotheses, strategy
         result = AgentsRcaRuntimeResult.failed(investigation_id, "raw invalid")
         result.review = CoordinationReview(
             investigation_id=investigation_id,

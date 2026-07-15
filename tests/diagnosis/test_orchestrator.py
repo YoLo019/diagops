@@ -25,27 +25,35 @@ from backend.domain.actions import (
     RecommendedAction,
     VerificationSuggestion,
 )
-from backend.domain.agent_findings import AgentFindingType, AgentName
+from backend.domain.agent_findings import (
+    AgentFindingType,
+    AgentName,
+    RootCauseAttribution,
+)
 from backend.domain.agent_plan import AgentExecutionStatus, DiagnosisTaskStatus
 from backend.domain.evidence import (
+    EvidenceItem,
     EvidenceKind,
     EvidenceProvider,
     EvidenceStatus,
 )
 from backend.domain.hypotheses import CauseType
 from backend.domain.multi_agent import (
+    AdaptiveRunStatus,
     AgentExecutionLayer,
     CoordinationDecisionStatus,
     ExecutionStepKind,
     FailureCategory,
+    InvestigationStrategy,
     ModelProvider,
     MultiAgentRunStatus,
     MultiAgentRunSummary,
     ResultValidationCategory,
     StabilizationCategory,
 )
+from backend.domain.tool_calls import ToolCallRecord, ToolCallStatus
 from backend.providers.registry import ProviderRegistry, build_mock_provider_registry
-from backend.providers.results import ProviderResult
+from backend.providers.results import ProviderResult, ProviderStatus
 from backend.rca.analyzer import RcaAnalyzer
 from backend.reports.generator import ReportGenerator
 from backend.services.container import AppContainer
@@ -209,7 +217,9 @@ class StubAgentsRuntime:
         self.status = status
         self.calls = []
 
-    async def run(self, *, investigation_id, event, evidence, hypotheses):
+    async def run(
+        self, *, investigation_id, event, evidence, hypotheses, strategy=None
+    ):
         persisted = self.repository.get(investigation_id)
         assert event == persisted.event
         assert evidence == [
@@ -221,8 +231,86 @@ class StubAgentsRuntime:
         assert hypotheses == persisted.hypotheses
         assert self.repository.list_agent_findings(investigation_id)
         assert self.repository.get_coordination_review(investigation_id) is not None
-        self.calls.append((investigation_id, event, evidence, hypotheses))
+        self.calls.append((investigation_id, event, evidence, hypotheses, strategy))
         return sdk_result(self.repository, investigation_id, self.status)
+
+
+class AdaptiveStubAgentsRuntime:
+    strategy = InvestigationStrategy.FIXED
+
+    def __init__(self, repository, *, invalid_finding=False):
+        self.repository = repository
+        self.invalid_finding = invalid_finding
+        self.strategies = []
+
+    async def run(
+        self, *, investigation_id, event, evidence, hypotheses, strategy=None
+    ):
+        del event, evidence
+        self.strategies.append(strategy)
+        persisted = self.repository.get(investigation_id)
+        dynamic = EvidenceItem(
+            id="ev-adaptive-log",
+            provider=EvidenceProvider.LOG,
+            kind=EvidenceKind.LOG_PATTERN,
+            timestamp=persisted.event.started_at,
+            summary="Adaptive log evidence",
+        )
+        result = sdk_result(
+            self.repository, investigation_id, MultiAgentRunStatus.COMPLETED
+        )
+        result.findings[0].evidence_ids = [dynamic.id]
+        result.executions[0].evidence_ids = [dynamic.id]
+        result.review = build_hybrid_coordination_review(
+            investigation_id,
+            result.findings,
+            [*persisted.evidence, dynamic],
+            hypotheses,
+            MultiAgentRunStatus.COMPLETED,
+            "Adaptive SDK review",
+            "",
+            model_provider=ModelProvider.OPENAI,
+            model_name="gpt-test",
+            root_causes=[
+                RootCauseAttribution(
+                    root_cause_occurred_at=dynamic.timestamp,
+                    root_cause_component=persisted.event.service,
+                    root_cause_reason="adaptive log evidence",
+                    supporting_evidence_ids=[dynamic.id],
+                )
+            ],
+        )
+        if self.invalid_finding:
+            result.findings[0].evidence_ids = ["ev-unknown"]
+        result.run_summary = MultiAgentRunSummary(
+            status=MultiAgentRunStatus.COMPLETED,
+            strategy=InvestigationStrategy.ADAPTIVE,
+            adaptive_status=AdaptiveRunStatus.COMPLETED,
+            tool_call_count=1,
+            model_provider=ModelProvider.OPENAI,
+            model_name="gpt-test",
+        )
+        result.tool_calls = [
+            ToolCallRecord(
+                task_id=result.tasks[0].id,
+                agent_name=AgentName.LOG,
+                tool_name="read_logs",
+                input={"reason": "inspect incident logs"},
+                status=ToolCallStatus.SUCCESS,
+                output_evidence_ids=[dynamic.id],
+                started_at=dynamic.timestamp,
+                completed_at=dynamic.timestamp,
+            )
+        ]
+        result.provider_results = [
+            ProviderResult(
+                provider=EvidenceProvider.LOG,
+                status=ProviderStatus.SUCCESS,
+                evidence_items=[dynamic],
+            )
+        ]
+        result.evidence = [dynamic]
+        return result
 
 
 def corrupt_sdk_result(result, repository, investigation_id, case):
@@ -400,6 +488,122 @@ def test_orchestrator_persists_completed_record_with_actions_and_verifications()
     assert saved.provider_results
     assert saved.specialist_results
     assert saved.completed_at is not None
+
+
+def test_adaptive_evidence_is_validated_persisted_and_visible():
+    repository = InMemoryInvestigationRepository()
+    runtime = AdaptiveStubAgentsRuntime(repository)
+    orchestrator = build_v2_orchestrator(
+        repository=repository, agents_runtime=runtime
+    )
+
+    record = orchestrator.run(
+        load_incident_case("deployment_regression"),
+        strategy=InvestigationStrategy.ADAPTIVE,
+    )
+    persisted = repository.get(record.id)
+
+    assert runtime.strategies == [InvestigationStrategy.ADAPTIVE]
+    assert persisted.strategy == InvestigationStrategy.ADAPTIVE
+    assert any(item.id == "ev-adaptive-log" for item in persisted.evidence)
+    assert any(
+        "ev-adaptive-log" in call.output_evidence_ids
+        for call in repository.list_tool_calls(record.id)
+    )
+    assert repository.get_coordination_review(
+        record.id
+    ).root_causes[0].supporting_evidence_ids == ["ev-adaptive-log"]
+
+
+def test_adaptive_agent_validation_failure_keeps_deterministic_result_and_artifacts():
+    repository = InMemoryInvestigationRepository()
+    runtime = AdaptiveStubAgentsRuntime(repository, invalid_finding=True)
+    orchestrator = build_v2_orchestrator(
+        repository=repository, agents_runtime=runtime
+    )
+
+    record = orchestrator.run(
+        load_incident_case("deployment_regression"),
+        strategy=InvestigationStrategy.ADAPTIVE,
+    )
+
+    assert record.status == InvestigationStatus.COMPLETED
+    assert record.hypotheses[0].cause_type == CauseType.DEPLOYMENT_REGRESSION
+    assert record.report is not None
+    assert any(item.id == "ev-adaptive-log" for item in record.evidence)
+    assert repository.list_tool_calls(record.id)[-1].output_evidence_ids == [
+        "ev-adaptive-log"
+    ]
+
+
+def test_adaptive_repeated_seed_evidence_is_a_valid_audited_provider_result():
+    class RepeatedEvidenceRuntime:
+        strategy = InvestigationStrategy.ADAPTIVE
+
+        async def run(self, *, investigation_id, **_kwargs):
+            result = sdk_result(
+                repository, investigation_id, MultiAgentRunStatus.COMPLETED
+            )
+            repeated = next(
+                item
+                for item in repository.get(investigation_id).evidence
+                if item.provider == EvidenceProvider.LOG
+            )
+            result.provider_results = [
+                ProviderResult(
+                    provider=EvidenceProvider.LOG,
+                    status=ProviderStatus.PARTIAL,
+                    evidence_items=[repeated],
+                    error_message="one replica unavailable",
+                )
+            ]
+            result.run_summary.strategy = InvestigationStrategy.ADAPTIVE
+            result.run_summary.adaptive_status = AdaptiveRunStatus.COMPLETED
+            return result
+
+    repository = InMemoryInvestigationRepository()
+    record = build_v2_orchestrator(
+        repository=repository,
+        agents_runtime=RepeatedEvidenceRuntime(),
+    ).run(load_incident_case("deployment_regression"))
+
+    assert record.status == InvestigationStatus.COMPLETED
+    assert repository.get_coordination_review(
+        record.id
+    ).execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK
+    assert any(
+        result.status == ProviderStatus.PARTIAL
+        for result in record.provider_results
+    )
+
+
+def test_adaptive_artifact_persistence_failure_is_degraded_without_retry():
+    class FailingToolCallRepository(InMemoryInvestigationRepository):
+        def save_tool_calls(self, investigation_id, calls):
+            del investigation_id, calls
+            raise RuntimeError("injected tool-call persistence failure")
+
+    class CapturingReportGenerator(ReportGenerator):
+        def generate(self, *args, **kwargs):
+            self.multi_agent_run = kwargs.get("multi_agent_run")
+            return super().generate(*args, **kwargs)
+
+    repository = FailingToolCallRepository()
+    runtime = AdaptiveStubAgentsRuntime(repository)
+    report_generator = CapturingReportGenerator()
+    record = build_v2_orchestrator(
+        repository=repository,
+        report_generator=report_generator,
+        agents_runtime=runtime,
+    ).run(
+        load_incident_case("deployment_regression"),
+        strategy=InvestigationStrategy.ADAPTIVE,
+    )
+
+    assert record.status == InvestigationStatus.COMPLETED
+    assert runtime.strategies == [InvestigationStrategy.ADAPTIVE]
+    assert report_generator.multi_agent_run.strategy == InvestigationStrategy.ADAPTIVE
+    assert report_generator.multi_agent_run.adaptive_status == AdaptiveRunStatus.DEGRADED
 
 
 def test_orchestrator_records_v4_plan_tasks_executions_and_tool_calls():
@@ -1807,6 +2011,10 @@ def test_container_builds_one_agents_runtime_only_when_enabled(monkeypatch):
                 model="gpt-test",
                 max_turns=4,
                 timeout_seconds=12,
+                strategy=InvestigationStrategy.ADAPTIVE,
+                max_tool_calls_per_specialist=5,
+                max_total_tool_calls=11,
+                tool_timeout_seconds=20,
             ),
         )
     )
@@ -1819,7 +2027,13 @@ def test_container_builds_one_agents_runtime_only_when_enabled(monkeypatch):
         "timeout_seconds": 12,
         "model_provider": ModelProvider.OPENAI,
         "model_name": "gpt-test",
+        "strategy": InvestigationStrategy.ADAPTIVE,
+        "tool_registry": created[0].kwargs["tool_registry"],
+        "max_tool_calls_per_specialist": 5,
+        "max_total_tool_calls": 11,
+        "tool_timeout_seconds": 20,
     }
+    assert created[0].kwargs["tool_registry"].get("read_logs").read_only is True
 
 
 def test_container_selects_deepseek_adapter_without_openai_fallback(monkeypatch):

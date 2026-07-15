@@ -90,9 +90,17 @@ class CapturingAgentsRcaRuntime(AgentsRcaRuntime):
         event,
         evidence,
         hypotheses,
+        *,
+        strategy=None,
     ) -> AgentsRcaRuntimeResult:
         self.last_result = None
-        result = await super().run(investigation_id, event, evidence, hypotheses)
+        result = await super().run(
+            investigation_id,
+            event,
+            evidence,
+            hypotheses,
+            strategy=strategy,
+        )
         self.last_result = result
         return result
 
@@ -108,8 +116,10 @@ class DeterministicSubstituteRuntime:
         event,
         evidence,
         hypotheses,
+        *,
+        strategy=None,
     ) -> AgentsRcaRuntimeResult:
-        del event, evidence, hypotheses
+        del event, evidence, hypotheses, strategy
         result = AgentsRcaRuntimeResult.failed(
             investigation_id, "deterministic substitute fallback"
         )
@@ -121,9 +131,13 @@ class _AcceptanceOrchestrator(DiagnosisOrchestrator):
     accepted_result: AgentsRcaRuntimeResult | None = None
 
     def _record_v7_coordination(
-        self, investigation_id: str
+        self,
+        investigation_id: str,
+        strategy,
     ) -> AgentsRcaRuntimeResult | None:
-        self.accepted_result = super()._record_v7_coordination(investigation_id)
+        self.accepted_result = super()._record_v7_coordination(
+            investigation_id, strategy
+        )
         return self.accepted_result
 
 

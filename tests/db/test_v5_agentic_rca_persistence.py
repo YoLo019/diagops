@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import create_engine, insert
 
+from backend.db.models import InvestigationRecord
 from backend.db.repositories import InMemoryInvestigationRepository
 from backend.db.schema import agent_findings, coordination_reviews, metadata
 from backend.db.sqlite_repository import SQLiteInvestigationRepository
@@ -14,12 +15,14 @@ from backend.domain.agent_findings import (
     RootCauseCandidate,
 )
 from backend.domain.agent_plan import AgentExecution, AgentExecutionStatus
+from backend.domain.events import IncidentEvent, IncidentSource, Severity
 from backend.domain.hypotheses import CauseType
 from backend.domain.multi_agent import (
     AgentExecutionLayer,
     CoordinationDecisionStatus,
     ExecutionStepKind,
     FailureCategory,
+    InvestigationStrategy,
     ModelProvider,
     MultiAgentRunStatus,
     StabilizationCategory,
@@ -34,6 +37,26 @@ def build_sqlite_repository():
 
 def dt(minutes: int) -> datetime:
     return datetime(2026, 7, 8, 9, minutes, tzinfo=UTC)
+
+
+def test_sqlite_investigation_strategy_round_trips_without_schema_change():
+    repository = build_sqlite_repository()
+    record = InvestigationRecord(
+        event=IncidentEvent(
+            source=IncidentSource.MANUAL,
+            service="checkout",
+            environment="production",
+            severity=Severity.CRITICAL,
+            title="Checkout errors",
+            description="Error rate increased",
+            started_at=dt(0),
+        ),
+        strategy=InvestigationStrategy.ADAPTIVE,
+    )
+
+    repository.save(record)
+
+    assert repository.get(record.id).strategy == InvestigationStrategy.ADAPTIVE
 
 
 def finding(

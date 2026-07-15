@@ -44,14 +44,17 @@ from backend.domain.evidence import (
 )
 from backend.domain.hypotheses import Hypothesis
 from backend.domain.multi_agent import (
+    AdaptiveRunStatus,
     AgentExecutionLayer,
     CoordinationDecisionStatus,
     ExecutionStepKind,
     FailureCategory,
+    InvestigationStrategy,
     MultiAgentRunStatus,
     MultiAgentRunSummary,
     ResultValidationCategory,
 )
+from backend.domain.tool_calls import ToolCallRecord
 from backend.providers.registry import ProviderRegistry
 from backend.providers.results import ProviderResult
 from backend.rca.analyzer import RcaAnalyzer
@@ -64,6 +67,41 @@ logger = logging.getLogger(__name__)
 
 def _candidate_contract(candidate: RootCauseCandidate) -> dict[str, object]:
     return candidate.model_dump(mode="python", exclude={"id"})
+
+
+def _unique_models(items: list[ProviderResult]) -> list[ProviderResult]:
+    unique: list[ProviderResult] = []
+    fingerprints: set[str] = set()
+    for item in items:
+        validated = ProviderResult.model_validate(item.model_dump(mode="python"))
+        fingerprint = validated.model_dump_json()
+        if fingerprint in fingerprints:
+            continue
+        fingerprints.add(fingerprint)
+        unique.append(validated)
+    return unique
+
+
+def _merge_evidence(
+    existing: list[EvidenceItem], additional: list[EvidenceItem]
+) -> list[EvidenceItem]:
+    merged = [
+        EvidenceItem.model_validate(item.model_dump(mode="python"))
+        for item in existing
+    ]
+    by_id = {item.id: item for item in merged}
+    for item in additional:
+        validated = EvidenceItem.model_validate(item.model_dump(mode="python"))
+        previous = by_id.get(validated.id)
+        if previous is not None:
+            if previous != validated:
+                raise EvidenceContractError(
+                    "duplicate_evidence_id", validated.id
+                )
+            continue
+        by_id[validated.id] = validated
+        merged.append(validated)
+    return merged
 
 
 class DiagnosisOrchestrator:
@@ -92,10 +130,26 @@ class DiagnosisOrchestrator:
         )
         self.agents_runtime = agents_runtime
 
-    def run(self, event: IncidentEvent) -> InvestigationRecord:
+    def run(
+        self,
+        event: IncidentEvent,
+        strategy: InvestigationStrategy | None = None,
+    ) -> InvestigationRecord:
+        effective_strategy = InvestigationStrategy(
+            strategy
+            or getattr(
+                self.agents_runtime,
+                "strategy",
+                InvestigationStrategy.FIXED,
+            )
+        )
         safe_event = redact_model(event)
         record = self.repository.save(
-            InvestigationRecord(event=safe_event, status=InvestigationStatus.PENDING)
+            InvestigationRecord(
+                event=safe_event,
+                strategy=effective_strategy,
+                status=InvestigationStatus.PENDING,
+            )
         )
         logger.info(
             "investigation started id=%s service=%s", record.id, safe_event.service
@@ -122,7 +176,12 @@ class DiagnosisOrchestrator:
             self._record_v5_coordination(
                 record.id, safe_event, supporting_evidence, hypotheses
             )
-            v7_result = self._record_v7_coordination(record.id)
+            v7_result = self._record_v7_coordination(
+                record.id, effective_strategy
+            )
+            persisted = self.repository.get(record.id)
+            record.provider_results = persisted.provider_results
+            evidence = persisted.evidence
 
             actions, verifications = self.action_planner.plan(
                 safe_event, supporting_evidence, hypotheses
@@ -231,6 +290,7 @@ class DiagnosisOrchestrator:
     def _record_v7_coordination(
         self,
         investigation_id: str,
+        strategy: InvestigationStrategy,
     ) -> AgentsRcaRuntimeResult | None:
         if self.agents_runtime is None:
             return None
@@ -263,6 +323,7 @@ class DiagnosisOrchestrator:
                     event=persisted.event,
                     evidence=supporting_evidence,
                     hypotheses=persisted.hypotheses,
+                    strategy=strategy,
                 )
             )
         except Exception as exc:
@@ -273,6 +334,15 @@ class DiagnosisOrchestrator:
                 type(exc).__name__,
             )
             result = AgentsRcaRuntimeResult.failed(investigation_id, reason)
+
+        try:
+            evidence = self._persist_adaptive_artifacts(
+                investigation_id, result
+            )
+        except Exception:
+            return self._record_v7_persistence_failure(
+                investigation_id, result
+            )
 
         try:
             result = self._validate_v7_result(
@@ -290,13 +360,15 @@ class DiagnosisOrchestrator:
                 investigation_id,
                 exc.category.value,
             )
+            fallback = AgentsRcaRuntimeResult.validation_failed(
+                exc.category,
+                model_provider=result.run_summary.model_provider,
+                model_name=result.run_summary.model_name,
+            )
+            self._copy_adaptive_metadata(fallback, result, degraded=True)
             result = self._validate_v7_result(
                 investigation_id,
-                AgentsRcaRuntimeResult.validation_failed(
-                    exc.category,
-                    model_provider=result.run_summary.model_provider,
-                    model_name=result.run_summary.model_name,
-                ),
+                fallback,
                 evidence,
                 hypotheses,
                 existing_task_ids,
@@ -310,9 +382,13 @@ class DiagnosisOrchestrator:
                 investigation_id,
                 type(exc).__name__,
             )
+            fallback = AgentsRcaRuntimeResult.failed(
+                investigation_id, reason
+            )
+            self._copy_adaptive_metadata(fallback, result, degraded=True)
             result = self._validate_v7_result(
                 investigation_id,
-                AgentsRcaRuntimeResult.failed(investigation_id, reason),
+                fallback,
                 evidence,
                 hypotheses,
                 existing_task_ids,
@@ -327,6 +403,59 @@ class DiagnosisOrchestrator:
                 investigation_id, result
             )
         return self._reload_v7_result(investigation_id, result)
+
+    def _persist_adaptive_artifacts(
+        self,
+        investigation_id: str,
+        result: AgentsRcaRuntimeResult,
+    ) -> list[EvidenceItem]:
+        record = self.repository.get(investigation_id)
+        new_provider_results = _unique_models(result.provider_results)
+        for provider_result in new_provider_results:
+            validate_investigation_evidence([provider_result])
+        provider_results = _unique_models(
+            [*record.provider_results, *new_provider_results]
+        )
+        evidence = _merge_evidence(record.evidence, result.evidence)
+        calls = [
+            ToolCallRecord.model_validate(item.model_dump(mode="python"))
+            for item in result.tool_calls
+        ]
+        record.provider_results = provider_results
+        record.evidence = evidence
+        record.updated_at = datetime.now(UTC)
+        self.repository.save(record)
+        if calls:
+            self.repository.save_tool_calls(investigation_id, calls)
+        return evidence
+
+    @staticmethod
+    def _copy_adaptive_metadata(
+        target: AgentsRcaRuntimeResult,
+        source: AgentsRcaRuntimeResult,
+        *,
+        degraded: bool,
+    ) -> None:
+        target.run_summary.strategy = source.run_summary.strategy
+        target.run_summary.adaptive_status = (
+            AdaptiveRunStatus.DEGRADED
+            if degraded
+            and source.run_summary.strategy == InvestigationStrategy.ADAPTIVE
+            else source.run_summary.adaptive_status
+        )
+        target.run_summary.adaptive_stop_reason = (
+            source.run_summary.adaptive_stop_reason
+        )
+        target.run_summary.tool_call_count = source.run_summary.tool_call_count
+        target.run_summary.max_tool_calls_per_specialist = (
+            source.run_summary.max_tool_calls_per_specialist
+        )
+        target.run_summary.max_total_tool_calls = (
+            source.run_summary.max_total_tool_calls
+        )
+        target.tool_calls = list(source.tool_calls)
+        target.provider_results = list(source.provider_results)
+        target.evidence = list(source.evidence)
 
     def _validate_v7_result(
         self,
@@ -469,6 +598,7 @@ class DiagnosisOrchestrator:
                 secondary_stabilization_categories=(
                     review.secondary_stabilization_categories
                 ),
+                root_causes=review.root_causes,
             )
             candidate_contracts = [
                 _candidate_contract(candidate) for candidate in review.candidates
@@ -535,6 +665,7 @@ class DiagnosisOrchestrator:
                     ],
                     findings,
                     review.candidates,
+                    review.root_causes,
                 )
             except EvidenceContractError as exc:
                 raise AgentResultValidationError(
@@ -594,6 +725,9 @@ class DiagnosisOrchestrator:
             input_tokens=result.input_tokens,
             output_tokens=result.output_tokens,
             tool_names=list(result.tool_names),
+            tool_calls=list(result.tool_calls),
+            provider_results=list(result.provider_results),
+            evidence=list(result.evidence),
         )
 
     def _persist_v7_result(
@@ -646,6 +780,7 @@ class DiagnosisOrchestrator:
                 ),
             ),
         )
+        self._copy_adaptive_metadata(recovery, result, degraded=True)
         try:
             self.repository.save_multi_agent_result(
                 investigation_id, [], [execution], None
@@ -722,15 +857,17 @@ class DiagnosisOrchestrator:
                     return None
                 review = None
                 categories = stabilization_categories_from_executions(executions)
-                summary = MultiAgentRunSummary(
-                    status=MultiAgentRunStatus(coordinator.status.value),
-                    failure_reason=coordinator.error_message,
-                    model_provider=coordinator.model_provider,
-                    model_name=coordinator.model_name,
-                    primary_stabilization_category=(
-                        categories[0] if categories else None
-                    ),
-                    secondary_stabilization_categories=categories[1:],
+                summary = result.run_summary.model_copy(
+                    update={
+                        "status": MultiAgentRunStatus(coordinator.status.value),
+                        "failure_reason": coordinator.error_message,
+                        "model_provider": coordinator.model_provider,
+                        "model_name": coordinator.model_name,
+                        "primary_stabilization_category": (
+                            categories[0] if categories else None
+                        ),
+                        "secondary_stabilization_categories": categories[1:],
+                    }
                 )
             else:
                 persisted_review = self.repository.get_coordination_review(
@@ -745,16 +882,19 @@ class DiagnosisOrchestrator:
                     mode="json"
                 ):
                     return None
-                summary = MultiAgentRunSummary(
-                    status=review.run_status,
-                    model_provider=review.model_provider,
-                    model_name=review.model_name,
-                    primary_stabilization_category=(
-                        review.primary_stabilization_category
-                    ),
-                    secondary_stabilization_categories=(
-                        review.secondary_stabilization_categories
-                    ),
+                summary = result.run_summary.model_copy(
+                    update={
+                        "status": review.run_status,
+                        "failure_reason": None,
+                        "model_provider": review.model_provider,
+                        "model_name": review.model_name,
+                        "primary_stabilization_category": (
+                            review.primary_stabilization_category
+                        ),
+                        "secondary_stabilization_categories": (
+                            review.secondary_stabilization_categories
+                        ),
+                    }
                 )
 
             return AgentsRcaRuntimeResult(
@@ -766,6 +906,9 @@ class DiagnosisOrchestrator:
                 input_tokens=result.input_tokens,
                 output_tokens=result.output_tokens,
                 tool_names=list(result.tool_names),
+                tool_calls=list(result.tool_calls),
+                provider_results=list(result.provider_results),
+                evidence=list(result.evidence),
             )
         except Exception as exc:
             logger.warning(

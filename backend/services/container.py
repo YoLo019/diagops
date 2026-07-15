@@ -15,6 +15,7 @@ from backend.domain.multi_agent import ModelProvider
 from backend.providers.registry import build_provider_registry_from_settings
 from backend.rca.analyzer import RcaAnalyzer
 from backend.reports.generator import ReportGenerator
+from backend.tools.provider_tools import build_provider_tool_registry
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,17 @@ class AppContainer:
                     timeout_seconds=self.settings.agents.timeout_seconds,
                     model_provider=provider,
                     model_name=self.settings.agents.model,
+                    strategy=self.settings.agents.strategy,
+                    tool_registry=build_provider_tool_registry(providers),
+                    max_tool_calls_per_specialist=(
+                        self.settings.agents.max_tool_calls_per_specialist
+                    ),
+                    max_total_tool_calls=(
+                        self.settings.agents.max_total_tool_calls
+                    ),
+                    tool_timeout_seconds=(
+                        self.settings.agents.tool_timeout_seconds
+                    ),
                 )
             except Exception as exc:
                 logger.warning(

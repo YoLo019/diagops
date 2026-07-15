@@ -10,6 +10,7 @@ from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem
 from backend.domain.hypotheses import Hypothesis
 from backend.domain.llm_analysis import LLMAnalysis
+from backend.domain.multi_agent import InvestigationStrategy
 from backend.domain.reports import IncidentReport
 from backend.providers.results import ProviderResult
 from backend.safety.redaction import redact_text
@@ -26,6 +27,7 @@ class InvestigationStatus(StrEnum):
 class InvestigationRecord(BaseModel):
     id: str = Field(default_factory=lambda: f"inv-{uuid4().hex}")
     event: IncidentEvent
+    strategy: InvestigationStrategy = InvestigationStrategy.FIXED
     status: InvestigationStatus = InvestigationStatus.PENDING
     evidence: list[EvidenceItem] = Field(default_factory=list)
     provider_results: list[ProviderResult] = Field(default_factory=list)
@@ -46,6 +48,7 @@ class InvestigationSummary(BaseModel):
     status: str
     service: str
     title: str
+    strategy: InvestigationStrategy = InvestigationStrategy.FIXED
     top_cause_type: str
     confidence: float
     action_count: int = 0
@@ -61,6 +64,7 @@ class InvestigationSummary(BaseModel):
             status=record.status.value,
             service=redact_text(record.event.service),
             title=redact_text(record.event.title),
+            strategy=record.strategy,
             top_cause_type=top.cause_type.value if top else "unknown",
             confidence=top.confidence if top else 0.0,
             action_count=len(record.actions),
