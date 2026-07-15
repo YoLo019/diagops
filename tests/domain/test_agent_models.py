@@ -56,11 +56,31 @@ def test_root_cause_attribution_requires_grounded_non_empty_values():
         {"root_cause_reason": ""},
         {"root_cause_occurred_at": datetime(2026, 7, 15, 8)},
         {"supporting_evidence_ids": []},
+        {"supporting_evidence_ids": [""]},
     ):
         values = attribution.model_dump()
         values.update(changes)
         with pytest.raises(ValidationError):
             RootCauseAttribution.model_validate(values)
+
+
+def test_coordination_review_orders_root_causes_by_occurrence_time():
+    def attribution(hour: int) -> RootCauseAttribution:
+        return RootCauseAttribution(
+            root_cause_component=f"service-{hour}",
+            root_cause_occurred_at=datetime(2026, 7, 15, hour, tzinfo=UTC),
+            root_cause_reason="bounded evidence",
+            supporting_evidence_ids=[f"ev-{hour}"],
+        )
+
+    review = CoordinationReview(
+        investigation_id="inv-1", root_causes=[attribution(9), attribution(8)]
+    )
+
+    assert [item.root_cause_component for item in review.root_causes] == [
+        "service-8",
+        "service-9",
+    ]
 
 
 def test_agent_models_defaults_are_readable_and_empty_lists_are_fresh():

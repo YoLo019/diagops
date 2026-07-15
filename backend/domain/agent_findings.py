@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -82,7 +82,9 @@ class RootCauseAttribution(BaseModel):
     root_cause_occurred_at: datetime
     root_cause_component: str = Field(min_length=1)
     root_cause_reason: str = Field(min_length=1)
-    supporting_evidence_ids: list[str] = Field(min_length=1)
+    supporting_evidence_ids: list[Annotated[str, Field(min_length=1)]] = Field(
+        min_length=1
+    )
 
     @model_validator(mode="after")
     def validate_timestamp(self) -> "RootCauseAttribution":
@@ -114,8 +116,9 @@ class CoordinationReview(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     @model_validator(mode="after")
-    def sort_candidates(self) -> "CoordinationReview":
+    def sort_ranked_values(self) -> "CoordinationReview":
         self.candidates.sort(key=lambda candidate: candidate.rank)
+        self.root_causes.sort(key=lambda cause: cause.root_cause_occurred_at)
         return self
 
 

@@ -128,6 +128,24 @@ def test_deployment_query_filters_version_instance_window_and_limit(tmp_path):
     assert [item.payload["summary"] for item in result.evidence_items] == ["selected"]
 
 
+def test_fixed_deployment_payload_does_not_add_instance(tmp_path):
+    path = tmp_path / "deployments.json"
+    path.write_text(
+        """
+[
+  {"service":"payment-service","environment":"prod","version":"v2","instance":"pod-2","deployed_at":"2026-07-03T14:01:00+08:00","operator":"bot","commit":"b","summary":"fixed"}
+]
+""".strip(),
+        encoding="utf-8",
+    )
+
+    evidence = FileDeploymentProvider(path).collect(
+        load_incident_case("deployment_regression")
+    ).evidence_items[0]
+
+    assert "instance" not in evidence.payload
+
+
 def test_missing_deployment_file_becomes_provider_error_evidence(tmp_path):
     registry = ProviderRegistry([FileDeploymentProvider(tmp_path / "missing.json")])
 

@@ -62,7 +62,7 @@ class FileDeploymentProvider:
                 "commit": deployment["commit"],
                 "summary": summary,
             }
-            if deployment["instance"]:
+            if query and deployment["instance"]:
                 payload["instance"] = deployment["instance"]
             evidence.append(
                 EvidenceItem(

@@ -6,11 +6,13 @@ from backend.domain.evidence import EvidenceKind, EvidenceProvider, EvidenceStat
 from backend.domain.tool_queries import (
     DependencyQuery,
     DeploymentQuery,
+    LogQuery,
     MetricQuery,
     ServiceCatalogQuery,
 )
 from backend.providers.mock_dependencies import MockDependencyProvider
 from backend.providers.mock_deploys import MockDeployProvider
+from backend.providers.mock_logs import MockLogProvider
 from backend.providers.mock_metrics import MockMetricProvider
 from backend.providers.mock_service_catalog import MockServiceCatalogProvider
 from backend.providers.registry import ProviderRegistry, build_mock_provider_registry
@@ -148,3 +150,18 @@ def test_mock_queries_filter_metric_deployment_catalog_and_dependency_results():
     assert deployments == []
     assert catalog.payload["dependencies"] == []
     assert dependencies == []
+
+
+def test_mock_log_query_honors_level_filter():
+    event = load_incident_case("deployment_regression")
+    window = {
+        "start_time": event.started_at - timedelta(minutes=5),
+        "end_time": event.started_at + timedelta(minutes=5),
+        "reason": "验证日志级别",
+    }
+
+    info = MockLogProvider().collect(event, LogQuery(**window, levels=["INFO"]))
+    error = MockLogProvider().collect(event, LogQuery(**window, levels=["ERROR"]))
+
+    assert info.evidence_items == []
+    assert len(error.evidence_items) == 1

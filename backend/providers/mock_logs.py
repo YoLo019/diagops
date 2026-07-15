@@ -51,6 +51,10 @@ class MockLogProvider:
                 if query.start_time <= item.timestamp <= query.end_time
                 and (not query.instance or item.payload.get("instance") == query.instance)
                 and (
+                    not query.levels
+                    or "ERROR" in {level.upper() for level in query.levels}
+                )
+                and (
                     not query.keywords
                     or all(
                         keyword.lower() in f"{item.summary} {item.payload}".lower()
