@@ -37,7 +37,7 @@ class AdaptiveToolSession:
         event: IncidentEvent,
         seed_evidence: list[EvidenceItem],
         registry: ToolRegistry,
-        task_ids: dict[AgentName, str],
+        task_ids: dict[AgentName | tuple[AgentName, int], str],
         max_tool_calls_per_specialist: int = 3,
         max_total_tool_calls: int = 8,
         tool_timeout_seconds: int = 10,
@@ -102,7 +102,9 @@ class AdaptiveToolSession:
         raw_input: str,
         round_number: int,
     ) -> str:
-        del round_number
+        task_id = self.task_ids.get(
+            (agent_name, round_number), self.task_ids[agent_name]
+        )
         parsed = self._parse_input(raw_input)
         self._attempts[agent_name] += 1
         self._total_attempts += 1
@@ -114,6 +116,7 @@ class AdaptiveToolSession:
                 {},
                 ToolCallStatus.FAILED,
                 "invalid tool input",
+                task_id=task_id,
             )
         if tool_name not in TOOLS_BY_AGENT[agent_name]:
             return self._reject(
@@ -122,6 +125,7 @@ class AdaptiveToolSession:
                 parsed,
                 ToolCallStatus.FAILED,
                 "tool not allowed for agent",
+                task_id=task_id,
             )
 
         try:
@@ -134,6 +138,7 @@ class AdaptiveToolSession:
                 parsed,
                 ToolCallStatus.FAILED,
                 "tool input outside investigation scope",
+                task_id=task_id,
             )
 
         fingerprint = _query_fingerprint(tool_name, query)
@@ -145,6 +150,7 @@ class AdaptiveToolSession:
                 ToolCallStatus.SKIPPED,
                 "duplicate query",
                 AdaptiveStopReason.DUPLICATE_QUERY,
+                task_id=task_id,
             )
         if agent_name in self._stopped_agents:
             reason = self.stop_reasons[agent_name]
@@ -155,6 +161,7 @@ class AdaptiveToolSession:
                 ToolCallStatus.SKIPPED,
                 "specialist query stopped",
                 reason,
+                task_id=task_id,
             )
         if (
             self._attempts[agent_name] > self.max_tool_calls_per_specialist
@@ -167,6 +174,7 @@ class AdaptiveToolSession:
                 ToolCallStatus.SKIPPED,
                 "adaptive tool budget exhausted",
                 AdaptiveStopReason.BUDGET_EXHAUSTED,
+                task_id=task_id,
             )
 
         self._fingerprints.add(fingerprint)
@@ -174,7 +182,7 @@ class AdaptiveToolSession:
             self.registry.invoke_detailed,
             tool_name,
             event=self.event,
-            task_id=self.task_ids[agent_name],
+            task_id=task_id,
             agent_name=agent_name.value,
             input=query.model_dump(mode="json"),
         )
@@ -219,11 +227,13 @@ class AdaptiveToolSession:
         status: ToolCallStatus,
         message: str,
         stop_reason: AdaptiveStopReason | None = None,
+        *,
+        task_id: str,
     ) -> str:
         now = datetime.now(UTC)
         safe_input = redact_value(input_value)
         call = ToolCallRecord(
-            task_id=self.task_ids[agent_name],
+            task_id=task_id,
             agent_name=agent_name.value,
             tool_name=tool_name,
             input=safe_input if isinstance(safe_input, dict) else {},

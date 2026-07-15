@@ -16,6 +16,7 @@ from openai.types.responses import (
     ResponseOutputText,
 )
 
+from backend.diagnosis.adaptive_tools import AdaptiveToolSession
 from backend.diagnosis.agents_runtime import (
     AgentsRcaRuntime,
     _CoordinatorProposal,
@@ -32,6 +33,8 @@ from backend.domain.events import IncidentEvent, IncidentSource, Severity
 from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
 from backend.domain.hypotheses import CauseType, Hypothesis
 from backend.domain.multi_agent import MultiAgentRunStatus
+from backend.providers.registry import ProviderRegistry
+from backend.tools.provider_tools import build_provider_tool_registry
 
 
 @pytest.fixture
@@ -309,6 +312,46 @@ async def test_real_runner_invokes_three_structured_agent_tools_offline():
     assert model.tracing and set(model.tracing) == {
         ModelTracing.ENABLED_WITHOUT_DATA
     }
+
+
+@pytest.mark.anyio
+async def test_adaptive_sdk_specialists_receive_only_domain_tools():
+    model = ScriptedModel()
+    event = IncidentEvent(
+        source=IncidentSource.MANUAL,
+        service="checkout",
+        environment="production",
+        severity=Severity.CRITICAL,
+        title="Errors",
+        description="Errors increased",
+        started_at=datetime(2026, 7, 10, tzinfo=UTC),
+    )
+    session = AdaptiveToolSession(
+        event=event,
+        seed_evidence=[],
+        registry=build_provider_tool_registry(ProviderRegistry([])),
+        task_ids={name: f"task-{name.value}" for name in AgentName},
+    )
+
+    await _run_sdk_turn(
+        model=model,
+        coordinator_input="Request all specialists",
+        specialist_inputs={name: f"Evidence only for {name}" for name in AgentName},
+        specialist_names=list(AgentName),
+        max_turns=8,
+        adaptive_session=session,
+    )
+
+    assert model.tools_by_agent[AgentName.LOG] == ["read_logs"]
+    assert model.tools_by_agent[AgentName.METRIC] == [
+        "query_metrics",
+        "query_prometheus",
+    ]
+    assert model.tools_by_agent[AgentName.DEPLOYMENT] == [
+        "query_dependencies",
+        "read_deployments",
+        "read_service_catalog",
+    ]
 
 
 @pytest.mark.anyio

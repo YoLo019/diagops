@@ -8,6 +8,7 @@ from backend.domain.agent_findings import (
     AgentFindingType,
     AgentName,
     CoordinationReview,
+    RootCauseAttribution,
     RootCauseCandidate,
 )
 from backend.domain.evidence import EvidenceItem
@@ -116,6 +117,7 @@ def build_hybrid_coordination_review(
     model_name: str | None,
     primary_stabilization_category: StabilizationCategory | None = None,
     secondary_stabilization_categories: list[StabilizationCategory] | None = None,
+    root_causes: list[RootCauseAttribution] | None = None,
 ) -> CoordinationReview:
     """Validate references, build candidates, and assign status in code."""
     for finding in findings:
@@ -124,7 +126,7 @@ def build_hybrid_coordination_review(
     _validate_references(findings, evidence, hypotheses)
     active = _active_sdk_findings(findings)
     candidates = _build_candidates(active, hypotheses)
-    validate_agent_semantics(evidence, active, candidates)
+    validate_agent_semantics(evidence, active, candidates, root_causes)
 
     baseline = hypotheses[0] if hypotheses else None
     decision_status = (
@@ -190,6 +192,7 @@ def build_hybrid_coordination_review(
     return CoordinationReview(
         investigation_id=investigation_id,
         candidates=candidates,
+        root_causes=root_causes or [],
         execution_layer=AgentExecutionLayer.OPENAI_AGENTS_SDK,
         run_status=run_status,
         decision_status=decision_status,

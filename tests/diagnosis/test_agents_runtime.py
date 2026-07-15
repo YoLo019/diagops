@@ -48,15 +48,20 @@ from backend.domain.evidence import (
 )
 from backend.domain.hypotheses import CauseType, Hypothesis
 from backend.domain.multi_agent import (
+    AdaptiveRunStatus,
     AgentExecutionLayer,
     CoordinationDecisionStatus,
     ExecutionStepKind,
     FailureCategory,
+    InvestigationStrategy,
     ModelProvider,
     MultiAgentRunStatus,
     StabilizationCategory,
 )
+from backend.providers.registry import ProviderRegistry
+from backend.providers.results import ProviderResult, ProviderStatus
 from backend.safety.redaction import redact_text as _redact
+from backend.tools.provider_tools import build_provider_tool_registry
 
 
 class TurnStub:
@@ -214,6 +219,41 @@ def _all_first_round(cause=CauseType.DEPLOYMENT_REGRESSION):
     ]
 
 
+class AdaptiveLogProvider:
+    provider = EvidenceProvider.LOG
+    supported_tools = frozenset({"read_logs"})
+
+    def collect(self, event, query):
+        del event
+        return ProviderResult(
+            provider=self.provider,
+            status=ProviderStatus.PARTIAL,
+            evidence_items=[
+                EvidenceItem(
+                    id="ev-adaptive-log",
+                    provider=self.provider,
+                    kind=EvidenceKind.LOG_PATTERN,
+                    timestamp=query.end_time,
+                    summary="adaptive log evidence",
+                )
+            ],
+            error_message="one log source unavailable",
+        )
+
+
+def _adaptive_runtime(monkeypatch, turn, *, timeout_seconds=60):
+    monkeypatch.setenv("OPENAI_API_KEY", "present")
+    monkeypatch.setattr(agents_runtime, "_run_sdk_turn", turn)
+    return AgentsRcaRuntime(
+        model=SimpleNamespace(model="fake"),
+        strategy=InvestigationStrategy.ADAPTIVE,
+        tool_registry=build_provider_tool_registry(
+            ProviderRegistry([AdaptiveLogProvider()])
+        ),
+        timeout_seconds=timeout_seconds,
+    )
+
+
 @pytest.mark.parametrize("status", [EvidenceStatus.PARTIAL, EvidenceStatus.FAILED])
 def test_projection_includes_failed_and_partial_matching_provider(status):
     evidence = _evidence(
@@ -231,6 +271,16 @@ def test_projection_includes_failed_and_partial_matching_provider(status):
     assert "provider unavailable" in projected
     assert "must-not-leak" not in projected
     assert "payload" not in projected
+
+
+def test_adaptive_deployment_prompt_adds_catalog_and_dependency_evidence():
+    fixed = _specialist_prompt(_incident(), _all_evidence(), AgentName.DEPLOYMENT)
+    adaptive = _specialist_prompt(
+        _incident(), _all_evidence(), AgentName.DEPLOYMENT, adaptive=True
+    )
+
+    assert "ev-dependency" not in fixed
+    assert "ev-dependency" in adaptive
 
 
 def test_redaction_minimizes_sensitive_evidence_without_hiding_injection_text():
@@ -558,6 +608,151 @@ async def test_first_round_requests_all_specialists_in_isolation(monkeypatch):
         finding.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK
         for finding in result.findings
     )
+
+
+@pytest.mark.anyio
+async def test_adaptive_injected_turn_keeps_callable_contract_and_root_causes(
+    monkeypatch,
+):
+    monkeypatch.setenv("OPENAI_API_KEY", "present")
+    synthesis = _turn()
+    synthesis.coordinator_proposal = _CoordinatorProposal(
+        summary="Coordinator synthesis",
+        uncertainty="None",
+        proposed_cause=CauseType.DEPLOYMENT_REGRESSION,
+        root_causes=[
+            {
+                "root_cause_occurred_at": _incident().started_at,
+                "root_cause_component": "checkout",
+                "root_cause_reason": "deployment regression",
+                "supporting_evidence_ids": ["ev-deploy"],
+            }
+        ],
+    )
+    stub = TurnStub(_turn(_all_first_round()), synthesis)
+
+    result = await AgentsRcaRuntime(
+        model="fake",
+        turn=stub,
+        strategy=InvestigationStrategy.ADAPTIVE,
+    ).run("inv-1", _incident(), _all_evidence(), [_baseline()])
+
+    assert all("adaptive_session" not in call for call in stub.calls)
+    assert result.run_summary.strategy == InvestigationStrategy.ADAPTIVE
+    assert result.run_summary.adaptive_status == AdaptiveRunStatus.SKIPPED
+    assert result.review.root_causes[0].supporting_evidence_ids == ["ev-deploy"]
+
+
+@pytest.mark.anyio
+async def test_adaptive_default_turn_accepts_and_preserves_dynamic_evidence(
+    monkeypatch,
+):
+    calls = []
+
+    async def turn(**kwargs):
+        calls.append(kwargs)
+        session = kwargs["adaptive_session"]
+        if kwargs["analysis_round"] == 1:
+            response = json.loads(
+                await session.invoke(
+                    AgentName.LOG,
+                    "read_logs",
+                    json.dumps(
+                        {
+                            "start_time": "2026-07-10T09:55:00+00:00",
+                            "end_time": "2026-07-10T10:05:00+00:00",
+                            "reason": "inspect the incident logs",
+                        }
+                    ),
+                    1,
+                )
+            )
+            assert response["evidence"][0]["id"] == "ev-adaptive-log"
+            return _turn(
+                [
+                    _draft(AgentName.LOG, "ev-adaptive-log"),
+                    _draft(AgentName.METRIC, "ev-metric"),
+                    _draft(AgentName.DEPLOYMENT, "ev-deploy"),
+                ]
+            )
+
+        provider_error = next(
+            item for item in session.new_evidence if item.kind == EvidenceKind.PROVIDER_ERROR
+        )
+        assert "ev-adaptive-log" in kwargs["coordinator_input"]
+        assert provider_error.id not in kwargs["coordinator_input"]
+        result = _turn()
+        result.coordinator_proposal = _CoordinatorProposal(
+            summary="Coordinator synthesis",
+            uncertainty="partial log source",
+            proposed_cause=CauseType.DEPLOYMENT_REGRESSION,
+            root_causes=[
+                {
+                    "root_cause_occurred_at": _incident().started_at,
+                    "root_cause_component": "checkout",
+                    "root_cause_reason": "deployment regression",
+                    "supporting_evidence_ids": ["ev-adaptive-log"],
+                }
+            ],
+        )
+        return result
+
+    seed_evidence = _all_evidence()
+    result = await _adaptive_runtime(monkeypatch, turn).run(
+        "inv-1", _incident(), seed_evidence, [_baseline()]
+    )
+
+    log_task = next(
+        task
+        for task in result.tasks
+        if task.agent_name == AgentName.LOG and task.analysis_round == 1
+    )
+    assert len(calls) == 2
+    assert {item.id for item in seed_evidence} == {
+        "ev-log",
+        "ev-metric",
+        "ev-deploy",
+        "ev-dependency",
+    }
+    assert result.run_summary.status == MultiAgentRunStatus.COMPLETED
+    assert result.tool_calls[0].task_id == log_task.id
+    assert result.tool_calls[0].output_evidence_ids == ["ev-adaptive-log"]
+    assert result.provider_results[0].status == ProviderStatus.PARTIAL
+    assert {item.kind for item in result.evidence} == {
+        EvidenceKind.LOG_PATTERN,
+        EvidenceKind.PROVIDER_ERROR,
+    }
+    assert result.review.root_causes[0].supporting_evidence_ids == [
+        "ev-adaptive-log"
+    ]
+
+
+@pytest.mark.anyio
+async def test_adaptive_timeout_preserves_completed_tool_artifacts(monkeypatch):
+    async def turn(**kwargs):
+        await kwargs["adaptive_session"].invoke(
+            AgentName.LOG,
+            "read_logs",
+            json.dumps(
+                {
+                    "start_time": "2026-07-10T09:55:00+00:00",
+                    "end_time": "2026-07-10T10:05:00+00:00",
+                    "reason": "inspect the incident logs",
+                }
+            ),
+            kwargs["analysis_round"],
+        )
+        await asyncio.Event().wait()
+
+    result = await _adaptive_runtime(monkeypatch, turn, timeout_seconds=0.1).run(
+        "inv-1", _incident(), _all_evidence(), [_baseline()]
+    )
+
+    assert result.run_summary.status == MultiAgentRunStatus.FAILED
+    assert result.run_summary.adaptive_status == AdaptiveRunStatus.DEGRADED
+    assert result.tool_calls[0].output_evidence_ids == ["ev-adaptive-log"]
+    assert result.provider_results[0].status == ProviderStatus.PARTIAL
+    assert any(item.id == "ev-adaptive-log" for item in result.evidence)
 
 
 @pytest.mark.anyio

@@ -179,6 +179,26 @@ async def test_failed_tool_can_be_corrected_with_remaining_budget():
     assert provider.calls == 2
 
 
+@pytest.mark.anyio
+async def test_tool_call_uses_round_specific_task_id():
+    provider = QueryProvider("read_logs", EvidenceProvider.LOG, "ev-round-two")
+    session = AdaptiveToolSession(
+        event=_event(),
+        seed_evidence=[],
+        registry=build_provider_tool_registry(ProviderRegistry([provider])),
+        task_ids={
+            AgentName.LOG: "task-log-default",
+            (AgentName.LOG, 2): "task-log-round-two",
+        },
+    )
+
+    await session.invoke(
+        AgentName.LOG, "read_logs", json.dumps(_query_payload()), round_number=2
+    )
+
+    assert session.tool_calls[0].task_id == "task-log-round-two"
+
+
 def test_projection_excludes_payload_and_secrets():
     projected = project_tool_evidence(
         [

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from backend.domain.agent_findings import (
     AgentFinding,
     AgentFindingType,
+    RootCauseAttribution,
     RootCauseCandidate,
 )
 from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider, EvidenceStatus
@@ -134,6 +135,7 @@ def validate_agent_semantics(
     supporting_evidence: list[EvidenceItem],
     findings: list[AgentFinding],
     candidates: list[RootCauseCandidate],
+    root_causes: list[RootCauseAttribution] | None = None,
 ) -> None:
     """校验 Agent finding/candidate 不会把 signal 或错向引用升级为根因。"""
     evidence_by_id = {item.id: item for item in supporting_evidence}
@@ -186,6 +188,11 @@ def validate_agent_semantics(
                 or finding.related_cause_type != candidate.cause_type
             ):
                 raise EvidenceContractError("candidate_contradiction_mismatch", finding_id)
+
+    for root_cause in root_causes or []:
+        _require_usable_references(
+            evidence_by_id, root_cause.supporting_evidence_ids
+        )
 
 
 def _require_usable_references(
