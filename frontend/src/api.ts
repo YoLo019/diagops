@@ -7,6 +7,16 @@ export type InvestigationStatus =
   | "completed"
   | "failed"
   | "cancelled";
+export type InvestigationStrategy = "fixed" | "adaptive";
+export type AdaptiveRunStatus = "not_applicable" | "completed" | "degraded" | "skipped";
+export type AdaptiveStopReason =
+  | "sufficient_evidence"
+  | "budget_exhausted"
+  | "no_new_evidence"
+  | "duplicate_query"
+  | "round_limit"
+  | "timeout"
+  | "failed";
 
 export type ActionStatus = "proposed" | "approved" | "rejected" | "skipped" | "done";
 export type VerificationStatus = "pending" | "passed" | "failed" | "skipped";
@@ -133,6 +143,7 @@ export type InvestigationRecord = {
   id: string;
   event: IncidentEvent;
   status: InvestigationStatus;
+  strategy: InvestigationStrategy;
   evidence: EvidenceItem[];
   hypotheses: Hypothesis[];
   report?: IncidentReport | null;
@@ -149,6 +160,7 @@ export type InvestigationSummary = {
   status: string;
   service: string;
   title: string;
+  strategy: InvestigationStrategy;
   top_cause_type: string;
   confidence: number;
   action_count: number;
@@ -160,6 +172,7 @@ export type ManualInvestigationPayload = {
   text: string;
   service: string;
   environment: string;
+  strategy: InvestigationStrategy;
 };
 
 export type DiagnosisTask = {
@@ -315,6 +328,12 @@ export type MultiAgentRunSummary = {
   model_name?: string | null;
   primary_stabilization_category?: StabilizationCategory | null;
   secondary_stabilization_categories?: StabilizationCategory[];
+  strategy?: InvestigationStrategy;
+  adaptive_status?: AdaptiveRunStatus;
+  adaptive_stop_reason?: AdaptiveStopReason | null;
+  tool_call_count?: number;
+  max_tool_calls_per_specialist?: number;
+  max_total_tool_calls?: number;
 };
 
 export type AgentConfig = {
@@ -322,6 +341,10 @@ export type AgentConfig = {
   model?: string | null;
   implementation_status: "implemented" | "unsupported";
   certification_status: "certified" | "failed" | "not_run";
+  strategy: InvestigationStrategy;
+  max_tool_calls_per_specialist: number;
+  max_total_tool_calls: number;
+  tool_timeout_seconds: number;
 };
 
 export type RcaWorkbench = {
@@ -331,6 +354,7 @@ export type RcaWorkbench = {
   evidence: EvidenceItem[];
   coordination_review?: CoordinationReview | null;
   agent_executions?: AgentExecution[];
+  tool_calls: ToolCallRecord[];
   multi_agent_run?: MultiAgentRunSummary | null;
   agent_config?: AgentConfig | null;
   graph_seed: {

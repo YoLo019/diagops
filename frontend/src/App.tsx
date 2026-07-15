@@ -25,6 +25,7 @@ import {
   type DiagnosisPlan,
   type DiagnosisTask,
   type InvestigationRecord,
+  type InvestigationStrategy,
   type InvestigationSummary,
   type MemoryItem,
   type MultiAgentRunSummary,
@@ -50,6 +51,16 @@ const statusLabels: Record<string, string> = {
   running: "诊断中",
   skipped: "已跳过",
   success: "成功",
+};
+
+const adaptiveStopLabels: Record<string, string> = {
+  budget_exhausted: "预算耗尽",
+  duplicate_query: "重复查询",
+  failed: "执行失败",
+  no_new_evidence: "无新增证据",
+  round_limit: "轮次上限",
+  sufficient_evidence: "证据充分",
+  timeout: "超时",
 };
 
 function allowedActionTargets(action: RecommendedAction): ActionStatus[] {
@@ -172,6 +183,34 @@ function formatIdList(values: string[]) {
   return values.length > 0 ? values.join(", ") : "无";
 }
 
+export function groupToolCallsByAgentAndRound(
+  toolCalls: ToolCallRecord[],
+  tasks: DiagnosisTask[],
+) {
+  const taskById = new Map(tasks.map((task) => [task.id, task]));
+  const groups = new Map<
+    string,
+    { agentName: string; round: 1 | 2 | null; calls: ToolCallRecord[] }
+  >();
+  for (const call of toolCalls) {
+    const round = taskById.get(call.task_id)?.analysis_round ?? null;
+    const key = `${call.agent_name}:${round ?? "fixed"}`;
+    const group = groups.get(key) ?? { agentName: call.agent_name, round, calls: [] };
+    group.calls.push(call);
+    groups.set(key, group);
+  }
+  return [...groups.values()].sort(
+    (left, right) =>
+      left.agentName.localeCompare(right.agentName) || (left.round ?? 0) - (right.round ?? 0),
+  );
+}
+
+function toolCallParameters(input: Record<string, unknown>) {
+  const parameters = { ...input };
+  delete parameters.reason;
+  return Object.keys(parameters).length > 0 ? JSON.stringify(parameters) : "无";
+}
+
 function StatusBadge({ value }: { value: string }) {
   return <span className={`badge badge-${value}`}>{statusLabels[value] ?? value}</span>;
 }
@@ -209,6 +248,7 @@ function ManualInvestigationForm({ onCreated }: { onCreated: (id: string) => voi
   const [text, setText] = useState("");
   const [service, setService] = useState("checkout-service");
   const [environment, setEnvironment] = useState("prod");
+  const [strategy, setStrategy] = useState<InvestigationStrategy>("fixed");
 
   const mutation = useMutation({
     mutationFn: createManualInvestigation,
@@ -221,7 +261,7 @@ function ManualInvestigationForm({ onCreated }: { onCreated: (id: string) => voi
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    mutation.mutate({ text, service, environment });
+    mutation.mutate({ text, service, environment, strategy });
   }
 
   return (
@@ -250,6 +290,16 @@ function ManualInvestigationForm({ onCreated }: { onCreated: (id: string) => voi
             onChange={(event) => setEnvironment(event.target.value)}
             required
           />
+        </label>
+        <label>
+          调查模式
+          <select
+            value={strategy}
+            onChange={(event) => setStrategy(event.target.value as InvestigationStrategy)}
+          >
+            <option value="fixed">固定采集</option>
+            <option value="adaptive">自适应调查</option>
+          </select>
         </label>
       </div>
       {mutation.isError ? <p className="error">{mutation.error.message}</p> : null}
@@ -892,6 +942,11 @@ function AgentProcessPanels({ investigationId }: { investigationId: string }) {
     queryFn: () => getToolCalls(investigationId),
     enabled: Boolean(investigationId),
   });
+  const workbenchQuery = useQuery<RcaWorkbench>({
+    queryKey: ["rca-workbench", investigationId],
+    queryFn: () => getRcaWorkbench(investigationId),
+    enabled: Boolean(investigationId),
+  });
   const memoryQuery = useQuery<MemoryItem[]>({
     queryKey: ["memory", investigationId],
     queryFn: () => getMemoryHits(investigationId),
@@ -907,6 +962,15 @@ function AgentProcessPanels({ investigationId }: { investigationId: string }) {
     : planQuery.data?.tasks ?? [];
   const executions = executionsQuery.data ?? [];
   const toolCalls = toolCallsQuery.data ?? [];
+  const adaptiveRun = workbenchQuery.data?.multi_agent_run ?? null;
+  const displayedToolCalls =
+    adaptiveRun?.strategy === "adaptive"
+      ? workbenchQuery.data?.tool_calls ?? []
+      : toolCalls;
+  const toolCallGroups = useMemo(
+    () => groupToolCallsByAgentAndRound(displayedToolCalls, tasks),
+    [displayedToolCalls, tasks],
+  );
   const contextFacts = contextQuery.data ?? [];
   const memoryHits = memoryQuery.data ?? [];
   const dependencyCount = taskGraphQuery.data?.edges.length ?? 0;
@@ -997,28 +1061,55 @@ function AgentProcessPanels({ investigationId }: { investigationId: string }) {
       <section className="panel agent-process-panel">
         <div className="panel-heading">
           <h2>工具调用</h2>
-          <span>{toolCalls.length}</span>
+          <span>
+            {adaptiveRun?.strategy === "adaptive"
+              ? `预算 ${adaptiveRun.tool_call_count ?? displayedToolCalls.length}/${adaptiveRun.max_total_tool_calls ?? 0}`
+              : displayedToolCalls.length}
+          </span>
         </div>
+        {adaptiveRun?.adaptive_stop_reason ? (
+          <p className="trace-stop-reason">
+            停止原因: {adaptiveStopLabels[adaptiveRun.adaptive_stop_reason] ?? adaptiveRun.adaptive_stop_reason}
+          </p>
+        ) : null}
         {toolCallsQuery.isLoading ? (
           <div className="empty-state">加载中...</div>
         ) : toolCallsQuery.isError ? (
           <p className="error">{toolCallsQuery.error.message}</p>
-        ) : toolCalls.length === 0 ? (
+        ) : displayedToolCalls.length === 0 ? (
           <div className="empty-state">暂无工具调用。</div>
         ) : (
-          <div className="process-list">
-            {toolCalls.map((call) => (
-              <article className="process-item" key={call.id}>
-                <div className="workflow-heading">
-                  <strong>{call.tool_name}</strong>
-                  <StatusBadge value={call.status} />
+          <div className="tool-call-groups">
+            {toolCallGroups.map((group) => (
+              <section className="tool-call-group" key={`${group.agentName}-${group.round ?? "fixed"}`}>
+                <div className="tool-call-group-heading">
+                  <strong>{group.agentName}</strong>
+                  <span>{group.round ? `第 ${group.round} 轮` : "固定采集"}</span>
                 </div>
-                <div className="process-detail">
-                  <span>Agent: {call.agent_name}</span>
-                  <span>证据: {formatIdList(call.output_evidence_ids)}</span>
+                <div className="process-list">
+                  {group.calls.map((call) => (
+                    <article className="process-item" key={call.id}>
+                      <div className="workflow-heading">
+                        <strong>{call.tool_name}</strong>
+                        <StatusBadge value={call.status} />
+                      </div>
+                      <div className="process-detail">
+                        <span>耗时: {call.duration_ms} ms</span>
+                        <span>证据: {formatIdList(call.output_evidence_ids)}</span>
+                      </div>
+                      <p>
+                        <strong>调用原因:</strong>{" "}
+                        {projectAgentUiText(String(call.input.reason ?? "未提供"), "openai_agents_sdk")}
+                      </p>
+                      <p>
+                        <strong>查询参数:</strong>{" "}
+                        <code className="tool-parameters">{toolCallParameters(call.input)}</code>
+                      </p>
+                      {call.error_message ? <p className="error">{call.error_message}</p> : null}
+                    </article>
+                  ))}
                 </div>
-                {call.error_message ? <p className="error">{call.error_message}</p> : null}
-              </article>
+              </section>
             ))}
           </div>
         )}

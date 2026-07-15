@@ -178,6 +178,65 @@ def test_v8_1_frontend_types_and_compact_diagnostics_are_present() -> None:
     )
 
 
+def test_v8_2_adaptive_strategy_and_tool_trace_are_present() -> None:
+    api = (FRONTEND / "src" / "api.ts").read_text(encoding="utf-8")
+    app = (FRONTEND / "src" / "App.tsx").read_text(encoding="utf-8")
+
+    for field in [
+        'export type InvestigationStrategy = "fixed" | "adaptive"',
+        "strategy: InvestigationStrategy",
+        "adaptive_status?: AdaptiveRunStatus",
+        "adaptive_stop_reason?: AdaptiveStopReason | null",
+        "tool_call_count?: number",
+        "max_tool_calls_per_specialist: number",
+        "max_total_tool_calls: number",
+        "tool_timeout_seconds: number",
+        "tool_calls: ToolCallRecord[]",
+    ]:
+        assert field in api
+    for projection in [
+        "setStrategy",
+        "value={strategy}",
+        "groupToolCallsByAgentAndRound",
+        "调用原因",
+        "查询参数",
+        "耗时",
+        "预算",
+        "停止原因",
+    ]:
+        assert projection in app
+
+
+def test_v8_2_tool_calls_group_by_agent_and_task_round() -> None:
+    calls = [
+        {"id": "call-log-2", "task_id": "task-log-2", "agent_name": "LogAgent"},
+        {"id": "call-deploy", "task_id": "task-fixed", "agent_name": "DeploymentAgent"},
+        {"id": "call-log-1", "task_id": "task-log-1", "agent_name": "LogAgent"},
+    ]
+    tasks = [
+        {"id": "task-log-1", "analysis_round": 1},
+        {"id": "task-log-2", "analysis_round": 2},
+    ]
+
+    groups = _run_app_exports(
+        [
+            {
+                "name": "groupToolCallsByAgentAndRound",
+                "args": [calls, tasks],
+            }
+        ]
+    )[0]
+
+    assert [
+        (group["agentName"], group["round"], [call["id"] for call in group["calls"]])
+        for group in groups
+    ] == [
+        ("DeploymentAgent", None, ["call-deploy"]),
+        ("LogAgent", 1, ["call-log-1"]),
+        ("LogAgent", 2, ["call-log-2"]),
+    ]
+
+
 def test_app_contains_v7_hybrid_rca_copy() -> None:
     app = (FRONTEND / "src" / "App.tsx").read_text(encoding="utf-8")
 

@@ -5,7 +5,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
 from backend.diagnosis.deepseek_model import implementation_status
-from backend.domain.multi_agent import ModelProvider
+from backend.domain.multi_agent import InvestigationStrategy, ModelProvider
 from backend.services.container import get_container
 from backend.services.reliability_artifacts import latest_certification
 
@@ -27,6 +27,10 @@ class AgentConfigResponse(BaseModel):
     model: str | None
     implementation_status: Literal["implemented", "unsupported"]
     certification_status: Literal["certified", "failed", "not_run"]
+    strategy: InvestigationStrategy
+    max_tool_calls_per_specialist: int
+    max_total_tool_calls: int
+    tool_timeout_seconds: int
 
 
 def _path(value: Path) -> str:
@@ -89,6 +93,10 @@ def build_agent_config() -> AgentConfigResponse:
         model=model,
         implementation_status=provider_implementation,
         certification_status=certification,
+        strategy=settings.strategy,
+        max_tool_calls_per_specialist=settings.max_tool_calls_per_specialist,
+        max_total_tool_calls=settings.max_total_tool_calls,
+        tool_timeout_seconds=settings.tool_timeout_seconds,
     )
 
 

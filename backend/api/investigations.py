@@ -13,6 +13,7 @@ from backend.domain.evidence import EvidenceItem, EvidenceProvider
 from backend.domain.human_transitions import HumanStateConflict
 from backend.domain.hypotheses import CauseType
 from backend.domain.memory import MemoryItem
+from backend.domain.multi_agent import InvestigationStrategy
 from backend.domain.reports import IncidentReport
 from backend.memory import MemoryStore
 from backend.providers.results import ProviderResult
@@ -28,6 +29,7 @@ class ManualInvestigationRequest(BaseModel):
     text: str = Field(min_length=1)
     service: str = Field(min_length=1)
     environment: str = Field(min_length=1)
+    strategy: InvestigationStrategy | None = None
 
 
 class UpdateActionStatusRequest(BaseModel):
@@ -91,7 +93,7 @@ def create_manual_investigation(
         started_at=datetime.now(UTC),
     )
     container = get_container()
-    record = container.orchestrator.run(event)
+    record = container.orchestrator.run(event, strategy=request.strategy)
     return to_summary(record)
 
 

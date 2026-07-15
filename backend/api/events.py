@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException
 
 from backend.db.models import InvestigationRecord, InvestigationSummary
 from backend.domain.events import IncidentEvent
+from backend.domain.multi_agent import InvestigationStrategy
 from backend.services.container import get_container
 from backend.services.incident_cases import list_case_ids, load_incident_case
 
@@ -13,9 +14,12 @@ def to_summary(record: InvestigationRecord) -> InvestigationSummary:
 
 
 @router.post("", response_model=InvestigationSummary)
-def create_event(event: IncidentEvent) -> InvestigationSummary:
+def create_event(
+    event: IncidentEvent,
+    strategy: InvestigationStrategy | None = None,
+) -> InvestigationSummary:
     container = get_container()
-    record = container.orchestrator.run(event)
+    record = container.orchestrator.run(event, strategy=strategy)
     return to_summary(record)
 
 

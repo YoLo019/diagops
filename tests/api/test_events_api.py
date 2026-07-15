@@ -49,6 +49,26 @@ def test_webhook_without_real_metric_provider_preserves_unknown_cause():
     assert response.json()["top_cause_type"] == "unknown"
 
 
+def test_raw_event_accepts_adaptive_strategy_query():
+    client = TestClient(app)
+    response = client.post(
+        "/events?strategy=adaptive",
+        json={
+            "source": "webhook",
+            "service": "checkout-service",
+            "environment": "prod",
+            "severity": "warning",
+            "title": "Latency increased",
+            "description": "checkout-service latency increased",
+            "started_at": "2026-07-03T15:10:00+08:00",
+        },
+    )
+
+    assert response.status_code == 200
+    detail = client.get(f"/investigations/{response.json()['id']}").json()
+    assert detail["strategy"] == "adaptive"
+
+
 def test_create_event_summary_includes_v2_counts():
     client = TestClient(app)
 
@@ -119,6 +139,23 @@ def test_manual_investigation_creates_completed_record():
     body = response.json()
     assert body["service"] == "checkout-service"
     assert body["status"] == "completed"
+
+
+def test_manual_investigation_accepts_adaptive_strategy():
+    client = TestClient(app)
+    response = client.post(
+        "/investigations/manual",
+        json={
+            "text": "checkout-service has many 500s",
+            "service": "checkout-service",
+            "environment": "prod",
+            "strategy": "adaptive",
+        },
+    )
+
+    assert response.status_code == 200
+    detail = client.get(f"/investigations/{response.json()['id']}").json()
+    assert detail["strategy"] == "adaptive"
 
 
 def test_unknown_simulated_case_returns_404():

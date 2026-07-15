@@ -13,8 +13,11 @@ from backend.domain.agent_findings import AgentFinding, CoordinationReview
 from backend.domain.agent_plan import AgentExecution, DiagnosisPlan, DiagnosisTask
 from backend.domain.memory import MemoryItem
 from backend.domain.multi_agent import (
+    AdaptiveRunStatus,
+    AdaptiveStopReason,
     AgentExecutionLayer,
     FailureCategory,
+    InvestigationStrategy,
     MultiAgentRunStatus,
     MultiAgentRunSummary,
 )
@@ -85,14 +88,20 @@ def _execution_timestamp(execution: AgentExecution) -> float:
 def _multi_agent_run_summary(
     review: CoordinationReview | None,
     executions: list[AgentExecution],
+    *,
+    strategy: InvestigationStrategy = InvestigationStrategy.FIXED,
+    tool_calls: list[ToolCallRecord] | None = None,
+    max_tool_calls_per_specialist: int = 3,
+    max_total_tool_calls: int = 8,
 ) -> MultiAgentRunSummary | None:
+    summary: MultiAgentRunSummary | None = None
     if (
         review is not None
         and review.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK
         and review.run_status
         in {MultiAgentRunStatus.COMPLETED, MultiAgentRunStatus.PARTIAL}
     ):
-        return MultiAgentRunSummary(
+        summary = MultiAgentRunSummary(
             status=review.run_status,
             model_provider=review.model_provider,
             model_name=review.model_name,
@@ -103,36 +112,89 @@ def _multi_agent_run_summary(
                 review.secondary_stabilization_categories
             ),
         )
+    else:
+        attempts = [
+            execution
+            for execution in executions
+            if execution.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK
+            and execution.agent_name == "CoordinatorAgent"
+        ]
+        if attempts:
+            latest = max(
+                attempts,
+                key=lambda execution: (
+                    _execution_timestamp(execution),
+                    execution.id,
+                ),
+            )
+            if latest.status.value in {
+                MultiAgentRunStatus.FAILED.value,
+                MultiAgentRunStatus.SKIPPED.value,
+            }:
+                categories = stabilization_categories_from_executions(executions)
+                summary = MultiAgentRunSummary(
+                    status=MultiAgentRunStatus(latest.status.value),
+                    failure_reason=_safe_failure_label(latest.failure_category),
+                    model_provider=latest.model_provider,
+                    model_name=latest.model_name,
+                    primary_stabilization_category=(
+                        categories[0] if categories else None
+                    ),
+                    secondary_stabilization_categories=categories[1:],
+                )
 
-    attempts = [
-        execution
-        for execution in executions
-        if execution.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK
-        and execution.agent_name == "CoordinatorAgent"
-    ]
-    if not attempts:
-        return None
-    latest = max(
-        attempts,
-        key=lambda execution: (
-            _execution_timestamp(execution),
-            execution.id,
-        ),
+    if strategy != InvestigationStrategy.ADAPTIVE:
+        return summary
+    calls = tool_calls or []
+    if summary is None:
+        return MultiAgentRunSummary(
+            status=MultiAgentRunStatus.SKIPPED,
+            strategy=strategy,
+            adaptive_status=AdaptiveRunStatus.SKIPPED,
+            tool_call_count=len(calls),
+            max_tool_calls_per_specialist=max_tool_calls_per_specialist,
+            max_total_tool_calls=max_total_tool_calls,
+        )
+    adaptive_status = (
+        AdaptiveRunStatus.COMPLETED
+        if summary.status == MultiAgentRunStatus.COMPLETED
+        else (
+            AdaptiveRunStatus.SKIPPED
+            if summary.status == MultiAgentRunStatus.SKIPPED
+            else AdaptiveRunStatus.DEGRADED
+        )
     )
-    if latest.status.value not in {
-        MultiAgentRunStatus.FAILED.value,
-        MultiAgentRunStatus.SKIPPED.value,
-    }:
-        return None
-    categories = stabilization_categories_from_executions(executions)
-    return MultiAgentRunSummary(
-        status=MultiAgentRunStatus(latest.status.value),
-        failure_reason=_safe_failure_label(latest.failure_category),
-        model_provider=latest.model_provider,
-        model_name=latest.model_name,
-        primary_stabilization_category=(categories[0] if categories else None),
-        secondary_stabilization_categories=categories[1:],
+    return summary.model_copy(
+        update={
+            "strategy": strategy,
+            "adaptive_status": adaptive_status,
+            "adaptive_stop_reason": _adaptive_stop_reason(summary, calls),
+            "tool_call_count": len(calls),
+            "max_tool_calls_per_specialist": max_tool_calls_per_specialist,
+            "max_total_tool_calls": max_total_tool_calls,
+        }
     )
+
+
+def _adaptive_stop_reason(
+    summary: MultiAgentRunSummary,
+    calls: list[ToolCallRecord],
+) -> AdaptiveStopReason | None:
+    messages = " ".join(call.error_message or "" for call in calls).lower()
+    for marker, reason in (
+        ("budget exhausted", AdaptiveStopReason.BUDGET_EXHAUSTED),
+        ("duplicate query", AdaptiveStopReason.DUPLICATE_QUERY),
+        ("no new evidence", AdaptiveStopReason.NO_NEW_EVIDENCE),
+    ):
+        if marker in messages:
+            return reason
+    if summary.primary_stabilization_category is not None and (
+        summary.primary_stabilization_category.value == "cancelled_or_timeout"
+    ):
+        return AdaptiveStopReason.TIMEOUT
+    if summary.status == MultiAgentRunStatus.FAILED:
+        return AdaptiveStopReason.FAILED
+    return None
 
 
 @router.get("/{investigation_id}/plan", response_model=DiagnosisPlan | None)
@@ -225,6 +287,25 @@ def get_investigation_rca_workbench(investigation_id: str) -> dict[str, Any]:
         redact_model(item)
         for item in _repository().list_executions(investigation_id)
     ]
+    tasks = _repository().list_tasks(investigation_id)
+    tool_calls = [
+        redact_model(item)
+        for item in _repository().list_tool_calls(investigation_id)
+    ]
+    custom_task_ids = {
+        task.id
+        for task in tasks
+        if task.execution_layer == AgentExecutionLayer.CUSTOM
+    }
+    adaptive_tool_calls = [
+        call for call in tool_calls if call.task_id not in custom_task_ids
+    ]
+    workbench_tool_calls = (
+        adaptive_tool_calls
+        if record.strategy == InvestigationStrategy.ADAPTIVE
+        else tool_calls
+    )
+    agent_config = build_agent_config()
     candidates = [] if review is None else review.candidates
     return {
         "investigation": record,
@@ -234,8 +315,18 @@ def get_investigation_rca_workbench(investigation_id: str) -> dict[str, Any]:
         "graph_seed": _build_rca_graph_seed(record.evidence, findings, candidates),
         "coordination_review": review,
         "agent_executions": executions,
-        "multi_agent_run": _multi_agent_run_summary(review, executions),
-        "agent_config": build_agent_config(),
+        "tool_calls": workbench_tool_calls,
+        "multi_agent_run": _multi_agent_run_summary(
+            review,
+            executions,
+            strategy=record.strategy,
+            tool_calls=adaptive_tool_calls,
+            max_tool_calls_per_specialist=(
+                agent_config.max_tool_calls_per_specialist
+            ),
+            max_total_tool_calls=agent_config.max_total_tool_calls,
+        ),
+        "agent_config": agent_config,
     }
 
 

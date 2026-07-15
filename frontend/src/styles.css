@@ -158,6 +158,14 @@ textarea {
   flex: 1;
 }
 
+.manual-form .field-row {
+  flex-wrap: wrap;
+}
+
+.manual-form .field-row > label {
+  flex: 1 1 120px;
+}
+
 .manual-form button {
   background: #216869;
   border-radius: 6px;
@@ -362,6 +370,33 @@ textarea {
   display: flex;
   flex-wrap: wrap;
   gap: 6px 12px;
+}
+
+.tool-call-groups,
+.tool-call-group {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.tool-call-group-heading {
+  align-items: center;
+  color: #4a5868;
+  display: flex;
+  font-size: 13px;
+  justify-content: space-between;
+}
+
+.tool-parameters {
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.trace-stop-reason {
+  color: #687789;
+  font-size: 13px;
+  margin: -4px 0 12px;
 }
 
 .rca-workbench .panel-heading:not(:first-child) {

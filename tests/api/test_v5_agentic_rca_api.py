@@ -14,11 +14,13 @@ from backend.domain.multi_agent import (
     CoordinationDecisionStatus,
     ExecutionStepKind,
     FailureCategory,
+    InvestigationStrategy,
     ModelProvider,
     MultiAgentRunStatus,
     ResultValidationCategory,
     StabilizationCategory,
 )
+from backend.domain.tool_calls import ToolCallRecord, ToolCallStatus
 from backend.main import app
 from backend.services.container import get_container, reset_container
 
@@ -70,6 +72,7 @@ def test_v5_agentic_rca_endpoints_feed_workbench(
         "agent_executions",
         "multi_agent_run",
         "agent_config",
+        "tool_calls",
     }
     assert workbench["investigation"]["id"] == investigation_id
     assert workbench["findings"] == findings
@@ -119,6 +122,10 @@ def test_agent_config_and_workbench_expose_only_non_secret_provider_status(
         "model": "deepseek-v4-pro",
         "implementation_status": "implemented",
         "certification_status": "not_run",
+        "strategy": "fixed",
+        "max_tool_calls_per_specialist": 3,
+        "max_total_tool_calls": 8,
+        "tool_timeout_seconds": 10,
     }
     assert config_response.status_code == 200
     assert config_response.json() == expected
@@ -128,6 +135,62 @@ def test_agent_config_and_workbench_expose_only_non_secret_provider_status(
     assert "api_key" not in combined
     assert "deepseek_api_key" not in combined
     assert "api.deepseek.com" not in combined
+
+
+def test_workbench_contains_adaptive_trace_metadata(
+    client: TestClient,
+    investigation_id: str,
+):
+    repository = get_container().repository
+    record = repository.get(investigation_id)
+    record.strategy = InvestigationStrategy.ADAPTIVE
+    repository.save(record)
+    failed = AgentsRcaRuntimeResult.failed(investigation_id, "runtime timeout")
+    task = failed.tasks[0].model_copy(update={"analysis_round": 1})
+    execution = failed.executions[0].model_copy(
+        update={
+            "task_id": task.id,
+            "analysis_round": 1,
+            "failure_category": FailureCategory.TIMEOUT,
+            "model_provider": ModelProvider.OPENAI,
+            "model_name": "gpt-test",
+        }
+    )
+    repository.save_tasks(
+        investigation_id,
+        [*repository.list_tasks(investigation_id), task],
+    )
+    repository.save_executions(investigation_id, [execution])
+    repository.save_tool_calls(
+        investigation_id,
+        [
+            ToolCallRecord(
+                task_id=task.id,
+                agent_name="LogAgent",
+                tool_name="read_logs",
+                input={
+                    "reason": "inspect incident logs",
+                    "limit": 20,
+                    "token": "tool-secret-value",
+                },
+                status=ToolCallStatus.SUCCESS,
+                output_evidence_ids=[record.evidence[0].id],
+                started_at=datetime.now(UTC),
+                completed_at=datetime.now(UTC),
+            )
+        ],
+    )
+
+    response = client.get(
+        f"/investigations/{investigation_id}/rca-workbench"
+    )
+    body = response.json()
+
+    assert body["multi_agent_run"]["strategy"] == "adaptive"
+    assert body["multi_agent_run"]["adaptive_status"] == "degraded"
+    assert body["multi_agent_run"]["tool_call_count"] == 1
+    assert body["tool_calls"][0]["input"]["reason"] == "inspect incident logs"
+    assert "tool-secret-value" not in response.text
 
 
 def test_v8_1_workbench_exposes_persisted_reliability_fields(
