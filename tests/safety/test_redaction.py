@@ -26,6 +26,8 @@ from backend.services.incident_cases import load_incident_case
         (r"C:\\private\\incident.log", "[REDACTED_PATH]"),
         ("/var/lib/private/incident.log", "[REDACTED_PATH]"),
         ("owner@example.com", "[REDACTED_EMAIL]"),
+        ("sk-proj-abcdefghijklmnopqrstuvwxyz123456", "[REDACTED]"),
+        ("sk-abcdefghijklmnopqrstuvwxyz123456", "[REDACTED]"),
     ],
 )
 def test_redact_text_removes_sensitive_forms(value: str, marker: str) -> None:

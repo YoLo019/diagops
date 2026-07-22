@@ -1,6 +1,14 @@
 export const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL ?? "";
 
+export type JsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+
 export type InvestigationStatus =
   | "pending"
   | "running"
@@ -154,6 +162,7 @@ export type InvestigationRecord = {
   created_at: string;
   updated_at: string;
   completed_at?: string | null;
+  runtime_available: boolean;
 };
 
 export type InvestigationSummary = {
@@ -167,6 +176,125 @@ export type InvestigationSummary = {
   action_count: number;
   verification_count: number;
   failure_reason?: string | null;
+  runtime_available: boolean;
+};
+
+export type RuntimeRunStatus =
+  | "created"
+  | "running"
+  | "cancelling"
+  | "interrupted"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export type RuntimePhase =
+  | "intake"
+  | "evidence_collection"
+  | "deterministic_rca"
+  | "specialist_analysis"
+  | "conflict_review"
+  | "coordination"
+  | "report_generation"
+  | "finalize";
+
+export type RuntimeRun = {
+  id: string;
+  investigation_id: string;
+  run_kind: "live" | "replay";
+  strategy: InvestigationStrategy;
+  status: RuntimeRunStatus;
+  current_phase?: RuntimePhase | null;
+  source_run_id?: string | null;
+  parent_run_id?: string | null;
+  run_reason: "initial" | "additional_evidence" | "manual_rerun" | "replay";
+  model_provider?: ModelProvider | null;
+  model_name?: string | null;
+  prompt_version?: string | null;
+  failure_category?: string | null;
+  created_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  cancel_requested_at?: string | null;
+};
+
+export type RuntimeAttempt = {
+  id: string;
+  run_id: string;
+  attempt_number: number;
+  resume_from_checkpoint_id?: string | null;
+  status: string;
+  started_at: string;
+  completed_at?: string | null;
+  failure_category?: string | null;
+};
+
+export type RuntimeEvent = {
+  id: string;
+  run_id: string;
+  attempt_id: string;
+  sequence: number;
+  event_type: string;
+  phase?: RuntimePhase | null;
+  actor_type: string;
+  actor_name?: string | null;
+  task_id?: string | null;
+  execution_id?: string | null;
+  tool_call_id?: string | null;
+  evidence_ids: string[];
+  safe_payload: Record<string, JsonValue>;
+  occurred_at: string;
+  schema_version: number;
+};
+
+export type RuntimeCheckpoint = {
+  id: string;
+  run_id: string;
+  attempt_id: string;
+  completed_phase: RuntimePhase;
+  event_sequence: number;
+  state_digest: string;
+  projection_digest: string;
+  resume_state: Record<string, JsonValue>;
+  created_at: string;
+  schema_version: number;
+};
+
+export type RuntimeRunDetail = RuntimeRun & {
+  attempts: RuntimeAttempt[];
+  checkpoints: RuntimeCheckpoint[];
+};
+
+export type ReplayReport = {
+  id: string;
+  replay_run_id: string;
+  source_run_id: string;
+  valid: boolean;
+  validation_errors: string[];
+  benchmark_evaluation: string;
+  external_call_count: number;
+  created_at: string;
+};
+
+export type RuntimeDiffSection = {
+  left: JsonValue;
+  right: JsonValue;
+  changed: boolean;
+};
+
+export type RuntimeRunDiff = {
+  run_id: string;
+  against_run_id: string;
+  sections: Record<string, RuntimeDiffSection>;
+};
+
+export type RuntimeRunCreatePayload = {
+  strategy: InvestigationStrategy;
+  run_reason: "initial" | "additional_evidence" | "manual_rerun";
+  parent_run_id?: string | null;
+  model_provider?: ModelProvider | null;
+  model_name?: string | null;
+  prompt_version?: string | null;
 };
 
 export type ManualInvestigationPayload = {
@@ -501,6 +629,53 @@ export function createManualInvestigation(payload: ManualInvestigationPayload) {
     method: "POST",
     body: JSON.stringify(payload),
   });
+}
+
+export function createRuntimeRun(
+  investigationId: string,
+  payload: RuntimeRunCreatePayload,
+) {
+  return request<RuntimeRun>(`/investigations/${investigationId}/runtime-runs`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function listRuntimeRuns(investigationId: string) {
+  return request<RuntimeRun[]>(`/investigations/${investigationId}/runtime-runs`);
+}
+
+export function getRuntimeRun(runId: string) {
+  return request<RuntimeRunDetail>(`/runtime-runs/${runId}`);
+}
+
+export function getRuntimeEvents(runId: string, after = 0, limit = 200) {
+  return request<RuntimeEvent[]>(
+    `/runtime-runs/${runId}/events?after=${after}&limit=${limit}`,
+  );
+}
+
+export function cancelRuntimeRun(runId: string) {
+  return request<RuntimeRun>(`/runtime-runs/${runId}/cancel`, { method: "POST" });
+}
+
+export function resumeRuntimeRun(runId: string) {
+  return request<RuntimeRun>(`/runtime-runs/${runId}/resume`, { method: "POST" });
+}
+
+export function replayRuntimeRun(runId: string) {
+  return request<ReplayReport>(`/runtime-runs/${runId}/replay`, { method: "POST" });
+}
+
+export function diffRuntimeRuns(runId: string, againstRunId: string) {
+  return request<RuntimeRunDiff>(
+    `/runtime-runs/${runId}/diff?against_run_id=${encodeURIComponent(againstRunId)}`,
+  );
+}
+
+export function runtimeEventStreamUrl(runId: string, lastSequence: number) {
+  const path = `/runtime-runs/${encodeURIComponent(runId)}/events/stream?last_event_id=${lastSequence}`;
+  return `${API_BASE_URL}${path}`;
 }
 
 export function updateActionStatus(

@@ -1,7 +1,9 @@
 from datetime import datetime
 from enum import StrEnum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from backend.safety.redaction import assert_safe_label
 
 
 class IncidentSource(StrEnum):
@@ -26,3 +28,10 @@ class IncidentEvent(BaseModel):
     started_at: datetime
     time_window_minutes: int = Field(default=30, gt=0)
     signals: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("environment")
+    @classmethod
+    def validate_environment(cls, value: str) -> str:
+        """在共享事件边界拒绝凭据形态的 environment 标签。"""
+        assert_safe_label(value)
+        return value

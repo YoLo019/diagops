@@ -1,0 +1,845 @@
+{
+  "baseline_commit": "3f06d9ae87729185b3429c839f11cc366de75000",
+  "case_id": "dependency_timeout",
+  "strategy": "adaptive",
+  "checksum": "af0c04cc749296e2e6efe6199d2811a45cf8f633059cad05df743bd877245bf9",
+  "contract": {
+    "executions": [
+      {
+        "agent_name": "LogAgent",
+        "analysis_round": null,
+        "attempt": 1,
+        "error_message": null,
+        "evidence_ids": [
+          "EVIDENCE_2"
+        ],
+        "execution_layer": "custom",
+        "failure_category": "none",
+        "id": "EXECUTION_1",
+        "model_name": null,
+        "model_provider": null,
+        "result_validation_category": null,
+        "status": "completed",
+        "step_kind": null,
+        "summary": "LogAgent completed",
+        "task_id": "TASK_1",
+        "tool_call_ids": [
+          "TOOL_CALL_1"
+        ]
+      },
+      {
+        "agent_name": "MetricAgent",
+        "analysis_round": null,
+        "attempt": 1,
+        "error_message": null,
+        "evidence_ids": [],
+        "execution_layer": "custom",
+        "failure_category": "none",
+        "id": "EXECUTION_2",
+        "model_name": null,
+        "model_provider": null,
+        "result_validation_category": null,
+        "status": "completed",
+        "step_kind": null,
+        "summary": "MetricAgent completed",
+        "task_id": "TASK_2",
+        "tool_call_ids": [
+          "TOOL_CALL_2"
+        ]
+      },
+      {
+        "agent_name": "DeploymentAgent",
+        "analysis_round": null,
+        "attempt": 1,
+        "error_message": null,
+        "evidence_ids": [],
+        "execution_layer": "custom",
+        "failure_category": "none",
+        "id": "EXECUTION_3",
+        "model_name": null,
+        "model_provider": null,
+        "result_validation_category": null,
+        "status": "completed",
+        "step_kind": null,
+        "summary": "DeploymentAgent completed",
+        "task_id": "TASK_3",
+        "tool_call_ids": [
+          "TOOL_CALL_3"
+        ]
+      },
+      {
+        "agent_name": "DependencyAgent",
+        "analysis_round": null,
+        "attempt": 1,
+        "error_message": null,
+        "evidence_ids": [
+          "EVIDENCE_1"
+        ],
+        "execution_layer": "custom",
+        "failure_category": "none",
+        "id": "EXECUTION_4",
+        "model_name": null,
+        "model_provider": null,
+        "result_validation_category": null,
+        "status": "completed",
+        "step_kind": null,
+        "summary": "DependencyAgent completed",
+        "task_id": "TASK_4",
+        "tool_call_ids": [
+          "TOOL_CALL_4"
+        ]
+      },
+      {
+        "agent_name": "ServiceCatalogAgent",
+        "analysis_round": null,
+        "attempt": 1,
+        "error_message": null,
+        "evidence_ids": [
+          "EVIDENCE_3"
+        ],
+        "execution_layer": "custom",
+        "failure_category": "none",
+        "id": "EXECUTION_5",
+        "model_name": null,
+        "model_provider": null,
+        "result_validation_category": null,
+        "status": "completed",
+        "step_kind": null,
+        "summary": "ServiceCatalogAgent completed",
+        "task_id": "TASK_5",
+        "tool_call_ids": [
+          "TOOL_CALL_5"
+        ]
+      }
+    ],
+    "findings": [
+      {
+        "agent_name": "LogAgent",
+        "analysis_round": 1,
+        "blocking": false,
+        "confidence": 1.0,
+        "evidence_ids": [
+          "EVIDENCE_2"
+        ],
+        "execution_layer": "custom",
+        "finding_type": "root_cause",
+        "gaps": [],
+        "id": "FINDING_1",
+        "investigation_id": "INVESTIGATION_1",
+        "rationale": "TimeoutException increased when calling inventory-service",
+        "related_cause_type": "downstream_dependency_failure",
+        "revises_finding_id": null,
+        "severity": "high",
+        "summary": "log evidence signal"
+      },
+      {
+        "agent_name": "MetricAgent",
+        "analysis_round": 1,
+        "blocking": false,
+        "confidence": 0.2,
+        "evidence_ids": [],
+        "execution_layer": "custom",
+        "finding_type": "gap",
+        "gaps": [
+          "metric evidence is missing"
+        ],
+        "id": "FINDING_2",
+        "investigation_id": "INVESTIGATION_1",
+        "rationale": "",
+        "related_cause_type": null,
+        "revises_finding_id": null,
+        "severity": "low",
+        "summary": "metric evidence unavailable"
+      },
+      {
+        "agent_name": "DeploymentAgent",
+        "analysis_round": 1,
+        "blocking": false,
+        "confidence": 0.2,
+        "evidence_ids": [],
+        "execution_layer": "custom",
+        "finding_type": "gap",
+        "gaps": [
+          "deploy evidence is missing"
+        ],
+        "id": "FINDING_3",
+        "investigation_id": "INVESTIGATION_1",
+        "rationale": "",
+        "related_cause_type": null,
+        "revises_finding_id": null,
+        "severity": "low",
+        "summary": "deploy evidence unavailable"
+      }
+    ],
+    "record": {
+      "actions": [
+        {
+          "action_type": "dependency_check",
+          "description": "Dependency health evidence points to a downstream issue.",
+          "id": "ACTION_1",
+          "note": null,
+          "requires_approval": false,
+          "risk_level": "low",
+          "status": "proposed",
+          "supporting_evidence_ids": [
+            "EVIDENCE_1",
+            "EVIDENCE_2"
+          ],
+          "title": "Contact dependency owner"
+        }
+      ],
+      "event": {
+        "description": "order-service timeout increased when inventory-service became slow",
+        "environment": "prod",
+        "service": "order-service",
+        "severity": "critical",
+        "signals": {
+          "dependency": "inventory-service",
+          "error_rate": "high",
+          "latency": "high"
+        },
+        "source": "simulated",
+        "started_at": "2026-07-03T16:20:00+08:00",
+        "time_window_minutes": 30,
+        "title": "Order API timeout increased"
+      },
+      "evidence": [
+        {
+          "confidence": 1.0,
+          "error_message": null,
+          "id": "EVIDENCE_1",
+          "kind": "dependency_health",
+          "payload": {
+            "dependency": "inventory-service",
+            "error_rate": "8%",
+            "latency_p95": "3200ms",
+            "root_cause_claims": [
+              {
+                "component": "inventory-service",
+                "occurred_at": "2026-07-03T16:18:00+08:00",
+                "reason": "downstream dependency failure"
+              }
+            ]
+          },
+          "provider": "dependency",
+          "status": "success",
+          "summary": "inventory-service latency increased before order-service timeout errors",
+          "timestamp": "2026-07-03T16:18:00+08:00"
+        },
+        {
+          "confidence": 1.0,
+          "error_message": null,
+          "id": "EVIDENCE_2",
+          "kind": "log_pattern",
+          "payload": {
+            "count": 90,
+            "dependency": "inventory-service",
+            "exception": "TimeoutException"
+          },
+          "provider": "log",
+          "status": "success",
+          "summary": "TimeoutException increased when calling inventory-service",
+          "timestamp": "2026-07-03T16:20:00+08:00"
+        },
+        {
+          "confidence": 1.0,
+          "error_message": null,
+          "id": "EVIDENCE_3",
+          "kind": "service_metadata",
+          "payload": {
+            "dependencies": [
+              "inventory-service",
+              "payment-db"
+            ],
+            "environment": "prod",
+            "owner": "platform-team",
+            "runtime": "python",
+            "service": "order-service"
+          },
+          "provider": "service_catalog",
+          "status": "success",
+          "summary": "order-service owner is platform-team",
+          "timestamp": "2026-07-03T16:20:00+08:00"
+        },
+        {
+          "confidence": 0.8,
+          "error_message": null,
+          "id": "EVIDENCE_4",
+          "kind": "related_alert",
+          "payload": {
+            "related_alert_count": 0,
+            "service": "order-service",
+            "time_window_minutes": 30
+          },
+          "provider": "related_alert",
+          "status": "success",
+          "summary": "No wider alert storm detected around order-service",
+          "timestamp": "2026-07-03T16:20:00+08:00"
+        }
+      ],
+      "failure_reason": null,
+      "hypotheses": [
+        {
+          "cause_type": "downstream_dependency_failure",
+          "confidence": 0.95,
+          "contradicting_evidence_ids": [],
+          "id": "HYPOTHESIS_1",
+          "next_actions": [
+            "Inspect the downstream service health and recent changes.",
+            "Increase timeout budget only if it is safe for callers and capacity.",
+            "Enable fallback, circuit breaking, or queueing for the affected dependency path."
+          ],
+          "summary": "A downstream dependency slowdown matches the timeout pattern.",
+          "supporting_evidence_ids": [
+            "EVIDENCE_1",
+            "EVIDENCE_2"
+          ]
+        }
+      ],
+      "id": "INVESTIGATION_1",
+      "llm_analysis": null,
+      "multi_agent_run": {
+        "adaptive_status": "skipped",
+        "failure_reason": null,
+        "max_tool_calls_per_specialist": 3,
+        "max_total_tool_calls": 8,
+        "status": "skipped",
+        "strategy": "adaptive"
+      },
+      "provider_results": [
+        {
+          "error_message": null,
+          "evidence_items": [
+            {
+              "confidence": 1.0,
+              "error_message": null,
+              "id": "EVIDENCE_2",
+              "kind": "log_pattern",
+              "payload": {
+                "count": 90,
+                "dependency": "inventory-service",
+                "exception": "TimeoutException"
+              },
+              "provider": "log",
+              "status": "success",
+              "summary": "TimeoutException increased when calling inventory-service",
+              "timestamp": "2026-07-03T16:20:00+08:00"
+            }
+          ],
+          "provider": "log",
+          "status": "success"
+        },
+        {
+          "error_message": null,
+          "evidence_items": [],
+          "provider": "metric",
+          "status": "success"
+        },
+        {
+          "error_message": null,
+          "evidence_items": [],
+          "provider": "deploy",
+          "status": "success"
+        },
+        {
+          "error_message": null,
+          "evidence_items": [
+            {
+              "confidence": 1.0,
+              "error_message": null,
+              "id": "EVIDENCE_1",
+              "kind": "dependency_health",
+              "payload": {
+                "dependency": "inventory-service",
+                "error_rate": "8%",
+                "latency_p95": "3200ms",
+                "root_cause_claims": [
+                  {
+                    "component": "inventory-service",
+                    "occurred_at": "2026-07-03T16:18:00+08:00",
+                    "reason": "downstream dependency failure"
+                  }
+                ]
+              },
+              "provider": "dependency",
+              "status": "success",
+              "summary": "inventory-service latency increased before order-service timeout errors",
+              "timestamp": "2026-07-03T16:18:00+08:00"
+            }
+          ],
+          "provider": "dependency",
+          "status": "success"
+        },
+        {
+          "error_message": null,
+          "evidence_items": [
+            {
+              "confidence": 1.0,
+              "error_message": null,
+              "id": "EVIDENCE_3",
+              "kind": "service_metadata",
+              "payload": {
+                "dependencies": [
+                  "inventory-service",
+                  "payment-db"
+                ],
+                "environment": "prod",
+                "owner": "platform-team",
+                "runtime": "python",
+                "service": "order-service"
+              },
+              "provider": "service_catalog",
+              "status": "success",
+              "summary": "order-service owner is platform-team",
+              "timestamp": "2026-07-03T16:20:00+08:00"
+            }
+          ],
+          "provider": "service_catalog",
+          "status": "success"
+        },
+        {
+          "error_message": null,
+          "evidence_items": [
+            {
+              "confidence": 0.8,
+              "error_message": null,
+              "id": "EVIDENCE_4",
+              "kind": "related_alert",
+              "payload": {
+                "related_alert_count": 0,
+                "service": "order-service",
+                "time_window_minutes": 30
+              },
+              "provider": "related_alert",
+              "status": "success",
+              "summary": "No wider alert storm detected around order-service",
+              "timestamp": "2026-07-03T16:20:00+08:00"
+            }
+          ],
+          "provider": "related_alert",
+          "status": "success"
+        }
+      ],
+      "report": {
+        "action_ids": [
+          "ACTION_1"
+        ],
+        "hypotheses": [
+          {
+            "cause_type": "downstream_dependency_failure",
+            "confidence": 0.95,
+            "contradicting_evidence_ids": [],
+            "id": "HYPOTHESIS_1",
+            "next_actions": [
+              "Inspect the downstream service health and recent changes.",
+              "Increase timeout budget only if it is safe for callers and capacity.",
+              "Enable fallback, circuit breaking, or queueing for the affected dependency path."
+            ],
+            "summary": "A downstream dependency slowdown matches the timeout pattern.",
+            "supporting_evidence_ids": [
+              "EVIDENCE_1",
+              "EVIDENCE_2"
+            ]
+          }
+        ],
+        "id": "REPORT_1",
+        "investigation_id": "INVESTIGATION_1",
+        "markdown_sections": [
+          {
+            "heading": "order-service RCA 诊断报告",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "heading": "摘要",
+            "sha256": "44a675a19b1a7ae2279a958301c4110c83d58f344f71304cafe4cbab8eb1a78f"
+          },
+          {
+            "heading": "最可能根因",
+            "sha256": "45201cb588929084c865e302cfc4ca51e41dffbc56597f6abc12a5e45e252e54"
+          },
+          {
+            "heading": "证据链",
+            "sha256": "af4eba50f84a9f3787a9461f330a0af31a39371388c2ebb615cce50ebc822500"
+          },
+          {
+            "heading": "支持该结论的证据",
+            "sha256": "3e03f2fc7b61289577c092ec92bc8a176ef5c8058b98617643d549292ab7cca4"
+          },
+          {
+            "heading": "建议动作",
+            "sha256": "aeafcaa8e2f7755339cb8dd2bf8b8e09a6793964f5d40758598b38b53941aa1d"
+          },
+          {
+            "heading": "需要审批的动作",
+            "sha256": "999b422f624f92288df0d3f4795df304278e90f929f537fa9b9baa0ad25e287c"
+          },
+          {
+            "heading": "验证建议",
+            "sha256": "3720eaffd05236d3a6464b240bce62339333aaca42b8aa21d3cac3909eeaf5cd"
+          },
+          {
+            "heading": "事实与推断",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "heading": "观察到的事实",
+            "sha256": "2f9c1faa2df08c7949769efa6d2c55194c895cbd0700fea5e87d02f0770e9800"
+          },
+          {
+            "heading": "推断结论/不确定性",
+            "sha256": "4b1843a51f88ec42b1870391af4531b3c25c3dd914efa231ea069528c817ea9b"
+          }
+        ],
+        "summary": "A downstream dependency slowdown matches the timeout pattern.",
+        "timeline": [
+          {
+            "event": "inventory-service latency increased before order-service timeout errors",
+            "time": "2026-07-03T16:18:00+08:00"
+          },
+          {
+            "event": "TimeoutException increased when calling inventory-service",
+            "time": "2026-07-03T16:20:00+08:00"
+          },
+          {
+            "event": "order-service owner is platform-team",
+            "time": "2026-07-03T16:20:00+08:00"
+          },
+          {
+            "event": "No wider alert storm detected around order-service",
+            "time": "2026-07-03T16:20:00+08:00"
+          }
+        ],
+        "verification_suggestion_ids": [
+          "VERIFICATION_1",
+          "VERIFICATION_2"
+        ]
+      },
+      "specialist_results": [
+        {
+          "agent_name": "LogAnalyst",
+          "errors": [],
+          "evidence_items": [
+            {
+              "confidence": 1.0,
+              "error_message": null,
+              "id": "EVIDENCE_2",
+              "kind": "log_pattern",
+              "payload": {
+                "count": 90,
+                "dependency": "inventory-service",
+                "exception": "TimeoutException"
+              },
+              "provider": "log",
+              "status": "success",
+              "summary": "TimeoutException increased when calling inventory-service",
+              "timestamp": "2026-07-03T16:20:00+08:00"
+            }
+          ],
+          "status": "completed",
+          "summary": "log provider returned 1 evidence item(s)"
+        },
+        {
+          "agent_name": "MetricAnalyst",
+          "errors": [],
+          "evidence_items": [],
+          "status": "completed",
+          "summary": "metric provider returned 0 evidence item(s)"
+        },
+        {
+          "agent_name": "DeployAnalyst",
+          "errors": [],
+          "evidence_items": [],
+          "status": "completed",
+          "summary": "deploy provider returned 0 evidence item(s)"
+        },
+        {
+          "agent_name": "DependencyAnalyst",
+          "errors": [],
+          "evidence_items": [
+            {
+              "confidence": 1.0,
+              "error_message": null,
+              "id": "EVIDENCE_1",
+              "kind": "dependency_health",
+              "payload": {
+                "dependency": "inventory-service",
+                "error_rate": "8%",
+                "latency_p95": "3200ms",
+                "root_cause_claims": [
+                  {
+                    "component": "inventory-service",
+                    "occurred_at": "2026-07-03T16:18:00+08:00",
+                    "reason": "downstream dependency failure"
+                  }
+                ]
+              },
+              "provider": "dependency",
+              "status": "success",
+              "summary": "inventory-service latency increased before order-service timeout errors",
+              "timestamp": "2026-07-03T16:18:00+08:00"
+            }
+          ],
+          "status": "completed",
+          "summary": "dependency provider returned 1 evidence item(s)"
+        },
+        {
+          "agent_name": "ServiceCatalogAnalyst",
+          "errors": [],
+          "evidence_items": [
+            {
+              "confidence": 1.0,
+              "error_message": null,
+              "id": "EVIDENCE_3",
+              "kind": "service_metadata",
+              "payload": {
+                "dependencies": [
+                  "inventory-service",
+                  "payment-db"
+                ],
+                "environment": "prod",
+                "owner": "platform-team",
+                "runtime": "python",
+                "service": "order-service"
+              },
+              "provider": "service_catalog",
+              "status": "success",
+              "summary": "order-service owner is platform-team",
+              "timestamp": "2026-07-03T16:20:00+08:00"
+            }
+          ],
+          "status": "completed",
+          "summary": "service_catalog provider returned 1 evidence item(s)"
+        },
+        {
+          "agent_name": "RelatedAlertAnalyst",
+          "errors": [],
+          "evidence_items": [
+            {
+              "confidence": 0.8,
+              "error_message": null,
+              "id": "EVIDENCE_4",
+              "kind": "related_alert",
+              "payload": {
+                "related_alert_count": 0,
+                "service": "order-service",
+                "time_window_minutes": 30
+              },
+              "provider": "related_alert",
+              "status": "success",
+              "summary": "No wider alert storm detected around order-service",
+              "timestamp": "2026-07-03T16:20:00+08:00"
+            }
+          ],
+          "status": "completed",
+          "summary": "related_alert provider returned 1 evidence item(s)"
+        }
+      ],
+      "status": "completed",
+      "strategy": "adaptive",
+      "verification_suggestions": [
+        {
+          "description": "Confirm that dependency latency recovers.",
+          "expected_signal": "dependency latency recovers",
+          "id": "VERIFICATION_1",
+          "related_action_ids": [],
+          "related_cause_types": [],
+          "result_evidence_ids": [],
+          "result_note": null,
+          "status": "pending",
+          "title": "Verify dependency latency recovers"
+        },
+        {
+          "description": "Confirm that local timeout errors decrease.",
+          "expected_signal": "local timeout errors decrease",
+          "id": "VERIFICATION_2",
+          "related_action_ids": [],
+          "related_cause_types": [],
+          "result_evidence_ids": [],
+          "result_note": null,
+          "status": "pending",
+          "title": "Verify local timeout errors decrease"
+        }
+      ]
+    },
+    "review": {
+      "baseline_cause_type": null,
+      "candidates": [
+        {
+          "cause_type": "downstream_dependency_failure",
+          "confidence": 1.0,
+          "contradicting_evidence_ids": [],
+          "contradicting_finding_ids": [],
+          "id": "CANDIDATE_1",
+          "rank": 1,
+          "rationale": "log evidence signal",
+          "summary": "downstream_dependency_failure is candidate #1.",
+          "supporting_evidence_ids": [
+            "EVIDENCE_2"
+          ],
+          "supporting_finding_ids": [
+            "FINDING_1"
+          ],
+          "uncertainty": "Only one specialist currently supports this candidate."
+        }
+      ],
+      "decision_status": null,
+      "execution_layer": "custom",
+      "id": "REVIEW_1",
+      "investigation_id": "INVESTIGATION_1",
+      "model_name": null,
+      "model_provider": null,
+      "primary_stabilization_category": null,
+      "root_causes": [],
+      "run_status": "completed",
+      "secondary_stabilization_categories": [],
+      "selected_cause_type": null,
+      "summary": "",
+      "uncertainty": ""
+    },
+    "tasks": [
+      {
+        "agent_name": "LogAgent",
+        "analysis_round": null,
+        "depends_on": [],
+        "description": "Read incident-window logs for error patterns.",
+        "execution_layer": "custom",
+        "id": "TASK_1",
+        "priority": 100,
+        "status": "completed",
+        "task_type": "log_investigation",
+        "title": "Investigate logs",
+        "tool_names": [
+          "read_logs"
+        ]
+      },
+      {
+        "agent_name": "MetricAgent",
+        "analysis_round": null,
+        "depends_on": [],
+        "description": "Query incident-window service metrics.",
+        "execution_layer": "custom",
+        "id": "TASK_2",
+        "priority": 100,
+        "status": "completed",
+        "task_type": "metric_investigation",
+        "title": "Investigate metrics",
+        "tool_names": [
+          "query_metrics"
+        ]
+      },
+      {
+        "agent_name": "DeploymentAgent",
+        "analysis_round": null,
+        "depends_on": [],
+        "description": "Read deployment changes near the incident window.",
+        "execution_layer": "custom",
+        "id": "TASK_3",
+        "priority": 100,
+        "status": "completed",
+        "task_type": "deployment_check",
+        "title": "Check deployments",
+        "tool_names": [
+          "read_deployments"
+        ]
+      },
+      {
+        "agent_name": "DependencyAgent",
+        "analysis_round": null,
+        "depends_on": [],
+        "description": "Query dependency health and related service context.",
+        "execution_layer": "custom",
+        "id": "TASK_4",
+        "priority": 100,
+        "status": "completed",
+        "task_type": "dependency_check",
+        "title": "Check dependencies",
+        "tool_names": [
+          "query_dependencies"
+        ]
+      },
+      {
+        "agent_name": "ServiceCatalogAgent",
+        "analysis_round": null,
+        "depends_on": [],
+        "description": "Read service ownership and dependency context.",
+        "execution_layer": "custom",
+        "id": "TASK_5",
+        "priority": 100,
+        "status": "completed",
+        "task_type": "service_context",
+        "title": "Read service context",
+        "tool_names": [
+          "read_service_catalog"
+        ]
+      }
+    ],
+    "tool_calls": [
+      {
+        "agent_name": "LogAgent",
+        "error_message": null,
+        "id": "TOOL_CALL_1",
+        "input": {
+          "investigation_id": "INVESTIGATION_1"
+        },
+        "output_evidence_ids": [
+          "EVIDENCE_2"
+        ],
+        "status": "success",
+        "task_id": "TASK_1",
+        "tool_name": "read_logs"
+      },
+      {
+        "agent_name": "MetricAgent",
+        "error_message": null,
+        "id": "TOOL_CALL_2",
+        "input": {
+          "investigation_id": "INVESTIGATION_1"
+        },
+        "output_evidence_ids": [],
+        "status": "success",
+        "task_id": "TASK_2",
+        "tool_name": "query_metrics"
+      },
+      {
+        "agent_name": "DeploymentAgent",
+        "error_message": null,
+        "id": "TOOL_CALL_3",
+        "input": {
+          "investigation_id": "INVESTIGATION_1"
+        },
+        "output_evidence_ids": [],
+        "status": "success",
+        "task_id": "TASK_3",
+        "tool_name": "read_deployments"
+      },
+      {
+        "agent_name": "DependencyAgent",
+        "error_message": null,
+        "id": "TOOL_CALL_4",
+        "input": {
+          "investigation_id": "INVESTIGATION_1"
+        },
+        "output_evidence_ids": [
+          "EVIDENCE_1"
+        ],
+        "status": "success",
+        "task_id": "TASK_4",
+        "tool_name": "query_dependencies"
+      },
+      {
+        "agent_name": "ServiceCatalogAgent",
+        "error_message": null,
+        "id": "TOOL_CALL_5",
+        "input": {
+          "investigation_id": "INVESTIGATION_1"
+        },
+        "output_evidence_ids": [
+          "EVIDENCE_3"
+        ],
+        "status": "success",
+        "task_id": "TASK_5",
+        "tool_name": "read_service_catalog"
+      }
+    ]
+  }
+}

@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 from backend.diagnosis.context import (
     DiagnosisContext,
     SpecialistResult,
@@ -5,6 +7,7 @@ from backend.diagnosis.context import (
 )
 from backend.domain.events import IncidentEvent
 from backend.providers.registry import ProviderRegistry
+from backend.runtime.concurrency import RunStepGate
 
 AGENT_NAMES_BY_PROVIDER = {
     "log": "LogAnalyst",
@@ -22,6 +25,25 @@ class DiagnosisCoordinator:
 
     def collect(self, event: IncidentEvent) -> DiagnosisContext:
         provider_results = self.providers.collect_results(event)
+        return self._context(event, provider_results)
+
+    async def collect_async(
+        self,
+        event: IncidentEvent,
+        *,
+        max_parallel_steps: int = 3,
+        check_execution: Callable[[], None] | None = None,
+        parallel_limit: RunStepGate | None = None,
+    ) -> DiagnosisContext:
+        provider_results = await self.providers.collect_results_async(
+            event,
+            max_parallel_steps=max_parallel_steps,
+            check_execution=check_execution,
+            parallel_limit=parallel_limit,
+        )
+        return self._context(event, provider_results)
+
+    def _context(self, event, provider_results) -> DiagnosisContext:
         evidence = self.providers.evidence_from_results(provider_results)
         specialist_results = [
             SpecialistResult(

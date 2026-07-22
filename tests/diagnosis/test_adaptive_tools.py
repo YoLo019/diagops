@@ -105,6 +105,29 @@ async def test_session_enforces_global_budget_across_specialists():
 
 
 @pytest.mark.anyio
+async def test_distinct_queries_have_distinct_stable_logical_operations():
+    provider = QueryProvider("read_logs", EvidenceProvider.LOG, "ev-log")
+    session = _session([provider], per_agent=2, total=2)
+
+    await session.invoke(
+        AgentName.LOG,
+        "read_logs",
+        json.dumps(_query_payload(keywords=["first"])),
+        1,
+    )
+    await session.invoke(
+        AgentName.LOG,
+        "read_logs",
+        json.dumps(_query_payload(keywords=["second"])),
+        1,
+    )
+
+    logical_ids = [call.logical_call_id for call in session.tool_calls]
+    assert provider.calls == 2
+    assert len(set(logical_ids)) == 2
+
+
+@pytest.mark.anyio
 async def test_session_rejects_out_of_window_and_out_of_scope_dependency():
     provider = QueryProvider(
         "query_dependencies", EvidenceProvider.DEPENDENCY, "ev-dependency"

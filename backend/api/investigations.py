@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from backend.api.events import to_summary
 from backend.db.models import InvestigationRecord, InvestigationSummary
@@ -17,7 +17,7 @@ from backend.domain.multi_agent import InvestigationStrategy
 from backend.domain.reports import IncidentReport
 from backend.memory import MemoryStore
 from backend.providers.results import ProviderResult
-from backend.safety.redaction import redact_model, redact_text
+from backend.safety.redaction import assert_safe_label, redact_model, redact_text
 from backend.services.container import get_container
 
 router = APIRouter(prefix="/investigations", tags=["investigations"])
@@ -30,6 +30,13 @@ class ManualInvestigationRequest(BaseModel):
     service: str = Field(min_length=1)
     environment: str = Field(min_length=1)
     strategy: InvestigationStrategy | None = None
+
+    @field_validator("environment")
+    @classmethod
+    def validate_environment(cls, value: str) -> str:
+        """在公开输入边界拒绝凭据，避免进入业务记录和 runtime snapshot。"""
+        assert_safe_label(value)
+        return value
 
 
 class UpdateActionStatusRequest(BaseModel):
@@ -55,7 +62,10 @@ class FeedbackRequest(BaseModel):
 def _get_investigation_record(investigation_id: str) -> InvestigationRecord:
     container = get_container()
     try:
-        return redact_model(container.repository.get(investigation_id))
+        record = redact_model(container.repository.get(investigation_id))
+        return record.model_copy(
+            update={"runtime_available": _runtime_available(investigation_id)}
+        )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -64,20 +74,35 @@ def _sorted_evidence(record: InvestigationRecord) -> list[EvidenceItem]:
     return sorted(record.evidence, key=lambda item: (item.timestamp, item.id))
 
 
+def _runtime_available(investigation_id: str) -> bool:
+    container = get_container()
+    return bool(container.runtime_store.list_runs(investigation_id))
+
+
 @router.get("", response_model=list[InvestigationRecord])
 def list_investigations() -> list[InvestigationRecord]:
     container = get_container()
-    return [redact_model(record) for record in container.repository.list()]
+    return [
+        redact_model(record).model_copy(
+            update={"runtime_available": _runtime_available(record.id)}
+        )
+        for record in container.repository.list()
+    ]
 
 
 @router.get("/summaries", response_model=list[InvestigationSummary])
 def list_investigation_summaries() -> list[InvestigationSummary]:
     container = get_container()
-    return [redact_model(item) for item in container.repository.list_summaries()]
+    return [
+        redact_model(item).model_copy(
+            update={"runtime_available": _runtime_available(item.id)}
+        )
+        for item in container.repository.list_summaries()
+    ]
 
 
 @router.post("/manual", response_model=InvestigationSummary)
-def create_manual_investigation(
+async def create_manual_investigation(
     request: ManualInvestigationRequest,
 ) -> InvestigationSummary:
     text = request.text.strip()
@@ -93,8 +118,11 @@ def create_manual_investigation(
         started_at=datetime.now(UTC),
     )
     container = get_container()
-    record = container.orchestrator.run(event, strategy=request.strategy)
-    return to_summary(record)
+    record = await container.run_investigation(event, strategy=request.strategy)
+    return to_summary(
+        record,
+        runtime_available=_runtime_available(record.id),
+    )
 
 
 @router.patch("/{investigation_id}/actions/{action_id}")

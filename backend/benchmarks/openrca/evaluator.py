@@ -9,7 +9,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from backend.benchmarks.openrca.models import OpenRcaBenchmarkSummary
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from backend.benchmarks.openrca.models import OpenRcaBenchmarkSummary, OpenRcaPartition
 
 _PREDICTION_PATTERN = re.compile(
     r'{\s*'
@@ -94,6 +96,106 @@ def evaluate_prediction(prediction: str, scoring_points: str) -> EvaluationScore
         reason_points=reason_points,
         time_points=time_points,
     )
+
+
+class _ReplayLocator(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int = Field(ge=1, le=1)
+    benchmark_run_id: str = Field(min_length=1, max_length=160)
+    strategy: str = Field(pattern=r"^(fixed|adaptive)$")
+    provider: str = Field(min_length=1, max_length=160)
+    model: str = Field(min_length=1, max_length=160)
+    prompt_version: str = Field(min_length=1, max_length=160)
+    case_id: str = Field(min_length=1, max_length=160)
+    partition: OpenRcaPartition
+    row_id: str = Field(pattern=r"^\d+$")
+    prediction_root: str = Field(min_length=1, max_length=2048)
+    prediction_file: str = Field(pattern=r"^(fixed|adaptive)-predictions\.csv$")
+    prediction_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    query_root: str = Field(min_length=1, max_length=2048)
+    scoring_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+def evaluate_persisted_prediction(runtime_store, runtime_run_id: str) -> str:
+    """按持久 locator 与内容哈希重跑官方 prediction/scoring evaluator。"""
+    raw_locator = runtime_store.get_benchmark_replay_locator(runtime_run_id)
+    if raw_locator is None:
+        raise FileNotFoundError("benchmark replay locator is missing")
+    try:
+        locator = _ReplayLocator.model_validate(raw_locator)
+    except ValidationError as exc:
+        raise ValueError("benchmark replay locator is invalid") from exc
+    if locator.prediction_file != f"{locator.strategy}-predictions.csv":
+        raise ValueError("benchmark prediction identity is invalid")
+    run = runtime_store.get_run(runtime_run_id)
+    if (
+        run.model_provider is None
+        or locator.provider != run.model_provider.value
+        or locator.model != run.model_name
+        or locator.prompt_version != run.prompt_version
+    ):
+        raise ValueError("benchmark runtime configuration is inconsistent")
+
+    prediction_root = Path(locator.prediction_root).resolve()
+    prediction_path = (prediction_root / locator.prediction_file).resolve()
+    if (
+        not prediction_path.is_relative_to(prediction_root)
+        or not prediction_path.is_file()
+    ):
+        raise FileNotFoundError("benchmark prediction artifact is missing")
+    prediction = _prediction_for_runtime(
+        prediction_path, runtime_run_id, locator
+    )
+    if _sha256(prediction) != locator.prediction_sha256:
+        raise ValueError("benchmark prediction artifact checksum mismatch")
+
+    query_root = Path(locator.query_root).resolve()
+    query_path = (query_root / locator.partition.value / "query.csv").resolve()
+    if not query_path.is_relative_to(query_root) or not query_path.is_file():
+        raise FileNotFoundError("benchmark scoring artifact is missing")
+    with query_path.open(encoding="utf-8-sig", newline="") as file:
+        query_rows = list(csv.DictReader(file))
+    try:
+        scoring_points = query_rows[int(locator.row_id)].get("scoring_points", "")
+    except (IndexError, ValueError) as exc:
+        raise ValueError("benchmark scoring row identity is invalid") from exc
+    if _sha256(scoring_points) != locator.scoring_sha256:
+        raise ValueError("benchmark scoring artifact checksum mismatch")
+
+    score = evaluate_prediction(prediction, scoring_points)
+    if score.strict:
+        return "strict"
+    if score.component_points + score.reason_points + score.time_points:
+        return f"partial:{score.partial_score:.2f}"
+    return "invalid"
+
+
+def _prediction_for_runtime(
+    path: Path, runtime_run_id: str, locator: _ReplayLocator
+) -> str:
+    matches = []
+    with path.open(encoding="utf-8", newline="") as file:
+        for row in csv.DictReader(file):
+            try:
+                metadata = json.loads(row.get("metadata", ""))
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if (
+                isinstance(metadata, dict)
+                and metadata.get("runtime_run_id") == runtime_run_id
+                and row.get("case_id") == locator.case_id
+                and row.get("partition") == locator.partition.value
+                and row.get("row_id") == locator.row_id
+            ):
+                matches.append(row.get("prediction", ""))
+    if len(matches) != 1:
+        raise ValueError("benchmark prediction row identity is invalid")
+    return matches[0]
+
+
+def _sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def evaluate_run(query_root: Path, run_dir: Path) -> Path:

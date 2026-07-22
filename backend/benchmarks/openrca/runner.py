@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import csv
+import hashlib
 import json
 import math
 import subprocess
@@ -21,17 +23,25 @@ from backend.benchmarks.openrca.providers import (
     OpenRcaLogProvider,
     OpenRcaMetricProvider,
 )
-from backend.db.models import InvestigationStatus
-from backend.db.repositories import InMemoryInvestigationRepository
+from backend.db.models import InvestigationRecord, InvestigationStatus
 from backend.diagnosis.agents_runtime import AgentsRcaRuntime, AgentsRcaRuntimeResult
 from backend.diagnosis.coordinator import DiagnosisCoordinator
 from backend.diagnosis.orchestrator import DiagnosisOrchestrator
 from backend.domain.agent_findings import RootCauseAttribution
 from backend.domain.events import IncidentEvent, IncidentSource, Severity
-from backend.domain.multi_agent import FailureCategory, InvestigationStrategy
+from backend.domain.multi_agent import FailureCategory, InvestigationStrategy, ModelProvider
+from backend.domain.runtime import (
+    RuntimeRun,
+    RuntimeRunKind,
+    RuntimeRunReason,
+)
 from backend.providers.registry import ProviderRegistry
 from backend.rca.analyzer import RcaAnalyzer
 from backend.reports.generator import ReportGenerator
+from backend.runtime.coordinator import RuntimeCoordinator
+from backend.runtime.phase_executor import DiagnosisPhaseExecutor
+from backend.runtime.telemetry import RuntimeTelemetry
+from backend.runtime.writer import RuntimeWriter
 from backend.tools.provider_tools import build_provider_tool_registry
 
 
@@ -48,6 +58,7 @@ class BenchmarkCaseOutcome:
     input_tokens: int = 0
     output_tokens: int = 0
     read_only_violations: int = 0
+    runtime_run_id: str | None = None
 
 
 class BenchmarkCaseRunner(Protocol):
@@ -65,9 +76,27 @@ class _CapturingAgentsRuntime(AgentsRcaRuntime):
 
 
 class OpenRcaDiagnosisRunner:
-    def __init__(self, dataset_root: Path, model: str) -> None:
+    def __init__(
+        self,
+        dataset_root: Path,
+        model: str,
+        *,
+        repository,
+        runtime_store,
+        provider: ModelProvider = ModelProvider.OPENAI,
+        prompt_version: str = "v8.2",
+    ) -> None:
         self.dataset_root = dataset_root
         self.model = model
+        self.provider = provider
+        self.prompt_version = prompt_version
+        self.repository = repository
+        self.runtime_store = runtime_store
+
+    def configure_runtime(self, *, provider, model, prompt_version) -> None:
+        self.provider = ModelProvider(provider)
+        self.model = model
+        self.prompt_version = prompt_version
 
     def run_case(
         self, case: OpenRcaRuntimeCase, strategy: InvestigationStrategy
@@ -85,10 +114,12 @@ class OpenRcaDiagnosisRunner:
             model=self.model,
             strategy=strategy,
             tool_registry=registry,
+            model_provider=self.provider,
+            model_name=self.model,
+            prompt_version=self.prompt_version,
         )
-        repository = InMemoryInvestigationRepository()
         orchestrator = DiagnosisOrchestrator(
-            repository=repository,
+            repository=self.repository,
             providers=providers,
             analyzer=RcaAnalyzer(),
             report_generator=ReportGenerator(),
@@ -96,8 +127,54 @@ class OpenRcaDiagnosisRunner:
             agents_runtime=runtime,
             default_strategy=strategy,
         )
-        record = orchestrator.run(_benchmark_event(case), strategy=strategy)
-        review = repository.get_coordination_review(record.id)
+        record = self.repository.save(
+            InvestigationRecord(
+                event=_benchmark_event(case),
+                strategy=strategy,
+                runtime_available=True,
+            )
+        )
+        runtime_run = self.runtime_store.create_run(
+            RuntimeRun(
+                investigation_id=record.id,
+                run_kind=RuntimeRunKind.LIVE,
+                strategy=strategy,
+                run_reason=RuntimeRunReason.INITIAL,
+                model_provider=self.provider,
+                model_name=(
+                    self.model
+                    if isinstance(self.model, str)
+                    else type(self.model).__name__
+                ),
+                prompt_version=self.prompt_version,
+                tool_budget=8,
+                timeout_seconds=60,
+            )
+        )
+        writer = RuntimeWriter(self.runtime_store)
+        coordinator = RuntimeCoordinator(
+            store=self.runtime_store,
+            writer=writer,
+            phase_executor=DiagnosisPhaseExecutor(
+                orchestrator,
+                telemetry=RuntimeTelemetry.disabled(),
+            ),
+            telemetry=RuntimeTelemetry.disabled(),
+        )
+
+        async def execute() -> None:
+            try:
+                await coordinator.execute(
+                    runtime_run.id,
+                    owner=f"openrca-{runtime_run.id}",
+                )
+            finally:
+                await coordinator.shutdown()
+
+        asyncio.run(execute())
+        runtime_run = self.runtime_store.get_run(runtime_run.id)
+        record = self.repository.get(record.id)
+        review = self.repository.get_coordination_review(record.id)
         root_causes = list(review.root_causes) if review is not None else []
         evidence_ids = {item.id for item in record.evidence}
         references = [
@@ -106,7 +183,7 @@ class OpenRcaDiagnosisRunner:
             for evidence_id in cause.supporting_evidence_ids
         ]
         invalid_references = sum(item not in evidence_ids for item in references)
-        calls = repository.list_tool_calls(record.id)
+        calls = self.repository.list_tool_calls(record.id)
         duplicate_rejections = sum(
             "duplicate query" in (call.error_message or "").casefold()
             for call in calls
@@ -119,7 +196,7 @@ class OpenRcaDiagnosisRunner:
                 read_only_violations += 1
             else:
                 read_only_violations += int(not spec.read_only)
-        executions = repository.list_executions(record.id)
+        executions = self.repository.list_executions(record.id)
         invalid_references += sum(
             execution.failure_category == FailureCategory.INVALID_REFERENCE
             for execution in executions
@@ -145,6 +222,42 @@ class OpenRcaDiagnosisRunner:
             input_tokens=runtime_result.input_tokens if runtime_result else 0,
             output_tokens=runtime_result.output_tokens if runtime_result else 0,
             read_only_violations=read_only_violations,
+            runtime_run_id=runtime_run.id,
+        )
+
+    def register_replay_artifact(
+        self,
+        *,
+        case: OpenRcaRuntimeCase,
+        strategy: InvestigationStrategy,
+        benchmark_run_id: str,
+        runtime_run_id: str,
+        prediction_path: Path,
+        prediction: str,
+    ) -> None:
+        scoring_points = _scoring_points(self.dataset_root, case)
+        self.runtime_store.set_benchmark_replay_locator(
+            runtime_run_id,
+            {
+                "schema_version": 1,
+                "benchmark_run_id": benchmark_run_id,
+                "strategy": strategy.value,
+                "provider": self.provider.value,
+                "model": self.model,
+                "prompt_version": self.prompt_version,
+                "case_id": case.case_id,
+                "partition": case.partition.value,
+                "row_id": case.row_id,
+                "prediction_root": str(prediction_path.parent.resolve()),
+                "prediction_file": prediction_path.name,
+                "prediction_sha256": hashlib.sha256(
+                    prediction.encode("utf-8")
+                ).hexdigest(),
+                "query_root": str(self.dataset_root.resolve()),
+                "scoring_sha256": hashlib.sha256(
+                    scoring_points.encode("utf-8")
+                ).hexdigest(),
+            },
         )
 
 
@@ -174,6 +287,7 @@ def run_benchmark_pair(
     output_root: Path,
     *,
     model: str,
+    provider: ModelProvider = ModelProvider.OPENAI,
     prompt_version: str = "v8.2",
     input_cost_per_million: float = 0,
     output_cost_per_million: float = 0,
@@ -188,6 +302,14 @@ def run_benchmark_pair(
     index = OpenRcaRuntimeIndex.model_validate_json(
         safe_index.read_text(encoding="utf-8")
     )
+    provider = ModelProvider(provider)
+    configure = getattr(case_runner, "configure_runtime", None)
+    if configure is not None:
+        configure(
+            provider=provider,
+            model=model,
+            prompt_version=prompt_version,
+        )
     started_at = datetime.now(UTC)
     run_id = started_at.strftime("run-%Y%m%dT%H%M%S%fZ")
     output_dir = output_root / run_id
@@ -197,7 +319,7 @@ def run_benchmark_pair(
         "run_id": run_id,
         "case_manifest_hash": index.case_manifest_hash,
         "model": model,
-        "provider": "openai",
+        "provider": provider.value,
         "prompt_version": prompt_version,
         "git_commit": git_commit,
         "strategies": [item.value for item in strategies],
@@ -233,12 +355,30 @@ def run_benchmark_pair(
                     "row_id": case.row_id,
                     "task_index": case.task_index,
                     "prediction": _official_prediction(outcome.root_causes),
+                    "metadata": json.dumps(
+                        {"runtime_run_id": outcome.runtime_run_id},
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
                 }
             )
             _write_predictions(
                 output_dir / f"{strategy.value}-predictions.csv",
                 rows[strategy],
             )
+            register = getattr(case_runner, "register_replay_artifact", None)
+            if register is not None and outcome.runtime_run_id is not None:
+                register(
+                    case=case,
+                    strategy=strategy,
+                    benchmark_run_id=run_id,
+                    runtime_run_id=outcome.runtime_run_id,
+                    prediction_path=(
+                        output_dir / f"{strategy.value}-predictions.csv"
+                    ),
+                    prediction=rows[strategy][-1]["prediction"],
+                )
             partition_rows = [
                 row
                 for row in rows[strategy]
@@ -361,11 +501,22 @@ def _write_predictions(path: Path, rows: list[dict[str, str]]) -> None:
                 "row_id",
                 "task_index",
                 "prediction",
+                "metadata",
             ),
         )
         writer.writeheader()
         writer.writerows(rows)
     temporary.replace(path)
+
+
+def _scoring_points(dataset_root: Path, case: OpenRcaRuntimeCase) -> str:
+    path = dataset_root / case.partition.value / "query.csv"
+    with path.open(encoding="utf-8-sig", newline="") as file:
+        rows = list(csv.DictReader(file))
+    try:
+        return rows[int(case.row_id)].get("scoring_points", "")
+    except (IndexError, ValueError) as exc:
+        raise ValueError("OpenRCA scoring row identity is invalid") from exc
 
 
 def _write_json_atomic(path: Path, value: object) -> None:

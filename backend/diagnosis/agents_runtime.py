@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import inspect
 import json
 import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
@@ -24,7 +27,10 @@ from backend.diagnosis.coordination_review import (
     build_hybrid_coordination_review,
     conflicting_agent_names,
 )
-from backend.diagnosis.deepseek_model import DeepSeekChatCompletionsModel
+from backend.diagnosis.deepseek_model import (
+    DeepSeekChatCompletionsModel,
+    create_deepseek_model,
+)
 from backend.diagnosis.evidence_validation import root_cause_claims
 from backend.diagnosis.openai_model import openai_responses_model
 from backend.domain.agent_findings import (
@@ -65,6 +71,8 @@ from backend.domain.multi_agent import (
 )
 from backend.domain.tool_calls import ToolCallRecord
 from backend.providers.results import ProviderResult
+from backend.runtime.concurrency import RunStepGate
+from backend.runtime.faults import RuntimeInjectedFault
 from backend.safety.redaction import redact_text, redact_value
 from backend.tools.registry import ToolRegistry
 
@@ -168,12 +176,59 @@ class _AgentOutputValidationError(ValueError):
     pass
 
 
-class _CoordinatorResponseHook(RunHooks):
-    def __init__(self, responses: list[Any]) -> None:
-        self.responses = responses
+class _ModelLifecycleHook(RunHooks):
+    """按 SDK 的实际 LLM request 配对 durable Model 生命周期。"""
 
-    async def on_llm_end(self, _context, _agent, response) -> None:
-        self.responses.append(response)
+    def __init__(
+        self,
+        persist_model_event: Callable[[str, str, int, str], Awaitable[None]]
+        | None,
+        responses: list[Any] | None = None,
+    ) -> None:
+        self.persist_model_event = persist_model_event
+        self.responses = responses
+        self.pending: dict[int, list[tuple[str, str]]] = {}
+
+    async def on_llm_start(
+        self, _context, agent, _system_prompt, _input_items
+    ) -> None:
+        execution_id = f"model-exec-{uuid4().hex}"
+        actor_name = agent.name
+        self.pending.setdefault(id(agent), []).append((execution_id, actor_name))
+        if self.persist_model_event is not None:
+            await self.persist_model_event(execution_id, "started", 0, actor_name)
+
+    async def on_llm_end(self, _context, agent, response) -> None:
+        if self.responses is not None:
+            self.responses.append(response)
+        execution_id, actor_name = self.pending[id(agent)].pop(0)
+        if self.persist_model_event is not None:
+            usage = response.usage
+            await self.persist_model_event(
+                execution_id,
+                "completed",
+                max(0, usage.input_tokens) + max(0, usage.output_tokens),
+                actor_name,
+            )
+
+    async def fail_pending(self) -> None:
+        if self.persist_model_event is not None:
+            for requests in self.pending.values():
+                for execution_id, actor_name in requests:
+                    await self.persist_model_event(
+                        execution_id, "failed", 0, actor_name
+                    )
+        self.pending.clear()
+
+
+class _CoordinatorResponseHook(_ModelLifecycleHook):
+    def __init__(
+        self,
+        responses: list[Any],
+        persist_model_event: Callable[[str, str, int, str], Awaitable[None]]
+        | None = None,
+    ) -> None:
+        super().__init__(persist_model_event, responses)
 
 
 @dataclass
@@ -195,6 +250,7 @@ class _SdkTurnResult:
     error: str | None = None
     cancelled: bool = False
     failure_category: FailureCategory = FailureCategory.NONE
+    failed_agent_names: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -293,6 +349,19 @@ class AgentsRcaRuntimeResult:
 
 
 TurnCallable = Callable[..., Awaitable[_SdkTurnResult]]
+ModelAdapterFactory = Callable[[ModelProvider, str], str | Model | None]
+
+
+class TokenBudgetExceeded(RuntimeError):
+    """模型预算在请求前耗尽，或本次 usage 超过剩余额度。"""
+
+
+class ConflictReviewOutcome(StrEnum):
+    """区分无冲突跳过、完成复核与已持久化超时，避免 timeout 冒充 skipped。"""
+
+    SKIPPED = "skipped"
+    COMPLETED = "completed"
+    TIMED_OUT = "timed_out"
 
 
 class AgentsRcaRuntime:
@@ -310,6 +379,19 @@ class AgentsRcaRuntime:
         max_tool_calls_per_specialist: int = 3,
         max_total_tool_calls: int = 8,
         tool_timeout_seconds: int = 10,
+        runtime_run_id: str | None = None,
+        resolve_tool_result: Callable[[str], ToolCallRecord | None] | None = None,
+        persist_tool_start: Callable[[ToolCallRecord], Awaitable[ToolCallRecord]]
+        | None = None,
+        persist_tool_result: Callable[[Any], Awaitable[ToolCallRecord]] | None = None,
+        persist_agent_event: Callable[[str, str], Awaitable[None]] | None = None,
+        persist_model_event: Callable[[str, str], Awaitable[None]] | None = None,
+        check_execution: Callable[[], None] | None = None,
+        max_parallel_steps_per_run: int = 3,
+        model_adapter_factory: ModelAdapterFactory | None = None,
+        prompt_version: str | None = None,
+        runtime_token_budget: int | None = None,
+        parallel_limit: RunStepGate | None = None,
     ) -> None:
         self.model = model
         self.max_turns = max_turns
@@ -322,9 +404,99 @@ class AgentsRcaRuntime:
         self.max_tool_calls_per_specialist = max_tool_calls_per_specialist
         self.max_total_tool_calls = max_total_tool_calls
         self.tool_timeout_seconds = tool_timeout_seconds
+        self.runtime_run_id = runtime_run_id
+        self._resolve_tool_result = resolve_tool_result
+        self._persist_tool_start = persist_tool_start
+        self._persist_tool_result = persist_tool_result
+        self._persist_agent_event = persist_agent_event
+        self._persist_model_event = persist_model_event
+        self._check_execution = check_execution or (lambda: None)
+        self._hit_fault: Callable[[str], None] = lambda _point: None
+        self.max_parallel_steps_per_run = max_parallel_steps_per_run
+        self._model_adapter_factory = model_adapter_factory
+        self.prompt_version = prompt_version or "v8.2"
+        self.runtime_token_budget = runtime_token_budget
+        self._parallel_limit = parallel_limit or RunStepGate(
+            max_parallel_steps_per_run
+        )
+        self._run_deadline: float | None = None
+        self._active_model_execution_ids: set[str] = set()
+        self._timeout_cancelled_execution_ids: set[str] = set()
         self._configured_model_name = (
             model_name.strip() if isinstance(model_name, str) and model_name.strip() else None
         ) if model_name is not None else _model_name_from_model(model)
+
+    def clone_for_run(
+        self,
+        *,
+        model_provider: ModelProvider | None,
+        model_name: str | None,
+        prompt_version: str | None,
+        token_budget: int | None,
+        timeout_seconds: float | None = None,
+    ) -> AgentsRcaRuntime:
+        """为 durable Run 创建隔离 adapter，避免并发 Run 改写进程级模型配置。"""
+        runtime = copy.copy(self)
+        provider = ModelProvider(model_provider or self.model_provider)
+        name = (model_name or self._configured_model_name or "").strip()
+        if self._model_adapter_factory is not None:
+            adapter = self._model_adapter_factory(provider, name)
+        elif provider == ModelProvider.DEEPSEEK:
+            if isinstance(self.model, DeepSeekChatCompletionsModel):
+                adapter = self.model.clone_for_model(name)
+            else:
+                adapter = create_deepseek_model(
+                    name,
+                    os.getenv("DEEPSEEK_API_KEY"),
+                )
+        else:
+            adapter = name or None
+        runtime.model = adapter
+        runtime.model_provider = provider
+        runtime._configured_model_name = name or None
+        runtime.prompt_version = prompt_version or "v8.2"
+        runtime.runtime_token_budget = token_budget
+        runtime.timeout_seconds = (
+            timeout_seconds if timeout_seconds is not None else self.timeout_seconds
+        )
+        runtime._run_deadline = None
+        runtime._active_model_execution_ids = set()
+        runtime._timeout_cancelled_execution_ids = set()
+        return runtime
+
+    def begin_run_deadline(self) -> None:
+        """为一次 PhaseExecutor Run 建立单一 monotonic deadline。"""
+        if self._run_deadline is None:
+            self._run_deadline = (
+                asyncio.get_running_loop().time() + self.timeout_seconds
+            )
+
+    def _remaining_run_timeout(self) -> float:
+        if self._run_deadline is None:
+            self.begin_run_deadline()
+        assert self._run_deadline is not None
+        return max(0.0, self._run_deadline - asyncio.get_running_loop().time())
+
+    async def _await_with_run_deadline(self, awaitable: Awaitable[Any]) -> Any:
+        """只把 Agents deadline 触发的取消标记为确定性 model failure。"""
+        task = asyncio.ensure_future(awaitable)
+        try:
+            done, _pending = await asyncio.wait(
+                {task}, timeout=self._remaining_run_timeout()
+            )
+            if done:
+                return task.result()
+            self._timeout_cancelled_execution_ids.update(
+                self._active_model_execution_ids
+            )
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise TimeoutError
+        except asyncio.CancelledError:
+            # 外部取消、进程退出与 lease loss 都保持 started-only 的 ambiguous 语义。
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise
 
     async def run(
         self,
@@ -334,8 +506,10 @@ class AgentsRcaRuntime:
         hypotheses: list[Hypothesis],
         *,
         strategy: InvestigationStrategy | None = None,
+        stop_after_specialists: bool = False,
     ) -> AgentsRcaRuntimeResult:
         effective_strategy = InvestigationStrategy(strategy or self.strategy)
+        self._remaining_run_timeout()
         runtime_evidence = list(evidence)
         configured_model = (
             self.model.strip() if isinstance(self.model, str) else self.model
@@ -370,7 +544,7 @@ class AgentsRcaRuntime:
         )
         progress = _RuntimeProgress()
         try:
-            await asyncio.wait_for(
+            await self._await_with_run_deadline(
                 self._run_with_effective_model(
                     result,
                     investigation_id,
@@ -380,8 +554,8 @@ class AgentsRcaRuntime:
                     progress,
                     configured_model,
                     adaptive_session,
-                ),
-                timeout=self.timeout_seconds,
+                    stop_after_specialists=stop_after_specialists,
+                )
             )
             current = asyncio.current_task()
             if current is not None and current.cancelling():
@@ -393,6 +567,8 @@ class AgentsRcaRuntime:
                 FailureCategory.TIMEOUT,
                 progress,
             )
+        except RuntimeInjectedFault:
+            raise
         except Exception as exc:  # The SDK path must never fail the base RCA.
             self._record_failure(
                 result, _safe_reason(exc), _failure_category(exc), progress
@@ -427,6 +603,14 @@ class AgentsRcaRuntime:
             max_tool_calls_per_specialist=self.max_tool_calls_per_specialist,
             max_total_tool_calls=self.max_total_tool_calls,
             tool_timeout_seconds=self.tool_timeout_seconds,
+            runtime_run_id=self.runtime_run_id,
+            resolve_tool_result=self._resolve_tool_result,
+            persist_tool_start=self._persist_tool_start,
+            persist_tool_result=self._persist_tool_result,
+            check_execution=self._check_execution,
+            max_parallel_steps_per_run=self.max_parallel_steps_per_run,
+            hit_fault=self._hit_fault,
+            parallel_limit=self._parallel_limit,
         )
 
     def _attach_adaptive_result(
@@ -506,6 +690,8 @@ class AgentsRcaRuntime:
         progress: _RuntimeProgress,
         configured_model: str | Model,
         adaptive_session: AdaptiveToolSession | None,
+        *,
+        stop_after_specialists: bool = False,
     ) -> None:
         if (
             self._uses_default_sdk_turn
@@ -526,6 +712,7 @@ class AgentsRcaRuntime:
                     progress,
                     model,
                     adaptive_session,
+                    stop_after_specialists=stop_after_specialists,
                 )
             return
         await self._run_configured(
@@ -538,7 +725,202 @@ class AgentsRcaRuntime:
             progress,
             configured_model,
             adaptive_session,
+            stop_after_specialists=stop_after_specialists,
         )
+
+    async def review_conflicts(
+        self,
+        result: AgentsRcaRuntimeResult,
+        investigation_id: str,
+        event: IncidentEvent,
+        evidence: list[EvidenceItem],
+        hypotheses: list[Hypothesis],
+    ) -> ConflictReviewOutcome:
+        """只执行受冲突影响的 specialist 复核，不生成 Coordinator review。"""
+        baseline = hypotheses[0] if hypotheses else None
+        conflicting = (
+            conflicting_agent_names(baseline, result.findings)
+            if baseline is not None
+            else set()
+        )
+        selected = [name for name in AgentName if name in conflicting]
+        if not selected:
+            return ConflictReviewOutcome.SKIPPED
+        review_contexts = {
+            name: _version_review_prompt(
+                self.prompt_version,
+                _review_prompt(event, evidence, name, baseline, result.findings),
+            )
+            for name in selected
+        }
+        try:
+            turn = await self._invoke_phase_model_turn(
+                coordinator_input=_apply_prompt_version(
+                    self.prompt_version,
+                    "Invoke only the supplied specialists to review their conflicts.",
+                ),
+                specialist_inputs={
+                    name: review_contexts[name][0] for name in selected
+                },
+                specialist_names=selected,
+                max_turns=self.max_turns,
+                analysis_round=2,
+                attempt=1,
+                prompt_version=self.prompt_version,
+            )
+        except TimeoutError:
+            self._record_split_timeout(
+                result,
+                _RuntimeProgress(
+                    step_kind=ExecutionStepKind.SPECIALIST_COLLECTION,
+                    attempt=1,
+                    analysis_round=2,
+                ),
+            )
+            return ConflictReviewOutcome.TIMED_OUT
+        if turn is None:
+            return ConflictReviewOutcome.SKIPPED
+        self._consume_turn(
+            result,
+            turn,
+            requested=selected,
+            allowed_evidence={name: review_contexts[name][1] for name in selected},
+            investigation_id=investigation_id,
+            analysis_round=2,
+            seen_responses=set(),
+            coordinator_step_kind=ExecutionStepKind.FINAL_SYNTHESIS,
+            specialist_step_kind=ExecutionStepKind.SPECIALIST_COLLECTION,
+            attempt=1,
+            record_coordinator=False,
+        )
+        if turn.cancelled:
+            raise asyncio.CancelledError
+        return ConflictReviewOutcome.COMPLETED
+
+    async def synthesize(
+        self,
+        result: AgentsRcaRuntimeResult,
+        investigation_id: str,
+        evidence: list[EvidenceItem],
+        hypotheses: list[Hypothesis],
+    ) -> AgentsRcaRuntimeResult:
+        """在独立 Coordination Phase 中只执行最终合成。"""
+        if any(
+            execution.failure_category == FailureCategory.TIMEOUT
+            for execution in result.executions
+        ):
+            return result
+        try:
+            turn = await self._invoke_phase_model_turn(
+                coordinator_input=_apply_prompt_version(
+                    self.prompt_version,
+                    _synthesis_prompt(hypotheses, result.findings, evidence),
+                ),
+                specialist_inputs={},
+                specialist_names=[],
+                max_turns=self.max_turns,
+                analysis_round=2,
+                attempt=1,
+                prompt_version=self.prompt_version,
+            )
+        except TimeoutError:
+            self._record_split_timeout(
+                result,
+                _RuntimeProgress(
+                    step_kind=ExecutionStepKind.FINAL_SYNTHESIS,
+                    attempt=1,
+                    analysis_round=2,
+                ),
+            )
+            return result
+        if turn is None:
+            return result
+        self._consume_turn(
+            result,
+            turn,
+            requested=[],
+            allowed_evidence={},
+            investigation_id=investigation_id,
+            analysis_round=2,
+            seen_responses=set(),
+            coordinator_step_kind=ExecutionStepKind.FINAL_SYNTHESIS,
+            specialist_step_kind=ExecutionStepKind.SPECIALIST_COLLECTION,
+            attempt=1,
+        )
+        if turn.cancelled:
+            raise asyncio.CancelledError
+        if turn.error or turn.coordinator_proposal is None:
+            self._finish_failed(
+                result, turn.error or "Invalid Coordinator output"
+            )
+            return result
+        status = (
+            MultiAgentRunStatus.PARTIAL
+            if any(
+                execution.status == AgentExecutionStatus.FAILED
+                for execution in result.executions
+            )
+            else MultiAgentRunStatus.COMPLETED
+        )
+        proposal = _CoordinatorProposal.model_validate(
+            redact_value(turn.coordinator_proposal.model_dump())
+        )
+        root_causes = [
+            RootCauseAttribution.model_validate(item.model_dump())
+            for item in proposal.root_causes
+        ]
+        categories = (
+            []
+            if status == MultiAgentRunStatus.COMPLETED
+            else stabilization_categories_from_executions(result.executions)
+        )
+        result.review = build_hybrid_coordination_review(
+            investigation_id,
+            result.findings,
+            evidence,
+            hypotheses,
+            status,
+            proposal.summary,
+            proposal.uncertainty,
+            model_provider=self.model_provider,
+            model_name=self._model_name,
+            primary_stabilization_category=categories[0] if categories else None,
+            secondary_stabilization_categories=categories[1:],
+            root_causes=root_causes,
+        )
+        result.run_summary = _run_summary(
+            status,
+            None,
+            result.executions,
+            self.model_provider,
+            self._model_name,
+        )
+        return result
+
+    async def _invoke_phase_model_turn(self, **kwargs: Any) -> _SdkTurnResult | None:
+        configured_model = (
+            self.model.strip() if isinstance(self.model, str) else self.model
+        )
+        credential_name = (
+            "OPENAI_API_KEY"
+            if self.model_provider == ModelProvider.OPENAI
+            else "DEEPSEEK_API_KEY"
+        )
+        if not configured_model or not os.getenv(credential_name, "").strip():
+            return None
+        async def invoke() -> _SdkTurnResult:
+            if (
+                self._uses_default_sdk_turn
+                and self.model_provider == ModelProvider.OPENAI
+                and isinstance(configured_model, str)
+            ):
+                async with openai_responses_model(
+                    configured_model, self._remaining_run_timeout()
+                ) as model:
+                    return await self._invoke_turn(None, model=model, **kwargs)
+            return await self._invoke_turn(None, model=configured_model, **kwargs)
+
+        return await self._await_with_run_deadline(invoke())
 
     async def _run_configured(
         self,
@@ -551,6 +933,8 @@ class AgentsRcaRuntime:
         progress: _RuntimeProgress,
         model: str | Model,
         adaptive_session: AdaptiveToolSession | None,
+        *,
+        stop_after_specialists: bool = False,
     ) -> None:
         adaptive = adaptive_session is not None
         first_allowed = {
@@ -558,7 +942,10 @@ class AgentsRcaRuntime:
             for name in AgentName
         }
         first_inputs = {
-            name: _specialist_prompt(event, evidence, name, adaptive=adaptive)
+            name: _apply_prompt_version(
+                self.prompt_version,
+                _specialist_prompt(event, evidence, name, adaptive=adaptive),
+            )
             for name in AgentName
         }
         progress.step_kind = ExecutionStepKind.INITIAL_COORDINATION
@@ -567,15 +954,19 @@ class AgentsRcaRuntime:
         first = await self._invoke_turn(
             adaptive_session,
             model=model,
-            coordinator_input=(
-                "Invoke every supplied specialist exactly once. Their independent "
-                "outputs are diagnostic drafts, not production actions."
+            coordinator_input=_apply_prompt_version(
+                self.prompt_version,
+                (
+                    "Invoke every supplied specialist exactly once. Their independent "
+                    "outputs are diagnostic drafts, not production actions."
+                ),
             ),
             specialist_inputs=first_inputs,
             specialist_names=list(AgentName),
             max_turns=self.max_turns,
             analysis_round=1,
             attempt=1,
+            prompt_version=self.prompt_version,
         )
         _merge_adaptive_evidence(evidence, adaptive_session)
         first_names: list[AgentName] = []
@@ -633,15 +1024,19 @@ class AgentsRcaRuntime:
             recollected = await self._invoke_turn(
                 adaptive_session,
                 model=model,
-                coordinator_input=(
-                    "Invoke every supplied missing specialist exactly once. Their "
-                    "independent outputs are diagnostic drafts, not production actions."
+                coordinator_input=_apply_prompt_version(
+                    self.prompt_version,
+                    (
+                        "Invoke every supplied missing specialist exactly once. Their "
+                        "independent outputs are diagnostic drafts, not production actions."
+                    ),
                 ),
                 specialist_inputs={name: first_inputs[name] for name in missing},
                 specialist_names=missing,
                 max_turns=self.max_turns,
                 analysis_round=1,
                 attempt=2,
+                prompt_version=self.prompt_version,
             )
             _merge_adaptive_evidence(evidence, adaptive_session)
             self._consume_turn(
@@ -687,6 +1082,9 @@ class AgentsRcaRuntime:
                 for execution in result.executions
             ) or nonrecoverable_first_output
 
+        if stop_after_specialists:
+            return
+
         baseline = hypotheses[0] if hypotheses else None
         conflicting = (
             conflicting_agent_names(baseline, result.findings)
@@ -695,7 +1093,10 @@ class AgentsRcaRuntime:
         )
         selected = [name for name in AgentName if name in conflicting]
         review_contexts = {
-            name: _review_prompt(event, evidence, name, baseline, result.findings)
+            name: _version_review_prompt(
+                self.prompt_version,
+                _review_prompt(event, evidence, name, baseline, result.findings),
+            )
             for name in selected
         }
         progress.step_kind = ExecutionStepKind.FINAL_SYNTHESIS
@@ -704,12 +1105,16 @@ class AgentsRcaRuntime:
         synthesis = await self._invoke_turn(
             adaptive_session,
             model=model,
-            coordinator_input=_synthesis_prompt(hypotheses, result.findings, evidence),
+            coordinator_input=_apply_prompt_version(
+                self.prompt_version,
+                _synthesis_prompt(hypotheses, result.findings, evidence),
+            ),
             specialist_inputs={name: review_contexts[name][0] for name in selected},
             specialist_names=selected,
             max_turns=self.max_turns,
             analysis_round=2,
             attempt=1,
+            prompt_version=self.prompt_version,
         )
         _merge_adaptive_evidence(evidence, adaptive_session)
         partial |= self._consume_turn(
@@ -785,9 +1190,122 @@ class AgentsRcaRuntime:
         adaptive_session: AdaptiveToolSession | None,
         **kwargs: Any,
     ) -> _SdkTurnResult:
+        self._check_execution()
+        if self.runtime_token_budget is not None and self.runtime_token_budget <= 0:
+            raise TokenBudgetExceeded("model token budget exhausted before request")
+        agent_names = _unique(
+            [
+                COORDINATOR,
+                *(name.value for name in kwargs.get("specialist_names", [])),
+            ]
+        )
+        await self._persist_agent_statuses(agent_names, "started")
+        real_sdk_turn = self._uses_default_sdk_turn and self.turn is _run_sdk_turn
+        aggregate_model_lifecycle = not real_sdk_turn
+        execution_id = f"model-exec-{uuid4().hex}"
+        if aggregate_model_lifecycle:
+            kwargs["execution_id"] = execution_id
+            await self._persist_model_status(
+                execution_id, "started", 0, agent_names[0]
+            )
+            self._active_model_execution_ids.add(execution_id)
         if self._uses_default_sdk_turn:
             kwargs["adaptive_session"] = adaptive_session
-        return await self.turn(**kwargs)
+            kwargs["parallel_limit"] = self._parallel_limit
+        if real_sdk_turn:
+            kwargs["persist_model_event"] = self._persist_model_status
+        try:
+            result = await self.turn(**kwargs)
+        except asyncio.CancelledError:
+            if (
+                aggregate_model_lifecycle
+                and execution_id in self._timeout_cancelled_execution_ids
+            ):
+                await self._persist_model_status(
+                    execution_id, "failed", 0, agent_names[0]
+                )
+                await self._persist_agent_statuses(agent_names, "failed")
+            if real_sdk_turn:
+                self._active_model_execution_ids.clear()
+                self._timeout_cancelled_execution_ids.clear()
+            raise
+        except Exception:
+            if aggregate_model_lifecycle:
+                await self._persist_model_status(
+                    execution_id, "failed", 0, agent_names[0]
+                )
+            await self._persist_agent_statuses(agent_names, "failed")
+            raise
+        finally:
+            if aggregate_model_lifecycle:
+                self._active_model_execution_ids.discard(execution_id)
+                self._timeout_cancelled_execution_ids.discard(execution_id)
+        self._hit_fault("model_after_send")
+        # Model 返回后再次校验 fence，避免取消或 lease 丢失后的晚到结果进入业务状态。
+        self._check_execution()
+        token_usage = max(0, getattr(result, "input_tokens", 0)) + max(
+            0, getattr(result, "output_tokens", 0)
+        )
+        if self.runtime_token_budget is not None:
+            remaining = self.runtime_token_budget
+            self.runtime_token_budget = max(0, remaining - token_usage)
+            if token_usage > remaining:
+                if aggregate_model_lifecycle:
+                    await self._persist_model_status(
+                        execution_id, "failed", token_usage, agent_names[0]
+                    )
+                await self._persist_agent_statuses(agent_names, "failed")
+                raise TokenBudgetExceeded(
+                    "model response token usage exceeded remaining budget"
+                )
+        if aggregate_model_lifecycle:
+            await self._persist_model_status(
+                execution_id, "completed", token_usage, agent_names[0]
+            )
+        failed_agents = set(getattr(result, "failed_agent_names", ()))
+        for agent_name in agent_names:
+            await self._persist_agent_statuses(
+                [agent_name], "failed" if agent_name in failed_agents else "completed"
+            )
+        return result
+
+    async def _persist_agent_statuses(
+        self, agent_names: list[str], status: str
+    ) -> None:
+        callback = self._persist_agent_event
+        if callback is None:
+            return
+        for agent_name in agent_names:
+            await callback(agent_name, status)
+
+    async def _persist_model_status(
+        self,
+        execution_id: str,
+        status: str,
+        token_usage: int,
+        actor_name: str = COORDINATOR,
+    ) -> None:
+        callback = self._persist_model_event
+        if callback is None:
+            return
+        if status == "started":
+            self._active_model_execution_ids.add(execution_id)
+        try:
+            inspect.signature(callback).bind(
+                execution_id, status, token_usage, actor_name
+            )
+        except (TypeError, ValueError):
+            try:
+                inspect.signature(callback).bind(execution_id, status, token_usage)
+            except (TypeError, ValueError):
+                await callback(execution_id, status)
+            else:
+                await callback(execution_id, status, token_usage)
+        else:
+            await callback(execution_id, status, token_usage, actor_name)
+        if status != "started":
+            self._active_model_execution_ids.discard(execution_id)
+            self._timeout_cancelled_execution_ids.discard(execution_id)
 
     def _consume_turn(
         self,
@@ -1051,6 +1569,19 @@ class AgentsRcaRuntime:
             self._model_name,
         )
 
+    def _record_split_timeout(
+        self,
+        result: AgentsRcaRuntimeResult,
+        progress: _RuntimeProgress,
+    ) -> None:
+        """把 split phase 的整体 deadline 耗尽投影为既有 timeout 失败契约。"""
+        self._record_failure(
+            result,
+            "Agents runtime timeout",
+            FailureCategory.TIMEOUT,
+            progress,
+        )
+
     def _finish_failed(self, result: AgentsRcaRuntimeResult, reason: str) -> None:
         result.review = None
         result.run_summary = _run_summary(
@@ -1072,9 +1603,29 @@ async def _run_sdk_turn(
     analysis_round: int = 1,
     attempt: int = 1,
     adaptive_session: AdaptiveToolSession | None = None,
+    execution_id: str | None = None,
+    prompt_version: str = "v8.2",
+    parallel_limit: RunStepGate | None = None,
+    persist_model_event: Callable[[str, str, int, str], Awaitable[None]]
+    | None = None,
 ) -> _SdkTurnResult:
+    del execution_id
+    turn_limit = parallel_limit or RunStepGate(1)
+    if prompt_version == "v9":
+        return await _run_sdk_turn_parallel(
+            model=model,
+            coordinator_input=coordinator_input,
+            specialist_inputs=specialist_inputs,
+            specialist_names=specialist_names,
+            max_turns=max_turns,
+            analysis_round=analysis_round,
+            adaptive_session=adaptive_session,
+            parallel_limit=turn_limit,
+            persist_model_event=persist_model_event,
+        )
     captured: list[_CapturedDraft] = []
     captured_results: list[Any] = []
+    failed_agent_names: list[str] = []
     specialist_output_type, specialist_settings, specialist_validator, specialist_suffix = (
         _output_contract(model, _SpecialistDraft)
     )
@@ -1095,7 +1646,10 @@ async def _run_sdk_turn(
         )
         specialist = Agent(
             name=name.value,
-            instructions=f"{_specialist_instructions(name)}{specialist_suffix}",
+            instructions=(
+                f"{_apply_prompt_version(prompt_version, _specialist_instructions(name))}"
+                f"{specialist_suffix}"
+            ),
             model=model,
             tools=(
                 adaptive_session.tools_for(name, analysis_round, attempt)
@@ -1115,10 +1669,13 @@ async def _run_sdk_turn(
             captured_results.append(run_result)
             return _json_dump(_draft_projection(draft))
 
+        specialist_hook = _ModelLifecycleHook(persist_model_event)
         tool = specialist.as_tool(
             tool_name=name.value,
             tool_description=f"Request one read-only {name.value} diagnostic finding.",
             custom_output_extractor=capture,
+            hooks=specialist_hook,
+            failure_error_function=None,
             max_turns=max_turns,
             run_config=RunConfig(
                 workflow_name=WORKFLOW_NAME,
@@ -1134,12 +1691,20 @@ async def _run_sdk_turn(
 
         async def invoke_once(context, input_json):
             nonlocal output, used
-            async with lock:
-                if used:
+            async with turn_limit.slot():
+                async with lock:
+                    if used:
+                        return output
+                    used = True
+                    try:
+                        output = await invoke(context, input_json)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        await specialist_hook.fail_pending()
+                        failed_agent_names.append(name.value)
+                        raise
                     return output
-                used = True
-                output = await invoke(context, input_json)
-                return output
 
         def is_enabled(_context, _agent):
             return not used
@@ -1150,6 +1715,9 @@ async def _run_sdk_turn(
 
     tools = [tool_for(name) for name in specialist_names]
     hook_responses: list[Any] = []
+    coordinator_hook = _CoordinatorResponseHook(
+        hook_responses, persist_model_event
+    )
     coordinator_options = (
         {"model_settings": coordinator_settings}
         if coordinator_settings is not None
@@ -1158,9 +1726,15 @@ async def _run_sdk_turn(
     coordinator = Agent(
         name=COORDINATOR,
         instructions=(
-            "You are CoordinatorAgent. Use only the supplied specialist agent tools. "
-            "They are read-only. Return only a structured diagnostic proposal; never "
-            f"claim or request production mutation.{coordinator_suffix}"
+            _apply_prompt_version(
+                prompt_version,
+                (
+                    "You are CoordinatorAgent. Use only the supplied specialist agent "
+                    "tools. They are read-only. Return only a structured diagnostic "
+                    "proposal; never claim or request production mutation."
+                ),
+            )
+            + coordinator_suffix
         ),
         model=model,
         tools=tools,
@@ -1172,7 +1746,7 @@ async def _run_sdk_turn(
             coordinator,
             coordinator_input,
             max_turns=max_turns,
-            hooks=_CoordinatorResponseHook(hook_responses),
+            hooks=coordinator_hook,
             run_config=RunConfig(
                 workflow_name=WORKFLOW_NAME,
                 tracing_disabled=tracing_disabled,
@@ -1180,6 +1754,8 @@ async def _run_sdk_turn(
             ),
         )
     except (asyncio.CancelledError, Exception) as exc:
+        if not isinstance(exc, asyncio.CancelledError):
+            await coordinator_hook.fail_pending()
         run_data = getattr(exc, "run_data", None)
         exception_responses = list(getattr(run_data, "raw_responses", []))
         proposal = None
@@ -1220,6 +1796,7 @@ async def _run_sdk_turn(
         error=error,
         cancelled=cancelled,
         failure_category=failure_category,
+        failed_agent_names=_unique(failed_agent_names),
     )
 
 
@@ -1303,6 +1880,191 @@ def _specialist_instructions(name: AgentName) -> str:
         "Cite supplied or tool-returned evidence IDs. "
         f"{SPECIALIST_FINDING_CONTRACT} Never execute or recommend mutations."
     )
+
+
+async def _run_with_model_lifecycle(
+    agent,
+    agent_input,
+    *,
+    persist_model_event: Callable[[str, str, int, str], Awaitable[None]] | None,
+    **runner_kwargs: Any,
+):
+    """让每次真实 SDK 调用拥有独立 Model 生命周期。"""
+    hook = _ModelLifecycleHook(persist_model_event)
+    try:
+        return await Runner.run(agent, agent_input, hooks=hook, **runner_kwargs)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        await hook.fail_pending()
+        raise
+
+
+async def _run_sdk_turn_parallel(
+    *,
+    model: str | Model,
+    coordinator_input: str,
+    specialist_inputs: dict[AgentName, str],
+    specialist_names: list[AgentName],
+    max_turns: int,
+    analysis_round: int,
+    adaptive_session: AdaptiveToolSession | None,
+    parallel_limit: RunStepGate,
+    persist_model_event: Callable[[str, str, int, str], Awaitable[None]]
+    | None = None,
+) -> _SdkTurnResult:
+    """V9 显式并行 specialist；单个失败不取消同组其他只读分析。"""
+    tracing_disabled = _is_deepseek(model)
+    specialist_output_type, specialist_settings, specialist_validator, specialist_suffix = (
+        _output_contract(model, _SpecialistDraft)
+    )
+
+    async def run_specialist(name: AgentName):
+        options = (
+            {"model_settings": specialist_settings}
+            if specialist_settings is not None
+            else {}
+        )
+        specialist = Agent(
+            name=name.value,
+            instructions=(
+                f"{_apply_prompt_version('v9', _specialist_instructions(name))}"
+                f"{specialist_suffix}"
+            ),
+            model=model,
+            tools=(
+                adaptive_session.tools_for(name, analysis_round)
+                if adaptive_session is not None
+                else []
+            ),
+            output_type=specialist_output_type,
+            **options,
+        )
+        async with parallel_limit.slot():
+            run_result = await _run_with_model_lifecycle(
+                specialist,
+                specialist_inputs[name],
+                persist_model_event=persist_model_event,
+                max_turns=max_turns,
+                run_config=RunConfig(
+                    workflow_name=WORKFLOW_NAME,
+                    tracing_disabled=tracing_disabled,
+                    trace_include_sensitive_data=False,
+                ),
+            )
+        value = run_result.final_output
+        draft = _SpecialistDraft.model_validate(
+            specialist_validator(value) if specialist_validator else value
+        )
+        return _CapturedDraft(name, draft, analysis_round), run_result
+
+    tasks = [asyncio.create_task(run_specialist(name)) for name in specialist_names]
+    try:
+        specialist_results = await asyncio.gather(*tasks, return_exceptions=True)
+    except asyncio.CancelledError:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+    captured: list[_CapturedDraft] = []
+    run_results: list[Any] = []
+    failed_agent_names: list[str] = []
+    for name, item in zip(specialist_names, specialist_results, strict=True):
+        if isinstance(item, BaseException):
+            failed_agent_names.append(name.value)
+            continue
+        draft, run_result = item
+        captured.append(draft)
+        run_results.append(run_result)
+
+    coordinator_output_type, coordinator_settings, coordinator_validator, coordinator_suffix = (
+        _output_contract(model, _CoordinatorProposal)
+    )
+    coordinator_options = (
+        {"model_settings": coordinator_settings}
+        if coordinator_settings is not None
+        else {}
+    )
+    coordinator = Agent(
+        name=COORDINATOR,
+        instructions=(
+            _apply_prompt_version(
+                "v9",
+                "You are CoordinatorAgent. Synthesize only the supplied read-only "
+                "specialist drafts into a structured diagnostic proposal.",
+            )
+            + coordinator_suffix
+        ),
+        model=model,
+        output_type=coordinator_output_type,
+        **coordinator_options,
+    )
+    draft_projection = [
+        {"agent_name": item.agent_name.value, **_draft_projection(item.draft)}
+        for item in captured
+    ]
+    coordinator_result = None
+    proposal = None
+    error = None
+    failure_category = FailureCategory.NONE
+    try:
+        async with parallel_limit.slot():
+            coordinator_result = await _run_with_model_lifecycle(
+                coordinator,
+                f"{coordinator_input}\nSPECIALIST_DRAFTS={_json_dump(draft_projection)}",
+                persist_model_event=persist_model_event,
+                max_turns=max_turns,
+                run_config=RunConfig(
+                    workflow_name=WORKFLOW_NAME,
+                    tracing_disabled=tracing_disabled,
+                    trace_include_sensitive_data=False,
+                ),
+            )
+        value = coordinator_result.final_output
+        proposal = _CoordinatorProposal.model_validate(
+            coordinator_validator(value) if coordinator_validator else value
+        )
+        run_results.append(coordinator_result)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        error = _safe_reason(exc)
+        failure_category = _failure_category(exc)
+        failed_agent_names.append(COORDINATOR)
+
+    raw_responses = _unique_responses(_raw_responses(run_results))
+    input_tokens, output_tokens = _response_usage(raw_responses)
+    return _SdkTurnResult(
+        captured_drafts=captured,
+        coordinator_proposal=proposal,
+        executions=[],
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        tool_names=[name.value for name in specialist_names],
+        raw_responses=raw_responses,
+        error=error,
+        cancelled=False,
+        failure_category=failure_category,
+        failed_agent_names=failed_agent_names,
+    )
+
+
+def _apply_prompt_version(version: str | None, prompt: str) -> str:
+    """选择冻结的 prompt 合同；未知版本必须在模型调用前失败。"""
+    effective = version or "v8.2"
+    if effective == "v8.2":
+        return prompt
+    if effective == "v9":
+        return f"PROMPT_CONTRACT=v9\n{prompt}"
+    raise ValueError(f"unsupported prompt version: {effective}")
+
+
+def _version_review_prompt(
+    version: str | None, review: tuple[str, set[str]]
+) -> tuple[str, set[str]]:
+    prompt, evidence_ids = review
+    return _apply_prompt_version(version, prompt), evidence_ids
 
 
 def _project_evidence(evidence: list[EvidenceItem]) -> str:

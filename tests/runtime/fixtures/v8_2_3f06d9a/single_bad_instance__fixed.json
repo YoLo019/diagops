@@ -1,0 +1,731 @@
+{
+  "baseline_commit": "3f06d9ae87729185b3429c839f11cc366de75000",
+  "case_id": "single_bad_instance",
+  "strategy": "fixed",
+  "checksum": "b1dc36a17fcb576aae9742bece5e1459456fbd3f3d857d22ef96859440cfe76e",
+  "contract": {
+    "executions": [
+      {
+        "agent_name": "LogAgent",
+        "analysis_round": null,
+        "attempt": 1,
+        "error_message": null,
+        "evidence_ids": [],
+        "execution_layer": "custom",
+        "failure_category": "none",
+        "id": "EXECUTION_1",
+        "model_name": null,
+        "model_provider": null,
+        "result_validation_category": null,
+        "status": "completed",
+        "step_kind": null,
+        "summary": "LogAgent completed",
+        "task_id": "TASK_1",
+        "tool_call_ids": [
+          "TOOL_CALL_1"
+        ]
+      },
+      {
+        "agent_name": "MetricAgent",
+        "analysis_round": null,
+        "attempt": 1,
+        "error_message": null,
+        "evidence_ids": [
+          "EVIDENCE_1"
+        ],
+        "execution_layer": "custom",
+        "failure_category": "none",
+        "id": "EXECUTION_2",
+        "model_name": null,
+        "model_provider": null,
+        "result_validation_category": null,
+        "status": "completed",
+        "step_kind": null,
+        "summary": "MetricAgent completed",
+        "task_id": "TASK_2",
+        "tool_call_ids": [
+          "TOOL_CALL_2"
+        ]
+      },
+      {
+        "agent_name": "DeploymentAgent",
+        "analysis_round": null,
+        "attempt": 1,
+        "error_message": null,
+        "evidence_ids": [],
+        "execution_layer": "custom",
+        "failure_category": "none",
+        "id": "EXECUTION_3",
+        "model_name": null,
+        "model_provider": null,
+        "result_validation_category": null,
+        "status": "completed",
+        "step_kind": null,
+        "summary": "DeploymentAgent completed",
+        "task_id": "TASK_3",
+        "tool_call_ids": [
+          "TOOL_CALL_3"
+        ]
+      },
+      {
+        "agent_name": "ServiceCatalogAgent",
+        "analysis_round": null,
+        "attempt": 1,
+        "error_message": null,
+        "evidence_ids": [
+          "EVIDENCE_2"
+        ],
+        "execution_layer": "custom",
+        "failure_category": "none",
+        "id": "EXECUTION_4",
+        "model_name": null,
+        "model_provider": null,
+        "result_validation_category": null,
+        "status": "completed",
+        "step_kind": null,
+        "summary": "ServiceCatalogAgent completed",
+        "task_id": "TASK_4",
+        "tool_call_ids": [
+          "TOOL_CALL_4"
+        ]
+      }
+    ],
+    "findings": [
+      {
+        "agent_name": "LogAgent",
+        "analysis_round": 1,
+        "blocking": false,
+        "confidence": 0.2,
+        "evidence_ids": [],
+        "execution_layer": "custom",
+        "finding_type": "gap",
+        "gaps": [
+          "log evidence is missing"
+        ],
+        "id": "FINDING_1",
+        "investigation_id": "INVESTIGATION_1",
+        "rationale": "",
+        "related_cause_type": null,
+        "revises_finding_id": null,
+        "severity": "low",
+        "summary": "log evidence unavailable"
+      },
+      {
+        "agent_name": "MetricAgent",
+        "analysis_round": 1,
+        "blocking": false,
+        "confidence": 1.0,
+        "evidence_ids": [
+          "EVIDENCE_1"
+        ],
+        "execution_layer": "custom",
+        "finding_type": "signal",
+        "gaps": [],
+        "id": "FINDING_2",
+        "investigation_id": "INVESTIGATION_1",
+        "rationale": "One instance has high CPU and abnormal error rate",
+        "related_cause_type": null,
+        "revises_finding_id": null,
+        "severity": "medium",
+        "summary": "metric evidence signal"
+      },
+      {
+        "agent_name": "DeploymentAgent",
+        "analysis_round": 1,
+        "blocking": false,
+        "confidence": 0.2,
+        "evidence_ids": [],
+        "execution_layer": "custom",
+        "finding_type": "gap",
+        "gaps": [
+          "deploy evidence is missing"
+        ],
+        "id": "FINDING_3",
+        "investigation_id": "INVESTIGATION_1",
+        "rationale": "",
+        "related_cause_type": null,
+        "revises_finding_id": null,
+        "severity": "low",
+        "summary": "deploy evidence unavailable"
+      }
+    ],
+    "record": {
+      "actions": [
+        {
+          "action_type": "check",
+          "description": "Instance-level evidence suggests one bad instance.",
+          "id": "ACTION_1",
+          "note": null,
+          "requires_approval": false,
+          "risk_level": "read_only",
+          "status": "proposed",
+          "supporting_evidence_ids": [
+            "EVIDENCE_1"
+          ],
+          "title": "Inspect abnormal instance"
+        }
+      ],
+      "event": {
+        "description": "profile-service has one instance with high CPU and many errors",
+        "environment": "prod",
+        "service": "profile-service",
+        "severity": "warning",
+        "signals": {
+          "cpu": "high",
+          "error_rate": "medium",
+          "instance": "abnormal"
+        },
+        "source": "simulated",
+        "started_at": "2026-07-03T18:40:00+08:00",
+        "time_window_minutes": 30,
+        "title": "One instance has abnormal error rate"
+      },
+      "evidence": [
+        {
+          "confidence": 1.0,
+          "error_message": null,
+          "id": "EVIDENCE_1",
+          "kind": "metric_trend",
+          "payload": {
+            "cpu": "94%",
+            "error_rate": "18%",
+            "instance": "profile-service-3",
+            "root_cause_claims": [
+              {
+                "component": "profile-service-3",
+                "occurred_at": "2026-07-03T18:40:00+08:00",
+                "reason": "resource saturation"
+              }
+            ]
+          },
+          "provider": "metric",
+          "status": "success",
+          "summary": "One instance has high CPU and abnormal error rate",
+          "timestamp": "2026-07-03T18:40:00+08:00"
+        },
+        {
+          "confidence": 1.0,
+          "error_message": null,
+          "id": "EVIDENCE_2",
+          "kind": "service_metadata",
+          "payload": {
+            "dependencies": [
+              "inventory-service",
+              "payment-db"
+            ],
+            "environment": "prod",
+            "owner": "platform-team",
+            "runtime": "python",
+            "service": "profile-service"
+          },
+          "provider": "service_catalog",
+          "status": "success",
+          "summary": "profile-service owner is platform-team",
+          "timestamp": "2026-07-03T18:40:00+08:00"
+        },
+        {
+          "confidence": 0.8,
+          "error_message": null,
+          "id": "EVIDENCE_3",
+          "kind": "related_alert",
+          "payload": {
+            "related_alert_count": 0,
+            "service": "profile-service",
+            "time_window_minutes": 30
+          },
+          "provider": "related_alert",
+          "status": "success",
+          "summary": "No wider alert storm detected around profile-service",
+          "timestamp": "2026-07-03T18:40:00+08:00"
+        }
+      ],
+      "failure_reason": null,
+      "hypotheses": [
+        {
+          "cause_type": "single_instance_issue",
+          "confidence": 0.95,
+          "contradicting_evidence_ids": [],
+          "id": "HYPOTHESIS_1",
+          "next_actions": [
+            "Drain and restart the unhealthy instance after preserving diagnostic data.",
+            "Compare instance-local CPU, memory, disk, and error logs against healthy peers.",
+            "Check whether the load balancer is still routing traffic to the bad instance."
+          ],
+          "summary": "The impact is concentrated on one unhealthy instance.",
+          "supporting_evidence_ids": [
+            "EVIDENCE_1"
+          ]
+        }
+      ],
+      "id": "INVESTIGATION_1",
+      "llm_analysis": null,
+      "multi_agent_run": null,
+      "provider_results": [
+        {
+          "error_message": null,
+          "evidence_items": [],
+          "provider": "log",
+          "status": "success"
+        },
+        {
+          "error_message": null,
+          "evidence_items": [
+            {
+              "confidence": 1.0,
+              "error_message": null,
+              "id": "EVIDENCE_1",
+              "kind": "metric_trend",
+              "payload": {
+                "cpu": "94%",
+                "error_rate": "18%",
+                "instance": "profile-service-3",
+                "root_cause_claims": [
+                  {
+                    "component": "profile-service-3",
+                    "occurred_at": "2026-07-03T18:40:00+08:00",
+                    "reason": "resource saturation"
+                  }
+                ]
+              },
+              "provider": "metric",
+              "status": "success",
+              "summary": "One instance has high CPU and abnormal error rate",
+              "timestamp": "2026-07-03T18:40:00+08:00"
+            }
+          ],
+          "provider": "metric",
+          "status": "success"
+        },
+        {
+          "error_message": null,
+          "evidence_items": [],
+          "provider": "deploy",
+          "status": "success"
+        },
+        {
+          "error_message": null,
+          "evidence_items": [],
+          "provider": "dependency",
+          "status": "success"
+        },
+        {
+          "error_message": null,
+          "evidence_items": [
+            {
+              "confidence": 1.0,
+              "error_message": null,
+              "id": "EVIDENCE_2",
+              "kind": "service_metadata",
+              "payload": {
+                "dependencies": [
+                  "inventory-service",
+                  "payment-db"
+                ],
+                "environment": "prod",
+                "owner": "platform-team",
+                "runtime": "python",
+                "service": "profile-service"
+              },
+              "provider": "service_catalog",
+              "status": "success",
+              "summary": "profile-service owner is platform-team",
+              "timestamp": "2026-07-03T18:40:00+08:00"
+            }
+          ],
+          "provider": "service_catalog",
+          "status": "success"
+        },
+        {
+          "error_message": null,
+          "evidence_items": [
+            {
+              "confidence": 0.8,
+              "error_message": null,
+              "id": "EVIDENCE_3",
+              "kind": "related_alert",
+              "payload": {
+                "related_alert_count": 0,
+                "service": "profile-service",
+                "time_window_minutes": 30
+              },
+              "provider": "related_alert",
+              "status": "success",
+              "summary": "No wider alert storm detected around profile-service",
+              "timestamp": "2026-07-03T18:40:00+08:00"
+            }
+          ],
+          "provider": "related_alert",
+          "status": "success"
+        }
+      ],
+      "report": {
+        "action_ids": [
+          "ACTION_1"
+        ],
+        "hypotheses": [
+          {
+            "cause_type": "single_instance_issue",
+            "confidence": 0.95,
+            "contradicting_evidence_ids": [],
+            "id": "HYPOTHESIS_1",
+            "next_actions": [
+              "Drain and restart the unhealthy instance after preserving diagnostic data.",
+              "Compare instance-local CPU, memory, disk, and error logs against healthy peers.",
+              "Check whether the load balancer is still routing traffic to the bad instance."
+            ],
+            "summary": "The impact is concentrated on one unhealthy instance.",
+            "supporting_evidence_ids": [
+              "EVIDENCE_1"
+            ]
+          }
+        ],
+        "id": "REPORT_1",
+        "investigation_id": "INVESTIGATION_1",
+        "markdown_sections": [
+          {
+            "heading": "profile-service RCA 诊断报告",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "heading": "摘要",
+            "sha256": "aad65d6a06566f7e3b66aa7549e53efd6c4b8fdabab9e112f499547cf059791f"
+          },
+          {
+            "heading": "最可能根因",
+            "sha256": "bc2699e9a4f141bd20c1de1f9cb78ade1ff0ec15f35b2fd7ec527f8ddce412ed"
+          },
+          {
+            "heading": "证据链",
+            "sha256": "f1b1e37bb7a04255a4721d0b3b9ceacf8ea7f37595196eb09e0acdea1a8bb31c"
+          },
+          {
+            "heading": "支持该结论的证据",
+            "sha256": "4dcdf635acbfc9353a63f0955eb036bc0dedeee39058bae19b7eae2b2df6fb1f"
+          },
+          {
+            "heading": "建议动作",
+            "sha256": "06edded847ac1ff6e33b11ae68a9f1545bcdabc932f5a33b9f077af063942279"
+          },
+          {
+            "heading": "需要审批的动作",
+            "sha256": "999b422f624f92288df0d3f4795df304278e90f929f537fa9b9baa0ad25e287c"
+          },
+          {
+            "heading": "验证建议",
+            "sha256": "2628cdd2b95d60e19c0a2cf5259d016a072f601bcbc27a6943fd892218303cf0"
+          },
+          {
+            "heading": "事实与推断",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "heading": "观察到的事实",
+            "sha256": "2f9c1faa2df08c7949769efa6d2c55194c895cbd0700fea5e87d02f0770e9800"
+          },
+          {
+            "heading": "推断结论/不确定性",
+            "sha256": "4b1843a51f88ec42b1870391af4531b3c25c3dd914efa231ea069528c817ea9b"
+          }
+        ],
+        "summary": "The impact is concentrated on one unhealthy instance.",
+        "timeline": [
+          {
+            "event": "One instance has high CPU and abnormal error rate",
+            "time": "2026-07-03T18:40:00+08:00"
+          },
+          {
+            "event": "profile-service owner is platform-team",
+            "time": "2026-07-03T18:40:00+08:00"
+          },
+          {
+            "event": "No wider alert storm detected around profile-service",
+            "time": "2026-07-03T18:40:00+08:00"
+          }
+        ],
+        "verification_suggestion_ids": [
+          "VERIFICATION_1",
+          "VERIFICATION_2"
+        ]
+      },
+      "specialist_results": [
+        {
+          "agent_name": "LogAnalyst",
+          "errors": [],
+          "evidence_items": [],
+          "status": "completed",
+          "summary": "log provider returned 0 evidence item(s)"
+        },
+        {
+          "agent_name": "MetricAnalyst",
+          "errors": [],
+          "evidence_items": [
+            {
+              "confidence": 1.0,
+              "error_message": null,
+              "id": "EVIDENCE_1",
+              "kind": "metric_trend",
+              "payload": {
+                "cpu": "94%",
+                "error_rate": "18%",
+                "instance": "profile-service-3",
+                "root_cause_claims": [
+                  {
+                    "component": "profile-service-3",
+                    "occurred_at": "2026-07-03T18:40:00+08:00",
+                    "reason": "resource saturation"
+                  }
+                ]
+              },
+              "provider": "metric",
+              "status": "success",
+              "summary": "One instance has high CPU and abnormal error rate",
+              "timestamp": "2026-07-03T18:40:00+08:00"
+            }
+          ],
+          "status": "completed",
+          "summary": "metric provider returned 1 evidence item(s)"
+        },
+        {
+          "agent_name": "DeployAnalyst",
+          "errors": [],
+          "evidence_items": [],
+          "status": "completed",
+          "summary": "deploy provider returned 0 evidence item(s)"
+        },
+        {
+          "agent_name": "DependencyAnalyst",
+          "errors": [],
+          "evidence_items": [],
+          "status": "completed",
+          "summary": "dependency provider returned 0 evidence item(s)"
+        },
+        {
+          "agent_name": "ServiceCatalogAnalyst",
+          "errors": [],
+          "evidence_items": [
+            {
+              "confidence": 1.0,
+              "error_message": null,
+              "id": "EVIDENCE_2",
+              "kind": "service_metadata",
+              "payload": {
+                "dependencies": [
+                  "inventory-service",
+                  "payment-db"
+                ],
+                "environment": "prod",
+                "owner": "platform-team",
+                "runtime": "python",
+                "service": "profile-service"
+              },
+              "provider": "service_catalog",
+              "status": "success",
+              "summary": "profile-service owner is platform-team",
+              "timestamp": "2026-07-03T18:40:00+08:00"
+            }
+          ],
+          "status": "completed",
+          "summary": "service_catalog provider returned 1 evidence item(s)"
+        },
+        {
+          "agent_name": "RelatedAlertAnalyst",
+          "errors": [],
+          "evidence_items": [
+            {
+              "confidence": 0.8,
+              "error_message": null,
+              "id": "EVIDENCE_3",
+              "kind": "related_alert",
+              "payload": {
+                "related_alert_count": 0,
+                "service": "profile-service",
+                "time_window_minutes": 30
+              },
+              "provider": "related_alert",
+              "status": "success",
+              "summary": "No wider alert storm detected around profile-service",
+              "timestamp": "2026-07-03T18:40:00+08:00"
+            }
+          ],
+          "status": "completed",
+          "summary": "related_alert provider returned 1 evidence item(s)"
+        }
+      ],
+      "status": "completed",
+      "strategy": "fixed",
+      "verification_suggestions": [
+        {
+          "description": "Confirm that bad instance error rate recovers.",
+          "expected_signal": "bad instance error rate recovers",
+          "id": "VERIFICATION_1",
+          "related_action_ids": [],
+          "related_cause_types": [],
+          "result_evidence_ids": [],
+          "result_note": null,
+          "status": "pending",
+          "title": "Verify bad instance error rate recovers"
+        },
+        {
+          "description": "Confirm that load balancer stops routing errors.",
+          "expected_signal": "load balancer stops routing errors",
+          "id": "VERIFICATION_2",
+          "related_action_ids": [],
+          "related_cause_types": [],
+          "result_evidence_ids": [],
+          "result_note": null,
+          "status": "pending",
+          "title": "Verify load balancer stops routing errors"
+        }
+      ]
+    },
+    "review": {
+      "baseline_cause_type": null,
+      "candidates": [
+        {
+          "cause_type": "single_instance_issue",
+          "confidence": 0.95,
+          "contradicting_evidence_ids": [],
+          "contradicting_finding_ids": [],
+          "id": "CANDIDATE_1",
+          "rank": 1,
+          "rationale": "Seeded from existing RCA hypothesis.",
+          "summary": "single_instance_issue is candidate #1.",
+          "supporting_evidence_ids": [
+            "EVIDENCE_1"
+          ],
+          "supporting_finding_ids": [],
+          "uncertainty": "limited specialist findings; use base RCA hypothesis."
+        }
+      ],
+      "decision_status": null,
+      "execution_layer": "custom",
+      "id": "REVIEW_1",
+      "investigation_id": "INVESTIGATION_1",
+      "model_name": null,
+      "model_provider": null,
+      "primary_stabilization_category": null,
+      "root_causes": [],
+      "run_status": "completed",
+      "secondary_stabilization_categories": [],
+      "selected_cause_type": null,
+      "summary": "",
+      "uncertainty": ""
+    },
+    "tasks": [
+      {
+        "agent_name": "LogAgent",
+        "analysis_round": null,
+        "depends_on": [],
+        "description": "Read incident-window logs for error patterns.",
+        "execution_layer": "custom",
+        "id": "TASK_1",
+        "priority": 100,
+        "status": "completed",
+        "task_type": "log_investigation",
+        "title": "Investigate logs",
+        "tool_names": [
+          "read_logs"
+        ]
+      },
+      {
+        "agent_name": "MetricAgent",
+        "analysis_round": null,
+        "depends_on": [],
+        "description": "Query incident-window service metrics.",
+        "execution_layer": "custom",
+        "id": "TASK_2",
+        "priority": 100,
+        "status": "completed",
+        "task_type": "metric_investigation",
+        "title": "Investigate metrics",
+        "tool_names": [
+          "query_metrics"
+        ]
+      },
+      {
+        "agent_name": "DeploymentAgent",
+        "analysis_round": null,
+        "depends_on": [],
+        "description": "Read deployment changes near the incident window.",
+        "execution_layer": "custom",
+        "id": "TASK_3",
+        "priority": 100,
+        "status": "completed",
+        "task_type": "deployment_check",
+        "title": "Check deployments",
+        "tool_names": [
+          "read_deployments"
+        ]
+      },
+      {
+        "agent_name": "ServiceCatalogAgent",
+        "analysis_round": null,
+        "depends_on": [],
+        "description": "Read service ownership and dependency context.",
+        "execution_layer": "custom",
+        "id": "TASK_4",
+        "priority": 100,
+        "status": "completed",
+        "task_type": "service_context",
+        "title": "Read service context",
+        "tool_names": [
+          "read_service_catalog"
+        ]
+      }
+    ],
+    "tool_calls": [
+      {
+        "agent_name": "LogAgent",
+        "error_message": null,
+        "id": "TOOL_CALL_1",
+        "input": {
+          "investigation_id": "INVESTIGATION_1"
+        },
+        "output_evidence_ids": [],
+        "status": "success",
+        "task_id": "TASK_1",
+        "tool_name": "read_logs"
+      },
+      {
+        "agent_name": "MetricAgent",
+        "error_message": null,
+        "id": "TOOL_CALL_2",
+        "input": {
+          "investigation_id": "INVESTIGATION_1"
+        },
+        "output_evidence_ids": [
+          "EVIDENCE_1"
+        ],
+        "status": "success",
+        "task_id": "TASK_2",
+        "tool_name": "query_metrics"
+      },
+      {
+        "agent_name": "DeploymentAgent",
+        "error_message": null,
+        "id": "TOOL_CALL_3",
+        "input": {
+          "investigation_id": "INVESTIGATION_1"
+        },
+        "output_evidence_ids": [],
+        "status": "success",
+        "task_id": "TASK_3",
+        "tool_name": "read_deployments"
+      },
+      {
+        "agent_name": "ServiceCatalogAgent",
+        "error_message": null,
+        "id": "TOOL_CALL_4",
+        "input": {
+          "investigation_id": "INVESTIGATION_1"
+        },
+        "output_evidence_ids": [
+          "EVIDENCE_2"
+        ],
+        "status": "success",
+        "task_id": "TASK_4",
+        "tool_name": "read_service_catalog"
+      }
+    ]
+  }
+}

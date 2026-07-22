@@ -61,7 +61,7 @@ def test_schema_initialization_creates_current_agent_tables(tmp_path):
     with engine.connect() as connection:
         version = connection.execute(select(schema_version.c.version)).scalar_one()
 
-    assert version == 5
+    assert version == 6
     assert {
         "diagnosis_plans",
         "diagnosis_tasks",

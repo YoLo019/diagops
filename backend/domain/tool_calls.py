@@ -13,6 +13,7 @@ class ToolCallStatus(StrEnum):
     SUCCESS = "success"
     FAILED = "failed"
     SKIPPED = "skipped"
+    INTERRUPTED = "interrupted"
 
 
 class ToolSpec(BaseModel):
@@ -36,3 +37,7 @@ class ToolCallRecord(BaseModel):
     started_at: datetime | None = None
     completed_at: datetime | None = None
     duration_ms: int = Field(default=0, ge=0)
+    runtime_run_id: str | None = None
+    logical_call_id: str | None = None
+    idempotency_key: str | None = None
+    execution_id: str | None = None

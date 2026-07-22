@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import uuid4
 
 from agents import FunctionTool
 
@@ -15,9 +17,10 @@ from backend.domain.multi_agent import AdaptiveStopReason
 from backend.domain.tool_calls import ToolCallRecord, ToolCallStatus
 from backend.domain.tool_queries import DependencyQuery, QueryWindow
 from backend.providers.results import ProviderResult, ProviderStatus
+from backend.runtime.concurrency import RunStepGate
 from backend.safety.redaction import redact_value
 from backend.tools.provider_tools import QUERY_MODELS_BY_TOOL
-from backend.tools.registry import ToolRegistry
+from backend.tools.registry import ToolInvocationResult, ToolRegistry
 
 TOOLS_BY_AGENT = {
     AgentName.LOG: frozenset({"read_logs"}),
@@ -44,13 +47,36 @@ class AdaptiveToolSession:
         max_total_tool_calls: int = 8,
         tool_timeout_seconds: float = 10,
         allowed_targets: set[str] | None = None,
+        runtime_run_id: str | None = None,
+        resolve_tool_result: Callable[[str], ToolCallRecord | None] | None = None,
+        persist_tool_start: Callable[[ToolCallRecord], Awaitable[ToolCallRecord]]
+        | None = None,
+        persist_tool_result: Callable[
+            [ToolInvocationResult], Awaitable[ToolCallRecord]
+        ]
+        | None = None,
+        check_execution: Callable[[], None] | None = None,
+        max_parallel_steps_per_run: int = 3,
+        hit_fault: Callable[[str], None] | None = None,
+        parallel_limit: RunStepGate | None = None,
     ) -> None:
+        if max_parallel_steps_per_run < 1:
+            raise ValueError("max_parallel_steps_per_run must be positive")
         self.event = event
         self.registry = registry
         self.task_ids = task_ids
         self.max_tool_calls_per_specialist = max_tool_calls_per_specialist
         self.max_total_tool_calls = max_total_tool_calls
         self.tool_timeout_seconds = tool_timeout_seconds
+        self.runtime_run_id = runtime_run_id
+        self._resolve_tool_result = resolve_tool_result or (lambda _key: None)
+        self._persist_tool_start = persist_tool_start
+        self._persist_tool_result = persist_tool_result
+        self._check_execution = check_execution or (lambda: None)
+        self._parallel_limit = parallel_limit or RunStepGate(
+            max_parallel_steps_per_run
+        )
+        self._hit_fault = hit_fault or (lambda _point: None)
         self.tool_calls: list[ToolCallRecord] = []
         self.provider_results: list[ProviderResult] = []
         self.new_evidence: list[EvidenceItem] = []
@@ -156,6 +182,32 @@ class AdaptiveToolSession:
             )
 
         fingerprint = _query_fingerprint(tool_name, query)
+        normalized_input = query.model_dump(mode="json", exclude={"reason"})
+        safe_normalized_input = {
+            key: value for key, value in normalized_input.items() if value is not None
+        }
+        logical_step = f"{agent_name.value}:{round_number}:{attempt}"
+        idempotency_key = tool_idempotency_key(
+            run_id=self.runtime_run_id,
+            agent_name=agent_name,
+            logical_step=logical_step,
+            tool_name=tool_name,
+            normalized_input=normalized_input,
+        )
+        # durable success 不再跨外部边界，也不应被恢复后的剩余预算阻断。
+        self._check_execution()
+        committed = self._resolve_tool_result(idempotency_key)
+        if committed is not None and committed.status == ToolCallStatus.SUCCESS:
+            reused = ToolCallRecord.model_validate(
+                committed.model_dump(mode="python")
+            )
+            self.tool_calls.append(reused)
+            return _response(
+                status=ToolCallStatus.SUCCESS,
+                evidence=[],
+                warning=None,
+                stop_reason=None,
+            )
         if fingerprint in self._fingerprints:
             return self._reject(
                 agent_name,
@@ -192,29 +244,78 @@ class AdaptiveToolSession:
             )
 
         self._fingerprints.add(fingerprint)
+        # idempotency_key 保持旧格式兼容；预算身份额外带 operation 指纹以区分同 turn 多查询。
+        logical_call_id = f"{logical_step}:{fingerprint}"
+        tool_call_id = f"tool-{uuid4().hex}"
+        execution_id = f"tool-exec-{uuid4().hex}"
+        running_call = ToolCallRecord(
+            id=tool_call_id,
+            task_id=task_id,
+            agent_name=agent_name.value,
+            tool_name=tool_name,
+            input=safe_normalized_input,
+            status=ToolCallStatus.RUNNING,
+            started_at=datetime.now(UTC),
+            runtime_run_id=self.runtime_run_id,
+            logical_call_id=logical_call_id,
+            idempotency_key=idempotency_key,
+            execution_id=execution_id,
+        )
+        if self._persist_tool_start is not None:
+            await self._persist_tool_start(running_call)
+            self._check_execution()
         try:
             # asyncio 无法终止已进入线程的同步 Provider；超时后只记录失败，晚到结果不写回 Session。
-            result = await asyncio.wait_for(
-                asyncio.to_thread(
-                    self.registry.invoke_detailed,
-                    tool_name,
-                    event=self.event,
-                    task_id=task_id,
-                    agent_name=agent_name.value,
-                    input=query.model_dump(mode="json"),
-                ),
-                timeout=self.tool_timeout_seconds,
-            )
+            async with self._parallel_limit.slot():
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self.registry.invoke_detailed,
+                        tool_name,
+                        event=self.event,
+                        task_id=task_id,
+                        agent_name=agent_name.value,
+                        input=query.model_dump(mode="json"),
+                    ),
+                    timeout=self.tool_timeout_seconds,
+                )
         except TimeoutError:
-            return self._reject(
-                agent_name,
-                tool_name,
-                query.model_dump(mode="json"),
-                ToolCallStatus.FAILED,
+            return await self._finish_failed_invocation(
+                running_call,
                 "tool invocation timeout",
                 AdaptiveStopReason.TIMEOUT,
-                task_id=task_id,
             )
+        except Exception:
+            return await self._finish_failed_invocation(
+                running_call,
+                "tool invocation failed",
+                None,
+            )
+        # 同步 Tool 在线程中完成后必须重新校验 lease/cancel fence，晚到结果不得推进状态。
+        self._check_execution()
+        result = ToolInvocationResult(
+            call=result.call.model_copy(
+                update={
+                    "id": tool_call_id,
+                    "input": safe_normalized_input,
+                    "runtime_run_id": self.runtime_run_id,
+                    "logical_call_id": logical_call_id,
+                    "idempotency_key": idempotency_key,
+                    "execution_id": execution_id,
+                }
+            ),
+            evidence=list(result.evidence),
+            provider_results=list(result.provider_results),
+        )
+        if self._persist_tool_result is not None:
+            persisted = await self._persist_tool_result(result)
+            result = ToolInvocationResult(
+                call=ToolCallRecord.model_validate(
+                    persisted.model_dump(mode="python")
+                ),
+                evidence=result.evidence,
+                provider_results=result.provider_results,
+            )
+        self._check_execution()
         self.tool_calls.append(result.call)
         self.provider_results.extend(result.provider_results)
 
@@ -235,6 +336,43 @@ class AdaptiveToolSession:
             status=result.call.status,
             evidence=project_tool_evidence(result.evidence),
             warning=_result_warning(result.provider_results),
+            stop_reason=stop_reason,
+        )
+
+    async def _finish_failed_invocation(
+        self,
+        running_call: ToolCallRecord,
+        message: str,
+        stop_reason: AdaptiveStopReason | None,
+    ) -> str:
+        """用同一逻辑调用身份覆盖 running，避免超时线程的晚到结果产生第二条记录。"""
+        completed_at = datetime.now(UTC)
+        started_at = running_call.started_at or completed_at
+        failed_call = running_call.model_copy(
+            update={
+                "status": ToolCallStatus.FAILED,
+                "error_message": message,
+                "completed_at": completed_at,
+                "duration_ms": max(
+                    0, int((completed_at - started_at).total_seconds() * 1000)
+                ),
+            }
+        )
+        if self._persist_tool_result is not None:
+            failed_call = await self._persist_tool_result(
+                ToolInvocationResult(
+                    call=failed_call,
+                    evidence=[],
+                    provider_results=[],
+                )
+            )
+        self.tool_calls.append(failed_call)
+        if stop_reason is not None:
+            self._stop(AgentName(running_call.agent_name), stop_reason)
+        return _response(
+            status=ToolCallStatus.FAILED,
+            evidence=[],
+            warning=message,
             stop_reason=stop_reason,
         )
 
@@ -348,6 +486,27 @@ def _query_fingerprint(tool_name: str, query: QueryWindow) -> str:
         values[name] = sorted(set(normalized))
     canonical = json.dumps(values, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(f"{tool_name}:{canonical}".encode()).hexdigest()
+
+
+def tool_idempotency_key(
+    *,
+    run_id: str | None,
+    agent_name: AgentName,
+    logical_step: str,
+    tool_name: str,
+    normalized_input: dict[str, Any],
+) -> str:
+    """从安全规范化输入生成稳定 key，不包含 reason、凭证或证据正文。"""
+    canonical = json.dumps(
+        normalized_input,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    identity = ":".join(
+        (run_id or "compat", agent_name.value, logical_step, tool_name, canonical)
+    )
+    return hashlib.sha256(identity.encode()).hexdigest()
 
 
 def _result_warning(results: list[ProviderResult]) -> str | None:

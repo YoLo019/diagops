@@ -67,11 +67,28 @@ class BenchmarkSettings(BaseModel):
     results_path: Path = Path("output/benchmarks/openrca")
 
 
+class OpenTelemetrySettings(BaseModel):
+    enabled: bool = False
+    endpoint: str | None = None
+
+
+class RuntimeSettings(BaseModel):
+    model_config = ConfigDict(validate_assignment=True)
+
+    enabled: bool = True
+    max_concurrent_runs: int = Field(default=4, ge=1, le=32)
+    max_parallel_steps_per_run: int = Field(default=3, ge=1, le=16)
+    lease_seconds: int = Field(default=30, ge=5, le=3600)
+    heartbeat_seconds: int = Field(default=10, ge=1, le=300)
+    opentelemetry: OpenTelemetrySettings = Field(default_factory=OpenTelemetrySettings)
+
+
 class AppSettings(BaseModel):
     storage: StorageSettings = Field(default_factory=StorageSettings)
     providers: ProviderSettings = Field(default_factory=ProviderSettings)
     agents: AgentsSettings = Field(default_factory=AgentsSettings)
     benchmark: BenchmarkSettings = Field(default_factory=BenchmarkSettings)
+    runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
 
 
 def load_settings() -> AppSettings:
@@ -120,6 +137,27 @@ def _apply_environment_overrides(settings: AppSettings) -> None:
 
     if value := _get_env("DIAGOPS_AGENTS_TOOL_TIMEOUT_SECONDS"):
         settings.agents.tool_timeout_seconds = int(value)
+
+    if value := _get_env("DIAGOPS_RUNTIME_ENABLED"):
+        settings.runtime.enabled = _parse_bool(value)
+
+    if value := _get_env("DIAGOPS_RUNTIME_MAX_CONCURRENT_RUNS"):
+        settings.runtime.max_concurrent_runs = int(value)
+
+    if value := _get_env("DIAGOPS_RUNTIME_MAX_PARALLEL_STEPS_PER_RUN"):
+        settings.runtime.max_parallel_steps_per_run = int(value)
+
+    if value := _get_env("DIAGOPS_RUNTIME_LEASE_SECONDS"):
+        settings.runtime.lease_seconds = int(value)
+
+    if value := _get_env("DIAGOPS_RUNTIME_HEARTBEAT_SECONDS"):
+        settings.runtime.heartbeat_seconds = int(value)
+
+    if value := _get_env("DIAGOPS_RUNTIME_OTEL_ENABLED"):
+        settings.runtime.opentelemetry.enabled = _parse_bool(value)
+
+    if value := _get_env("DIAGOPS_RUNTIME_OTEL_ENDPOINT"):
+        settings.runtime.opentelemetry.endpoint = value
 
 
 def _parse_bool(value: str) -> bool:

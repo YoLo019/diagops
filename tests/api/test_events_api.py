@@ -14,9 +14,8 @@ def reset_api_container():
 
 
 def test_create_simulated_event_returns_completed_investigation():
-    client = TestClient(app)
-
-    response = client.post("/events/simulated/deployment_regression")
+    with TestClient(app) as client:
+        response = client.post("/events/simulated/deployment_regression")
 
     assert response.status_code == 200
     body = response.json()
@@ -24,6 +23,7 @@ def test_create_simulated_event_returns_completed_investigation():
     assert isinstance(body["status"], str)
     assert body["service"] == "payment-service"
     assert body["top_cause_type"] == "deployment_regression"
+    assert body["runtime_available"] is True
 
 
 def test_webhook_without_real_metric_provider_preserves_unknown_cause():
@@ -47,6 +47,52 @@ def test_webhook_without_real_metric_provider_preserves_unknown_cause():
     assert response.status_code == 200
     assert response.json()["status"] == "completed"
     assert response.json()["top_cause_type"] == "unknown"
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        "sk-proj-abcdefghijklmnopqrstuvwxyz123456",
+        "secret=ordinary-secret",
+        "prod-secret",
+        "prod-token",
+        "prod-key",
+        "https://operator:ordinary-secret@example.invalid/prod",
+    ],
+)
+def test_raw_event_rejects_credential_like_environment(environment: str) -> None:
+    response = TestClient(app).post(
+        "/events",
+        json={
+            "source": "webhook",
+            "service": "checkout-service",
+            "environment": environment,
+            "severity": "warning",
+            "title": "Latency increased",
+            "description": "checkout-service latency increased",
+            "started_at": "2026-07-03T15:10:00+08:00",
+        },
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("environment", ["secretary-prod", "tokenizer-prod"])
+def test_raw_event_accepts_non_credential_environment_words(environment: str) -> None:
+    response = TestClient(app).post(
+        "/events",
+        json={
+            "source": "webhook",
+            "service": "checkout-service",
+            "environment": environment,
+            "severity": "warning",
+            "title": "Latency increased",
+            "description": "checkout-service latency increased",
+            "started_at": "2026-07-03T15:10:00+08:00",
+        },
+    )
+
+    assert response.status_code == 200
 
 
 def test_raw_event_accepts_adaptive_strategy_query():
@@ -118,6 +164,29 @@ def test_manual_investigation_rejects_blank_fields(field: str):
     response = client.post(
         "/investigations/manual",
         json=payload,
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        "sk-proj-abcdefghijklmnopqrstuvwxyz123456",
+        "token=ordinary-secret",
+        "https://operator:ordinary-secret@example.invalid/prod",
+    ],
+)
+def test_manual_investigation_rejects_credential_like_environment(
+    environment: str,
+) -> None:
+    response = TestClient(app).post(
+        "/investigations/manual",
+        json={
+            "text": "checkout-service has many 500s",
+            "service": "checkout-service",
+            "environment": environment,
+        },
     )
 
     assert response.status_code == 422

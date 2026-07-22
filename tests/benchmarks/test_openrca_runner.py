@@ -5,12 +5,14 @@ import os
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
+from functools import partial
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
 from backend.benchmarks.openrca import runner as openrca_runner
+from backend.benchmarks.openrca.evaluator import evaluate_persisted_prediction
 from backend.benchmarks.openrca.models import (
     OpenRcaPartition,
     OpenRcaRuntimeCase,
@@ -20,8 +22,12 @@ from backend.benchmarks.openrca.runner import (
     BenchmarkCaseOutcome,
     run_benchmark_pair,
 )
+from backend.db.session import create_db_engine
+from backend.db.sqlite_repository import SQLiteInvestigationRepository
 from backend.domain.agent_findings import RootCauseAttribution
-from backend.domain.multi_agent import InvestigationStrategy
+from backend.domain.multi_agent import InvestigationStrategy, ModelProvider
+from backend.runtime.replay import ReplayDependencies, ReplayService
+from backend.runtime.sqlite_store import SQLiteRuntimeStore
 
 TZ = timezone(timedelta(hours=8))
 
@@ -57,6 +63,7 @@ class FakeRuntime:
             input_tokens=100,
             output_tokens=20,
             read_only_violations=0,
+            runtime_run_id=f"runtime-{strategy.value}-{case.case_id}",
         )
 
 
@@ -144,6 +151,36 @@ def test_runner_writes_fixed_and_adaptive_artifacts(tmp_path: Path):
     assert json.loads(rows[1]["prediction"]) == {}
     assert rows[0]["row_id"] == "0"
     assert rows[0]["task_index"] == "task_1"
+    assert json.loads(rows[0]["metadata"])["runtime_run_id"].startswith(
+        "runtime-adaptive-"
+    )
+
+
+def test_runner_optionally_configures_real_case_runner_without_breaking_old_fakes(
+    tmp_path: Path,
+) -> None:
+    class ConfigurableFake(FakeRuntime):
+        configured = None
+
+        def configure_runtime(self, *, provider, model, prompt_version) -> None:
+            self.configured = (provider, model, prompt_version)
+
+    runner = ConfigurableFake()
+
+    run_benchmark_pair(
+        runner,
+        safe_index(tmp_path),
+        tmp_path / "runs",
+        provider=ModelProvider.DEEPSEEK,
+        model="deepseek-chat",
+        prompt_version="v9",
+    )
+
+    assert runner.configured == (
+        ModelProvider.DEEPSEEK,
+        "deepseek-chat",
+        "v9",
+    )
 
 
 @pytest.mark.parametrize("rate", [-1.0, math.nan, math.inf])
@@ -184,6 +221,8 @@ def test_fixture_cli_prepare_run_evaluate_smoke(tmp_path: Path):
     runs = tmp_path / "runs"
     environment = os.environ.copy()
     environment.pop("OPENAI_API_KEY", None)
+    runtime_database = tmp_path / "openrca-runtime.db"
+    environment["DIAGOPS_DATABASE_URL"] = f"sqlite:///{runtime_database}"
 
     def command(*arguments: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -215,8 +254,55 @@ def test_fixture_cli_prepare_run_evaluate_smoke(tmp_path: Path):
         str(runs),
         "--model",
         "test-model",
+        "--prompt-version",
+        "v9",
     )
     run_id = run.stdout.strip().splitlines()[-1]
+    with (runs / run_id / "fixed-predictions.csv").open(
+        encoding="utf-8", newline=""
+    ) as file:
+        runtime_run_ids = {
+            json.loads(row["metadata"])["runtime_run_id"]
+            for row in csv.DictReader(file)
+        }
+    engine = create_db_engine(f"sqlite:///{runtime_database}")
+    runtime_store = SQLiteRuntimeStore(
+        engine,
+        SQLiteInvestigationRepository(engine),
+    )
+    assert runtime_run_ids
+    runtime_runs = [runtime_store.get_run(run_id) for run_id in runtime_run_ids]
+    assert all(item.model_provider == ModelProvider.OPENAI for item in runtime_runs)
+    assert all(item.model_name == "test-model" for item in runtime_runs)
+    assert all(item.prompt_version == "v9" for item in runtime_runs)
+    for item in runtime_runs:
+        locator = runtime_store.get_benchmark_replay_locator(item.id)
+        assert locator["provider"] == item.model_provider.value
+        assert locator["model"] == item.model_name
+        assert locator["prompt_version"] == item.prompt_version
+    evaluations = {
+        evaluate_persisted_prediction(runtime_store, runtime_run_id)
+        for runtime_run_id in runtime_run_ids
+    }
+    assert "not_available" not in evaluations
+    assert evaluations <= {"strict", "invalid", "partial:0.00"}
+
+    tampered_run_id = next(iter(runtime_run_ids))
+    locator = runtime_store.get_benchmark_replay_locator(tampered_run_id)
+    assert locator is not None
+    prediction_path = Path(locator["prediction_root"]) / locator["prediction_file"]
+    prediction_path.write_text("tampered", encoding="utf-8")
+    report = ReplayService(
+        ReplayDependencies(
+            store=runtime_store,
+            benchmark_evaluator=partial(
+                evaluate_persisted_prediction, runtime_store
+            ),
+        )
+    ).replay(tampered_run_id)
+    assert report.valid is False
+    assert "benchmark_artifact_invalid" in report.validation_errors
+    engine.dispose()
     command(
         "evaluate",
         "--query-root",

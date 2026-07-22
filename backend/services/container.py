@@ -1,8 +1,13 @@
+import asyncio
 import logging
 import os
+from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 
+from backend.benchmarks.openrca.evaluator import evaluate_persisted_prediction
 from backend.config.settings import AppSettings, StorageSettings, load_settings
+from backend.db.models import InvestigationRecord, InvestigationStatus
 from backend.db.repositories import InMemoryInvestigationRepository
 from backend.db.session import create_db_engine, initialize_database
 from backend.db.sqlite_repository import SQLiteInvestigationRepository
@@ -11,18 +16,38 @@ from backend.diagnosis.agents_runtime import AgentsRcaRuntime
 from backend.diagnosis.coordinator import DiagnosisCoordinator
 from backend.diagnosis.deepseek_model import create_deepseek_model
 from backend.diagnosis.orchestrator import DiagnosisOrchestrator
+from backend.domain.events import IncidentEvent
 from backend.domain.multi_agent import ModelProvider
+from backend.domain.runtime import (
+    RuntimeRun,
+    RuntimeRunKind,
+    RuntimeRunReason,
+)
 from backend.providers.registry import build_provider_registry_from_settings
 from backend.rca.analyzer import RcaAnalyzer
 from backend.reports.generator import ReportGenerator
+from backend.runtime.coordinator import RuntimeCoordinator
+from backend.runtime.diff import RuntimeDiffService
+from backend.runtime.event_hub import EventHub
+from backend.runtime.manager import RuntimeManager
+from backend.runtime.phase_executor import DiagnosisPhaseExecutor
+from backend.runtime.replay import ReplayDependencies, ReplayService
+from backend.runtime.sqlite_store import SQLiteRuntimeStore
+from backend.runtime.store import InMemoryRuntimeStore
+from backend.runtime.telemetry import RuntimeTelemetry
+from backend.runtime.writer import RuntimeWriter
+from backend.safety.redaction import redact_model
 from backend.tools.provider_tools import build_provider_tool_registry
 
 logger = logging.getLogger(__name__)
+_TELEMETRY_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
 
 class AppContainer:
     def __init__(self, settings: AppSettings | None = None) -> None:
         self.settings = settings or load_settings()
+        self._shutdown_lock = asyncio.Lock()
+        self._shutdown = False
         self.engine = None
         self.repository = self._build_repository()
         providers = build_provider_registry_from_settings(self.settings)
@@ -53,6 +78,7 @@ class AppContainer:
                     tool_timeout_seconds=(
                         self.settings.agents.tool_timeout_seconds
                     ),
+                    prompt_version="v9",
                 )
             except Exception as exc:
                 logger.warning(
@@ -73,6 +99,33 @@ class AppContainer:
             ),
             max_total_tool_calls=self.settings.agents.max_total_tool_calls,
         )
+        self.event_hub = EventHub()
+        self.telemetry = RuntimeTelemetry.from_settings(
+            self.settings.runtime.opentelemetry
+        )
+        self.runtime_store = self._build_runtime_store()
+        self.runtime_writer = RuntimeWriter(self.runtime_store)
+        self.runtime_phase_executor = DiagnosisPhaseExecutor(
+            self.orchestrator,
+            max_parallel_steps_per_run=(
+                self.settings.runtime.max_parallel_steps_per_run
+            ),
+            telemetry=self.telemetry,
+        )
+        self.runtime_manager = RuntimeManager(
+            coordinator_factory=self._build_runtime_coordinator,
+            max_concurrent_runs=self.settings.runtime.max_concurrent_runs,
+        )
+        self.replay_service = ReplayService(
+            ReplayDependencies(
+                store=self.runtime_store,
+                benchmark_evaluator=partial(
+                    evaluate_persisted_prediction,
+                    self.runtime_store,
+                ),
+            )
+        )
+        self.diff_service = RuntimeDiffService(store=self.runtime_store)
 
     def _build_repository(self):
         storage_url = self.settings.storage.url
@@ -95,6 +148,137 @@ class AppContainer:
         parent = database_path.parent
         if str(parent) not in {"", "."}:
             parent.mkdir(parents=True, exist_ok=True)
+
+    def _build_runtime_store(self):
+        if isinstance(self.repository, InMemoryInvestigationRepository):
+            return InMemoryRuntimeStore(
+                self.repository,
+                lease_seconds=self.settings.runtime.lease_seconds,
+                event_publisher=self.event_hub.publish,
+            )
+        if isinstance(self.repository, SQLiteInvestigationRepository):
+            if self.engine is None:
+                raise RuntimeError("SQLite Runtime requires the shared database engine")
+            return SQLiteRuntimeStore(
+                self.engine,
+                self.repository,
+                lease_seconds=self.settings.runtime.lease_seconds,
+                event_publisher=self.event_hub.publish,
+            )
+        raise ValueError("Unsupported repository for Runtime")
+
+    def _build_runtime_coordinator(self, _run_id: str) -> RuntimeCoordinator:
+        return RuntimeCoordinator(
+            store=self.runtime_store,
+            writer=self.runtime_writer,
+            phase_executor=self.runtime_phase_executor,
+            heartbeat_seconds=self.settings.runtime.heartbeat_seconds,
+            telemetry=self.telemetry,
+        )
+
+    async def startup(self) -> None:
+        """按持久化先行顺序启动 Runtime，过期 lease 只审计不自动恢复。"""
+        if not self.settings.runtime.enabled:
+            return
+        await self.runtime_writer.start()
+        self.runtime_store.audit_expired_leases(datetime.now(UTC))
+        await self.runtime_manager.startup()
+
+    async def shutdown(self) -> None:
+        """在有界时间内停止新调度并清空已接受的 Runtime 写入。"""
+        async with self._shutdown_lock:
+            if self._shutdown:
+                return
+            self._shutdown = True
+            try:
+                await asyncio.wait_for(self.runtime_manager.shutdown(), timeout=15)
+            except TimeoutError:
+                logger.warning("runtime shutdown timed out category=runtime_shutdown_timeout")
+            finally:
+                try:
+                    await self.runtime_writer.shutdown()
+                finally:
+                    self.telemetry.force_flush(
+                        timeout_seconds=_TELEMETRY_SHUTDOWN_TIMEOUT_SECONDS
+                    )
+                    self.telemetry.shutdown(
+                        timeout_seconds=_TELEMETRY_SHUTDOWN_TIMEOUT_SECONDS
+                    )
+                    self.close()
+
+    async def run_investigation(
+        self,
+        event: IncidentEvent,
+        *,
+        strategy=None,
+    ):
+        if not self.settings.runtime.enabled:
+            return await asyncio.to_thread(
+                self.orchestrator.run,
+                event,
+                strategy=strategy,
+            )
+        effective_strategy = strategy or self.settings.agents.strategy
+        record = redact_model(
+            InvestigationRecord(event=event, strategy=effective_strategy)
+        )
+        self.repository.save(record)
+        run = self.create_runtime_run(
+            record.id,
+            strategy=effective_strategy,
+            run_reason=RuntimeRunReason.INITIAL,
+        )
+        await self.runtime_writer.start()
+        task = await self.runtime_manager.start(run.id)
+        try:
+            await task
+        except Exception:
+            failed = self.repository.get(record.id)
+            if failed.status != InvestigationStatus.FAILED:
+                raise
+            return failed
+        return self.repository.get(record.id)
+
+    def create_runtime_run(
+        self,
+        investigation_id: str,
+        *,
+        strategy,
+        run_reason: RuntimeRunReason,
+        parent_run_id: str | None = None,
+        model_provider=None,
+        model_name: str | None = None,
+        prompt_version: str | None = None,
+    ) -> RuntimeRun:
+        self.repository.get(investigation_id)
+        agents_runtime = self.orchestrator.agents_runtime
+        effective_provider = model_provider or getattr(
+            agents_runtime, "model_provider", None
+        )
+        effective_model = model_name or getattr(agents_runtime, "_model_name", None)
+        effective_prompt = prompt_version or getattr(
+            agents_runtime, "prompt_version", None
+        )
+        run = RuntimeRun(
+            investigation_id=investigation_id,
+            run_kind=RuntimeRunKind.LIVE,
+            strategy=strategy,
+            run_reason=run_reason,
+            parent_run_id=parent_run_id,
+            model_provider=effective_provider,
+            model_name=effective_model,
+            prompt_version=effective_prompt,
+            tool_budget=self.settings.agents.max_total_tool_calls,
+            token_budget=getattr(agents_runtime, "runtime_token_budget", None),
+            timeout_seconds=float(self.settings.agents.timeout_seconds),
+        )
+        return self.runtime_store.create_run(run)
+
+    def replay_run(self, run_id: str):
+        return self.replay_service.replay(run_id)
+
+    def diff_runs(self, run_id: str, against_run_id: str):
+        return self.diff_service.compare(run_id, against_run_id)
 
     def close(self) -> None:
         """释放仅由当前 container 创建并持有的数据库 engine。"""

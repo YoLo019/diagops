@@ -1,0 +1,15 @@
+{
+  "baseline_commit": "3f06d9ae87729185b3429c839f11cc366de75000",
+  "fixtures": {
+    "deployment_regression__fixed.json": "b7cb4f2879fe8ab0e12c4382127020b2348290aa02bcf24f0c90b6dbcac64bf2",
+    "deployment_regression__adaptive.json": "97f76d784ef801d979d136bbc86b5e291a637aae00d5d5ba73f6de4f997c527d",
+    "traffic_spike__fixed.json": "c2b69dd57ca961b6d0852b34cb0f4ffbf2f30fbaaac5224a2b910728bbbd67a5",
+    "traffic_spike__adaptive.json": "8abf04ee2b5fd610ff578220f93b5d7da12e24b8ea06080b24ba033038709b2a",
+    "dependency_timeout__fixed.json": "c2f11f876912b500e97b13490724f87d84944b9c0f3147e784f1d4b2e550e985",
+    "dependency_timeout__adaptive.json": "af0c04cc749296e2e6efe6199d2811a45cf8f633059cad05df743bd877245bf9",
+    "database_slowdown__fixed.json": "8dcab5de2406cd1d3ee964a3ac35a399163efb102919ca0022d29c5b49bca839",
+    "database_slowdown__adaptive.json": "00af7c34f63b57cde96529a9574ccb446ca3422dd0a1315bffbfff24dafcfaed",
+    "single_bad_instance__fixed.json": "b1dc36a17fcb576aae9742bece5e1459456fbd3f3d857d22ef96859440cfe76e",
+    "single_bad_instance__adaptive.json": "153ba2cab5c70ac58992ebf7bc5e9d8b2ee4406ea4084b9b51320237259210d4"
+  }
+}

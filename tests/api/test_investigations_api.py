@@ -1,8 +1,10 @@
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.db.models import InvestigationRecord
+from backend.domain.events import IncidentEvent
 from backend.main import app
-from backend.services.container import reset_container
+from backend.services.container import get_container, reset_container
 
 
 @pytest.fixture(autouse=True)
@@ -19,6 +21,26 @@ def test_list_investigations_starts_empty():
     assert response.json() == []
 
 
+@pytest.mark.parametrize(
+    "environment",
+    ("prod-secret", "prod-token", "prod-key"),
+)
+def test_manual_investigation_rejects_credential_like_environment_label(
+    environment: str,
+) -> None:
+    with TestClient(app) as client:
+        response = client.post(
+            "/investigations/manual",
+            json={
+                "text": "service latency",
+                "service": "payment-service",
+                "environment": environment,
+            },
+        )
+
+    assert response.status_code == 422
+
+
 def test_get_investigation_after_simulated_event():
     client = TestClient(app)
     created = client.post("/events/simulated/deployment_regression").json()
@@ -31,6 +53,23 @@ def test_get_investigation_after_simulated_event():
     assert body["status"] == "completed"
     assert isinstance(body["status"], str)
     assert body["report"]["markdown"].startswith("# payment-service RCA")
+
+
+def test_synchronous_investigation_api_returns_persisted_failed_record() -> None:
+    container = get_container()
+
+    class FailingPhaseExecutor:
+        async def execute_phase(self, _phase_input):
+            raise RuntimeError("unsafe provider detail")
+
+    container.runtime_phase_executor = FailingPhaseExecutor()
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post("/events/simulated/deployment_regression")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "failed"
+    assert response.json()["failure_reason"] == "operation failed"
 
 
 def test_list_investigations_includes_created_record():
@@ -64,8 +103,39 @@ def test_list_investigation_summaries_is_newest_first_and_excludes_details():
         "action_count",
         "verification_count",
         "failure_reason",
+        "runtime_available",
     }
     assert client.get("/investigations/summaries/evidence").status_code == 404
+
+
+def test_runtime_availability_is_an_additive_api_projection() -> None:
+    container = reset_container()
+    old = container.repository.save(
+        InvestigationRecord(
+            event=IncidentEvent(
+                source="manual",
+                service="legacy-service",
+                environment="prod",
+                severity="warning",
+                title="legacy",
+                description="legacy record",
+                started_at="2026-07-18T00:00:00Z",
+            )
+        )
+    )
+
+    with TestClient(app) as client:
+        old_detail = client.get(f"/investigations/{old.id}").json()
+        created = client.post("/events/simulated/deployment_regression").json()
+        container.settings.runtime.enabled = False
+        new_detail = client.get(f"/investigations/{created['id']}").json()
+        summaries = client.get("/investigations/summaries").json()
+
+    assert old_detail["runtime_available"] is False
+    assert new_detail["runtime_available"] is True
+    assert next(item for item in summaries if item["id"] == created["id"])[
+        "runtime_available"
+    ] is True
 
 
 def test_unknown_investigation_returns_404():

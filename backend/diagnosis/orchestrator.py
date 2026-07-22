@@ -2,7 +2,7 @@ import asyncio
 import logging
 from datetime import UTC, datetime
 
-from backend.db.models import InvestigationRecord, InvestigationStatus
+from backend.db.models import InvestigationRecord
 from backend.db.repositories import InMemoryInvestigationRepository
 from backend.diagnosis.action_planner import ActionPlanner
 from backend.diagnosis.agents_runtime import (
@@ -18,7 +18,6 @@ from backend.diagnosis.coordinator import DiagnosisCoordinator
 from backend.diagnosis.evidence_validation import (
     EvidenceContractError,
     validate_agent_semantics,
-    validate_hypotheses,
     validate_investigation_evidence,
 )
 from backend.diagnosis.execution_engine import DiagnosisExecutionEngine
@@ -60,7 +59,6 @@ from backend.providers.registry import ProviderRegistry
 from backend.providers.results import ProviderResult
 from backend.rca.analyzer import RcaAnalyzer
 from backend.reports.generator import ReportGenerator
-from backend.safety.redaction import redact_model, safe_failure
 from backend.tools.provider_tools import build_provider_tool_registry
 
 logger = logging.getLogger(__name__)
@@ -145,122 +143,12 @@ class DiagnosisOrchestrator:
         event: IncidentEvent,
         strategy: InvestigationStrategy | None = None,
     ) -> InvestigationRecord:
-        effective_strategy = InvestigationStrategy(strategy or self.default_strategy)
-        safe_event = redact_model(event)
-        record = self.repository.save(
-            InvestigationRecord(
-                event=safe_event,
-                strategy=effective_strategy,
-                status=InvestigationStatus.PENDING,
-            )
-        )
-        logger.info(
-            "investigation started id=%s service=%s", record.id, safe_event.service
-        )
-        self.repository.update_status(record.id, InvestigationStatus.RUNNING)
+        # 延迟导入避免 Runtime 适配层与既有编排器产生模块循环。
+        from backend.runtime.phase_executor import DiagnosisPhaseExecutor
 
-        try:
-            context = self.coordinator.collect(event)
-            validated = validate_investigation_evidence(context.provider_results)
-            evidence = context.evidence
-            supporting_evidence = validated.supporting_evidence
-            record.provider_results = context.provider_results
-            record.specialist_results = context.specialist_results
-            record.evidence = evidence
-            record.updated_at = datetime.now(UTC)
-            self.repository.save(record)
-            self._record_v4_execution(record.id, safe_event, context.provider_results)
-
-            hypotheses = self.analyzer.analyze(safe_event, supporting_evidence)
-            validate_hypotheses(supporting_evidence, hypotheses)
-            record.hypotheses = hypotheses
-            record.updated_at = datetime.now(UTC)
-            self.repository.save(record)
-            self._record_v5_coordination(
-                record.id, safe_event, supporting_evidence, hypotheses
-            )
-            v7_result = self._record_v7_coordination(
-                record.id, effective_strategy
-            )
-            persisted = self.repository.get(record.id)
-            persisted.multi_agent_run = self._resolved_run_summary(
-                effective_strategy, v7_result
-            )
-            persisted.updated_at = datetime.now(UTC)
-            persisted = self.repository.save(persisted)
-            record.multi_agent_run = persisted.multi_agent_run
-            record.provider_results = persisted.provider_results
-            evidence = persisted.evidence
-
-            actions, verifications = self.action_planner.plan(
-                safe_event, supporting_evidence, hypotheses
-            )
-            evidence = self._ensure_action_evidence(evidence, actions)
-
-            record.evidence = evidence
-            record.actions = actions
-            record.verification_suggestions = verifications
-            record.updated_at = datetime.now(UTC)
-            self.repository.save(record)
-            report = self.report_generator.generate(
-                record.id,
-                safe_event,
-                evidence,
-                hypotheses,
-                actions=actions,
-                verification_suggestions=verifications,
-                **(
-                    {
-                        "coordination_review": v7_result.review,
-                        "multi_agent_run": v7_result.run_summary,
-                        "agent_findings": v7_result.findings,
-                    }
-                    if v7_result is not None
-                    else {}
-                ),
-            )
-            record.report = report
-            record.updated_at = datetime.now(UTC)
-            self.repository.save(record)
-            completed = self.repository.update_status(record.id, InvestigationStatus.COMPLETED)
-            logger.info(
-                "investigation completed id=%s evidence_count=%s "
-                "action_count=%s verification_count=%s",
-                completed.id,
-                len(completed.evidence),
-                len(completed.actions),
-                len(completed.verification_suggestions),
-            )
-            return completed
-        except asyncio.CancelledError:
-            try:
-                self.repository.update_status(
-                    record.id,
-                    InvestigationStatus.CANCELLED,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "investigation cancellation persistence failed id=%s "
-                    "error_type=%s",
-                    record.id,
-                    type(exc).__name__,
-                )
-            raise
-        except Exception as exc:
-            logger.error(
-                "investigation failed id=%s error_type=%s",
-                record.id,
-                type(exc).__name__,
-            )
-            failure_reason = safe_failure("investigation_failure")
-            record.failure_reason = failure_reason
-            record.updated_at = datetime.now(UTC)
-            self.repository.save(record)
-            return self.repository.update_status(
-                record.id,
-                InvestigationStatus.FAILED,
-                failure_reason=failure_reason,
-            )
+        return asyncio.run(
+            DiagnosisPhaseExecutor(self).execute(event, strategy)
+        ).record
 
     def _record_v5_coordination(
         self,
@@ -269,6 +157,21 @@ class DiagnosisOrchestrator:
         evidence: list[EvidenceItem],
         hypotheses,
     ) -> None:
+        self._record_v5_findings(
+            investigation_id,
+            event,
+            evidence,
+            hypotheses,
+        )
+        self._record_v5_review(investigation_id, evidence, hypotheses)
+
+    def _record_v5_findings(
+        self,
+        investigation_id: str,
+        event: IncidentEvent,
+        evidence: list[EvidenceItem],
+        hypotheses,
+    ) -> list[AgentFinding]:
         try:
             findings = build_agent_findings(investigation_id, event, evidence)
             cause_rank = {
@@ -279,24 +182,53 @@ class DiagnosisOrchestrator:
                     finding.related_cause_type, len(cause_rank)
                 )
             )
+            save_findings = getattr(self.repository, "save_agent_findings", None)
+            if save_findings is not None:
+                save_findings(investigation_id, findings)
+            return findings
+        except Exception as exc:
+            logger.warning(
+                "v5 finding recording failed id=%s error_type=%s",
+                investigation_id,
+                type(exc).__name__,
+            )
+            return []
+
+    def _record_v5_review(
+        self,
+        investigation_id: str,
+        evidence: list[EvidenceItem],
+        hypotheses,
+    ) -> CoordinationReview | None:
+        try:
+            findings = self.repository.list_agent_findings(investigation_id)
             review = build_coordination_review(
                 investigation_id, findings, evidence, hypotheses
             )
             validate_agent_semantics(evidence, findings, review.candidates)
-            save_findings = getattr(self.repository, "save_agent_findings", None)
-            if save_findings is not None:
-                save_findings(investigation_id, findings)
             save_review = getattr(self.repository, "save_coordination_review", None)
             if save_review is not None:
                 save_review(review)
+            return review
         except Exception as exc:
             logger.warning(
-                "v5 coordination recording failed id=%s error_type=%s",
+                "v5 review recording failed id=%s error_type=%s",
                 investigation_id,
                 type(exc).__name__,
             )
+            return None
 
     def _record_v7_coordination(
+        self,
+        investigation_id: str,
+        strategy: InvestigationStrategy,
+    ) -> AgentsRcaRuntimeResult | None:
+        """保留旧同步调用面；Runtime Phase 路径直接 await async 实现。"""
+        return asyncio.run(
+            self._record_v7_coordination_async(investigation_id, strategy)
+        )
+
+    async def _record_v7_coordination_async(
         self,
         investigation_id: str,
         strategy: InvestigationStrategy,
@@ -326,14 +258,12 @@ class DiagnosisOrchestrator:
                 item.id
                 for item in self.repository.list_agent_findings(investigation_id)
             }
-            result = asyncio.run(
-                self.agents_runtime.run(
-                    investigation_id=investigation_id,
-                    event=persisted.event,
-                    evidence=supporting_evidence,
-                    hypotheses=persisted.hypotheses,
-                    strategy=strategy,
-                )
+            result = await self.agents_runtime.run(
+                investigation_id=investigation_id,
+                event=persisted.event,
+                evidence=supporting_evidence,
+                hypotheses=persisted.hypotheses,
+                strategy=strategy,
             )
         except Exception as exc:
             reason = f"{type(exc).__name__}: Agents runtime failed"
@@ -976,6 +906,7 @@ class DiagnosisOrchestrator:
         self,
         evidence: list[EvidenceItem],
         actions,
+        investigation_id: str | None = None,
     ) -> list[EvidenceItem]:
         evidence_ids = {item.id for item in evidence}
         needs_missing = any(
@@ -986,10 +917,21 @@ class DiagnosisOrchestrator:
         if not needs_missing:
             return evidence
 
+        missing_evidence_id = (
+            f"ev-missing-evidence-{investigation_id}"
+            if investigation_id is not None
+            else "ev-missing-evidence"
+        )
+        for action in actions:
+            action.supporting_evidence_ids = [
+                missing_evidence_id if item == "ev-missing-evidence" else item
+                for item in action.supporting_evidence_ids
+            ]
+
         return [
             *evidence,
             EvidenceItem(
-                id="ev-missing-evidence",
+                id=missing_evidence_id,
                 provider=EvidenceProvider.SERVICE_CATALOG,
                 kind=EvidenceKind.PROVIDER_ERROR,
                 status=EvidenceStatus.FAILED,

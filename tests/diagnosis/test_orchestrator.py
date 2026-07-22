@@ -2060,6 +2060,7 @@ def test_container_builds_one_agents_runtime_only_when_enabled(monkeypatch):
         "max_tool_calls_per_specialist": 5,
         "max_total_tool_calls": 11,
         "tool_timeout_seconds": 20,
+        "prompt_version": "v9",
     }
     assert created[0].kwargs["tool_registry"].get("read_logs").read_only is True
 

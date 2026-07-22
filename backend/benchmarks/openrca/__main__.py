@@ -12,7 +12,8 @@ from backend.benchmarks.openrca.runner import (
     OpenRcaDiagnosisRunner,
     run_benchmark_pair,
 )
-from backend.domain.multi_agent import InvestigationStrategy
+from backend.domain.multi_agent import InvestigationStrategy, ModelProvider
+from backend.services.container import get_container
 
 
 def main() -> None:
@@ -30,6 +31,11 @@ def main() -> None:
     run.add_argument("--safe-index", type=Path, required=True)
     run.add_argument("--output", type=Path, required=True)
     run.add_argument("--model", required=True)
+    run.add_argument(
+        "--provider",
+        choices=tuple(item.value for item in ModelProvider),
+        default=ModelProvider.OPENAI.value,
+    )
     run.add_argument(
         "--strategy", choices=("fixed", "adaptive", "both"), default="both"
     )
@@ -68,11 +74,20 @@ def main() -> None:
         if arguments.strategy == "both"
         else (InvestigationStrategy(arguments.strategy),)
     )
+    container = get_container()
     result = run_benchmark_pair(
-        OpenRcaDiagnosisRunner(arguments.dataset_root, arguments.model),
+        OpenRcaDiagnosisRunner(
+            arguments.dataset_root,
+            arguments.model,
+            repository=container.repository,
+            runtime_store=container.runtime_store,
+            provider=ModelProvider(arguments.provider),
+            prompt_version=arguments.prompt_version,
+        ),
         arguments.safe_index,
         arguments.output,
         model=arguments.model,
+        provider=ModelProvider(arguments.provider),
         prompt_version=arguments.prompt_version,
         input_cost_per_million=arguments.input_cost_per_million,
         output_cost_per_million=arguments.output_cost_per_million,

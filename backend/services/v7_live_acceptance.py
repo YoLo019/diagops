@@ -140,6 +140,16 @@ class _AcceptanceOrchestrator(DiagnosisOrchestrator):
         )
         return self.accepted_result
 
+    async def _record_v7_coordination_async(
+        self,
+        investigation_id: str,
+        strategy,
+    ) -> AgentsRcaRuntimeResult | None:
+        self.accepted_result = await super()._record_v7_coordination_async(
+            investigation_id, strategy
+        )
+        return self.accepted_result
+
 
 class _PromptInjectionLogProvider:
     provider = EvidenceProvider.LOG

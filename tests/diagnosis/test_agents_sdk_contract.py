@@ -34,6 +34,7 @@ from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
 from backend.domain.hypotheses import CauseType, Hypothesis
 from backend.domain.multi_agent import MultiAgentRunStatus
 from backend.providers.registry import ProviderRegistry
+from backend.runtime.concurrency import RunStepGate
 from backend.tools.provider_tools import build_provider_tool_registry
 
 
@@ -282,6 +283,12 @@ async def test_deepseek_chat_request_serializes_json_object_and_tools(monkeypatc
 async def test_real_runner_invokes_three_structured_agent_tools_offline():
     model = ScriptedModel()
     specialist_inputs = {name: f"Evidence only for {name}" for name in AgentName}
+    lifecycle: list[tuple[str, str, int, str]] = []
+
+    async def persist_model_event(
+        execution_id: str, status: str, token_usage: int, actor_name: str
+    ) -> None:
+        lifecycle.append((execution_id, status, token_usage, actor_name))
 
     result = await _run_sdk_turn(
         model=model,
@@ -289,6 +296,7 @@ async def test_real_runner_invokes_three_structured_agent_tools_offline():
         specialist_inputs=specialist_inputs,
         specialist_names=list(AgentName),
         max_turns=8,
+        persist_model_event=persist_model_event,
     )
 
     assert {captured.agent_name for captured in result.captured_drafts} == set(
@@ -312,6 +320,348 @@ async def test_real_runner_invokes_three_structured_agent_tools_offline():
     assert model.tracing and set(model.tracing) == {
         ModelTracing.ENABLED_WITHOUT_DATA
     }
+    grouped: dict[str, list[str]] = {}
+    for execution_id, status, _usage, _actor_name in lifecycle:
+        grouped.setdefault(execution_id, []).append(status)
+    assert len(grouped) == 5
+    assert all(statuses == ["started", "completed"] for statuses in grouped.values())
+
+
+@pytest.mark.anyio
+async def test_real_specialist_group_obeys_shared_run_gate() -> None:
+    class BlockingSpecialists(ScriptedModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.active = 0
+            self.peak = 0
+            self.saturated = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def get_response(self, system_instructions, *args, **kwargs):
+            is_specialist = "CoordinatorAgent" not in system_instructions
+            if not is_specialist:
+                return _message_response(
+                    _CoordinatorProposal(
+                        summary="bounded specialists completed",
+                        uncertainty="none",
+                        proposed_cause=CauseType.DEPLOYMENT_REGRESSION,
+                    ).model_dump_json(),
+                    Usage(input_tokens=20, output_tokens=5),
+                )
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+            if self.active == 2:
+                self.saturated.set()
+            try:
+                await self.release.wait()
+                return await super().get_response(
+                    system_instructions, *args, **kwargs
+                )
+            finally:
+                self.active -= 1
+
+    model = BlockingSpecialists()
+    task = asyncio.create_task(
+        _run_sdk_turn(
+            model=model,
+            coordinator_input="Request all specialists",
+            specialist_inputs={name: f"Evidence for {name}" for name in AgentName},
+            specialist_names=list(AgentName),
+            max_turns=8,
+            parallel_limit=RunStepGate(2),
+            prompt_version="v9",
+        )
+    )
+
+    await asyncio.wait_for(model.saturated.wait(), 3)
+    assert model.peak == 2
+    model.release.set()
+    result = await asyncio.wait_for(task, 3)
+
+    assert result.error is None
+    assert model.peak == 2
+    assert model.active == 0
+
+
+@pytest.mark.anyio
+async def test_v9_real_runner_emits_one_model_lifecycle_per_actual_agent_call():
+    class V9ScriptedModel(ScriptedModel):
+        async def get_response(self, system_instructions, *args, **kwargs):
+            if "CoordinatorAgent" in system_instructions:
+                return _message_response(
+                    _CoordinatorProposal(
+                        summary="specialists completed",
+                        uncertainty="none",
+                        proposed_cause=CauseType.DEPLOYMENT_REGRESSION,
+                    ).model_dump_json(),
+                    Usage(input_tokens=20, output_tokens=5),
+                )
+            return await super().get_response(system_instructions, *args, **kwargs)
+
+    model = V9ScriptedModel()
+    lifecycle: list[tuple[str, str, int, str]] = []
+
+    async def persist_model_event(
+        execution_id: str, status: str, token_usage: int, actor_name: str
+    ) -> None:
+        lifecycle.append((execution_id, status, token_usage, actor_name))
+
+    runtime = AgentsRcaRuntime(
+        model=model,
+        prompt_version="v9",
+        persist_model_event=persist_model_event,
+    )
+    result = await runtime._invoke_turn(
+        None,
+        model=model,
+        coordinator_input="Synthesize the specialist drafts.",
+        specialist_inputs={
+            name: f"Evidence only for {name.value}" for name in AgentName
+        },
+        specialist_names=list(AgentName),
+        max_turns=8,
+        analysis_round=1,
+        attempt=1,
+        prompt_version="v9",
+    )
+
+    assert result.error is None
+    grouped: dict[str, list[tuple[str, int, str]]] = {}
+    for execution_id, status, token_usage, actor_name in lifecycle:
+        grouped.setdefault(execution_id, []).append((status, token_usage, actor_name))
+    assert len(grouped) == 4
+    assert {items[0][2] for items in grouped.values()} == {
+        "CoordinatorAgent",
+        *(name.value for name in AgentName),
+    }
+    assert all(
+        [item[0] for item in items] == ["started", "completed"]
+        for items in grouped.values()
+    )
+
+
+@pytest.mark.anyio
+async def test_v9_specialist_failure_does_not_cancel_siblings() -> None:
+    class OneFailedSpecialist(ScriptedModel):
+        async def get_response(self, system_instructions, *args, **kwargs):
+            if "CoordinatorAgent" in system_instructions:
+                return _message_response(
+                    _CoordinatorProposal(
+                        summary="partial specialists completed",
+                        uncertainty="log specialist failed",
+                        proposed_cause=CauseType.DEPLOYMENT_REGRESSION,
+                    ).model_dump_json(),
+                    Usage(input_tokens=20, output_tokens=5),
+                )
+            if AgentName.LOG.value in system_instructions:
+                raise RuntimeError("log specialist failed")
+            return await super().get_response(system_instructions, *args, **kwargs)
+
+    agent_lifecycle: list[tuple[str, str]] = []
+    model_lifecycle: list[tuple[str, str, str]] = []
+
+    async def persist_agent_event(agent_name: str, status: str) -> None:
+        agent_lifecycle.append((agent_name, status))
+
+    async def persist_model_event(
+        execution_id: str, status: str, _usage: int, actor_name: str
+    ) -> None:
+        model_lifecycle.append((execution_id, status, actor_name))
+
+    model = OneFailedSpecialist()
+    runtime = AgentsRcaRuntime(
+        model=model,
+        prompt_version="v9",
+        persist_agent_event=persist_agent_event,
+        persist_model_event=persist_model_event,
+    )
+    result = await runtime._invoke_turn(
+        None,
+        model=model,
+        coordinator_input="Request all specialists",
+        specialist_inputs={name: f"Evidence for {name}" for name in AgentName},
+        specialist_names=list(AgentName),
+        max_turns=8,
+        prompt_version="v9",
+    )
+
+    assert {item.agent_name for item in result.captured_drafts} == {
+        AgentName.METRIC,
+        AgentName.DEPLOYMENT,
+    }
+    assert result.coordinator_proposal is not None
+    assert result.error is None
+    statuses: dict[str, list[str]] = {}
+    for agent_name, status in agent_lifecycle:
+        statuses.setdefault(agent_name, []).append(status)
+    assert statuses[AgentName.LOG.value] == ["started", "failed"]
+    assert statuses[AgentName.METRIC.value] == ["started", "completed"]
+    assert statuses[AgentName.DEPLOYMENT.value] == ["started", "completed"]
+    assert statuses["CoordinatorAgent"] == ["started", "completed"]
+    log_models = [item for item in model_lifecycle if item[2] == AgentName.LOG.value]
+    assert [item[1] for item in log_models] == ["started", "failed"]
+
+
+@pytest.mark.anyio
+async def test_v8_2_specialist_exception_closes_model_and_fails_only_that_agent() -> None:
+    class OneFailedSpecialist(ScriptedModel):
+        async def get_response(self, system_instructions, *args, **kwargs):
+            if AgentName.LOG.value in system_instructions:
+                raise RuntimeError("log specialist failed")
+            return await super().get_response(system_instructions, *args, **kwargs)
+
+    agent_lifecycle: list[tuple[str, str]] = []
+    model_lifecycle: list[tuple[str, str, str]] = []
+
+    async def persist_agent_event(agent_name: str, status: str) -> None:
+        agent_lifecycle.append((agent_name, status))
+
+    async def persist_model_event(
+        execution_id: str, status: str, _usage: int, actor_name: str
+    ) -> None:
+        model_lifecycle.append((execution_id, status, actor_name))
+
+    runtime = AgentsRcaRuntime(
+        model=OneFailedSpecialist(),
+        prompt_version="v8.2",
+        persist_agent_event=persist_agent_event,
+        persist_model_event=persist_model_event,
+    )
+    result = await runtime._invoke_turn(
+        None,
+        model=runtime.model,
+        coordinator_input="Request all specialists",
+        specialist_inputs={name: f"Evidence for {name}" for name in AgentName},
+        specialist_names=list(AgentName),
+        max_turns=8,
+        prompt_version="v8.2",
+    )
+
+    assert result.failed_agent_names == [AgentName.LOG.value]
+    statuses: dict[str, list[str]] = {}
+    for agent_name, status in agent_lifecycle:
+        statuses.setdefault(agent_name, []).append(status)
+    assert statuses[AgentName.LOG.value] == ["started", "failed"]
+    assert statuses[AgentName.METRIC.value] == ["started", "completed"]
+    assert statuses[AgentName.DEPLOYMENT.value] == ["started", "completed"]
+    assert statuses["CoordinatorAgent"] == ["started", "completed"]
+    grouped: dict[str, list[str]] = {}
+    for execution_id, status, _actor_name in model_lifecycle:
+        grouped.setdefault(execution_id, []).append(status)
+    assert grouped
+    assert all(statuses[-1] in {"completed", "failed"} for statuses in grouped.values())
+    assert [
+        status
+        for _execution_id, status, actor_name in model_lifecycle
+        if actor_name == AgentName.LOG.value
+    ] == ["started", "failed"]
+
+
+@pytest.mark.anyio
+async def test_v9_specialist_group_cancellation_drains_children() -> None:
+    class HangingSpecialists(ScriptedModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.active = 0
+            self.started = asyncio.Event()
+
+        async def get_response(self, system_instructions, *args, **kwargs):
+            if "CoordinatorAgent" in system_instructions:
+                return await super().get_response(system_instructions, *args, **kwargs)
+            self.active += 1
+            if self.active == 2:
+                self.started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.active -= 1
+
+    model = HangingSpecialists()
+    lifecycle: list[tuple[str, str, str]] = []
+
+    async def persist_model_event(
+        execution_id: str, status: str, _usage: int, actor_name: str
+    ) -> None:
+        lifecycle.append((execution_id, status, actor_name))
+
+    task = asyncio.create_task(
+        _run_sdk_turn(
+            model=model,
+            coordinator_input="Request all specialists",
+            specialist_inputs={name: f"Evidence for {name}" for name in AgentName},
+            specialist_names=list(AgentName),
+            max_turns=8,
+            parallel_limit=RunStepGate(2),
+            prompt_version="v9",
+            persist_model_event=persist_model_event,
+        )
+    )
+    await asyncio.wait_for(model.started.wait(), 3)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert model.active == 0
+    grouped: dict[str, list[str]] = {}
+    for execution_id, status, _actor_name in lifecycle:
+        grouped.setdefault(execution_id, []).append(status)
+    assert grouped
+    assert all(statuses == ["started"] for statuses in grouped.values())
+
+
+@pytest.mark.anyio
+async def test_two_v9_runs_do_not_share_specialist_gate() -> None:
+    active = 0
+    peak = 0
+    saturated = asyncio.Event()
+    release = asyncio.Event()
+
+    class RunIsolatedModel(ScriptedModel):
+        async def get_response(self, system_instructions, *args, **kwargs):
+            nonlocal active, peak
+            if "CoordinatorAgent" in system_instructions:
+                return _message_response(
+                    _CoordinatorProposal(
+                        summary="run completed",
+                        uncertainty="none",
+                        proposed_cause=CauseType.DEPLOYMENT_REGRESSION,
+                    ).model_dump_json(),
+                    Usage(input_tokens=20, output_tokens=5),
+                )
+            active += 1
+            peak = max(peak, active)
+            if active == 2:
+                saturated.set()
+            try:
+                await release.wait()
+                return await super().get_response(
+                    system_instructions, *args, **kwargs
+                )
+            finally:
+                active -= 1
+
+    async def run(model):
+        return await _run_sdk_turn(
+            model=model,
+            coordinator_input="Request all specialists",
+            specialist_inputs={name: f"Evidence for {name}" for name in AgentName},
+            specialist_names=list(AgentName),
+            max_turns=8,
+            parallel_limit=RunStepGate(1),
+            prompt_version="v9",
+        )
+
+    tasks = [
+        asyncio.create_task(run(RunIsolatedModel())),
+        asyncio.create_task(run(RunIsolatedModel())),
+    ]
+    await asyncio.wait_for(saturated.wait(), 3)
+    assert peak == 2
+    release.set()
+    results = await asyncio.gather(*tasks)
+
+    assert all(result.error is None for result in results)
+    assert peak == 2
 
 
 @pytest.mark.anyio

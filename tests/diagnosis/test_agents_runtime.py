@@ -14,6 +14,7 @@ import backend.diagnosis.agents_runtime as agents_runtime
 from backend.diagnosis.agents_runtime import (
     AgentsRcaRuntime,
     AgentsRcaRuntimeResult,
+    ConflictReviewOutcome,
     _CapturedDraft,
     _CoordinatorProposal,
     _failure_category,
@@ -60,8 +61,10 @@ from backend.domain.multi_agent import (
 )
 from backend.providers.registry import ProviderRegistry
 from backend.providers.results import ProviderResult, ProviderStatus
+from backend.runtime.concurrency import RunStepGate
 from backend.safety.redaction import redact_text as _redact
 from backend.tools.provider_tools import build_provider_tool_registry
+from backend.tools.registry import ToolRegistry
 
 
 class TurnStub:
@@ -82,6 +85,197 @@ class TurnStub:
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
+
+
+@pytest.mark.anyio
+async def test_model_boundary_deducts_usage_and_blocks_exhausted_budget() -> None:
+    calls = 0
+    events = []
+
+    async def turn(**_kwargs):
+        nonlocal calls
+        calls += 1
+        return _SdkTurnResult([], None, [], input_tokens=3, output_tokens=2)
+
+    async def persist(execution_id, status, token_usage=0):
+        events.append((execution_id, status, token_usage))
+
+    runtime = AgentsRcaRuntime(model="fake", turn=turn, persist_model_event=persist)
+    runtime.runtime_token_budget = 5
+
+    await runtime._invoke_turn(None, model=runtime.model)
+
+    assert runtime.runtime_token_budget == 0
+    assert calls == 1
+    assert events[-1][1:] == ("completed", 5)
+    with pytest.raises(agents_runtime.TokenBudgetExceeded):
+        await runtime._invoke_turn(None, model=runtime.model)
+    assert calls == 1
+
+
+@pytest.mark.anyio
+async def test_model_boundary_rejects_response_that_exceeds_remaining_budget() -> None:
+    events = []
+
+    async def turn(**_kwargs):
+        return _SdkTurnResult([], None, [], input_tokens=4, output_tokens=2)
+
+    async def persist(execution_id, status, token_usage=0):
+        events.append((execution_id, status, token_usage))
+
+    runtime = AgentsRcaRuntime(model="fake", turn=turn, persist_model_event=persist)
+    runtime.runtime_token_budget = 5
+
+    with pytest.raises(agents_runtime.TokenBudgetExceeded):
+        await runtime._invoke_turn(None, model=runtime.model)
+
+    assert runtime.runtime_token_budget == 0
+    assert events[-1][1:] == ("failed", 6)
+
+
+@pytest.mark.anyio
+async def test_runtime_timeout_terminalizes_sent_model_and_releases_resources(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "present")
+    events: list[tuple[str, str]] = []
+    context_exited = asyncio.Event()
+    turn_started = asyncio.Event()
+    gate = RunStepGate(1)
+
+    @asynccontextmanager
+    async def model_context(_model_name: str, _timeout_seconds: float):
+        try:
+            yield object()
+        finally:
+            context_exited.set()
+
+    async def turn(**kwargs):
+        async with kwargs["parallel_limit"].slot():
+            turn_started.set()
+            await asyncio.Event().wait()
+
+    async def persist(execution_id: str, status: str, _token_usage: int = 0):
+        events.append((execution_id, status))
+
+    monkeypatch.setattr(agents_runtime, "openai_responses_model", model_context)
+    runtime = AgentsRcaRuntime(
+        model="fake",
+        timeout_seconds=0.02,
+        persist_model_event=persist,
+    )
+    runtime.turn = turn
+    runtime._parallel_limit = gate
+
+    result = await runtime.run("inv-1", _incident(), _all_evidence(), [_baseline()])
+
+    await asyncio.wait_for(turn_started.wait(), timeout=0.1)
+    await asyncio.wait_for(context_exited.wait(), timeout=0.1)
+    async with asyncio.timeout(0.1):
+        async with gate.slot():
+            pass
+    assert result.executions[-1].failure_category == FailureCategory.TIMEOUT
+    assert len({execution_id for execution_id, _status in events}) == 1
+    assert [status for _execution_id, status in events] == ["started", "failed"]
+
+
+@pytest.mark.anyio
+async def test_external_model_cancellation_keeps_started_only_audit() -> None:
+    events: list[tuple[str, str]] = []
+    turn_started = asyncio.Event()
+
+    async def turn(**_kwargs):
+        turn_started.set()
+        await asyncio.Event().wait()
+
+    async def persist(execution_id: str, status: str, _token_usage: int = 0):
+        events.append((execution_id, status))
+
+    runtime = AgentsRcaRuntime(
+        model="fake",
+        turn=turn,
+        timeout_seconds=60,
+        persist_model_event=persist,
+    )
+    invocation = asyncio.create_task(
+        runtime._await_with_run_deadline(
+            runtime._invoke_turn(None, model=runtime.model)
+        )
+    )
+    await asyncio.wait_for(turn_started.wait(), timeout=0.1)
+
+    invocation.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await invocation
+
+    assert len({execution_id for execution_id, _status in events}) == 1
+    assert [status for _execution_id, status in events] == ["started"]
+
+
+def test_prompt_version_selects_real_template_and_rejects_unknown_version() -> None:
+    baseline = agents_runtime._apply_prompt_version("v8.2", "diagnose")
+    current = agents_runtime._apply_prompt_version("v9", "diagnose")
+
+    assert baseline == "diagnose"
+    assert current.startswith("PROMPT_CONTRACT=v9\n")
+    with pytest.raises(ValueError, match="unsupported prompt version"):
+        agents_runtime._apply_prompt_version("future", "diagnose")
+
+
+def test_deepseek_frozen_run_builds_an_independent_typed_adapter() -> None:
+    base = DeepSeekChatCompletionsModel(model="deepseek-base", api_key="secret")
+    runtime = AgentsRcaRuntime(
+        model=base,
+        model_provider=ModelProvider.DEEPSEEK,
+        model_name="deepseek-base",
+    )
+
+    cloned = runtime.clone_for_run(
+        model_provider=ModelProvider.DEEPSEEK,
+        model_name="deepseek-v4-pro",
+        prompt_version="v9",
+        token_budget=100,
+    )
+
+    assert isinstance(cloned.model, DeepSeekChatCompletionsModel)
+    assert cloned.model is not base
+    assert cloned.model.model == "deepseek-v4-pro"
+
+
+def test_frozen_run_can_switch_from_openai_to_typed_deepseek_adapter(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "secret")
+    runtime = AgentsRcaRuntime(
+        model="gpt-base",
+        model_provider=ModelProvider.OPENAI,
+        model_name="gpt-base",
+    )
+
+    cloned = runtime.clone_for_run(
+        model_provider=ModelProvider.DEEPSEEK,
+        model_name="deepseek-v4-pro",
+        prompt_version="v9",
+        token_budget=100,
+    )
+
+    assert isinstance(cloned.model, DeepSeekChatCompletionsModel)
+    assert cloned.model.model == "deepseek-v4-pro"
+
+
+def test_adaptive_tools_share_the_runtime_run_gate() -> None:
+    runtime = AgentsRcaRuntime(
+        model="fake",
+        strategy=InvestigationStrategy.ADAPTIVE,
+        tool_registry=ToolRegistry(),
+    )
+
+    session = runtime._adaptive_session(
+        _incident(), [], InvestigationStrategy.ADAPTIVE
+    )
+
+    assert session is not None
+    assert session._parallel_limit is runtime._parallel_limit
 
 
 def _incident() -> IncidentEvent:
@@ -1954,6 +2148,60 @@ async def test_overall_timeout_does_not_discard_first_round(monkeypatch):
     assert len(result.findings) == 3
     assert result.run_summary.status == MultiAgentRunStatus.FAILED
     assert "timeout" in (result.run_summary.failure_reason or "").lower()
+
+
+@pytest.mark.anyio
+async def test_split_phases_share_one_overall_deadline(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "present")
+    conflict_cancelled = asyncio.Event()
+    first = _all_first_round()
+    first[1] = _CapturedDraft(
+        agent_name=AgentName.METRIC,
+        draft=_SpecialistDraft(
+            finding_type=AgentFindingType.GAP,
+            summary="Metric evidence is insufficient",
+            confidence=0.2,
+            gaps=["missing saturation metric"],
+            blocking=True,
+        ),
+    )
+
+    async def turn(**kwargs):
+        if kwargs["analysis_round"] == 1:
+            return _turn(first)
+        try:
+            await asyncio.sleep(1)
+        finally:
+            conflict_cancelled.set()
+
+    runtime = AgentsRcaRuntime(model="fake", turn=turn, timeout_seconds=0.05)
+    result = await runtime.run(
+        "inv-1",
+        _incident(),
+        _all_evidence(),
+        [_baseline()],
+        stop_after_specialists=True,
+    )
+    await asyncio.sleep(0.02)
+    started = asyncio.get_running_loop().time()
+
+    reviewed = await asyncio.wait_for(
+        runtime.review_conflicts(
+            result,
+            "inv-1",
+            _incident(),
+            _all_evidence(),
+            [_baseline()],
+        ),
+        timeout=0.2,
+    )
+
+    assert reviewed == ConflictReviewOutcome.TIMED_OUT
+    assert asyncio.get_running_loop().time() - started < 0.15
+    assert conflict_cancelled.is_set()
+    assert len(result.findings) == 3
+    assert result.executions[-1].failure_category == FailureCategory.TIMEOUT
+    assert result.run_summary.status == MultiAgentRunStatus.FAILED
 
 
 @pytest.mark.anyio

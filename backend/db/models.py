@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_serializer
 
 from backend.diagnosis.context import SpecialistResult
 from backend.domain.actions import RecommendedAction, VerificationSuggestion
@@ -42,6 +42,14 @@ class InvestigationRecord(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     completed_at: datetime | None = None
+    runtime_available: bool = False
+
+    @model_serializer(mode="wrap")
+    def serialize_runtime_projection(self, handler):
+        data = handler(self)
+        if "runtime_available" not in self.model_fields_set:
+            data.pop("runtime_available", None)
+        return data
 
 
 class InvestigationSummary(BaseModel):
@@ -55,6 +63,14 @@ class InvestigationSummary(BaseModel):
     action_count: int = 0
     verification_count: int = 0
     failure_reason: str | None = None
+    runtime_available: bool = False
+
+    @model_serializer(mode="wrap")
+    def serialize_runtime_projection(self, handler):
+        data = handler(self)
+        if "runtime_available" not in self.model_fields_set:
+            data.pop("runtime_available", None)
+        return data
 
     @classmethod
     def from_record(cls, record: InvestigationRecord) -> "InvestigationSummary":

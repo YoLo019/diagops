@@ -10,6 +10,7 @@ export default defineConfig({
       "/events": "http://127.0.0.1:8000",
       "/health": "http://127.0.0.1:8000",
       "/investigations": "http://127.0.0.1:8000",
+      "/runtime-runs": "http://127.0.0.1:8000",
     },
   },
 });

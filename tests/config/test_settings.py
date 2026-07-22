@@ -158,3 +158,61 @@ def test_invalid_adaptive_agent_environment_is_rejected(
 
     with pytest.raises(ValidationError):
         load_settings()
+
+
+def test_runtime_settings_defaults_are_bounded_and_otel_is_off(monkeypatch, tmp_path):
+    monkeypatch.setenv("DIAGOPS_CONFIG", str(tmp_path / "missing.yaml"))
+
+    settings = load_settings()
+
+    assert settings.runtime.enabled is True
+    assert settings.runtime.max_concurrent_runs == 4
+    assert settings.runtime.max_parallel_steps_per_run == 3
+    assert settings.runtime.lease_seconds == 30
+    assert settings.runtime.heartbeat_seconds == 10
+    assert settings.runtime.opentelemetry.enabled is False
+    assert settings.runtime.opentelemetry.endpoint is None
+
+
+def test_runtime_environment_overrides(monkeypatch, tmp_path):
+    monkeypatch.setenv("DIAGOPS_CONFIG", str(tmp_path / "missing.yaml"))
+    monkeypatch.setenv("DIAGOPS_RUNTIME_ENABLED", "false")
+    monkeypatch.setenv("DIAGOPS_RUNTIME_MAX_CONCURRENT_RUNS", "8")
+    monkeypatch.setenv("DIAGOPS_RUNTIME_MAX_PARALLEL_STEPS_PER_RUN", "6")
+    monkeypatch.setenv("DIAGOPS_RUNTIME_LEASE_SECONDS", "60")
+    monkeypatch.setenv("DIAGOPS_RUNTIME_HEARTBEAT_SECONDS", "15")
+    monkeypatch.setenv("DIAGOPS_RUNTIME_OTEL_ENABLED", "true")
+    monkeypatch.setenv("DIAGOPS_RUNTIME_OTEL_ENDPOINT", "http://localhost:4318/v1/traces")
+
+    settings = load_settings()
+
+    assert settings.runtime.enabled is False
+    assert settings.runtime.max_concurrent_runs == 8
+    assert settings.runtime.max_parallel_steps_per_run == 6
+    assert settings.runtime.lease_seconds == 60
+    assert settings.runtime.heartbeat_seconds == 15
+    assert settings.runtime.opentelemetry.enabled is True
+    assert settings.runtime.opentelemetry.endpoint == "http://localhost:4318/v1/traces"
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("DIAGOPS_RUNTIME_MAX_CONCURRENT_RUNS", "0"),
+        ("DIAGOPS_RUNTIME_MAX_CONCURRENT_RUNS", "33"),
+        ("DIAGOPS_RUNTIME_MAX_PARALLEL_STEPS_PER_RUN", "0"),
+        ("DIAGOPS_RUNTIME_MAX_PARALLEL_STEPS_PER_RUN", "17"),
+        ("DIAGOPS_RUNTIME_LEASE_SECONDS", "4"),
+        ("DIAGOPS_RUNTIME_LEASE_SECONDS", "3601"),
+        ("DIAGOPS_RUNTIME_HEARTBEAT_SECONDS", "0"),
+        ("DIAGOPS_RUNTIME_HEARTBEAT_SECONDS", "301"),
+    ],
+)
+def test_invalid_runtime_environment_limits_are_rejected(
+    monkeypatch, tmp_path, name, value
+):
+    monkeypatch.setenv("DIAGOPS_CONFIG", str(tmp_path / "missing.yaml"))
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(ValidationError):
+        load_settings()

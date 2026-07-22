@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import delete, func, insert, select, update
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 
 from backend.db.models import (
     InvestigationRecord,
@@ -56,63 +56,66 @@ class SQLiteInvestigationRepository:
         self.engine = engine
 
     def save(self, record: InvestigationRecord) -> InvestigationRecord:
-        rows = record_to_rows(record)
         with self.engine.begin() as connection:
-            exists = connection.execute(
-                select(investigations.c.id).where(investigations.c.id == record.id)
-            ).scalar_one_or_none()
-            if exists is None:
-                connection.execute(insert(investigations).values(rows["investigation"]))
-            else:
-                connection.execute(
-                    update(investigations)
-                    .where(investigations.c.id == record.id)
-                    .values(
-                        **{
-                            key: value
-                            for key, value in rows["investigation"].items()
-                            if key != "id"
-                        }
-                    )
+            self.save_with_connection(connection, record)
+        return record
+
+    def save_with_connection(
+        self, connection: Connection, record: InvestigationRecord
+    ) -> InvestigationRecord:
+        """使用调用方事务保存调查聚合，供 Runtime 原子 Phase commit 复用。"""
+        rows = record_to_rows(record)
+        exists = connection.execute(
+            select(investigations.c.id).where(investigations.c.id == record.id)
+        ).scalar_one_or_none()
+        if exists is None:
+            connection.execute(insert(investigations).values(rows["investigation"]))
+        else:
+            connection.execute(
+                update(investigations)
+                .where(investigations.c.id == record.id)
+                .values(
+                    **{
+                        key: value
+                        for key, value in rows["investigation"].items()
+                        if key != "id"
+                    }
                 )
+            )
+        connection.execute(delete(events).where(events.c.investigation_id == record.id))
+        connection.execute(
+            insert(events).values(investigation_id=record.id, payload=rows["events"][0])
+        )
+        self._replace_children(
+            connection, evidence_items, record.id, rows["evidence_items"]
+        )
+        self._replace_children(connection, hypotheses, record.id, rows["hypotheses"])
+        self._replace_children(
+            connection,
+            recommended_actions,
+            record.id,
+            rows["recommended_actions"],
+        )
+        self._replace_children(
+            connection,
+            verification_suggestions,
+            record.id,
+            rows["verification_suggestions"],
+        )
+        self._replace_children(
+            connection, provider_results, record.id, rows["provider_results"]
+        )
+        self._replace_children(
+            connection, specialist_results, record.id, rows["specialist_results"]
+        )
+        connection.execute(delete(reports).where(reports.c.investigation_id == record.id))
+        if rows["report"] is not None:
             connection.execute(
-                delete(events).where(events.c.investigation_id == record.id)
-            )
-            connection.execute(
-                insert(events).values(investigation_id=record.id, payload=rows["events"][0])
-            )
-            self._replace_children(
-                connection, evidence_items, record.id, rows["evidence_items"]
-            )
-            self._replace_children(connection, hypotheses, record.id, rows["hypotheses"])
-            self._replace_children(
-                connection,
-                recommended_actions,
-                record.id,
-                rows["recommended_actions"],
-            )
-            self._replace_children(
-                connection,
-                verification_suggestions,
-                record.id,
-                rows["verification_suggestions"],
-            )
-            self._replace_children(
-                connection, provider_results, record.id, rows["provider_results"]
-            )
-            self._replace_children(
-                connection, specialist_results, record.id, rows["specialist_results"]
-            )
-            connection.execute(
-                delete(reports).where(reports.c.investigation_id == record.id)
-            )
-            if rows["report"] is not None:
-                connection.execute(
-                    insert(reports).values(
-                        investigation_id=record.id,
-                        payload=rows["report"],
-                    )
+                insert(reports).values(
+                    investigation_id=record.id,
+                    payload=rows["report"],
                 )
+            )
         return record
 
     def get(self, investigation_id: str) -> InvestigationRecord:
@@ -285,6 +288,16 @@ class SQLiteInvestigationRepository:
                 raise
 
     def save_plan(self, plan: DiagnosisPlan) -> DiagnosisPlan:
+        with self.engine.begin() as connection:
+            self.save_plan_with_connection(connection, plan)
+        return plan
+
+    def save_plan_with_connection(
+        self,
+        connection: Connection,
+        plan: DiagnosisPlan,
+    ) -> DiagnosisPlan:
+        """在 RuntimeWriter 的事务中同步替换计划及其任务投影。"""
         payload = plan.model_dump(mode="json")
         row = {
             "id": plan.id,
@@ -292,14 +305,13 @@ class SQLiteInvestigationRepository:
             "created_at": payload["created_at"],
             "payload": payload,
         }
-        with self.engine.begin() as connection:
-            connection.execute(
-                delete(diagnosis_plans).where(
-                    diagnosis_plans.c.investigation_id == plan.investigation_id
-                )
+        connection.execute(
+            delete(diagnosis_plans).where(
+                diagnosis_plans.c.investigation_id == plan.investigation_id
             )
-            connection.execute(insert(diagnosis_plans).values(row))
-            self._replace_tasks(connection, plan.investigation_id, plan.tasks)
+        )
+        connection.execute(insert(diagnosis_plans).values(row))
+        self._replace_tasks(connection, plan.investigation_id, plan.tasks)
         return plan
 
     def get_plan(self, investigation_id: str) -> DiagnosisPlan | None:
@@ -321,7 +333,17 @@ class SQLiteInvestigationRepository:
         tasks: Sequence[DiagnosisTask],
     ) -> list[DiagnosisTask]:
         with self.engine.begin() as connection:
-            self._replace_tasks(connection, investigation_id, tasks)
+            self.save_tasks_with_connection(connection, investigation_id, tasks)
+        return list(tasks)
+
+    def save_tasks_with_connection(
+        self,
+        connection: Connection,
+        investigation_id: str,
+        tasks: Sequence[DiagnosisTask],
+    ) -> list[DiagnosisTask]:
+        """在调用方事务内替换任务列表。"""
+        self._replace_tasks(connection, investigation_id, tasks)
         return list(tasks)
 
     def list_tasks(self, investigation_id: str) -> list[DiagnosisTask]:
@@ -352,12 +374,24 @@ class SQLiteInvestigationRepository:
         investigation_id: str,
         facts: Sequence[ContextFact],
     ) -> list[ContextFact]:
+        with self.engine.begin() as connection:
+            self.save_context_facts_with_connection(
+                connection, investigation_id, facts
+            )
+        return list(facts)
+
+    def save_context_facts_with_connection(
+        self,
+        connection: Connection,
+        investigation_id: str,
+        facts: Sequence[ContextFact],
+    ) -> list[ContextFact]:
+        """在调用方事务中 upsert Agent 上下文，避免 checkpoint 先于投影落盘。"""
         rows = [
             self._agent_payload_row(investigation_id, fact, status=None, task_id=None)
             for fact in facts
         ]
-        with self.engine.begin() as connection:
-            self._upsert_payload_rows(connection, context_facts, rows)
+        self._upsert_payload_rows(connection, context_facts, rows)
         return list(facts)
 
     def list_context_facts(self, investigation_id: str) -> list[ContextFact]:
@@ -370,12 +404,22 @@ class SQLiteInvestigationRepository:
         investigation_id: str,
         calls: Sequence[ToolCallRecord],
     ) -> list[ToolCallRecord]:
+        with self.engine.begin() as connection:
+            self.save_tool_calls_with_connection(connection, investigation_id, calls)
+        return list(calls)
+
+    def save_tool_calls_with_connection(
+        self,
+        connection: Connection,
+        investigation_id: str,
+        calls: Sequence[ToolCallRecord],
+    ) -> list[ToolCallRecord]:
+        """在调用方事务内幂等保存 ToolCall 投影。"""
         rows = [
             self._agent_payload_row(investigation_id, call, task_id=call.task_id)
             for call in calls
         ]
-        with self.engine.begin() as connection:
-            self._upsert_payload_rows(connection, tool_calls, rows)
+        self._upsert_payload_rows(connection, tool_calls, rows)
         return list(calls)
 
     def list_tool_calls(self, investigation_id: str) -> list[ToolCallRecord]:
@@ -467,6 +511,20 @@ class SQLiteInvestigationRepository:
         review: CoordinationReview | None,
     ) -> None:
         """在单个事务中替换一次 SDK Agent 运行的完整持久化投影。"""
+        with self.engine.begin() as connection:
+            self.save_multi_agent_result_with_connection(
+                connection, investigation_id, findings, executions, review
+            )
+
+    def save_multi_agent_result_with_connection(
+        self,
+        connection: Connection,
+        investigation_id: str,
+        findings: Sequence[AgentFinding],
+        executions: Sequence[AgentExecution],
+        review: CoordinationReview | None,
+    ) -> None:
+        """在调用方事务内替换一次 SDK Agent 运行的完整投影。"""
         validated_findings, validated_executions, validated_review = (
             _validate_multi_agent_result(
                 investigation_id, list(findings), list(executions), review
@@ -493,38 +551,33 @@ class SQLiteInvestigationRepository:
                 "payload": payload,
             }
 
-        with self.engine.begin() as connection:
-            self._delete_sdk_agent_rows(
-                connection, agent_findings, investigation_id
-            )
-            self._delete_sdk_agent_rows(
-                connection, agent_executions, investigation_id
-            )
-            self._upsert_payload_rows(connection, agent_findings, finding_rows)
-            self._upsert_payload_rows(connection, agent_executions, execution_rows)
+        self._delete_sdk_agent_rows(connection, agent_findings, investigation_id)
+        self._delete_sdk_agent_rows(connection, agent_executions, investigation_id)
+        self._upsert_payload_rows(connection, agent_findings, finding_rows)
+        self._upsert_payload_rows(connection, agent_executions, execution_rows)
 
-            existing_review = connection.execute(
-                select(coordination_reviews).where(
+        existing_review = connection.execute(
+            select(coordination_reviews).where(
+                coordination_reviews.c.investigation_id == investigation_id
+            )
+        ).mappings().one_or_none()
+        if review_row is not None:
+            connection.execute(
+                delete(coordination_reviews).where(
                     coordination_reviews.c.investigation_id == investigation_id
                 )
-            ).mappings().one_or_none()
-            if review_row is not None:
-                connection.execute(
-                    delete(coordination_reviews).where(
-                        coordination_reviews.c.investigation_id == investigation_id
-                    )
+            )
+            self._insert_multi_agent_review(connection, review_row)
+        elif (
+            existing_review is not None
+            and existing_review["payload"].get("execution_layer")
+            == AgentExecutionLayer.OPENAI_AGENTS_SDK.value
+        ):
+            connection.execute(
+                delete(coordination_reviews).where(
+                    coordination_reviews.c.investigation_id == investigation_id
                 )
-                self._insert_multi_agent_review(connection, review_row)
-            elif (
-                existing_review is not None
-                and existing_review["payload"].get("execution_layer")
-                == AgentExecutionLayer.OPENAI_AGENTS_SDK.value
-            ):
-                connection.execute(
-                    delete(coordination_reviews).where(
-                        coordination_reviews.c.investigation_id == investigation_id
-                    )
-                )
+            )
 
     def get_coordination_review(
         self,

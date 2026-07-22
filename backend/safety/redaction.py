@@ -19,6 +19,16 @@ _CREDENTIAL_URL = re.compile(
     r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/@:]+:[^\s/@]+@[^\s]+"
 )
 _QUERY_URL = re.compile(r"(?i)\bhttps?://[^\s?]+\?[^\s]+")
+_PROVIDER_CREDENTIAL = re.compile(
+    r"(?<![A-Za-z0-9])(?:"
+    r"sk-(?:proj-|ant-(?:api\d{2}-)?)?[A-Za-z0-9_-]{20,}"
+    r"|gsk_[A-Za-z0-9_-]{20,}"
+    r"|github_pat_[A-Za-z0-9_]{20,}"
+    r"|gh[pousr]_[A-Za-z0-9]{20,}"
+    r"|AIza[A-Za-z0-9_-]{20,}"
+    r"|AKIA[A-Z0-9]{16}"
+    r")(?![A-Za-z0-9])"
+)
 _EMAIL = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)
 _WINDOWS_PATH = re.compile(r"(?i)(?<![\w])\b[A-Z]:\\(?:[^\s\\]+\\)*[^\s\\]*")
 _POSIX_PATH = re.compile(r"(?<![:/\w])/(?:[^/\s]+/)+[^\s,;]+")
@@ -63,6 +73,7 @@ def redact_text(value: str) -> str:
     """移除文本中的凭据、个人标识和本机路径。"""
     value = _CREDENTIAL_URL.sub("[REDACTED_URL]", value)
     value = _QUERY_URL.sub("[REDACTED_URL]", value)
+    value = _PROVIDER_CREDENTIAL.sub("[REDACTED]", value)
     value = _BEARER.sub("[REDACTED]", value)
     value = _ENCODED_ASSIGNMENT.sub(_redact_encoded_assignment, value)
     value = _ASSIGNMENT.sub(_redact_assignment, value)
@@ -113,6 +124,16 @@ def safe_failure(category: str) -> str:
 def assert_safe_value(value: Any) -> None:
     """拒绝仍需脱敏的持久化 payload，避免只依赖最终展示层。"""
     if redact_value(value) != value:
+        raise UnsafePersistenceValue("payload contains unsafe dynamic data")
+
+
+def assert_safe_label(value: str) -> None:
+    """拒绝凭据形态的外部标签，避免 secret/token/key 被当成元数据。"""
+    assert_safe_value(value)
+    segments = {
+        item.lower() for item in re.split(r"[^a-zA-Z0-9]+", value) if item
+    }
+    if _is_sensitive_key(value) or "key" in segments:
         raise UnsafePersistenceValue("payload contains unsafe dynamic data")
 
 

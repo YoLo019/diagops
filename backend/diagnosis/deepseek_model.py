@@ -86,6 +86,13 @@ class DeepSeekChatCompletionsModel(OpenAIChatCompletionsModel):
         # Agents SDK 的默认 cache key 仅针对官方 OpenAI endpoint。
         return False
 
+    def clone_for_model(self, model_name: str) -> "DeepSeekChatCompletionsModel":
+        """为冻结 Run 创建不共享传输状态的同凭据 adapter。"""
+        return type(self)(
+            model=model_name,
+            api_key=self._api_key.get_secret_value(),
+        )
+
     def __repr__(self) -> str:
         return f"{type(self).__name__}(model={self.model!r})"
 

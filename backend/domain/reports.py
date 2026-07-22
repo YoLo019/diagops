@@ -1,9 +1,12 @@
+from uuid import uuid4
+
 from pydantic import BaseModel, Field
 
 from backend.domain.hypotheses import Hypothesis
 
 
 class IncidentReport(BaseModel):
+    id: str = Field(default_factory=lambda: f"report-{uuid4().hex}")
     investigation_id: str
     summary: str
     timeline: list[dict[str, str]] = Field(default_factory=list)

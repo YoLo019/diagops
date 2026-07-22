@@ -516,6 +516,146 @@ zero mutation or out-of-scope executions, and an upstream official Adaptive
 partial score not below Fixed. Failed cases and unfavorable results must remain
 in the frozen artifacts.
 
+The prepare, run, evaluate, and upstream `python -m main.evaluate` commands
+above are the real release-gate templates. They require the separately
+downloaded full dataset, a pinned supported model, a matching Provider key kept
+only in the process environment, current caller-supplied input/output prices,
+and a separate Microsoft OpenRCA checkout for the official evaluator. A small
+fixture run is useful for development but is not the 40-case live release gate.
+
+## V9 Durable Runtime Operations
+
+An Investigation is one Runtime session. Different Investigations may execute
+concurrently, subject to `max_concurrent_runs`; records, budgets, event streams,
+and traces remain scoped to their Investigation and Run. One Investigation may
+retain multiple historical Runs, but it may have only one active live Run. The
+active set includes `created`, `running`, `cancelling`, and `interrupted`, so an
+operator must finish or resolve an interrupted Run before starting another live
+Run for the same Investigation.
+
+The checked-in defaults are:
+
+```yaml
+runtime:
+  enabled: true
+  max_concurrent_runs: 4
+  max_parallel_steps_per_run: 3
+  lease_seconds: 30
+  heartbeat_seconds: 10
+  opentelemetry:
+    enabled: false
+    endpoint: null
+```
+
+Environment overrides use the existing typed settings validation:
+
+```powershell
+$env:DIAGOPS_RUNTIME_ENABLED = "true"
+$env:DIAGOPS_RUNTIME_MAX_CONCURRENT_RUNS = "4"
+$env:DIAGOPS_RUNTIME_MAX_PARALLEL_STEPS_PER_RUN = "3"
+$env:DIAGOPS_RUNTIME_LEASE_SECONDS = "30"
+$env:DIAGOPS_RUNTIME_HEARTBEAT_SECONDS = "10"
+$env:DIAGOPS_RUNTIME_OTEL_ENABLED = "false"
+$env:DIAGOPS_RUNTIME_OTEL_ENDPOINT = "http://127.0.0.1:4318/v1/traces"
+```
+
+OpenTelemetry remains off unless both `DIAGOPS_RUNTIME_OTEL_ENABLED=true` and a
+valid HTTP(S) collector endpoint are configured. Collector creation, export,
+flush, shutdown failure, or delay is isolated from Run execution.
+
+### Run And Attempt Lifecycle
+
+A new Run moves from `created` to `running`, then to `completed`, `failed`, or
+`cancelled`. A cancellation request first moves an executing Run to
+`cancelling`; work already past a durable boundary is retained, while late
+results are fenced out. `cancelled` is terminal and cannot be resumed.
+
+Each execution ownership period creates one Attempt. An Attempt starts as
+`running` and ends as `completed`, `failed`, `cancelled`, or `interrupted`.
+When startup audit or an operator audit finds an expired lease, it marks the
+Run and current Attempt `interrupted`; startup never invokes an Agent, Provider,
+Tool, or automatic resume. Only an `interrupted` Run can be manually resumed,
+and resume creates a new Attempt from the last validated complete checkpoint.
+Successfully committed Tool results are reused instead of called again.
+
+Runtime APIs are additive:
+
+```text
+POST /investigations/{investigation_id}/runtime-runs
+GET  /investigations/{investigation_id}/runtime-runs
+GET  /runtime-runs/{run_id}
+GET  /runtime-runs/{run_id}/events?after={sequence}&limit={1..500}
+GET  /runtime-runs/{run_id}/events/stream
+POST /runtime-runs/{run_id}/cancel
+POST /runtime-runs/{run_id}/resume
+POST /runtime-runs/{run_id}/replay
+GET  /runtime-runs/{run_id}/diff?against_run_id={other_run_id}
+```
+
+Creating a Run requires `strategy` and `run_reason`; Provider, model, prompt
+version, and parent Run are optional frozen metadata. A conflicting active live
+Run or resume race returns `409`.
+
+### SSE Reconnect
+
+Runtime SSE event IDs are durable per-Run sequence numbers. Reconnect with the
+last processed sequence in the standard `Last-Event-ID` header:
+
+```powershell
+curl.exe -N `
+  -H "Last-Event-ID: 17" `
+  http://127.0.0.1:8000/runtime-runs/<run_id>/events/stream
+```
+
+Clients that cannot set the header may use
+`?last_event_id=17`. The header takes precedence when both are present. The
+server subscribes before durable catch-up and deduplicates by sequence, so new
+events arriving during reconnect are neither missed nor repeated. Heartbeats
+are comments and have no event ID. A client disconnect or slow-client overflow
+closes only that stream and does not cancel or otherwise affect execution.
+
+### Replay, Diff, Migration, And Retention
+
+`POST /runtime-runs/{run_id}/replay` performs audit replay from persisted state.
+It does not call a Provider, Tool, or model, consumes zero model tokens, and
+reports corruption such as sequence gaps, illegal transitions, invalid
+references, or checkpoint tampering. `GET /runtime-runs/{run_id}/diff` compares
+two Runs from the same Investigation using stable structured sections and
+frozen terminal business projections; it does not re-execute either Run.
+
+Database initialization migrates supported V8.2 SQLite schema V5 to schema V6
+in one transaction by adding `runtime_runs`, `runtime_attempts`,
+`runtime_events`, and `runtime_checkpoints`. Back up or copy the database before
+an operational migration and run `PRAGMA foreign_key_check` afterward. Existing
+Investigations remain readable and expose `runtime_available=false`; migration
+does not invent historical Runs, Attempts, Events, or Checkpoints for them.
+
+The first V9 release has no automatic Runtime event retention or cleanup.
+Runtime events remain append-only until an explicitly designed retention policy
+is approved.
+
+### Runtime Safety And Key-free Acceptance
+
+Runtime events, SSE, OpenTelemetry, Replay, Diff, and Runtime logs use
+allowlisted structured metadata. They prohibit prompts, chain-of-thought or
+hidden reasoning, credentials, authorization values, evidence or log bodies,
+raw Provider request/response payloads, arbitrary Tool output, arbitrary URLs,
+PromQL, Shell/SSH commands, and production mutations. Production Providers and
+Tools remain read-only. Injection-like text is treated as data and cannot add
+fields, external calls, or actions. Collector failure and client disconnect do
+not affect execution.
+
+Run the deterministic, key-free gate with:
+
+```powershell
+uv run python -m backend.services.runtime_acceptance
+```
+
+It writes only `output/runtime-acceptance/<run-id>/result.json`, reports raw
+latency, SQLite growth, recovery time, and OpenTelemetry overhead without an
+extra pass threshold, and fails if a required scenario or privacy check is
+missing.
+
 ## V2 Platform Loop
 
 DiagOps V2 keeps production systems read-only. It creates an investigation,

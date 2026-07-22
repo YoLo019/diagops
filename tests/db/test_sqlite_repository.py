@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import inspect, select, update
 
 from backend.db.models import InvestigationRecord, InvestigationStatus
-from backend.db.schema import evidence_items, llm_analyses, schema_version
+from backend.db.schema import evidence_items, investigations, llm_analyses, schema_version
 from backend.db.session import create_db_engine, initialize_database
 from backend.db.sqlite_repository import SQLiteInvestigationRepository
 from backend.diagnosis.action_planner import ActionPlanner
@@ -109,7 +109,22 @@ def test_schema_initialization_creates_schema_version(tmp_path):
         version = connection.execute(select(schema_version.c.version)).scalar_one()
 
     assert "schema_version" in tables
-    assert version == 5
+    assert version == 6
+
+
+def test_save_with_connection_uses_caller_owned_transaction(tmp_path):
+    repository, engine = build_repository(tmp_path)
+    record = completed_record()
+
+    with pytest.raises(RuntimeError, match="rollback"):
+        with engine.begin() as connection:
+            repository.save_with_connection(connection, record)
+            raise RuntimeError("rollback")
+
+    with engine.connect() as connection:
+        assert connection.execute(
+            select(investigations.c.id).where(investigations.c.id == record.id)
+        ).scalar_one_or_none() is None
 
 
 def test_aggregate_save_updates_parent_in_place_and_preserves_legacy_rows(tmp_path):

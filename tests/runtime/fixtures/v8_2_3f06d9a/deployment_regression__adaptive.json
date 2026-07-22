@@ -1,0 +1,973 @@
+{
+  "baseline_commit": "3f06d9ae87729185b3429c839f11cc366de75000",
+  "case_id": "deployment_regression",
+  "strategy": "adaptive",
+  "checksum": "97f76d784ef801d979d136bbc86b5e291a637aae00d5d5ba73f6de4f997c527d",
+  "contract": {
+    "executions": [
+      {
+        "agent_name": "MetricAgent",
+        "analysis_round": null,
+        "attempt": 1,
+        "error_message": null,
+        "evidence_ids": [
+          "EVIDENCE_2"
+        ],
+        "execution_layer": "custom",
+        "failure_category": "none",
+        "id": "EXECUTION_1",
+        "model_name": null,
+        "model_provider": null,
+        "result_validation_category": null,
+        "status": "completed",
+        "step_kind": null,
+        "summary": "MetricAgent completed",
+        "task_id": "TASK_1",
+        "tool_call_ids": [
+          "TOOL_CALL_1"
+        ]
+      },
+      {
+        "agent_name": "DeploymentAgent",
+        "analysis_round": null,
+        "attempt": 1,
+        "error_message": null,
+        "evidence_ids": [
+          "EVIDENCE_1"
+        ],
+        "execution_layer": "custom",
+        "failure_category": "none",
+        "id": "EXECUTION_2",
+        "model_name": null,
+        "model_provider": null,
+        "result_validation_category": null,
+        "status": "completed",
+        "step_kind": null,
+        "summary": "DeploymentAgent completed",
+        "task_id": "TASK_2",
+        "tool_call_ids": [
+          "TOOL_CALL_2"
+        ]
+      },
+      {
+        "agent_name": "LogAgent",
+        "analysis_round": null,
+        "attempt": 1,
+        "error_message": null,
+        "evidence_ids": [
+          "EVIDENCE_5"
+        ],
+        "execution_layer": "custom",
+        "failure_category": "none",
+        "id": "EXECUTION_3",
+        "model_name": null,
+        "model_provider": null,
+        "result_validation_category": null,
+        "status": "completed",
+        "step_kind": null,
+        "summary": "LogAgent completed",
+        "task_id": "TASK_3",
+        "tool_call_ids": [
+          "TOOL_CALL_3"
+        ]
+      },
+      {
+        "agent_name": "ServiceCatalogAgent",
+        "analysis_round": null,
+        "attempt": 1,
+        "error_message": null,
+        "evidence_ids": [
+          "EVIDENCE_3"
+        ],
+        "execution_layer": "custom",
+        "failure_category": "none",
+        "id": "EXECUTION_4",
+        "model_name": null,
+        "model_provider": null,
+        "result_validation_category": null,
+        "status": "completed",
+        "step_kind": null,
+        "summary": "ServiceCatalogAgent completed",
+        "task_id": "TASK_4",
+        "tool_call_ids": [
+          "TOOL_CALL_4"
+        ]
+      }
+    ],
+    "findings": [
+      {
+        "agent_name": "DeploymentAgent",
+        "analysis_round": 1,
+        "blocking": false,
+        "confidence": 1.0,
+        "evidence_ids": [
+          "EVIDENCE_1"
+        ],
+        "execution_layer": "custom",
+        "finding_type": "root_cause",
+        "gaps": [],
+        "id": "FINDING_1",
+        "investigation_id": "INVESTIGATION_1",
+        "rationale": "payment-service v1.8.2 was deployed three minutes before 5xx increased",
+        "related_cause_type": "deployment_regression",
+        "revises_finding_id": null,
+        "severity": "high",
+        "summary": "deploy evidence signal"
+      },
+      {
+        "agent_name": "LogAgent",
+        "analysis_round": 1,
+        "blocking": false,
+        "confidence": 1.0,
+        "evidence_ids": [
+          "EVIDENCE_5"
+        ],
+        "execution_layer": "custom",
+        "finding_type": "signal",
+        "gaps": [],
+        "id": "FINDING_2",
+        "investigation_id": "INVESTIGATION_1",
+        "rationale": "New NullPointerException appears in [REDACTED_PATH] after deployment",
+        "related_cause_type": null,
+        "revises_finding_id": null,
+        "severity": "medium",
+        "summary": "log evidence signal"
+      },
+      {
+        "agent_name": "MetricAgent",
+        "analysis_round": 1,
+        "blocking": false,
+        "confidence": 1.0,
+        "evidence_ids": [
+          "EVIDENCE_2"
+        ],
+        "execution_layer": "custom",
+        "finding_type": "root_cause",
+        "gaps": [],
+        "id": "FINDING_3",
+        "investigation_id": "INVESTIGATION_1",
+        "rationale": "QPS stayed within normal range while 5xx increased",
+        "related_cause_type": "traffic_spike",
+        "revises_finding_id": null,
+        "severity": "high",
+        "summary": "metric evidence signal"
+      }
+    ],
+    "record": {
+      "actions": [
+        {
+          "action_type": "rollback_suggestion",
+          "description": "Recent deployment evidence and new errors point to a possible regression. V2 does not execute rollback.",
+          "id": "ACTION_1",
+          "note": null,
+          "requires_approval": true,
+          "risk_level": "high",
+          "status": "proposed",
+          "supporting_evidence_ids": [
+            "EVIDENCE_1",
+            "EVIDENCE_2",
+            "EVIDENCE_5"
+          ],
+          "title": "Evaluate rollback for payment-service"
+        }
+      ],
+      "event": {
+        "description": "payment-service started returning many 500 responses after v1.8.2 deployment",
+        "environment": "prod",
+        "service": "payment-service",
+        "severity": "critical",
+        "signals": {
+          "error_rate": "high",
+          "latency": "normal",
+          "qps": "normal"
+        },
+        "source": "simulated",
+        "started_at": "2026-07-03T14:03:00+08:00",
+        "time_window_minutes": 30,
+        "title": "5xx error rate increased after deployment"
+      },
+      "evidence": [
+        {
+          "confidence": 1.0,
+          "error_message": null,
+          "id": "EVIDENCE_1",
+          "kind": "deployment",
+          "payload": {
+            "changed_module": "PayConfirmHandler",
+            "commit": "abc1234",
+            "root_cause_claims": [
+              {
+                "component": "payment-service",
+                "occurred_at": "2026-07-03T14:00:00+08:00",
+                "reason": "deployment regression"
+              }
+            ],
+            "version": "v1.8.2"
+          },
+          "provider": "deploy",
+          "status": "success",
+          "summary": "payment-service v1.8.2 was deployed three minutes before 5xx increased",
+          "timestamp": "2026-07-03T14:00:00+08:00"
+        },
+        {
+          "confidence": 1.0,
+          "error_message": null,
+          "id": "EVIDENCE_2",
+          "kind": "metric_trend",
+          "payload": {
+            "error_rate": "12%",
+            "qps_change": "+3%"
+          },
+          "provider": "metric",
+          "status": "success",
+          "summary": "QPS stayed within normal range while 5xx increased",
+          "timestamp": "2026-07-03T14:03:00+08:00"
+        },
+        {
+          "confidence": 1.0,
+          "error_message": null,
+          "id": "EVIDENCE_3",
+          "kind": "service_metadata",
+          "payload": {
+            "dependencies": [
+              "inventory-service",
+              "payment-db"
+            ],
+            "environment": "prod",
+            "owner": "platform-team",
+            "runtime": "python",
+            "service": "payment-service"
+          },
+          "provider": "service_catalog",
+          "status": "success",
+          "summary": "payment-service owner is platform-team",
+          "timestamp": "2026-07-03T14:03:00+08:00"
+        },
+        {
+          "confidence": 0.8,
+          "error_message": null,
+          "id": "EVIDENCE_4",
+          "kind": "related_alert",
+          "payload": {
+            "related_alert_count": 0,
+            "service": "payment-service",
+            "time_window_minutes": 30
+          },
+          "provider": "related_alert",
+          "status": "success",
+          "summary": "No wider alert storm detected around payment-service",
+          "timestamp": "2026-07-03T14:03:00+08:00"
+        },
+        {
+          "confidence": 1.0,
+          "error_message": null,
+          "id": "EVIDENCE_5",
+          "kind": "log_pattern",
+          "payload": {
+            "count": 120,
+            "endpoint": "[REDACTED_PATH]",
+            "exception": "NullPointerException",
+            "root_cause_claims": [
+              {
+                "component": "payment-service",
+                "occurred_at": "2026-07-03T14:04:00+08:00",
+                "reason": "process or container failure"
+              }
+            ]
+          },
+          "provider": "log",
+          "status": "success",
+          "summary": "New NullPointerException appears in [REDACTED_PATH] after deployment",
+          "timestamp": "2026-07-03T14:04:00+08:00"
+        },
+        {
+          "confidence": 1.0,
+          "error_message": null,
+          "id": "EVIDENCE_6",
+          "kind": "dependency_health",
+          "payload": {
+            "dependency": "payment-gateway",
+            "latency_p95": "900ms"
+          },
+          "provider": "dependency",
+          "status": "success",
+          "summary": "payment dependency latency rose slightly after local errors started",
+          "timestamp": "2026-07-03T14:05:00+08:00"
+        }
+      ],
+      "failure_reason": null,
+      "hypotheses": [
+        {
+          "cause_type": "deployment_regression",
+          "confidence": 0.95,
+          "contradicting_evidence_ids": [],
+          "id": "HYPOTHESIS_1",
+          "next_actions": [
+            "Compare the deployed version with the previous stable version.",
+            "Rollback or disable the changed module if error rate remains elevated.",
+            "Inspect the exception path and add a regression test for the endpoint."
+          ],
+          "summary": "A recent deployment is the strongest match for the new error pattern.",
+          "supporting_evidence_ids": [
+            "EVIDENCE_1",
+            "EVIDENCE_2",
+            "EVIDENCE_5"
+          ]
+        },
+        {
+          "cause_type": "downstream_dependency_failure",
+          "confidence": 0.4,
+          "contradicting_evidence_ids": [],
+          "id": "HYPOTHESIS_2",
+          "next_actions": [
+            "Inspect the downstream service health and recent changes.",
+            "Increase timeout budget only if it is safe for callers and capacity.",
+            "Enable fallback, circuit breaking, or queueing for the affected dependency path."
+          ],
+          "summary": "A downstream dependency slowdown matches the timeout pattern.",
+          "supporting_evidence_ids": [
+            "EVIDENCE_6"
+          ]
+        }
+      ],
+      "id": "INVESTIGATION_1",
+      "llm_analysis": null,
+      "multi_agent_run": {
+        "adaptive_status": "skipped",
+        "failure_reason": null,
+        "max_tool_calls_per_specialist": 3,
+        "max_total_tool_calls": 8,
+        "status": "skipped",
+        "strategy": "adaptive"
+      },
+      "provider_results": [
+        {
+          "error_message": null,
+          "evidence_items": [
+            {
+              "confidence": 1.0,
+              "error_message": null,
+              "id": "EVIDENCE_5",
+              "kind": "log_pattern",
+              "payload": {
+                "count": 120,
+                "endpoint": "[REDACTED_PATH]",
+                "exception": "NullPointerException",
+                "root_cause_claims": [
+                  {
+                    "component": "payment-service",
+                    "occurred_at": "2026-07-03T14:04:00+08:00",
+                    "reason": "process or container failure"
+                  }
+                ]
+              },
+              "provider": "log",
+              "status": "success",
+              "summary": "New NullPointerException appears in [REDACTED_PATH] after deployment",
+              "timestamp": "2026-07-03T14:04:00+08:00"
+            }
+          ],
+          "provider": "log",
+          "status": "success"
+        },
+        {
+          "error_message": null,
+          "evidence_items": [
+            {
+              "confidence": 1.0,
+              "error_message": null,
+              "id": "EVIDENCE_2",
+              "kind": "metric_trend",
+              "payload": {
+                "error_rate": "12%",
+                "qps_change": "+3%"
+              },
+              "provider": "metric",
+              "status": "success",
+              "summary": "QPS stayed within normal range while 5xx increased",
+              "timestamp": "2026-07-03T14:03:00+08:00"
+            }
+          ],
+          "provider": "metric",
+          "status": "success"
+        },
+        {
+          "error_message": null,
+          "evidence_items": [
+            {
+              "confidence": 1.0,
+              "error_message": null,
+              "id": "EVIDENCE_1",
+              "kind": "deployment",
+              "payload": {
+                "changed_module": "PayConfirmHandler",
+                "commit": "abc1234",
+                "root_cause_claims": [
+                  {
+                    "component": "payment-service",
+                    "occurred_at": "2026-07-03T14:00:00+08:00",
+                    "reason": "deployment regression"
+                  }
+                ],
+                "version": "v1.8.2"
+              },
+              "provider": "deploy",
+              "status": "success",
+              "summary": "payment-service v1.8.2 was deployed three minutes before 5xx increased",
+              "timestamp": "2026-07-03T14:00:00+08:00"
+            }
+          ],
+          "provider": "deploy",
+          "status": "success"
+        },
+        {
+          "error_message": null,
+          "evidence_items": [
+            {
+              "confidence": 1.0,
+              "error_message": null,
+              "id": "EVIDENCE_6",
+              "kind": "dependency_health",
+              "payload": {
+                "dependency": "payment-gateway",
+                "latency_p95": "900ms"
+              },
+              "provider": "dependency",
+              "status": "success",
+              "summary": "payment dependency latency rose slightly after local errors started",
+              "timestamp": "2026-07-03T14:05:00+08:00"
+            }
+          ],
+          "provider": "dependency",
+          "status": "success"
+        },
+        {
+          "error_message": null,
+          "evidence_items": [
+            {
+              "confidence": 1.0,
+              "error_message": null,
+              "id": "EVIDENCE_3",
+              "kind": "service_metadata",
+              "payload": {
+                "dependencies": [
+                  "inventory-service",
+                  "payment-db"
+                ],
+                "environment": "prod",
+                "owner": "platform-team",
+                "runtime": "python",
+                "service": "payment-service"
+              },
+              "provider": "service_catalog",
+              "status": "success",
+              "summary": "payment-service owner is platform-team",
+              "timestamp": "2026-07-03T14:03:00+08:00"
+            }
+          ],
+          "provider": "service_catalog",
+          "status": "success"
+        },
+        {
+          "error_message": null,
+          "evidence_items": [
+            {
+              "confidence": 0.8,
+              "error_message": null,
+              "id": "EVIDENCE_4",
+              "kind": "related_alert",
+              "payload": {
+                "related_alert_count": 0,
+                "service": "payment-service",
+                "time_window_minutes": 30
+              },
+              "provider": "related_alert",
+              "status": "success",
+              "summary": "No wider alert storm detected around payment-service",
+              "timestamp": "2026-07-03T14:03:00+08:00"
+            }
+          ],
+          "provider": "related_alert",
+          "status": "success"
+        }
+      ],
+      "report": {
+        "action_ids": [
+          "ACTION_1"
+        ],
+        "hypotheses": [
+          {
+            "cause_type": "deployment_regression",
+            "confidence": 0.95,
+            "contradicting_evidence_ids": [],
+            "id": "HYPOTHESIS_1",
+            "next_actions": [
+              "Compare the deployed version with the previous stable version.",
+              "Rollback or disable the changed module if error rate remains elevated.",
+              "Inspect the exception path and add a regression test for the endpoint."
+            ],
+            "summary": "A recent deployment is the strongest match for the new error pattern.",
+            "supporting_evidence_ids": [
+              "EVIDENCE_1",
+              "EVIDENCE_2",
+              "EVIDENCE_5"
+            ]
+          },
+          {
+            "cause_type": "downstream_dependency_failure",
+            "confidence": 0.4,
+            "contradicting_evidence_ids": [],
+            "id": "HYPOTHESIS_2",
+            "next_actions": [
+              "Inspect the downstream service health and recent changes.",
+              "Increase timeout budget only if it is safe for callers and capacity.",
+              "Enable fallback, circuit breaking, or queueing for the affected dependency path."
+            ],
+            "summary": "A downstream dependency slowdown matches the timeout pattern.",
+            "supporting_evidence_ids": [
+              "EVIDENCE_6"
+            ]
+          }
+        ],
+        "id": "REPORT_1",
+        "investigation_id": "INVESTIGATION_1",
+        "markdown_sections": [
+          {
+            "heading": "payment-service RCA 诊断报告",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "heading": "摘要",
+            "sha256": "57223fb21feb1636e4e403af3b1e58538ff1db395fded9b1111e0424afa2970c"
+          },
+          {
+            "heading": "最可能根因",
+            "sha256": "1f247c6a96c2842697d8ffe39071bddf1135d7cf7ac708e635081a4f1935766e"
+          },
+          {
+            "heading": "证据链",
+            "sha256": "1511218091e8ee2b5edfb72ce8b1b4c4790b89a583f7cbc34dbb5d6eef81e64b"
+          },
+          {
+            "heading": "支持该结论的证据",
+            "sha256": "a04d0405ff05b20f2e927c54843976f76539767814e1b3d82b5c6f4ba02c7363"
+          },
+          {
+            "heading": "其他可能假设",
+            "sha256": "4f0d43bd2a74691bc99b6a912673819a56605c8f6e991740d73a0e8657fd582a"
+          },
+          {
+            "heading": "建议动作",
+            "sha256": "759d79fb2710b2bb23d6500c71eb95c1bd9c79f985f0c4bb6c785908621b30d6"
+          },
+          {
+            "heading": "需要审批的动作",
+            "sha256": "77e773c37d634168ffe40bbfa0d4e056edf859cc988b0f930930003f519133f0"
+          },
+          {
+            "heading": "验证建议",
+            "sha256": "22599d21f4808c7cd6b6639e8bf341c60872638d6e02c7565b5cf08dff829b06"
+          },
+          {
+            "heading": "事实与推断",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "heading": "观察到的事实",
+            "sha256": "2f9c1faa2df08c7949769efa6d2c55194c895cbd0700fea5e87d02f0770e9800"
+          },
+          {
+            "heading": "推断结论/不确定性",
+            "sha256": "4b1843a51f88ec42b1870391af4531b3c25c3dd914efa231ea069528c817ea9b"
+          }
+        ],
+        "summary": "A recent deployment is the strongest match for the new error pattern.",
+        "timeline": [
+          {
+            "event": "payment-service v1.8.2 was deployed three minutes before 5xx increased",
+            "time": "2026-07-03T14:00:00+08:00"
+          },
+          {
+            "event": "QPS stayed within normal range while 5xx increased",
+            "time": "2026-07-03T14:03:00+08:00"
+          },
+          {
+            "event": "payment-service owner is platform-team",
+            "time": "2026-07-03T14:03:00+08:00"
+          },
+          {
+            "event": "No wider alert storm detected around payment-service",
+            "time": "2026-07-03T14:03:00+08:00"
+          },
+          {
+            "event": "New NullPointerException appears in [REDACTED_PATH] after deployment",
+            "time": "2026-07-03T14:04:00+08:00"
+          },
+          {
+            "event": "payment dependency latency rose slightly after local errors started",
+            "time": "2026-07-03T14:05:00+08:00"
+          }
+        ],
+        "verification_suggestion_ids": [
+          "VERIFICATION_1",
+          "VERIFICATION_2"
+        ]
+      },
+      "specialist_results": [
+        {
+          "agent_name": "LogAnalyst",
+          "errors": [],
+          "evidence_items": [
+            {
+              "confidence": 1.0,
+              "error_message": null,
+              "id": "EVIDENCE_5",
+              "kind": "log_pattern",
+              "payload": {
+                "count": 120,
+                "endpoint": "[REDACTED_PATH]",
+                "exception": "NullPointerException",
+                "root_cause_claims": [
+                  {
+                    "component": "payment-service",
+                    "occurred_at": "2026-07-03T14:04:00+08:00",
+                    "reason": "process or container failure"
+                  }
+                ]
+              },
+              "provider": "log",
+              "status": "success",
+              "summary": "New NullPointerException appears in [REDACTED_PATH] after deployment",
+              "timestamp": "2026-07-03T14:04:00+08:00"
+            }
+          ],
+          "status": "completed",
+          "summary": "log provider returned 1 evidence item(s)"
+        },
+        {
+          "agent_name": "MetricAnalyst",
+          "errors": [],
+          "evidence_items": [
+            {
+              "confidence": 1.0,
+              "error_message": null,
+              "id": "EVIDENCE_2",
+              "kind": "metric_trend",
+              "payload": {
+                "error_rate": "12%",
+                "qps_change": "+3%"
+              },
+              "provider": "metric",
+              "status": "success",
+              "summary": "QPS stayed within normal range while 5xx increased",
+              "timestamp": "2026-07-03T14:03:00+08:00"
+            }
+          ],
+          "status": "completed",
+          "summary": "metric provider returned 1 evidence item(s)"
+        },
+        {
+          "agent_name": "DeployAnalyst",
+          "errors": [],
+          "evidence_items": [
+            {
+              "confidence": 1.0,
+              "error_message": null,
+              "id": "EVIDENCE_1",
+              "kind": "deployment",
+              "payload": {
+                "changed_module": "PayConfirmHandler",
+                "commit": "abc1234",
+                "root_cause_claims": [
+                  {
+                    "component": "payment-service",
+                    "occurred_at": "2026-07-03T14:00:00+08:00",
+                    "reason": "deployment regression"
+                  }
+                ],
+                "version": "v1.8.2"
+              },
+              "provider": "deploy",
+              "status": "success",
+              "summary": "payment-service v1.8.2 was deployed three minutes before 5xx increased",
+              "timestamp": "2026-07-03T14:00:00+08:00"
+            }
+          ],
+          "status": "completed",
+          "summary": "deploy provider returned 1 evidence item(s)"
+        },
+        {
+          "agent_name": "DependencyAnalyst",
+          "errors": [],
+          "evidence_items": [
+            {
+              "confidence": 1.0,
+              "error_message": null,
+              "id": "EVIDENCE_6",
+              "kind": "dependency_health",
+              "payload": {
+                "dependency": "payment-gateway",
+                "latency_p95": "900ms"
+              },
+              "provider": "dependency",
+              "status": "success",
+              "summary": "payment dependency latency rose slightly after local errors started",
+              "timestamp": "2026-07-03T14:05:00+08:00"
+            }
+          ],
+          "status": "completed",
+          "summary": "dependency provider returned 1 evidence item(s)"
+        },
+        {
+          "agent_name": "ServiceCatalogAnalyst",
+          "errors": [],
+          "evidence_items": [
+            {
+              "confidence": 1.0,
+              "error_message": null,
+              "id": "EVIDENCE_3",
+              "kind": "service_metadata",
+              "payload": {
+                "dependencies": [
+                  "inventory-service",
+                  "payment-db"
+                ],
+                "environment": "prod",
+                "owner": "platform-team",
+                "runtime": "python",
+                "service": "payment-service"
+              },
+              "provider": "service_catalog",
+              "status": "success",
+              "summary": "payment-service owner is platform-team",
+              "timestamp": "2026-07-03T14:03:00+08:00"
+            }
+          ],
+          "status": "completed",
+          "summary": "service_catalog provider returned 1 evidence item(s)"
+        },
+        {
+          "agent_name": "RelatedAlertAnalyst",
+          "errors": [],
+          "evidence_items": [
+            {
+              "confidence": 0.8,
+              "error_message": null,
+              "id": "EVIDENCE_4",
+              "kind": "related_alert",
+              "payload": {
+                "related_alert_count": 0,
+                "service": "payment-service",
+                "time_window_minutes": 30
+              },
+              "provider": "related_alert",
+              "status": "success",
+              "summary": "No wider alert storm detected around payment-service",
+              "timestamp": "2026-07-03T14:03:00+08:00"
+            }
+          ],
+          "status": "completed",
+          "summary": "related_alert provider returned 1 evidence item(s)"
+        }
+      ],
+      "status": "completed",
+      "strategy": "adaptive",
+      "verification_suggestions": [
+        {
+          "description": "Confirm that 5xx rate below 1%.",
+          "expected_signal": "5xx rate below 1%",
+          "id": "VERIFICATION_1",
+          "related_action_ids": [],
+          "related_cause_types": [],
+          "result_evidence_ids": [],
+          "result_note": null,
+          "status": "pending",
+          "title": "Verify 5xx rate below 1%"
+        },
+        {
+          "description": "Confirm that new exception group stops appearing.",
+          "expected_signal": "new exception group stops appearing",
+          "id": "VERIFICATION_2",
+          "related_action_ids": [],
+          "related_cause_types": [],
+          "result_evidence_ids": [],
+          "result_note": null,
+          "status": "pending",
+          "title": "Verify new exception group stops appearing"
+        }
+      ]
+    },
+    "review": {
+      "baseline_cause_type": null,
+      "candidates": [
+        {
+          "cause_type": "deployment_regression",
+          "confidence": 1.0,
+          "contradicting_evidence_ids": [],
+          "contradicting_finding_ids": [],
+          "id": "CANDIDATE_1",
+          "rank": 1,
+          "rationale": "deploy evidence signal",
+          "summary": "deployment_regression is candidate #1.",
+          "supporting_evidence_ids": [
+            "EVIDENCE_1"
+          ],
+          "supporting_finding_ids": [
+            "FINDING_1"
+          ],
+          "uncertainty": "Only one specialist currently supports this candidate."
+        },
+        {
+          "cause_type": "traffic_spike",
+          "confidence": 1.0,
+          "contradicting_evidence_ids": [],
+          "contradicting_finding_ids": [],
+          "id": "CANDIDATE_2",
+          "rank": 2,
+          "rationale": "metric evidence signal",
+          "summary": "traffic_spike is candidate #2.",
+          "supporting_evidence_ids": [
+            "EVIDENCE_2"
+          ],
+          "supporting_finding_ids": [
+            "FINDING_3"
+          ],
+          "uncertainty": "Only one specialist currently supports this candidate."
+        }
+      ],
+      "decision_status": null,
+      "execution_layer": "custom",
+      "id": "REVIEW_1",
+      "investigation_id": "INVESTIGATION_1",
+      "model_name": null,
+      "model_provider": null,
+      "primary_stabilization_category": null,
+      "root_causes": [],
+      "run_status": "completed",
+      "secondary_stabilization_categories": [],
+      "selected_cause_type": null,
+      "summary": "",
+      "uncertainty": ""
+    },
+    "tasks": [
+      {
+        "agent_name": "MetricAgent",
+        "analysis_round": null,
+        "depends_on": [],
+        "description": "Query incident-window service metrics.",
+        "execution_layer": "custom",
+        "id": "TASK_1",
+        "priority": 50,
+        "status": "completed",
+        "task_type": "metric_investigation",
+        "title": "Investigate metrics",
+        "tool_names": [
+          "query_metrics"
+        ]
+      },
+      {
+        "agent_name": "DeploymentAgent",
+        "analysis_round": null,
+        "depends_on": [],
+        "description": "Read deployment changes near the incident window.",
+        "execution_layer": "custom",
+        "id": "TASK_2",
+        "priority": 50,
+        "status": "completed",
+        "task_type": "deployment_check",
+        "title": "Check deployments",
+        "tool_names": [
+          "read_deployments"
+        ]
+      },
+      {
+        "agent_name": "LogAgent",
+        "analysis_round": null,
+        "depends_on": [],
+        "description": "Read incident-window logs for error patterns.",
+        "execution_layer": "custom",
+        "id": "TASK_3",
+        "priority": 100,
+        "status": "completed",
+        "task_type": "log_investigation",
+        "title": "Investigate logs",
+        "tool_names": [
+          "read_logs"
+        ]
+      },
+      {
+        "agent_name": "ServiceCatalogAgent",
+        "analysis_round": null,
+        "depends_on": [],
+        "description": "Read service ownership and dependency context.",
+        "execution_layer": "custom",
+        "id": "TASK_4",
+        "priority": 100,
+        "status": "completed",
+        "task_type": "service_context",
+        "title": "Read service context",
+        "tool_names": [
+          "read_service_catalog"
+        ]
+      }
+    ],
+    "tool_calls": [
+      {
+        "agent_name": "MetricAgent",
+        "error_message": null,
+        "id": "TOOL_CALL_1",
+        "input": {
+          "investigation_id": "INVESTIGATION_1"
+        },
+        "output_evidence_ids": [
+          "EVIDENCE_2"
+        ],
+        "status": "success",
+        "task_id": "TASK_1",
+        "tool_name": "query_metrics"
+      },
+      {
+        "agent_name": "DeploymentAgent",
+        "error_message": null,
+        "id": "TOOL_CALL_2",
+        "input": {
+          "investigation_id": "INVESTIGATION_1"
+        },
+        "output_evidence_ids": [
+          "EVIDENCE_1"
+        ],
+        "status": "success",
+        "task_id": "TASK_2",
+        "tool_name": "read_deployments"
+      },
+      {
+        "agent_name": "LogAgent",
+        "error_message": null,
+        "id": "TOOL_CALL_3",
+        "input": {
+          "investigation_id": "INVESTIGATION_1"
+        },
+        "output_evidence_ids": [
+          "EVIDENCE_5"
+        ],
+        "status": "success",
+        "task_id": "TASK_3",
+        "tool_name": "read_logs"
+      },
+      {
+        "agent_name": "ServiceCatalogAgent",
+        "error_message": null,
+        "id": "TOOL_CALL_4",
+        "input": {
+          "investigation_id": "INVESTIGATION_1"
+        },
+        "output_evidence_ids": [
+          "EVIDENCE_3"
+        ],
+        "status": "success",
+        "task_id": "TASK_4",
+        "tool_name": "read_service_catalog"
+      }
+    ]
+  }
+}

@@ -661,6 +661,124 @@ textarea {
   }
 }
 
+.runtime-workbench {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(240px, 0.8fr) minmax(420px, 1.6fr) minmax(300px, 1fr);
+  min-height: calc(100vh - 140px);
+}
+
+.runtime-panel {
+  background: #fff;
+  border: 1px solid #d8e0e8;
+  border-radius: 10px;
+  min-width: 0;
+  overflow: auto;
+  padding: 16px;
+}
+
+.runtime-scope-note {
+  color: #617083;
+  font-size: 12px;
+}
+
+.runtime-session-list,
+.runtime-run-history,
+.runtime-event-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.runtime-session-list button,
+.runtime-run-history button,
+.runtime-event-list button {
+  align-items: flex-start;
+  background: #f8fafc;
+  border: 1px solid #e1e7ed;
+  border-radius: 7px;
+  color: #243342;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 9px;
+  text-align: left;
+}
+
+.runtime-session-list button.active,
+.runtime-run-history button.active {
+  background: #e9f5f3;
+  border-color: #4a918b;
+}
+
+.runtime-run-header,
+.runtime-run-controls {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: space-between;
+  margin-top: 18px;
+}
+
+.runtime-run-controls {
+  justify-content: flex-start;
+  margin: 0 0 18px;
+}
+
+.runtime-phase-timeline {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+}
+
+.runtime-phase-timeline article {
+  border-left: 4px solid #7a8a9a;
+  border-radius: 6px;
+  box-shadow: 0 1px 4px rgb(28 45 61 / 10%);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px;
+}
+
+.runtime-phase-timeline article[data-status="completed"] {
+  border-left-color: #24816f;
+}
+
+.runtime-agent-lanes {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.runtime-agent-lanes section {
+  align-items: center;
+  border-bottom: 1px solid #e6ebf0;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 130px minmax(0, 1fr);
+  padding: 8px 0;
+}
+
+.runtime-agent-lanes section > div {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+}
+
+.runtime-detail pre {
+  background: #17212b;
+  border-radius: 6px;
+  color: #dce8ef;
+  font-size: 11px;
+  max-height: 340px;
+  overflow: auto;
+  padding: 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 @media (max-width: 760px) {
   .app-shell {
     padding: 12px;
@@ -687,7 +805,12 @@ textarea {
   }
 
   .workspace,
-  .detail-grid {
+  .detail-grid,
+  .runtime-workbench {
+    grid-template-columns: 1fr;
+  }
+
+  .runtime-agent-lanes section {
     grid-template-columns: 1fr;
   }
 

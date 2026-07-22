@@ -53,8 +53,8 @@ def _validate_multi_agent_result(
 
 
 class InMemoryInvestigationRepository:
-    def __init__(self) -> None:
-        self._lock = RLock()
+    def __init__(self, lock=None) -> None:
+        self._lock = lock or RLock()
         self._records: dict[str, InvestigationRecord] = {}
         self._plans: dict[str, DiagnosisPlan] = {}
         self._tasks: dict[str, list[DiagnosisTask]] = {}
@@ -65,6 +65,11 @@ class InMemoryInvestigationRepository:
         self._agent_findings: dict[str, dict[str, AgentFinding]] = {}
         self._coordination_reviews: dict[str, CoordinationReview] = {}
         self._react_traces: dict[str, ReActTrace] = {}
+
+    @property
+    def transaction_lock(self):
+        """返回 Runtime 原子提交复用的可重入锁。"""
+        return self._lock
 
     def save(self, record: InvestigationRecord) -> InvestigationRecord:
         with self._lock:
@@ -173,8 +178,9 @@ class InMemoryInvestigationRepository:
         investigation_id: str,
         tasks: list[DiagnosisTask],
     ) -> list[DiagnosisTask]:
-        self._tasks[investigation_id] = list(tasks)
-        return list(tasks)
+        with self._lock:
+            self._tasks[investigation_id] = list(tasks)
+            return list(tasks)
 
     def list_tasks(self, investigation_id: str) -> list[DiagnosisTask]:
         return list(self._tasks.get(investigation_id, []))
@@ -210,10 +216,11 @@ class InMemoryInvestigationRepository:
         investigation_id: str,
         calls: list[ToolCallRecord],
     ) -> list[ToolCallRecord]:
-        bucket = self._tool_calls.setdefault(investigation_id, {})
-        for call in calls:
-            bucket[call.id] = call
-        return list(calls)
+        with self._lock:
+            bucket = self._tool_calls.setdefault(investigation_id, {})
+            for call in calls:
+                bucket[call.id] = call
+            return list(calls)
 
     def list_tool_calls(self, investigation_id: str) -> list[ToolCallRecord]:
         return list(self._tool_calls.get(investigation_id, {}).values())

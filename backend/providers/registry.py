@@ -1,4 +1,6 @@
+import asyncio
 import logging
+from collections.abc import Callable
 from time import perf_counter
 
 from backend.config.settings import AppSettings
@@ -16,6 +18,7 @@ from backend.providers.mock_related_alerts import MockRelatedAlertProvider
 from backend.providers.mock_service_catalog import MockServiceCatalogProvider
 from backend.providers.prometheus import PrometheusProvider
 from backend.providers.results import ProviderResult, ProviderStatus
+from backend.runtime.concurrency import RunStepGate
 from backend.safety.redaction import redact_model, safe_failure
 
 logger = logging.getLogger(__name__)
@@ -45,27 +48,64 @@ class ProviderRegistry:
         return list(self.providers)
 
     def collect_results(self, event: IncidentEvent) -> list[ProviderResult]:
-        results: list[ProviderResult] = []
-        for provider in self._providers_for(event):
-            started = perf_counter()
-            try:
-                result = redact_model(provider.collect(event))
-            except Exception:
-                provider_name = getattr(provider, "provider", EvidenceProvider.LOG)
-                result = ProviderResult(
-                    provider=provider_name,
-                    status=ProviderStatus.FAILED,
-                    error_message=safe_failure("provider_failure"),
-                    duration_ms=int((perf_counter() - started) * 1000),
-                )
-            logger.info(
-                "provider completed provider=%s status=%s duration_ms=%s evidence_count=%s",
-                result.provider,
-                result.status,
-                result.duration_ms,
-                len(result.evidence_items),
+        results = [
+            self._collect_provider(provider, event)
+            for provider in self._providers_for(event)
+        ]
+        return self._with_unconfigured(results)
+
+    async def collect_results_async(
+        self,
+        event: IncidentEvent,
+        *,
+        max_parallel_steps: int = 3,
+        check_execution: Callable[[], None] | None = None,
+        parallel_limit: RunStepGate | None = None,
+    ) -> list[ProviderResult]:
+        """按配置上限并行只读 Provider；gather 顺序保持既有输出稳定。"""
+        if max_parallel_steps < 1:
+            raise ValueError("max_parallel_steps must be positive")
+        limit = parallel_limit or RunStepGate(max_parallel_steps)
+        guard = check_execution or (lambda: None)
+
+        async def collect(provider) -> ProviderResult:
+            async with limit.slot():
+                guard()
+                result = await asyncio.to_thread(self._collect_provider, provider, event)
+                guard()
+                return result
+
+        results = list(
+            await asyncio.gather(
+                *(collect(provider) for provider in self._providers_for(event))
             )
-            results.append(result)
+        )
+        return self._with_unconfigured(results)
+
+    def _collect_provider(self, provider, event: IncidentEvent) -> ProviderResult:
+        started = perf_counter()
+        try:
+            result = redact_model(provider.collect(event))
+        except Exception:
+            provider_name = getattr(provider, "provider", EvidenceProvider.LOG)
+            result = ProviderResult(
+                provider=provider_name,
+                status=ProviderStatus.FAILED,
+                error_message=safe_failure("provider_failure"),
+                duration_ms=int((perf_counter() - started) * 1000),
+            )
+        logger.info(
+            "provider completed provider=%s status=%s duration_ms=%s evidence_count=%s",
+            result.provider,
+            result.status,
+            result.duration_ms,
+            len(result.evidence_items),
+        )
+        return result
+
+    @staticmethod
+    def _with_unconfigured(results: list[ProviderResult]) -> list[ProviderResult]:
+        results = list(results)
         configured = {result.provider for result in results}
         results.extend(
             ProviderResult(

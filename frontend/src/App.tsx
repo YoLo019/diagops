@@ -1,6 +1,7 @@
 import { FormEvent, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { OpenRcaBenchmark } from "./OpenRcaBenchmark";
+import { RuntimeWorkbench } from "./RuntimeWorkbench";
 import {
   API_BASE_URL,
   createManualInvestigation,
@@ -1196,7 +1197,7 @@ function ReportPanel({ investigation }: { investigation: InvestigationRecord }) 
 }
 
 export default function App() {
-  const [activeView, setActiveView] = useState<"investigations" | "benchmark">(
+  const [activeView, setActiveView] = useState<"investigations" | "runtime" | "benchmark">(
     "investigations",
   );
   const [selectedId, setSelectedId] = useState<string>();
@@ -1233,6 +1234,13 @@ export default function App() {
             Investigations
           </button>
           <button
+            className={activeView === "runtime" ? "active" : ""}
+            onClick={() => setActiveView("runtime")}
+            type="button"
+          >
+            Runtime Workbench
+          </button>
+          <button
             className={activeView === "benchmark" ? "active" : ""}
             onClick={() => setActiveView("benchmark")}
             type="button"
@@ -1246,6 +1254,11 @@ export default function App() {
               <span>共 {investigations.length} 条诊断</span>
               <span>记录审批状态和验证结果</span>
             </>
+          ) : activeView === "runtime" ? (
+            <>
+              <span>多会话 durable Runtime</span>
+              <span>SSE + 历史回放</span>
+            </>
           ) : (
             <>
               <span>Fixed / Adaptive</span>
@@ -1257,6 +1270,12 @@ export default function App() {
 
       {activeView === "benchmark" ? (
         <OpenRcaBenchmark />
+      ) : activeView === "runtime" ? (
+        <RuntimeWorkbench
+          investigations={investigations}
+          selectedInvestigationId={selectedId ?? investigations[0]?.id}
+          onSelectInvestigation={setSelectedId}
+        />
       ) : (
         <div className="workspace">
         <aside className="left-column">

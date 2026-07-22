@@ -31,3 +31,13 @@ agents:
 
 benchmark:
   results_path: output/benchmarks/openrca
+
+runtime:
+  enabled: true
+  max_concurrent_runs: 4
+  max_parallel_steps_per_run: 3
+  lease_seconds: 30
+  heartbeat_seconds: 10
+  opentelemetry:
+    enabled: false
+    endpoint: null
