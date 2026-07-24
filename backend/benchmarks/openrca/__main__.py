@@ -89,6 +89,7 @@ def main() -> None:
         model=arguments.model,
         provider=ModelProvider(arguments.provider),
         prompt_version=arguments.prompt_version,
+        timeout_seconds=container.settings.agents.timeout_seconds,
         input_cost_per_million=arguments.input_cost_per_million,
         output_cost_per_million=arguments.output_cost_per_million,
         strategies=strategies,

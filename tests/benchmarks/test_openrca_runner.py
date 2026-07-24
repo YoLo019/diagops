@@ -162,8 +162,10 @@ def test_runner_optionally_configures_real_case_runner_without_breaking_old_fake
     class ConfigurableFake(FakeRuntime):
         configured = None
 
-        def configure_runtime(self, *, provider, model, prompt_version) -> None:
-            self.configured = (provider, model, prompt_version)
+        def configure_runtime(
+            self, *, provider, model, prompt_version, timeout_seconds
+        ) -> None:
+            self.configured = (provider, model, prompt_version, timeout_seconds)
 
     runner = ConfigurableFake()
 
@@ -174,13 +176,20 @@ def test_runner_optionally_configures_real_case_runner_without_breaking_old_fake
         provider=ModelProvider.DEEPSEEK,
         model="deepseek-chat",
         prompt_version="v9",
+        timeout_seconds=180,
     )
 
     assert runner.configured == (
         ModelProvider.DEEPSEEK,
         "deepseek-chat",
         "v9",
+        180,
     )
+    run_id = (tmp_path / "runs" / "latest-run.txt").read_text().strip()
+    manifest = json.loads(
+        (tmp_path / "runs" / run_id / "run-manifest.json").read_text()
+    )
+    assert manifest["strategy_config"]["timeout_seconds"] == 180
 
 
 @pytest.mark.parametrize("rate", [-1.0, math.nan, math.inf])

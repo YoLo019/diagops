@@ -85,18 +85,23 @@ class OpenRcaDiagnosisRunner:
         runtime_store,
         provider: ModelProvider = ModelProvider.OPENAI,
         prompt_version: str = "v8.2",
+        timeout_seconds: float = 60,
     ) -> None:
         self.dataset_root = dataset_root
         self.model = model
         self.provider = provider
         self.prompt_version = prompt_version
+        self.timeout_seconds = timeout_seconds
         self.repository = repository
         self.runtime_store = runtime_store
 
-    def configure_runtime(self, *, provider, model, prompt_version) -> None:
+    def configure_runtime(
+        self, *, provider, model, prompt_version, timeout_seconds
+    ) -> None:
         self.provider = ModelProvider(provider)
         self.model = model
         self.prompt_version = prompt_version
+        self.timeout_seconds = timeout_seconds
 
     def run_case(
         self, case: OpenRcaRuntimeCase, strategy: InvestigationStrategy
@@ -117,6 +122,7 @@ class OpenRcaDiagnosisRunner:
             model_provider=self.provider,
             model_name=self.model,
             prompt_version=self.prompt_version,
+            timeout_seconds=self.timeout_seconds,
         )
         orchestrator = DiagnosisOrchestrator(
             repository=self.repository,
@@ -148,7 +154,7 @@ class OpenRcaDiagnosisRunner:
                 ),
                 prompt_version=self.prompt_version,
                 tool_budget=8,
-                timeout_seconds=60,
+                timeout_seconds=self.timeout_seconds,
             )
         )
         writer = RuntimeWriter(self.runtime_store)
@@ -289,6 +295,7 @@ def run_benchmark_pair(
     model: str,
     provider: ModelProvider = ModelProvider.OPENAI,
     prompt_version: str = "v8.2",
+    timeout_seconds: float = 60,
     input_cost_per_million: float = 0,
     output_cost_per_million: float = 0,
     strategies: tuple[InvestigationStrategy, ...] = (
@@ -309,6 +316,7 @@ def run_benchmark_pair(
             provider=provider,
             model=model,
             prompt_version=prompt_version,
+            timeout_seconds=timeout_seconds,
         )
     started_at = datetime.now(UTC)
     run_id = started_at.strftime("run-%Y%m%dT%H%M%S%fZ")
@@ -327,7 +335,7 @@ def run_benchmark_pair(
             "max_rounds": 2,
             "max_tool_calls_per_specialist": 3,
             "max_total_tool_calls": 8,
-            "timeout_seconds": 60,
+            "timeout_seconds": timeout_seconds,
         },
         "input_cost_per_million": input_cost_per_million,
         "output_cost_per_million": output_cost_per_million,
