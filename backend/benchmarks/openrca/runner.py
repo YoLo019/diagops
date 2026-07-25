@@ -107,11 +107,22 @@ class OpenRcaDiagnosisRunner:
         self, case: OpenRcaRuntimeCase, strategy: InvestigationStrategy
     ) -> BenchmarkCaseOutcome:
         started = perf_counter()
+        record = InvestigationRecord(
+            event=_benchmark_event(case),
+            strategy=strategy,
+            runtime_available=True,
+        )
         providers = ProviderRegistry(
             [
-                OpenRcaLogProvider(self.dataset_root, case),
-                OpenRcaMetricProvider(self.dataset_root, case),
-                OpenRcaDependencyProvider(self.dataset_root, case),
+                OpenRcaLogProvider(
+                    self.dataset_root, case, evidence_namespace=record.id
+                ),
+                OpenRcaMetricProvider(
+                    self.dataset_root, case, evidence_namespace=record.id
+                ),
+                OpenRcaDependencyProvider(
+                    self.dataset_root, case, evidence_namespace=record.id
+                ),
             ]
         )
         registry = build_provider_tool_registry(providers)
@@ -133,13 +144,7 @@ class OpenRcaDiagnosisRunner:
             agents_runtime=runtime,
             default_strategy=strategy,
         )
-        record = self.repository.save(
-            InvestigationRecord(
-                event=_benchmark_event(case),
-                strategy=strategy,
-                runtime_available=True,
-            )
-        )
+        record = self.repository.save(record)
         runtime_run = self.runtime_store.create_run(
             RuntimeRun(
                 investigation_id=record.id,

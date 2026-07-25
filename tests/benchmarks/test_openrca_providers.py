@@ -94,6 +94,19 @@ def test_log_provider_filters_keyword_level_instance_and_limit(fixture_root: Pat
     assert "timeout" in matches[0]["message"].lower()
 
 
+def test_log_provider_namespaces_evidence_id_per_investigation(fixture_root: Path):
+    case = runtime_case("Bank")
+    first = OpenRcaLogProvider(
+        fixture_root, case, evidence_namespace="inv-fixed"
+    ).collect(event("Bank"))
+    second = OpenRcaLogProvider(
+        fixture_root, case, evidence_namespace="inv-adaptive"
+    ).collect(event("Bank"))
+
+    assert first.evidence_items[0].payload == second.evidence_items[0].payload
+    assert first.evidence_items[0].id != second.evidence_items[0].id
+
+
 def test_dependency_provider_aggregates_parent_child_latency(fixture_root: Path):
     provider = OpenRcaDependencyProvider(
         fixture_root, runtime_case("Market/cloudbed-1")

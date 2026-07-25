@@ -33,8 +33,15 @@ from backend.providers.results import ProviderResult, ProviderStatus
 
 
 class _OpenRcaProvider:
-    def __init__(self, dataset_root: Path, case: OpenRcaRuntimeCase) -> None:
+    def __init__(
+        self,
+        dataset_root: Path,
+        case: OpenRcaRuntimeCase,
+        *,
+        evidence_namespace: str | None = None,
+    ) -> None:
         self.case = case
+        self.evidence_namespace = evidence_namespace
         self.directory = resolve_case_directory(dataset_root, case.telemetry_dir)
 
     @staticmethod
@@ -112,6 +119,7 @@ class OpenRcaLogProvider(_OpenRcaProvider):
                     datetime.fromisoformat(matches[-1]["timestamp"]),
                     f"{len(matches)} bounded log matches",
                     payload,
+                    evidence_namespace=self.evidence_namespace,
                 )
             ],
             error_message=_malformed_warning(malformed),
@@ -236,6 +244,7 @@ class OpenRcaMetricProvider(_OpenRcaProvider):
                     datetime.fromisoformat(str(anomalies[-1]["timestamp"])),
                     f"{len(anomalies)} bounded metric anomalies",
                     payload,
+                    evidence_namespace=self.evidence_namespace,
                 )
             ],
             error_message=_malformed_warning(malformed),
@@ -348,6 +357,7 @@ class OpenRcaDependencyProvider(_OpenRcaProvider):
                     latest,
                     f"{len(edges)} bounded dependency edges",
                     payload,
+                    evidence_namespace=self.evidence_namespace,
                 )
             ],
             error_message=_malformed_warning(malformed),
@@ -361,10 +371,14 @@ def _evidence(
     timestamp: datetime,
     summary: str,
     payload: dict,
+    *,
+    evidence_namespace: str | None = None,
 ) -> EvidenceItem:
     fingerprint = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    # Evidence 使用全局主键；按 Investigation 隔离可避免配对策略写入相同内容时冲突。
+    namespace = f"{evidence_namespace}:" if evidence_namespace else ""
     evidence_id = hashlib.sha256(
-        f"{case.case_id}:{provider.value}:{fingerprint}".encode()
+        f"{namespace}{case.case_id}:{provider.value}:{fingerprint}".encode()
     ).hexdigest()[:24]
     return EvidenceItem(
         id=f"ev-openrca-{evidence_id}",
