@@ -182,7 +182,17 @@ class OpenRcaDiagnosisRunner:
             finally:
                 await coordinator.shutdown()
 
-        asyncio.run(execute())
+        try:
+            asyncio.run(execute())
+        except Exception as exc:
+            runtime_result = runtime.last_result
+            return BenchmarkCaseOutcome(
+                failure_category=f"{type(exc).__name__}: benchmark case failed",
+                duration_ms=round((perf_counter() - started) * 1000),
+                input_tokens=runtime_result.input_tokens if runtime_result else 0,
+                output_tokens=runtime_result.output_tokens if runtime_result else 0,
+                runtime_run_id=runtime_run.id,
+            )
         runtime_run = self.runtime_store.get_run(runtime_run.id)
         record = self.repository.get(record.id)
         review = self.repository.get_coordination_review(record.id)

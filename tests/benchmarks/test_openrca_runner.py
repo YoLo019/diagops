@@ -20,12 +20,14 @@ from backend.benchmarks.openrca.models import (
 )
 from backend.benchmarks.openrca.runner import (
     BenchmarkCaseOutcome,
+    OpenRcaDiagnosisRunner,
     run_benchmark_pair,
 )
-from backend.db.session import create_db_engine
+from backend.db.session import create_db_engine, initialize_database
 from backend.db.sqlite_repository import SQLiteInvestigationRepository
 from backend.domain.agent_findings import RootCauseAttribution
 from backend.domain.multi_agent import InvestigationStrategy, ModelProvider
+from backend.runtime.coordinator import RuntimeCoordinator
 from backend.runtime.replay import ReplayDependencies, ReplayService
 from backend.runtime.sqlite_store import SQLiteRuntimeStore
 
@@ -190,6 +192,34 @@ def test_runner_optionally_configures_real_case_runner_without_breaking_old_fake
         (tmp_path / "runs" / run_id / "run-manifest.json").read_text()
     )
     assert manifest["strategy_config"]["timeout_seconds"] == 180
+
+
+def test_real_case_runner_preserves_runtime_id_on_execution_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'runtime.db'}")
+    initialize_database(engine)
+    repository = SQLiteInvestigationRepository(engine)
+    runtime_store = SQLiteRuntimeStore(engine, repository)
+    case = OpenRcaRuntimeIndex.model_validate_json(
+        safe_index(tmp_path).read_text(encoding="utf-8")
+    ).cases[0]
+
+    async def fail_execution(*_args, **_kwargs):
+        raise RuntimeError("injected execution failure")
+
+    monkeypatch.setattr(RuntimeCoordinator, "execute", fail_execution)
+    outcome = OpenRcaDiagnosisRunner(
+        Path(__file__).parents[1] / "fixtures" / "openrca",
+        "test-model",
+        repository=repository,
+        runtime_store=runtime_store,
+        prompt_version="v9",
+    ).run_case(case, InvestigationStrategy.FIXED)
+
+    assert outcome.failure_category == "RuntimeError: benchmark case failed"
+    assert outcome.runtime_run_id is not None
+    assert runtime_store.get_run(outcome.runtime_run_id).id == outcome.runtime_run_id
 
 
 @pytest.mark.parametrize("rate", [-1.0, math.nan, math.inf])
