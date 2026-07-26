@@ -1439,6 +1439,12 @@ class AgentsRcaRuntime:
                     invalid_agents.add(name)
                     invalid_reference_agents.add(name)
                     continue
+                if (
+                    draft.finding_type == AgentFindingType.ROOT_CAUSE
+                    and draft.related_cause_type in {None, CauseType.UNKNOWN}
+                ):
+                    invalid_agents.add(name)
+                    continue
                 revision = None
                 if analysis_round == 2:
                     revision = next(
@@ -2116,7 +2122,12 @@ def _synthesis_prompt(
 ) -> str:
     return (
         "Synthesize the deterministic baseline and validated specialist findings. "
-        "Final decision status is assigned by DiagOps code.\n"
+        "Final decision status is assigned by DiagOps code. "
+        "When EVIDENCE contains explicit root_cause_claims, return at least one "
+        "root_causes item: copy component, reason, and occurred_at exactly from a "
+        "claim and cite its Evidence id in supporting_evidence_ids. When no explicit "
+        "root_cause_claims exist, return an empty root_causes list; do not invent a "
+        "root cause.\n"
         f"BASELINE={_json_dump([_hypothesis_projection(item) for item in hypotheses])}\n"
         f"VALIDATED_FINDINGS={_json_dump([_finding_projection(item) for item in findings])}\n"
         f"{_project_evidence(evidence)}"

@@ -686,6 +686,14 @@ def test_all_model_data_uses_fixed_projection_and_recursive_redaction():
     assert "execution_layer" not in synthesis
 
 
+def test_synthesis_prompt_requires_evidence_bound_root_causes():
+    prompt = _synthesis_prompt([_baseline()], [], _all_evidence())
+
+    assert "return at least one root_causes item" in prompt
+    assert "copy component, reason, and occurred_at exactly" in prompt
+    assert "supporting_evidence_ids" in prompt
+
+
 def test_specialist_instructions_define_finding_types_without_expected_causes():
     text = _specialist_instructions(AgentName.METRIC)
 
@@ -1999,6 +2007,19 @@ async def test_timeout_after_recollection_records_final_synthesis_progress(monke
         _CapturedDraft(
             AgentName.METRIC,
             _SpecialistDraft.model_construct(
+                finding_type=AgentFindingType.ROOT_CAUSE,
+                summary="Unknown is not a usable root cause",
+                confidence=0.8,
+                evidence_ids=["ev-metric"],
+                related_cause_type=CauseType.UNKNOWN,
+                severity="medium",
+                rationale="",
+                gaps=[],
+            ),
+        ),
+        _CapturedDraft(
+            AgentName.METRIC,
+            _SpecialistDraft.model_construct(
                 finding_type="mutation",
                 summary="Unsupported enums",
                 confidence=0.8,
@@ -2010,7 +2031,7 @@ async def test_timeout_after_recollection_records_final_synthesis_progress(monke
             ),
         ),
     ],
-    ids=["unknown-agent", "unknown-round", "nan", "unknown-enums"],
+    ids=["unknown-agent", "unknown-round", "nan", "unknown-cause", "unknown-enums"],
 )
 async def test_invalid_specialist_output_is_rejected_without_escaping(
     monkeypatch, invalid

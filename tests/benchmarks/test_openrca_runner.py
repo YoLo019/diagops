@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from backend.benchmarks.openrca import __main__ as openrca_cli
 from backend.benchmarks.openrca import runner as openrca_runner
 from backend.benchmarks.openrca.evaluator import evaluate_persisted_prediction
 from backend.benchmarks.openrca.models import (
@@ -105,6 +106,18 @@ def test_runtime_case_requires_official_row_identity():
             end_time=datetime(2026, 7, 14, 12, 10, tzinfo=TZ),
             telemetry_dir="Bank/telemetry/2026-07-14",
         )
+
+
+def test_cli_disables_agents_tracing(monkeypatch):
+    calls = []
+    monkeypatch.setattr(openrca_cli, "set_tracing_disabled", calls.append, raising=False)
+    monkeypatch.setattr(sys, "argv", ["openrca", "--help"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        openrca_cli.main()
+
+    assert exc_info.value.code == 0
+    assert calls == [True]
 
 
 def test_benchmark_event_window_matches_runtime_case_window(tmp_path: Path):
