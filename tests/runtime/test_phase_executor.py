@@ -18,16 +18,19 @@ from backend.diagnosis.agents_runtime import (
     _SpecialistDraft,
 )
 from backend.diagnosis.coordinator import DiagnosisCoordinator
+from backend.diagnosis.evidence_validation import EvidenceContractError
 from backend.diagnosis.orchestrator import DiagnosisOrchestrator
 from backend.domain.agent_findings import AgentFindingType, AgentName
 from backend.domain.events import IncidentSource
 from backend.domain.evidence import EvidenceProvider
 from backend.domain.hypotheses import CauseType
 from backend.domain.multi_agent import (
+    AgentExecutionLayer,
     ExecutionStepKind,
     FailureCategory,
     InvestigationStrategy,
     ModelProvider,
+    ResultValidationCategory,
 )
 from backend.domain.runtime import (
     RuntimePhase,
@@ -622,6 +625,114 @@ async def test_sdk_model_turns_are_committed_in_their_own_runtime_phases(
         )
     ).replay(run.id)
     assert replay.valid is True, replay.validation_errors
+    await coordinator.shutdown()
+
+
+@pytest.mark.anyio
+async def test_split_coordination_semantic_error_uses_deterministic_fallback(
+    runtime_store,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "present")
+    store = runtime_store
+    orchestrator = _orchestrator(store.investigation_repository)
+
+    async def turn(**kwargs):
+        drafts = []
+        for name in kwargs["specialist_names"]:
+            prompt = kwargs["specialist_inputs"][name]
+            evidence_match = re.search(r'"id"\s*:\s*"([^"]+)"', prompt)
+            drafts.append(
+                _CapturedDraft(
+                    agent_name=name,
+                    analysis_round=kwargs["analysis_round"],
+                    draft=_SpecialistDraft(
+                        finding_type=(
+                            AgentFindingType.ROOT_CAUSE
+                            if evidence_match is not None
+                            else AgentFindingType.GAP
+                        ),
+                        summary=f"{name.value} finding",
+                        confidence=0.8,
+                        evidence_ids=(
+                            [evidence_match.group(1)]
+                            if evidence_match is not None
+                            else []
+                        ),
+                        related_cause_type=(
+                            CauseType.DEPLOYMENT_REGRESSION
+                            if evidence_match is not None
+                            else None
+                        ),
+                        gaps=(
+                            []
+                            if evidence_match is not None
+                            else ["missing evidence"]
+                        ),
+                        blocking=evidence_match is None,
+                    ),
+                )
+            )
+        return _SdkTurnResult(
+            drafts,
+            _CoordinatorProposal(
+                summary="invalid semantic synthesis",
+                uncertainty="unsupported root cause",
+                proposed_cause=CauseType.DEPLOYMENT_REGRESSION,
+            ),
+            [],
+        )
+
+    def reject_semantics(*_args, **_kwargs):
+        raise EvidenceContractError("root_cause_component_mismatch")
+
+    monkeypatch.setattr(
+        "backend.diagnosis.agents_runtime.build_hybrid_coordination_review",
+        reject_semantics,
+    )
+    orchestrator.agents_runtime = AgentsRcaRuntime(model="fake", turn=turn)
+    run = store.create_run(
+        RuntimeRun(
+            id="run-semantic-fallback",
+            investigation_id="inv-1",
+            run_kind=RuntimeRunKind.LIVE,
+            strategy=InvestigationStrategy.ADAPTIVE,
+            run_reason=RuntimeRunReason.INITIAL,
+        )
+    )
+    coordinator = RuntimeCoordinator(
+        store=store,
+        writer=RuntimeWriter(store),
+        phase_executor=DiagnosisPhaseExecutor(orchestrator),
+        heartbeat_seconds=1,
+    )
+
+    completed = await coordinator.execute(run.id, owner="worker-a")
+
+    record = store.investigation_repository.get("inv-1")
+    sdk_executions = [
+        item
+        for item in store.investigation_repository.list_executions("inv-1")
+        if item.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK
+    ]
+    review = store.investigation_repository.get_coordination_review("inv-1")
+    phase_failures = [
+        item
+        for item in store.list_events(run.id)
+        if item.event_type.value == "phase.failed"
+    ]
+    assert completed.status == RuntimeRunStatus.COMPLETED
+    assert record.status.value == "completed"
+    assert len(sdk_executions) == 1
+    assert sdk_executions[0].step_kind == ExecutionStepKind.RESULT_VALIDATION
+    assert (
+        sdk_executions[0].result_validation_category
+        == ResultValidationCategory.SEMANTIC_REFERENCE
+    )
+    assert sdk_executions[0].failure_category == FailureCategory.INVALID_REFERENCE
+    assert review is not None
+    assert review.execution_layer == AgentExecutionLayer.CUSTOM
+    assert phase_failures == []
     await coordinator.shutdown()
 
 

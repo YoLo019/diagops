@@ -13,13 +13,18 @@ from backend.diagnosis.agents_runtime import (
     ConflictReviewOutcome,
 )
 from backend.diagnosis.evidence_validation import (
+    EvidenceContractError,
     validate_hypotheses,
     validate_investigation_evidence,
 )
 from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem
 from backend.domain.hypotheses import Hypothesis
-from backend.domain.multi_agent import FailureCategory, InvestigationStrategy
+from backend.domain.multi_agent import (
+    FailureCategory,
+    InvestigationStrategy,
+    ResultValidationCategory,
+)
 from backend.domain.runtime import RuntimePhase, RuntimeResumeState, RuntimeRunReason
 from backend.runtime.concurrency import RunStepGate
 from backend.runtime.phases import RUNTIME_PHASE_ORDER, BusinessMutation, PhaseOutput
@@ -449,12 +454,28 @@ class DiagnosisPhaseExecutor:
             v7_result, AgentsRcaRuntimeResult
         ):
             self._ensure_agents_deadline(runtime)
-            v7_result = await runtime.synthesize(
-                v7_result,
-                record.id,
-                state.supporting_evidence,
-                state.hypotheses,
-            )
+            try:
+                v7_result = await runtime.synthesize(
+                    v7_result,
+                    record.id,
+                    state.supporting_evidence,
+                    state.hypotheses,
+                )
+            except EvidenceContractError:
+                logger.warning(
+                    "split agents validation failed id=%s validation_category=%s",
+                    record.id,
+                    ResultValidationCategory.SEMANTIC_REFERENCE.value,
+                )
+                fallback = AgentsRcaRuntimeResult.validation_failed(
+                    ResultValidationCategory.SEMANTIC_REFERENCE,
+                    model_provider=v7_result.run_summary.model_provider,
+                    model_name=v7_result.run_summary.model_name,
+                )
+                self._orchestrator._copy_adaptive_metadata(
+                    fallback, v7_result, degraded=True
+                )
+                v7_result = fallback
             state.v7_result = v7_result
             self._orchestrator.repository.save_tasks(record.id, v7_result.tasks)
             self._orchestrator.repository.save_multi_agent_result(
