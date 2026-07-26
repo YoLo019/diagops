@@ -325,7 +325,8 @@ class RuntimeCoordinator:
                         ),
                         persist_model_event=lambda execution_id,
                         status,
-                        token_usage=0,
+                        input_tokens=0,
+                        output_tokens=0,
                         actor_name="CoordinatorAgent",
                         phase=phase: (
                             self._persist_model_event(
@@ -335,7 +336,8 @@ class RuntimeCoordinator:
                                 phase,
                                 execution_id,
                                 status,
-                                token_usage,
+                                input_tokens,
+                                output_tokens,
                                 actor_name,
                             )
                         ),
@@ -547,7 +549,8 @@ class RuntimeCoordinator:
         phase: RuntimePhase,
         execution_id: str,
         status: str,
-        token_usage: int = 0,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
         actor_name: str = "CoordinatorAgent",
     ) -> None:
         event_type = {
@@ -583,8 +586,8 @@ class RuntimeCoordinator:
                     execution_id=execution_id,
                     safe_payload={
                         "status": status,
-                        "input_tokens": token_usage,
-                        "output_tokens": 0,
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
                     },
                 )
             )
@@ -596,8 +599,8 @@ class RuntimeCoordinator:
             self._finish_span(
                 self._model_spans.pop(key, None),
                 status,
-                input_tokens=token_usage,
-                output_tokens=0,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
             )
 
     async def _persist_agent_event(

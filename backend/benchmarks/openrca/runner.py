@@ -68,11 +68,23 @@ class BenchmarkCaseRunner(Protocol):
 
 
 class _CapturingAgentsRuntime(AgentsRcaRuntime):
-    last_result: AgentsRcaRuntimeResult | None = None
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # durable Phase clone 使用浅复制；共享结果引用才能包含后续 review/synthesis usage。
+        self._captured_results: list[AgentsRcaRuntimeResult] = []
 
     async def run(self, *args, **kwargs) -> AgentsRcaRuntimeResult:
-        self.last_result = await super().run(*args, **kwargs)
-        return self.last_result
+        result = await super().run(*args, **kwargs)
+        self._captured_results.append(result)
+        return result
+
+    @property
+    def input_tokens(self) -> int:
+        return sum(item.input_tokens for item in self._captured_results)
+
+    @property
+    def output_tokens(self) -> int:
+        return sum(item.output_tokens for item in self._captured_results)
 
 
 class OpenRcaDiagnosisRunner:
@@ -185,12 +197,11 @@ class OpenRcaDiagnosisRunner:
         try:
             asyncio.run(execute())
         except Exception as exc:
-            runtime_result = runtime.last_result
             return BenchmarkCaseOutcome(
                 failure_category=f"{type(exc).__name__}: benchmark case failed",
                 duration_ms=round((perf_counter() - started) * 1000),
-                input_tokens=runtime_result.input_tokens if runtime_result else 0,
-                output_tokens=runtime_result.output_tokens if runtime_result else 0,
+                input_tokens=runtime.input_tokens,
+                output_tokens=runtime.output_tokens,
                 runtime_run_id=runtime_run.id,
             )
         runtime_run = self.runtime_store.get_run(runtime_run.id)
@@ -222,7 +233,6 @@ class OpenRcaDiagnosisRunner:
             execution.failure_category == FailureCategory.INVALID_REFERENCE
             for execution in executions
         )
-        runtime_result = runtime.last_result
         summary = record.multi_agent_run
         failure_category = (
             summary.adaptive_stop_reason.value
@@ -240,8 +250,8 @@ class OpenRcaDiagnosisRunner:
             tool_call_count=len(calls),
             duplicate_query_rejections=duplicate_rejections,
             duration_ms=round((perf_counter() - started) * 1000),
-            input_tokens=runtime_result.input_tokens if runtime_result else 0,
-            output_tokens=runtime_result.output_tokens if runtime_result else 0,
+            input_tokens=runtime.input_tokens,
+            output_tokens=runtime.output_tokens,
             read_only_violations=read_only_violations,
             runtime_run_id=runtime_run.id,
         )

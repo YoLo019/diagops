@@ -235,6 +235,43 @@ def test_real_case_runner_preserves_runtime_id_on_execution_failure(
     assert runtime_store.get_run(outcome.runtime_run_id).id == outcome.runtime_run_id
 
 
+@pytest.mark.anyio
+async def test_capturing_runtime_accumulates_usage_from_durable_clone(
+    monkeypatch,
+) -> None:
+    usages = iter(((7, 2), (3, 1)))
+    results = []
+
+    async def run_with_usage(_self, *_args, **_kwargs):
+        input_tokens, output_tokens = next(usages)
+        result = type(
+            "Result",
+            (),
+            {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+            },
+        )()
+        results.append(result)
+        return result
+
+    monkeypatch.setattr(openrca_runner.AgentsRcaRuntime, "run", run_with_usage)
+    runtime = openrca_runner._CapturingAgentsRuntime(model="test-model")
+    durable_clone = runtime.clone_for_run(
+        model_provider=ModelProvider.OPENAI,
+        model_name="test-model",
+        prompt_version="v9",
+        token_budget=None,
+    )
+
+    await durable_clone.run()
+    await durable_clone.run()
+    results[0].input_tokens += 5
+
+    assert runtime.input_tokens == 15
+    assert runtime.output_tokens == 3
+
+
 @pytest.mark.parametrize("rate", [-1.0, math.nan, math.inf])
 def test_runner_rejects_invalid_cost_rates_before_creating_run(
     tmp_path: Path, rate: float

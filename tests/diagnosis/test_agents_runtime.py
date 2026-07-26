@@ -114,6 +114,31 @@ async def test_model_boundary_deducts_usage_and_blocks_exhausted_budget() -> Non
 
 
 @pytest.mark.anyio
+async def test_model_boundary_persists_split_token_usage() -> None:
+    events = []
+
+    async def turn(**_kwargs):
+        return _SdkTurnResult([], None, [], input_tokens=4, output_tokens=2)
+
+    async def persist(
+        execution_id, status, input_tokens, output_tokens, actor_name
+    ):
+        events.append(
+            (execution_id, status, input_tokens, output_tokens, actor_name)
+        )
+
+    runtime = AgentsRcaRuntime(
+        model="fake",
+        turn=turn,
+        persist_model_event=persist,
+    )
+
+    await runtime._invoke_turn(None, model=runtime.model)
+
+    assert events[-1][1:] == ("completed", 4, 2, "CoordinatorAgent")
+
+
+@pytest.mark.anyio
 async def test_model_boundary_rejects_response_that_exceeds_remaining_budget() -> None:
     events = []
 
