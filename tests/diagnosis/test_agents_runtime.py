@@ -237,6 +237,102 @@ async def test_external_model_cancellation_keeps_started_only_audit() -> None:
     assert [status for _execution_id, status in events] == ["started"]
 
 
+@pytest.mark.anyio
+async def test_real_sdk_deadline_terminalizes_started_model(monkeypatch) -> None:
+    events: list[tuple[str, str, str]] = []
+
+    async def hang(agent, _agent_input, *, hooks, **_kwargs):
+        await hooks.on_llm_start(None, agent, None, [])
+        await asyncio.Event().wait()
+
+    async def persist(
+        execution_id: str,
+        status: str,
+        _input_tokens: int,
+        _output_tokens: int,
+        actor_name: str,
+    ) -> None:
+        events.append((execution_id, status, actor_name))
+
+    monkeypatch.setattr(agents_runtime.Runner, "run", hang)
+    runtime = AgentsRcaRuntime(
+        model="fake",
+        prompt_version="v9",
+        timeout_seconds=0.01,
+        persist_model_event=persist,
+    )
+
+    with pytest.raises(TimeoutError):
+        await runtime._await_with_run_deadline(
+            runtime._invoke_turn(
+                None,
+                model=runtime.model,
+                coordinator_input="coordinate",
+                specialist_inputs={AgentName.LOG: "inspect logs"},
+                specialist_names=[AgentName.LOG],
+                max_turns=2,
+                prompt_version="v9",
+            )
+        )
+
+    assert len({execution_id for execution_id, _status, _actor in events}) == 1
+    assert [(status, actor) for _execution_id, status, actor in events] == [
+        ("started", "LogAgent"),
+        ("failed", "LogAgent"),
+    ]
+
+
+@pytest.mark.anyio
+async def test_real_sdk_external_cancellation_keeps_started_only_audit(
+    monkeypatch,
+) -> None:
+    events: list[tuple[str, str]] = []
+    model_started = asyncio.Event()
+
+    async def hang(agent, _agent_input, *, hooks, **_kwargs):
+        await hooks.on_llm_start(None, agent, None, [])
+        model_started.set()
+        await asyncio.Event().wait()
+
+    async def persist(
+        execution_id: str,
+        status: str,
+        _input_tokens: int,
+        _output_tokens: int,
+        _actor_name: str,
+    ) -> None:
+        events.append((execution_id, status))
+
+    monkeypatch.setattr(agents_runtime.Runner, "run", hang)
+    runtime = AgentsRcaRuntime(
+        model="fake",
+        prompt_version="v9",
+        timeout_seconds=60,
+        persist_model_event=persist,
+    )
+    invocation = asyncio.create_task(
+        runtime._await_with_run_deadline(
+            runtime._invoke_turn(
+                None,
+                model=runtime.model,
+                coordinator_input="coordinate",
+                specialist_inputs={AgentName.LOG: "inspect logs"},
+                specialist_names=[AgentName.LOG],
+                max_turns=2,
+                prompt_version="v9",
+            )
+        )
+    )
+    await asyncio.wait_for(model_started.wait(), timeout=0.1)
+
+    invocation.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await invocation
+
+    assert len({execution_id for execution_id, _status in events}) == 1
+    assert [status for _execution_id, status in events] == ["started"]
+
+
 def test_prompt_version_selects_real_template_and_rejects_unknown_version() -> None:
     baseline = agents_runtime._apply_prompt_version("v8.2", "diagnose")
     current = agents_runtime._apply_prompt_version("v9", "diagnose")

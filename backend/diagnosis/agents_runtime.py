@@ -456,6 +456,7 @@ class AgentsRcaRuntime:
         )
         self._run_deadline: float | None = None
         self._active_model_execution_ids: set[str] = set()
+        self._active_model_actor_names: dict[str, str] = {}
         self._timeout_cancelled_execution_ids: set[str] = set()
         self._configured_model_name = (
             model_name.strip() if isinstance(model_name, str) and model_name.strip() else None
@@ -496,6 +497,7 @@ class AgentsRcaRuntime:
         )
         runtime._run_deadline = None
         runtime._active_model_execution_ids = set()
+        runtime._active_model_actor_names = {}
         runtime._timeout_cancelled_execution_ids = set()
         return runtime
 
@@ -1261,7 +1263,21 @@ class AgentsRcaRuntime:
                 )
                 await self._persist_agent_statuses(agent_names, "failed")
             if real_sdk_turn:
+                deadline_executions = [
+                    (execution_id, self._active_model_actor_names[execution_id])
+                    for execution_id in (
+                        self._active_model_execution_ids
+                        & self._timeout_cancelled_execution_ids
+                    )
+                ]
+                for deadline_execution_id, actor_name in deadline_executions:
+                    await self._persist_model_status(
+                        deadline_execution_id, "failed", 0, 0, actor_name
+                    )
+                if deadline_executions:
+                    await self._persist_agent_statuses(agent_names, "failed")
                 self._active_model_execution_ids.clear()
+                self._active_model_actor_names.clear()
                 self._timeout_cancelled_execution_ids.clear()
             raise
         except Exception:
@@ -1334,6 +1350,7 @@ class AgentsRcaRuntime:
             return
         if status == "started":
             self._active_model_execution_ids.add(execution_id)
+            self._active_model_actor_names[execution_id] = actor_name
         await _invoke_model_event_callback(
             callback,
             execution_id,
@@ -1344,6 +1361,7 @@ class AgentsRcaRuntime:
         )
         if status != "started":
             self._active_model_execution_ids.discard(execution_id)
+            self._active_model_actor_names.pop(execution_id, None)
             self._timeout_cancelled_execution_ids.discard(execution_id)
 
     def _consume_turn(
