@@ -7,6 +7,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -28,6 +29,7 @@ from backend.db.session import create_db_engine, initialize_database
 from backend.db.sqlite_repository import SQLiteInvestigationRepository
 from backend.domain.agent_findings import RootCauseAttribution
 from backend.domain.multi_agent import InvestigationStrategy, ModelProvider
+from backend.domain.runtime import RuntimeEventType
 from backend.runtime.coordinator import RuntimeCoordinator
 from backend.runtime.replay import ReplayDependencies, ReplayService
 from backend.runtime.sqlite_store import SQLiteRuntimeStore
@@ -207,7 +209,7 @@ def test_runner_optionally_configures_real_case_runner_without_breaking_old_fake
     assert manifest["strategy_config"]["timeout_seconds"] == 180
 
 
-def test_real_case_runner_preserves_runtime_id_on_execution_failure(
+def test_real_case_runner_preserves_runtime_audit_on_execution_failure(
     tmp_path: Path, monkeypatch
 ) -> None:
     engine = create_db_engine(f"sqlite:///{tmp_path / 'runtime.db'}")
@@ -222,6 +224,24 @@ def test_real_case_runner_preserves_runtime_id_on_execution_failure(
         raise RuntimeError("injected execution failure")
 
     monkeypatch.setattr(RuntimeCoordinator, "execute", fail_execution)
+    monkeypatch.setattr(
+        runtime_store,
+        "list_events",
+        lambda _run_id: [
+            SimpleNamespace(
+                event_type=RuntimeEventType.MODEL_COMPLETED,
+                safe_payload={"input_tokens": 7, "output_tokens": 2},
+            ),
+            SimpleNamespace(
+                event_type=RuntimeEventType.MODEL_COMPLETED,
+                safe_payload={"input_tokens": 3, "output_tokens": 1},
+            ),
+            SimpleNamespace(
+                event_type=RuntimeEventType.PHASE_COMPLETED,
+                safe_payload={"input_tokens": 999, "output_tokens": 999},
+            ),
+        ],
+    )
     outcome = OpenRcaDiagnosisRunner(
         Path(__file__).parents[1] / "fixtures" / "openrca",
         "test-model",
@@ -232,44 +252,8 @@ def test_real_case_runner_preserves_runtime_id_on_execution_failure(
 
     assert outcome.failure_category == "RuntimeError: benchmark case failed"
     assert outcome.runtime_run_id is not None
+    assert (outcome.input_tokens, outcome.output_tokens) == (10, 3)
     assert runtime_store.get_run(outcome.runtime_run_id).id == outcome.runtime_run_id
-
-
-@pytest.mark.anyio
-async def test_capturing_runtime_accumulates_usage_from_durable_clone(
-    monkeypatch,
-) -> None:
-    usages = iter(((7, 2), (3, 1)))
-    results = []
-
-    async def run_with_usage(_self, *_args, **_kwargs):
-        input_tokens, output_tokens = next(usages)
-        result = type(
-            "Result",
-            (),
-            {
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-            },
-        )()
-        results.append(result)
-        return result
-
-    monkeypatch.setattr(openrca_runner.AgentsRcaRuntime, "run", run_with_usage)
-    runtime = openrca_runner._CapturingAgentsRuntime(model="test-model")
-    durable_clone = runtime.clone_for_run(
-        model_provider=ModelProvider.OPENAI,
-        model_name="test-model",
-        prompt_version="v9",
-        token_budget=None,
-    )
-
-    await durable_clone.run()
-    await durable_clone.run()
-    results[0].input_tokens += 5
-
-    assert runtime.input_tokens == 15
-    assert runtime.output_tokens == 3
 
 
 @pytest.mark.parametrize("rate", [-1.0, math.nan, math.inf])

@@ -24,13 +24,14 @@ from backend.benchmarks.openrca.providers import (
     OpenRcaMetricProvider,
 )
 from backend.db.models import InvestigationRecord, InvestigationStatus
-from backend.diagnosis.agents_runtime import AgentsRcaRuntime, AgentsRcaRuntimeResult
+from backend.diagnosis.agents_runtime import AgentsRcaRuntime
 from backend.diagnosis.coordinator import DiagnosisCoordinator
 from backend.diagnosis.orchestrator import DiagnosisOrchestrator
 from backend.domain.agent_findings import RootCauseAttribution
 from backend.domain.events import IncidentEvent, IncidentSource, Severity
 from backend.domain.multi_agent import FailureCategory, InvestigationStrategy, ModelProvider
 from backend.domain.runtime import (
+    RuntimeEventType,
     RuntimeRun,
     RuntimeRunKind,
     RuntimeRunReason,
@@ -67,24 +68,17 @@ class BenchmarkCaseRunner(Protocol):
     ) -> BenchmarkCaseOutcome: ...
 
 
-class _CapturingAgentsRuntime(AgentsRcaRuntime):
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        # durable Phase clone 使用浅复制；共享结果引用才能包含后续 review/synthesis usage。
-        self._captured_results: list[AgentsRcaRuntimeResult] = []
-
-    async def run(self, *args, **kwargs) -> AgentsRcaRuntimeResult:
-        result = await super().run(*args, **kwargs)
-        self._captured_results.append(result)
-        return result
-
-    @property
-    def input_tokens(self) -> int:
-        return sum(item.input_tokens for item in self._captured_results)
-
-    @property
-    def output_tokens(self) -> int:
-        return sum(item.output_tokens for item in self._captured_results)
+def _runtime_token_usage(runtime_store, run_id: str) -> tuple[int, int]:
+    events = (
+        item
+        for item in runtime_store.list_events(run_id)
+        if item.event_type == RuntimeEventType.MODEL_COMPLETED
+    )
+    payloads = [item.safe_payload for item in events]
+    return (
+        sum(int(item.get("input_tokens", 0)) for item in payloads),
+        sum(int(item.get("output_tokens", 0)) for item in payloads),
+    )
 
 
 class OpenRcaDiagnosisRunner:
@@ -138,7 +132,7 @@ class OpenRcaDiagnosisRunner:
             ]
         )
         registry = build_provider_tool_registry(providers)
-        runtime = _CapturingAgentsRuntime(
+        runtime = AgentsRcaRuntime(
             model=self.model,
             strategy=strategy,
             tool_registry=registry,
@@ -197,11 +191,14 @@ class OpenRcaDiagnosisRunner:
         try:
             asyncio.run(execute())
         except Exception as exc:
+            input_tokens, output_tokens = _runtime_token_usage(
+                self.runtime_store, runtime_run.id
+            )
             return BenchmarkCaseOutcome(
                 failure_category=f"{type(exc).__name__}: benchmark case failed",
                 duration_ms=round((perf_counter() - started) * 1000),
-                input_tokens=runtime.input_tokens,
-                output_tokens=runtime.output_tokens,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
                 runtime_run_id=runtime_run.id,
             )
         runtime_run = self.runtime_store.get_run(runtime_run.id)
@@ -241,6 +238,9 @@ class OpenRcaDiagnosisRunner:
         )
         if not root_causes and not failure_category:
             failure_category = "missing_root_cause"
+        input_tokens, output_tokens = _runtime_token_usage(
+            self.runtime_store, runtime_run.id
+        )
         return BenchmarkCaseOutcome(
             root_causes=root_causes,
             completed=record.status == InvestigationStatus.COMPLETED,
@@ -250,8 +250,8 @@ class OpenRcaDiagnosisRunner:
             tool_call_count=len(calls),
             duplicate_query_rejections=duplicate_rejections,
             duration_ms=round((perf_counter() - started) * 1000),
-            input_tokens=runtime.input_tokens,
-            output_tokens=runtime.output_tokens,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
             read_only_violations=read_only_violations,
             runtime_run_id=runtime_run.id,
         )
