@@ -369,13 +369,25 @@ class AdaptiveToolSession:
             }
         )
         if self._persist_tool_result is not None:
-            failed_call = await self._persist_tool_result(
-                ToolInvocationResult(
-                    call=failed_call,
-                    evidence=[],
-                    provider_results=[],
+            persistence = asyncio.ensure_future(
+                self._persist_tool_result(
+                    ToolInvocationResult(
+                        call=failed_call,
+                        evidence=[],
+                        provider_results=[],
+                    )
                 )
             )
+            cancelled = False
+            # SDK 可能在内部 timeout 收口期间再次 cancel；终止事件必须先于取消向上传播。
+            while not persistence.done():
+                try:
+                    await asyncio.shield(persistence)
+                except asyncio.CancelledError:
+                    cancelled = True
+            failed_call = persistence.result()
+            if cancelled:
+                raise asyncio.CancelledError
         self.tool_calls.append(failed_call)
         if stop_reason is not None:
             self._stop(AgentName(running_call.agent_name), stop_reason)
