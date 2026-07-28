@@ -278,6 +278,49 @@ async def test_session_records_provider_timeout_before_sdk_cancels_tool():
 
 
 @pytest.mark.anyio
+async def test_session_persists_interrupted_tool_before_propagating_cancel():
+    persisted_calls = []
+    started = asyncio.Event()
+
+    async def persist_start(call):
+        persisted_calls.append(call)
+        started.set()
+        return call
+
+    async def persist_result(result):
+        persisted_calls.append(result.call)
+        return result.call
+
+    session = AdaptiveToolSession(
+        event=_event(),
+        seed_evidence=[],
+        registry=build_provider_tool_registry(ProviderRegistry([SlowProvider()])),
+        task_ids=_task_ids(),
+        persist_tool_start=persist_start,
+        persist_tool_result=persist_result,
+    )
+    invocation = asyncio.create_task(
+        session.invoke(
+            AgentName.LOG,
+            "read_logs",
+            json.dumps(_query_payload()),
+            1,
+        )
+    )
+    await started.wait()
+    invocation.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await invocation
+
+    assert [call.status for call in persisted_calls] == [
+        ToolCallStatus.RUNNING,
+        ToolCallStatus.INTERRUPTED,
+    ]
+    assert persisted_calls[0].id == persisted_calls[1].id
+
+
+@pytest.mark.anyio
 async def test_tool_call_uses_round_specific_task_id():
     provider = QueryProvider("read_logs", EvidenceProvider.LOG, "ev-round-two")
     session = AdaptiveToolSession(
