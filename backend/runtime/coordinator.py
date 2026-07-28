@@ -617,6 +617,15 @@ class RuntimeCoordinator:
             "completed": RuntimeEventType.AGENT_COMPLETED,
             "failed": RuntimeEventType.AGENT_FAILED,
         }[status]
+        if status != "started":
+            await self._close_running_agent_tools(
+                run,
+                attempt,
+                owner,
+                phase,
+                actor_name,
+                status,
+            )
         key = (attempt.id, actor_name)
         if status == "started":
             self._agent_spans[key] = self.telemetry.start_span(
@@ -651,6 +660,69 @@ class RuntimeCoordinator:
             raise
         if status != "started":
             self._finish_span(self._agent_spans.pop(key, None), status)
+
+    async def _close_running_agent_tools(
+        self,
+        run: RuntimeRun,
+        attempt: RuntimeAttempt,
+        owner: str,
+        phase: RuntimePhase,
+        actor_name: str,
+        agent_status: str,
+    ) -> None:
+        """Agent 终态前收口 SDK 遗留 Tool，保证父生命周期不会越过仍在 running 的子调用。"""
+        calls = self.store.investigation_repository.list_tool_calls(
+            run.investigation_id
+        )
+        for call in calls:
+            if (
+                call.runtime_run_id != run.id
+                or call.agent_name != actor_name
+                or call.status != ToolCallStatus.RUNNING
+            ):
+                continue
+            completed_at = datetime.now(UTC)
+            started_at = call.started_at or completed_at
+            interrupted = call.model_copy(
+                update={
+                    "status": ToolCallStatus.INTERRUPTED,
+                    "completed_at": completed_at,
+                    "duration_ms": max(
+                        0,
+                        int((completed_at - started_at).total_seconds() * 1000),
+                    ),
+                    "error_message": f"agent {agent_status}",
+                }
+            )
+            try:
+                await self._persist_tool_result(
+                    run,
+                    attempt,
+                    owner,
+                    phase,
+                    ToolInvocationResult(
+                        call=interrupted,
+                        evidence=[],
+                        provider_results=[],
+                    ),
+                )
+            except RuntimeConflict:
+                current = next(
+                    (
+                        item
+                        for item in self.store.investigation_repository.list_tool_calls(
+                            run.investigation_id
+                        )
+                        if item.id == call.id
+                    ),
+                    None,
+                )
+                if current is None or current.status not in {
+                    ToolCallStatus.SUCCESS,
+                    ToolCallStatus.FAILED,
+                    ToolCallStatus.INTERRUPTED,
+                }:
+                    raise
 
     @staticmethod
     def _finish_span(span, status: str, **attributes) -> None:

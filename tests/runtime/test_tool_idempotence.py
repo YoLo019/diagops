@@ -600,6 +600,68 @@ async def test_running_cancel_discards_late_real_tool_result(runtime_store) -> N
 
 
 @pytest.mark.anyio
+async def test_agent_terminal_event_closes_running_tool_before_agent(runtime_store) -> None:
+    store = runtime_store
+    run = store.create_run(
+        RuntimeRun(
+            id="run-agent-closes-tool",
+            investigation_id="inv-1",
+            run_kind=RuntimeRunKind.LIVE,
+            strategy=InvestigationStrategy.ADAPTIVE,
+            run_reason=RuntimeRunReason.INITIAL,
+        )
+    )
+
+    class AgentBoundaryExecutor:
+        async def execute_phase(self, phase_input) -> PhaseOutput:
+            if phase_input.phase == RuntimePhase.INTAKE:
+                await phase_input.persist_agent_event("LogAgent", "started")
+                await phase_input.persist_tool_start(
+                    ToolCallRecord(
+                        id="tool-open",
+                        task_id="task-open",
+                        agent_name="LogAgent",
+                        tool_name="read_logs",
+                        input={},
+                        status=ToolCallStatus.RUNNING,
+                        runtime_run_id=phase_input.run_id,
+                        execution_id="tool-exec-open",
+                        started_at=datetime.now(UTC),
+                    )
+                )
+                await phase_input.persist_agent_event("LogAgent", "failed")
+            return PhaseOutput(
+                business_mutation=BusinessMutation(investigation_id="inv-1"),
+                safe_payload={"status": "completed"},
+                resume_state=phase_input.resume_state,
+            )
+
+    coordinator = RuntimeCoordinator(
+        store=store,
+        writer=RuntimeWriter(store),
+        phase_executor=AgentBoundaryExecutor(),
+        heartbeat_seconds=1,
+    )
+    completed = await coordinator.execute(run.id, owner="worker-a")
+
+    lifecycle = [
+        event.event_type.value
+        for event in store.list_events(run.id)
+        if event.event_type.value.startswith(("agent.", "tool."))
+    ]
+    calls = store.investigation_repository.list_tool_calls("inv-1")
+    assert completed.status == RuntimeRunStatus.COMPLETED
+    assert lifecycle == [
+        "agent.started",
+        "tool.started",
+        "tool.failed",
+        "agent.failed",
+    ]
+    assert calls[0].status == ToolCallStatus.INTERRUPTED
+    await coordinator.shutdown()
+
+
+@pytest.mark.anyio
 async def test_running_cancel_leaves_model_execution_ambiguous(runtime_store) -> None:
     store = runtime_store
     started = asyncio.Event()
