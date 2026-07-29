@@ -345,6 +345,7 @@ class RuntimeCoordinator:
                     )
                 )
                 self.check_execution(run.id, owner, run.lease_version)
+                await self._close_open_phase_agents(run, attempt, owner, phase)
                 current = self.store.get_run(run.id)
                 checkpoint = await self.writer.submit(
                     PhaseCommit(
@@ -660,6 +661,20 @@ class RuntimeCoordinator:
             raise
         if status != "started":
             self._finish_span(self._agent_spans.pop(key, None), status)
+
+    async def _close_open_phase_agents(
+        self,
+        run: RuntimeRun,
+        attempt: RuntimeAttempt,
+        owner: str,
+        phase: RuntimePhase,
+    ) -> None:
+        """Phase 终态前关闭未上报终态的 Agent 及其 Tool 子生命周期。"""
+        for attempt_id, actor_name in list(self._agent_spans):
+            if attempt_id == attempt.id:
+                await self._persist_agent_event(
+                    run, attempt, owner, phase, actor_name, "failed"
+                )
 
     async def _close_running_agent_tools(
         self,
