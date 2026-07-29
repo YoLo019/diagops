@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from agents import set_tracing_disabled
+
 from backend.benchmarks.openrca.evaluator import (
     evaluate_run,
     write_official_query_inputs,
@@ -17,6 +19,8 @@ from backend.services.container import get_container
 
 
 def main() -> None:
+    # Runtime 事件才是基准审计源；SDK tracing 会把自定义端点凭据发往官方 exporter。
+    set_tracing_disabled(True)
     parser = argparse.ArgumentParser(prog="python -m backend.benchmarks.openrca")
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -89,6 +93,7 @@ def main() -> None:
         model=arguments.model,
         provider=ModelProvider(arguments.provider),
         prompt_version=arguments.prompt_version,
+        timeout_seconds=container.settings.agents.timeout_seconds,
         input_cost_per_million=arguments.input_cost_per_million,
         output_cost_per_million=arguments.output_cost_per_million,
         strategies=strategies,

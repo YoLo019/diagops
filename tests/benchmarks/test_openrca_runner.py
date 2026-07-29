@@ -7,10 +7,12 @@ import sys
 from datetime import datetime, timedelta, timezone
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 
+from backend.benchmarks.openrca import __main__ as openrca_cli
 from backend.benchmarks.openrca import runner as openrca_runner
 from backend.benchmarks.openrca.evaluator import evaluate_persisted_prediction
 from backend.benchmarks.openrca.models import (
@@ -20,12 +22,15 @@ from backend.benchmarks.openrca.models import (
 )
 from backend.benchmarks.openrca.runner import (
     BenchmarkCaseOutcome,
+    OpenRcaDiagnosisRunner,
     run_benchmark_pair,
 )
-from backend.db.session import create_db_engine
+from backend.db.session import create_db_engine, initialize_database
 from backend.db.sqlite_repository import SQLiteInvestigationRepository
 from backend.domain.agent_findings import RootCauseAttribution
 from backend.domain.multi_agent import InvestigationStrategy, ModelProvider
+from backend.domain.runtime import RuntimeEventType
+from backend.runtime.coordinator import RuntimeCoordinator
 from backend.runtime.replay import ReplayDependencies, ReplayService
 from backend.runtime.sqlite_store import SQLiteRuntimeStore
 
@@ -105,6 +110,18 @@ def test_runtime_case_requires_official_row_identity():
         )
 
 
+def test_cli_disables_agents_tracing(monkeypatch):
+    calls = []
+    monkeypatch.setattr(openrca_cli, "set_tracing_disabled", calls.append, raising=False)
+    monkeypatch.setattr(sys, "argv", ["openrca", "--help"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        openrca_cli.main()
+
+    assert exc_info.value.code == 0
+    assert calls == [True]
+
+
 def test_benchmark_event_window_matches_runtime_case_window(tmp_path: Path):
     case = OpenRcaRuntimeIndex.model_validate_json(
         safe_index(tmp_path).read_text(encoding="utf-8")
@@ -162,8 +179,10 @@ def test_runner_optionally_configures_real_case_runner_without_breaking_old_fake
     class ConfigurableFake(FakeRuntime):
         configured = None
 
-        def configure_runtime(self, *, provider, model, prompt_version) -> None:
-            self.configured = (provider, model, prompt_version)
+        def configure_runtime(
+            self, *, provider, model, prompt_version, timeout_seconds
+        ) -> None:
+            self.configured = (provider, model, prompt_version, timeout_seconds)
 
     runner = ConfigurableFake()
 
@@ -174,13 +193,67 @@ def test_runner_optionally_configures_real_case_runner_without_breaking_old_fake
         provider=ModelProvider.DEEPSEEK,
         model="deepseek-chat",
         prompt_version="v9",
+        timeout_seconds=180,
     )
 
     assert runner.configured == (
         ModelProvider.DEEPSEEK,
         "deepseek-chat",
         "v9",
+        180,
     )
+    run_id = (tmp_path / "runs" / "latest-run.txt").read_text().strip()
+    manifest = json.loads(
+        (tmp_path / "runs" / run_id / "run-manifest.json").read_text()
+    )
+    assert manifest["strategy_config"]["timeout_seconds"] == 180
+
+
+def test_real_case_runner_preserves_runtime_audit_on_execution_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'runtime.db'}")
+    initialize_database(engine)
+    repository = SQLiteInvestigationRepository(engine)
+    runtime_store = SQLiteRuntimeStore(engine, repository)
+    case = OpenRcaRuntimeIndex.model_validate_json(
+        safe_index(tmp_path).read_text(encoding="utf-8")
+    ).cases[0]
+
+    async def fail_execution(*_args, **_kwargs):
+        raise RuntimeError("injected execution failure")
+
+    monkeypatch.setattr(RuntimeCoordinator, "execute", fail_execution)
+    monkeypatch.setattr(
+        runtime_store,
+        "list_events",
+        lambda _run_id: [
+            SimpleNamespace(
+                event_type=RuntimeEventType.MODEL_COMPLETED,
+                safe_payload={"input_tokens": 7, "output_tokens": 2},
+            ),
+            SimpleNamespace(
+                event_type=RuntimeEventType.MODEL_COMPLETED,
+                safe_payload={"input_tokens": 3, "output_tokens": 1},
+            ),
+            SimpleNamespace(
+                event_type=RuntimeEventType.PHASE_COMPLETED,
+                safe_payload={"input_tokens": 999, "output_tokens": 999},
+            ),
+        ],
+    )
+    outcome = OpenRcaDiagnosisRunner(
+        Path(__file__).parents[1] / "fixtures" / "openrca",
+        "test-model",
+        repository=repository,
+        runtime_store=runtime_store,
+        prompt_version="v9",
+    ).run_case(case, InvestigationStrategy.FIXED)
+
+    assert outcome.failure_category == "RuntimeError: benchmark case failed"
+    assert outcome.runtime_run_id is not None
+    assert (outcome.input_tokens, outcome.output_tokens) == (10, 3)
+    assert runtime_store.get_run(outcome.runtime_run_id).id == outcome.runtime_run_id
 
 
 @pytest.mark.parametrize("rate", [-1.0, math.nan, math.inf])

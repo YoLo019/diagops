@@ -325,7 +325,8 @@ class RuntimeCoordinator:
                         ),
                         persist_model_event=lambda execution_id,
                         status,
-                        token_usage=0,
+                        input_tokens=0,
+                        output_tokens=0,
                         actor_name="CoordinatorAgent",
                         phase=phase: (
                             self._persist_model_event(
@@ -335,7 +336,8 @@ class RuntimeCoordinator:
                                 phase,
                                 execution_id,
                                 status,
-                                token_usage,
+                                input_tokens,
+                                output_tokens,
                                 actor_name,
                             )
                         ),
@@ -343,6 +345,7 @@ class RuntimeCoordinator:
                     )
                 )
                 self.check_execution(run.id, owner, run.lease_version)
+                await self._close_open_phase_agents(run, attempt, owner, phase)
                 current = self.store.get_run(run.id)
                 checkpoint = await self.writer.submit(
                     PhaseCommit(
@@ -502,8 +505,10 @@ class RuntimeCoordinator:
         record = repository.get(run.investigation_id)
         evidence = {item.id: item for item in record.evidence}
         evidence.update({item.id: item for item in result.evidence})
-        provider_results = {item.id: item for item in record.provider_results}
-        provider_results.update({item.id: item for item in result.provider_results})
+        provider_results = {
+            item.model_dump_json(): item
+            for item in [*record.provider_results, *result.provider_results]
+        }
         record = record.model_copy(
             update={
                 "evidence": list(evidence.values()),
@@ -547,7 +552,8 @@ class RuntimeCoordinator:
         phase: RuntimePhase,
         execution_id: str,
         status: str,
-        token_usage: int = 0,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
         actor_name: str = "CoordinatorAgent",
     ) -> None:
         event_type = {
@@ -583,8 +589,8 @@ class RuntimeCoordinator:
                     execution_id=execution_id,
                     safe_payload={
                         "status": status,
-                        "input_tokens": token_usage,
-                        "output_tokens": 0,
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
                     },
                 )
             )
@@ -596,8 +602,8 @@ class RuntimeCoordinator:
             self._finish_span(
                 self._model_spans.pop(key, None),
                 status,
-                input_tokens=token_usage,
-                output_tokens=0,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
             )
 
     async def _persist_agent_event(
@@ -614,6 +620,15 @@ class RuntimeCoordinator:
             "completed": RuntimeEventType.AGENT_COMPLETED,
             "failed": RuntimeEventType.AGENT_FAILED,
         }[status]
+        if status != "started":
+            await self._close_running_agent_tools(
+                run,
+                attempt,
+                owner,
+                phase,
+                actor_name,
+                status,
+            )
         key = (attempt.id, actor_name)
         if status == "started":
             self._agent_spans[key] = self.telemetry.start_span(
@@ -648,6 +663,83 @@ class RuntimeCoordinator:
             raise
         if status != "started":
             self._finish_span(self._agent_spans.pop(key, None), status)
+
+    async def _close_open_phase_agents(
+        self,
+        run: RuntimeRun,
+        attempt: RuntimeAttempt,
+        owner: str,
+        phase: RuntimePhase,
+    ) -> None:
+        """Phase 终态前关闭未上报终态的 Agent 及其 Tool 子生命周期。"""
+        for attempt_id, actor_name in list(self._agent_spans):
+            if attempt_id == attempt.id:
+                await self._persist_agent_event(
+                    run, attempt, owner, phase, actor_name, "failed"
+                )
+
+    async def _close_running_agent_tools(
+        self,
+        run: RuntimeRun,
+        attempt: RuntimeAttempt,
+        owner: str,
+        phase: RuntimePhase,
+        actor_name: str,
+        agent_status: str,
+    ) -> None:
+        """Agent 终态前收口 SDK 遗留 Tool，保证父生命周期不会越过仍在 running 的子调用。"""
+        calls = self.store.investigation_repository.list_tool_calls(
+            run.investigation_id
+        )
+        for call in calls:
+            if (
+                call.runtime_run_id != run.id
+                or call.agent_name != actor_name
+                or call.status != ToolCallStatus.RUNNING
+            ):
+                continue
+            completed_at = datetime.now(UTC)
+            started_at = call.started_at or completed_at
+            interrupted = call.model_copy(
+                update={
+                    "status": ToolCallStatus.INTERRUPTED,
+                    "completed_at": completed_at,
+                    "duration_ms": max(
+                        0,
+                        int((completed_at - started_at).total_seconds() * 1000),
+                    ),
+                    "error_message": f"agent {agent_status}",
+                }
+            )
+            try:
+                await self._persist_tool_result(
+                    run,
+                    attempt,
+                    owner,
+                    phase,
+                    ToolInvocationResult(
+                        call=interrupted,
+                        evidence=[],
+                        provider_results=[],
+                    ),
+                )
+            except RuntimeConflict:
+                current = next(
+                    (
+                        item
+                        for item in self.store.investigation_repository.list_tool_calls(
+                            run.investigation_id
+                        )
+                        if item.id == call.id
+                    ),
+                    None,
+                )
+                if current is None or current.status not in {
+                    ToolCallStatus.SUCCESS,
+                    ToolCallStatus.FAILED,
+                    ToolCallStatus.INTERRUPTED,
+                }:
+                    raise
 
     @staticmethod
     def _finish_span(span, status: str, **attributes) -> None:

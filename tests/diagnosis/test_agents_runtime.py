@@ -114,6 +114,31 @@ async def test_model_boundary_deducts_usage_and_blocks_exhausted_budget() -> Non
 
 
 @pytest.mark.anyio
+async def test_model_boundary_persists_split_token_usage() -> None:
+    events = []
+
+    async def turn(**_kwargs):
+        return _SdkTurnResult([], None, [], input_tokens=4, output_tokens=2)
+
+    async def persist(
+        execution_id, status, input_tokens, output_tokens, actor_name
+    ):
+        events.append(
+            (execution_id, status, input_tokens, output_tokens, actor_name)
+        )
+
+    runtime = AgentsRcaRuntime(
+        model="fake",
+        turn=turn,
+        persist_model_event=persist,
+    )
+
+    await runtime._invoke_turn(None, model=runtime.model)
+
+    assert events[-1][1:] == ("completed", 4, 2, "CoordinatorAgent")
+
+
+@pytest.mark.anyio
 async def test_model_boundary_rejects_response_that_exceeds_remaining_budget() -> None:
     events = []
 
@@ -203,6 +228,102 @@ async def test_external_model_cancellation_keeps_started_only_audit() -> None:
         )
     )
     await asyncio.wait_for(turn_started.wait(), timeout=0.1)
+
+    invocation.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await invocation
+
+    assert len({execution_id for execution_id, _status in events}) == 1
+    assert [status for _execution_id, status in events] == ["started"]
+
+
+@pytest.mark.anyio
+async def test_real_sdk_deadline_terminalizes_started_model(monkeypatch) -> None:
+    events: list[tuple[str, str, str]] = []
+
+    async def hang(agent, _agent_input, *, hooks, **_kwargs):
+        await hooks.on_llm_start(None, agent, None, [])
+        await asyncio.Event().wait()
+
+    async def persist(
+        execution_id: str,
+        status: str,
+        _input_tokens: int,
+        _output_tokens: int,
+        actor_name: str,
+    ) -> None:
+        events.append((execution_id, status, actor_name))
+
+    monkeypatch.setattr(agents_runtime.Runner, "run", hang)
+    runtime = AgentsRcaRuntime(
+        model="fake",
+        prompt_version="v9",
+        timeout_seconds=0.01,
+        persist_model_event=persist,
+    )
+
+    with pytest.raises(TimeoutError):
+        await runtime._await_with_run_deadline(
+            runtime._invoke_turn(
+                None,
+                model=runtime.model,
+                coordinator_input="coordinate",
+                specialist_inputs={AgentName.LOG: "inspect logs"},
+                specialist_names=[AgentName.LOG],
+                max_turns=2,
+                prompt_version="v9",
+            )
+        )
+
+    assert len({execution_id for execution_id, _status, _actor in events}) == 1
+    assert [(status, actor) for _execution_id, status, actor in events] == [
+        ("started", "LogAgent"),
+        ("failed", "LogAgent"),
+    ]
+
+
+@pytest.mark.anyio
+async def test_real_sdk_external_cancellation_keeps_started_only_audit(
+    monkeypatch,
+) -> None:
+    events: list[tuple[str, str]] = []
+    model_started = asyncio.Event()
+
+    async def hang(agent, _agent_input, *, hooks, **_kwargs):
+        await hooks.on_llm_start(None, agent, None, [])
+        model_started.set()
+        await asyncio.Event().wait()
+
+    async def persist(
+        execution_id: str,
+        status: str,
+        _input_tokens: int,
+        _output_tokens: int,
+        _actor_name: str,
+    ) -> None:
+        events.append((execution_id, status))
+
+    monkeypatch.setattr(agents_runtime.Runner, "run", hang)
+    runtime = AgentsRcaRuntime(
+        model="fake",
+        prompt_version="v9",
+        timeout_seconds=60,
+        persist_model_event=persist,
+    )
+    invocation = asyncio.create_task(
+        runtime._await_with_run_deadline(
+            runtime._invoke_turn(
+                None,
+                model=runtime.model,
+                coordinator_input="coordinate",
+                specialist_inputs={AgentName.LOG: "inspect logs"},
+                specialist_names=[AgentName.LOG],
+                max_turns=2,
+                prompt_version="v9",
+            )
+        )
+    )
+    await asyncio.wait_for(model_started.wait(), timeout=0.1)
 
     invocation.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -684,6 +805,14 @@ def test_all_model_data_uses_fixed_projection_and_recursive_redaction():
     assert "next_actions" not in synthesis
     assert "created_at" not in synthesis
     assert "execution_layer" not in synthesis
+
+
+def test_synthesis_prompt_requires_evidence_bound_root_causes():
+    prompt = _synthesis_prompt([_baseline()], [], _all_evidence())
+
+    assert "return at least one root_causes item" in prompt
+    assert "copy component, reason, and occurred_at exactly" in prompt
+    assert "supporting_evidence_ids" in prompt
 
 
 def test_specialist_instructions_define_finding_types_without_expected_causes():
@@ -1999,6 +2128,19 @@ async def test_timeout_after_recollection_records_final_synthesis_progress(monke
         _CapturedDraft(
             AgentName.METRIC,
             _SpecialistDraft.model_construct(
+                finding_type=AgentFindingType.ROOT_CAUSE,
+                summary="Unknown is not a usable root cause",
+                confidence=0.8,
+                evidence_ids=["ev-metric"],
+                related_cause_type=CauseType.UNKNOWN,
+                severity="medium",
+                rationale="",
+                gaps=[],
+            ),
+        ),
+        _CapturedDraft(
+            AgentName.METRIC,
+            _SpecialistDraft.model_construct(
                 finding_type="mutation",
                 summary="Unsupported enums",
                 confidence=0.8,
@@ -2010,7 +2152,7 @@ async def test_timeout_after_recollection_records_final_synthesis_progress(monke
             ),
         ),
     ],
-    ids=["unknown-agent", "unknown-round", "nan", "unknown-enums"],
+    ids=["unknown-agent", "unknown-round", "nan", "unknown-cause", "unknown-enums"],
 )
 async def test_invalid_specialist_output_is_rejected_without_escaping(
     monkeypatch, invalid

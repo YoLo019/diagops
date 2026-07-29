@@ -278,6 +278,14 @@ class AdaptiveToolSession:
                     ),
                     timeout=self.tool_timeout_seconds,
                 )
+        except asyncio.CancelledError:
+            await self._finish_failed_invocation(
+                running_call,
+                "tool invocation cancelled",
+                None,
+                status=ToolCallStatus.INTERRUPTED,
+            )
+            raise
         except TimeoutError:
             return await self._finish_failed_invocation(
                 running_call,
@@ -344,13 +352,15 @@ class AdaptiveToolSession:
         running_call: ToolCallRecord,
         message: str,
         stop_reason: AdaptiveStopReason | None,
+        *,
+        status: ToolCallStatus = ToolCallStatus.FAILED,
     ) -> str:
-        """用同一逻辑调用身份覆盖 running，避免超时线程的晚到结果产生第二条记录。"""
+        """用同一逻辑调用身份收口 running，避免取消或超时后的晚到结果产生第二条记录。"""
         completed_at = datetime.now(UTC)
         started_at = running_call.started_at or completed_at
         failed_call = running_call.model_copy(
             update={
-                "status": ToolCallStatus.FAILED,
+                "status": status,
                 "error_message": message,
                 "completed_at": completed_at,
                 "duration_ms": max(
@@ -359,18 +369,30 @@ class AdaptiveToolSession:
             }
         )
         if self._persist_tool_result is not None:
-            failed_call = await self._persist_tool_result(
-                ToolInvocationResult(
-                    call=failed_call,
-                    evidence=[],
-                    provider_results=[],
+            persistence = asyncio.ensure_future(
+                self._persist_tool_result(
+                    ToolInvocationResult(
+                        call=failed_call,
+                        evidence=[],
+                        provider_results=[],
+                    )
                 )
             )
+            cancelled = False
+            # SDK 可能在内部 timeout 收口期间再次 cancel；终止事件必须先于取消向上传播。
+            while not persistence.done():
+                try:
+                    await asyncio.shield(persistence)
+                except asyncio.CancelledError:
+                    cancelled = True
+            failed_call = persistence.result()
+            if cancelled:
+                raise asyncio.CancelledError
         self.tool_calls.append(failed_call)
         if stop_reason is not None:
             self._stop(AgentName(running_call.agent_name), stop_reason)
         return _response(
-            status=ToolCallStatus.FAILED,
+            status=status,
             evidence=[],
             warning=message,
             stop_reason=stop_reason,

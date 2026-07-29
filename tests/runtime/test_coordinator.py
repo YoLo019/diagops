@@ -503,6 +503,39 @@ async def test_execute_commits_every_phase_and_completes_attempt() -> None:
 
 
 @pytest.mark.anyio
+async def test_execute_persists_split_model_token_usage() -> None:
+    store, run, _executor, coordinator = _services()
+
+    class ModelUsageExecutor(RecordingPhaseExecutor):
+        async def execute_phase(self, phase_input) -> PhaseOutput:
+            if phase_input.phase == RuntimePhase.SPECIALIST_ANALYSIS:
+                await phase_input.persist_model_event(
+                    "model-usage-1",
+                    "completed",
+                    4,
+                    2,
+                    "LogAgent",
+                )
+            return await super().execute_phase(phase_input)
+
+    coordinator.phase_executor = ModelUsageExecutor("inv-1")
+
+    await coordinator.execute(run.id, owner="worker-a")
+
+    model_event = next(
+        item
+        for item in store.list_events(run.id)
+        if item.event_type == RuntimeEventType.MODEL_COMPLETED
+    )
+    assert model_event.safe_payload == {
+        "status": "completed",
+        "input_tokens": 4,
+        "output_tokens": 2,
+    }
+    await coordinator.shutdown()
+
+
+@pytest.mark.anyio
 async def test_cancelled_run_is_terminal_and_cannot_resume() -> None:
     store, run, _executor, coordinator = _services()
     await coordinator.request_cancel(run.id)

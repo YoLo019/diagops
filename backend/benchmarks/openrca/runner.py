@@ -24,13 +24,14 @@ from backend.benchmarks.openrca.providers import (
     OpenRcaMetricProvider,
 )
 from backend.db.models import InvestigationRecord, InvestigationStatus
-from backend.diagnosis.agents_runtime import AgentsRcaRuntime, AgentsRcaRuntimeResult
+from backend.diagnosis.agents_runtime import AgentsRcaRuntime
 from backend.diagnosis.coordinator import DiagnosisCoordinator
 from backend.diagnosis.orchestrator import DiagnosisOrchestrator
 from backend.domain.agent_findings import RootCauseAttribution
 from backend.domain.events import IncidentEvent, IncidentSource, Severity
 from backend.domain.multi_agent import FailureCategory, InvestigationStrategy, ModelProvider
 from backend.domain.runtime import (
+    RuntimeEventType,
     RuntimeRun,
     RuntimeRunKind,
     RuntimeRunReason,
@@ -67,12 +68,17 @@ class BenchmarkCaseRunner(Protocol):
     ) -> BenchmarkCaseOutcome: ...
 
 
-class _CapturingAgentsRuntime(AgentsRcaRuntime):
-    last_result: AgentsRcaRuntimeResult | None = None
-
-    async def run(self, *args, **kwargs) -> AgentsRcaRuntimeResult:
-        self.last_result = await super().run(*args, **kwargs)
-        return self.last_result
+def _runtime_token_usage(runtime_store, run_id: str) -> tuple[int, int]:
+    events = (
+        item
+        for item in runtime_store.list_events(run_id)
+        if item.event_type == RuntimeEventType.MODEL_COMPLETED
+    )
+    payloads = [item.safe_payload for item in events]
+    return (
+        sum(int(item.get("input_tokens", 0)) for item in payloads),
+        sum(int(item.get("output_tokens", 0)) for item in payloads),
+    )
 
 
 class OpenRcaDiagnosisRunner:
@@ -85,38 +91,55 @@ class OpenRcaDiagnosisRunner:
         runtime_store,
         provider: ModelProvider = ModelProvider.OPENAI,
         prompt_version: str = "v8.2",
+        timeout_seconds: float = 60,
     ) -> None:
         self.dataset_root = dataset_root
         self.model = model
         self.provider = provider
         self.prompt_version = prompt_version
+        self.timeout_seconds = timeout_seconds
         self.repository = repository
         self.runtime_store = runtime_store
 
-    def configure_runtime(self, *, provider, model, prompt_version) -> None:
+    def configure_runtime(
+        self, *, provider, model, prompt_version, timeout_seconds
+    ) -> None:
         self.provider = ModelProvider(provider)
         self.model = model
         self.prompt_version = prompt_version
+        self.timeout_seconds = timeout_seconds
 
     def run_case(
         self, case: OpenRcaRuntimeCase, strategy: InvestigationStrategy
     ) -> BenchmarkCaseOutcome:
         started = perf_counter()
+        record = InvestigationRecord(
+            event=_benchmark_event(case),
+            strategy=strategy,
+            runtime_available=True,
+        )
         providers = ProviderRegistry(
             [
-                OpenRcaLogProvider(self.dataset_root, case),
-                OpenRcaMetricProvider(self.dataset_root, case),
-                OpenRcaDependencyProvider(self.dataset_root, case),
+                OpenRcaLogProvider(
+                    self.dataset_root, case, evidence_namespace=record.id
+                ),
+                OpenRcaMetricProvider(
+                    self.dataset_root, case, evidence_namespace=record.id
+                ),
+                OpenRcaDependencyProvider(
+                    self.dataset_root, case, evidence_namespace=record.id
+                ),
             ]
         )
         registry = build_provider_tool_registry(providers)
-        runtime = _CapturingAgentsRuntime(
+        runtime = AgentsRcaRuntime(
             model=self.model,
             strategy=strategy,
             tool_registry=registry,
             model_provider=self.provider,
             model_name=self.model,
             prompt_version=self.prompt_version,
+            timeout_seconds=self.timeout_seconds,
         )
         orchestrator = DiagnosisOrchestrator(
             repository=self.repository,
@@ -127,13 +150,7 @@ class OpenRcaDiagnosisRunner:
             agents_runtime=runtime,
             default_strategy=strategy,
         )
-        record = self.repository.save(
-            InvestigationRecord(
-                event=_benchmark_event(case),
-                strategy=strategy,
-                runtime_available=True,
-            )
-        )
+        record = self.repository.save(record)
         runtime_run = self.runtime_store.create_run(
             RuntimeRun(
                 investigation_id=record.id,
@@ -148,7 +165,7 @@ class OpenRcaDiagnosisRunner:
                 ),
                 prompt_version=self.prompt_version,
                 tool_budget=8,
-                timeout_seconds=60,
+                timeout_seconds=self.timeout_seconds,
             )
         )
         writer = RuntimeWriter(self.runtime_store)
@@ -171,7 +188,19 @@ class OpenRcaDiagnosisRunner:
             finally:
                 await coordinator.shutdown()
 
-        asyncio.run(execute())
+        try:
+            asyncio.run(execute())
+        except Exception as exc:
+            input_tokens, output_tokens = _runtime_token_usage(
+                self.runtime_store, runtime_run.id
+            )
+            return BenchmarkCaseOutcome(
+                failure_category=f"{type(exc).__name__}: benchmark case failed",
+                duration_ms=round((perf_counter() - started) * 1000),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                runtime_run_id=runtime_run.id,
+            )
         runtime_run = self.runtime_store.get_run(runtime_run.id)
         record = self.repository.get(record.id)
         review = self.repository.get_coordination_review(record.id)
@@ -201,7 +230,6 @@ class OpenRcaDiagnosisRunner:
             execution.failure_category == FailureCategory.INVALID_REFERENCE
             for execution in executions
         )
-        runtime_result = runtime.last_result
         summary = record.multi_agent_run
         failure_category = (
             summary.adaptive_stop_reason.value
@@ -210,6 +238,9 @@ class OpenRcaDiagnosisRunner:
         )
         if not root_causes and not failure_category:
             failure_category = "missing_root_cause"
+        input_tokens, output_tokens = _runtime_token_usage(
+            self.runtime_store, runtime_run.id
+        )
         return BenchmarkCaseOutcome(
             root_causes=root_causes,
             completed=record.status == InvestigationStatus.COMPLETED,
@@ -219,8 +250,8 @@ class OpenRcaDiagnosisRunner:
             tool_call_count=len(calls),
             duplicate_query_rejections=duplicate_rejections,
             duration_ms=round((perf_counter() - started) * 1000),
-            input_tokens=runtime_result.input_tokens if runtime_result else 0,
-            output_tokens=runtime_result.output_tokens if runtime_result else 0,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
             read_only_violations=read_only_violations,
             runtime_run_id=runtime_run.id,
         )
@@ -289,6 +320,7 @@ def run_benchmark_pair(
     model: str,
     provider: ModelProvider = ModelProvider.OPENAI,
     prompt_version: str = "v8.2",
+    timeout_seconds: float = 60,
     input_cost_per_million: float = 0,
     output_cost_per_million: float = 0,
     strategies: tuple[InvestigationStrategy, ...] = (
@@ -309,6 +341,7 @@ def run_benchmark_pair(
             provider=provider,
             model=model,
             prompt_version=prompt_version,
+            timeout_seconds=timeout_seconds,
         )
     started_at = datetime.now(UTC)
     run_id = started_at.strftime("run-%Y%m%dT%H%M%S%fZ")
@@ -327,7 +360,7 @@ def run_benchmark_pair(
             "max_rounds": 2,
             "max_tool_calls_per_specialist": 3,
             "max_total_tool_calls": 8,
-            "timeout_seconds": 60,
+            "timeout_seconds": timeout_seconds,
         },
         "input_cost_per_million": input_cost_per_million,
         "output_cost_per_million": output_cost_per_million,

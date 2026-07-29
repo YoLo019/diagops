@@ -176,13 +176,38 @@ class _AgentOutputValidationError(ValueError):
     pass
 
 
+async def _invoke_model_event_callback(
+    callback: Callable[..., Awaitable[None]] | None,
+    execution_id: str,
+    status: str,
+    input_tokens: int,
+    output_tokens: int,
+    actor_name: str,
+) -> None:
+    if callback is None:
+        return
+    token_usage = input_tokens + output_tokens
+    for arguments in (
+        (execution_id, status, input_tokens, output_tokens, actor_name),
+        (execution_id, status, token_usage, actor_name),
+        (execution_id, status, token_usage),
+        (execution_id, status),
+    ):
+        try:
+            inspect.signature(callback).bind(*arguments)
+        except (TypeError, ValueError):
+            continue
+        await callback(*arguments)
+        return
+    raise TypeError("persist_model_event callback has an unsupported signature")
+
+
 class _ModelLifecycleHook(RunHooks):
     """按 SDK 的实际 LLM request 配对 durable Model 生命周期。"""
 
     def __init__(
         self,
-        persist_model_event: Callable[[str, str, int, str], Awaitable[None]]
-        | None,
+        persist_model_event: Callable[..., Awaitable[None]] | None,
         responses: list[Any] | None = None,
     ) -> None:
         self.persist_model_event = persist_model_event
@@ -195,29 +220,40 @@ class _ModelLifecycleHook(RunHooks):
         execution_id = f"model-exec-{uuid4().hex}"
         actor_name = agent.name
         self.pending.setdefault(id(agent), []).append((execution_id, actor_name))
-        if self.persist_model_event is not None:
-            await self.persist_model_event(execution_id, "started", 0, actor_name)
+        await _invoke_model_event_callback(
+            self.persist_model_event,
+            execution_id,
+            "started",
+            0,
+            0,
+            actor_name,
+        )
 
     async def on_llm_end(self, _context, agent, response) -> None:
         if self.responses is not None:
             self.responses.append(response)
         execution_id, actor_name = self.pending[id(agent)].pop(0)
-        if self.persist_model_event is not None:
-            usage = response.usage
-            await self.persist_model_event(
-                execution_id,
-                "completed",
-                max(0, usage.input_tokens) + max(0, usage.output_tokens),
-                actor_name,
-            )
+        usage = response.usage
+        await _invoke_model_event_callback(
+            self.persist_model_event,
+            execution_id,
+            "completed",
+            max(0, usage.input_tokens),
+            max(0, usage.output_tokens),
+            actor_name,
+        )
 
     async def fail_pending(self) -> None:
-        if self.persist_model_event is not None:
-            for requests in self.pending.values():
-                for execution_id, actor_name in requests:
-                    await self.persist_model_event(
-                        execution_id, "failed", 0, actor_name
-                    )
+        for requests in self.pending.values():
+            for execution_id, actor_name in requests:
+                await _invoke_model_event_callback(
+                    self.persist_model_event,
+                    execution_id,
+                    "failed",
+                    0,
+                    0,
+                    actor_name,
+                )
         self.pending.clear()
 
 
@@ -225,8 +261,7 @@ class _CoordinatorResponseHook(_ModelLifecycleHook):
     def __init__(
         self,
         responses: list[Any],
-        persist_model_event: Callable[[str, str, int, str], Awaitable[None]]
-        | None = None,
+        persist_model_event: Callable[..., Awaitable[None]] | None = None,
     ) -> None:
         super().__init__(persist_model_event, responses)
 
@@ -385,7 +420,7 @@ class AgentsRcaRuntime:
         | None = None,
         persist_tool_result: Callable[[Any], Awaitable[ToolCallRecord]] | None = None,
         persist_agent_event: Callable[[str, str], Awaitable[None]] | None = None,
-        persist_model_event: Callable[[str, str], Awaitable[None]] | None = None,
+        persist_model_event: Callable[..., Awaitable[None]] | None = None,
         check_execution: Callable[[], None] | None = None,
         max_parallel_steps_per_run: int = 3,
         model_adapter_factory: ModelAdapterFactory | None = None,
@@ -421,6 +456,7 @@ class AgentsRcaRuntime:
         )
         self._run_deadline: float | None = None
         self._active_model_execution_ids: set[str] = set()
+        self._active_model_actor_names: dict[str, str] = {}
         self._timeout_cancelled_execution_ids: set[str] = set()
         self._configured_model_name = (
             model_name.strip() if isinstance(model_name, str) and model_name.strip() else None
@@ -461,6 +497,7 @@ class AgentsRcaRuntime:
         )
         runtime._run_deadline = None
         runtime._active_model_execution_ids = set()
+        runtime._active_model_actor_names = {}
         runtime._timeout_cancelled_execution_ids = set()
         return runtime
 
@@ -1206,7 +1243,7 @@ class AgentsRcaRuntime:
         if aggregate_model_lifecycle:
             kwargs["execution_id"] = execution_id
             await self._persist_model_status(
-                execution_id, "started", 0, agent_names[0]
+                execution_id, "started", 0, 0, agent_names[0]
             )
             self._active_model_execution_ids.add(execution_id)
         if self._uses_default_sdk_turn:
@@ -1222,17 +1259,31 @@ class AgentsRcaRuntime:
                 and execution_id in self._timeout_cancelled_execution_ids
             ):
                 await self._persist_model_status(
-                    execution_id, "failed", 0, agent_names[0]
+                    execution_id, "failed", 0, 0, agent_names[0]
                 )
                 await self._persist_agent_statuses(agent_names, "failed")
             if real_sdk_turn:
+                deadline_executions = [
+                    (execution_id, self._active_model_actor_names[execution_id])
+                    for execution_id in (
+                        self._active_model_execution_ids
+                        & self._timeout_cancelled_execution_ids
+                    )
+                ]
+                for deadline_execution_id, actor_name in deadline_executions:
+                    await self._persist_model_status(
+                        deadline_execution_id, "failed", 0, 0, actor_name
+                    )
+                if deadline_executions:
+                    await self._persist_agent_statuses(agent_names, "failed")
                 self._active_model_execution_ids.clear()
+                self._active_model_actor_names.clear()
                 self._timeout_cancelled_execution_ids.clear()
             raise
         except Exception:
             if aggregate_model_lifecycle:
                 await self._persist_model_status(
-                    execution_id, "failed", 0, agent_names[0]
+                    execution_id, "failed", 0, 0, agent_names[0]
                 )
             await self._persist_agent_statuses(agent_names, "failed")
             raise
@@ -1243,16 +1294,20 @@ class AgentsRcaRuntime:
         self._hit_fault("model_after_send")
         # Model 返回后再次校验 fence，避免取消或 lease 丢失后的晚到结果进入业务状态。
         self._check_execution()
-        token_usage = max(0, getattr(result, "input_tokens", 0)) + max(
-            0, getattr(result, "output_tokens", 0)
-        )
+        input_tokens = max(0, getattr(result, "input_tokens", 0))
+        output_tokens = max(0, getattr(result, "output_tokens", 0))
+        token_usage = input_tokens + output_tokens
         if self.runtime_token_budget is not None:
             remaining = self.runtime_token_budget
             self.runtime_token_budget = max(0, remaining - token_usage)
             if token_usage > remaining:
                 if aggregate_model_lifecycle:
                     await self._persist_model_status(
-                        execution_id, "failed", token_usage, agent_names[0]
+                        execution_id,
+                        "failed",
+                        input_tokens,
+                        output_tokens,
+                        agent_names[0],
                     )
                 await self._persist_agent_statuses(agent_names, "failed")
                 raise TokenBudgetExceeded(
@@ -1260,7 +1315,11 @@ class AgentsRcaRuntime:
                 )
         if aggregate_model_lifecycle:
             await self._persist_model_status(
-                execution_id, "completed", token_usage, agent_names[0]
+                execution_id,
+                "completed",
+                input_tokens,
+                output_tokens,
+                agent_names[0],
             )
         failed_agents = set(getattr(result, "failed_agent_names", ()))
         for agent_name in agent_names:
@@ -1282,7 +1341,8 @@ class AgentsRcaRuntime:
         self,
         execution_id: str,
         status: str,
-        token_usage: int,
+        input_tokens: int,
+        output_tokens: int,
         actor_name: str = COORDINATOR,
     ) -> None:
         callback = self._persist_model_event
@@ -1290,21 +1350,18 @@ class AgentsRcaRuntime:
             return
         if status == "started":
             self._active_model_execution_ids.add(execution_id)
-        try:
-            inspect.signature(callback).bind(
-                execution_id, status, token_usage, actor_name
-            )
-        except (TypeError, ValueError):
-            try:
-                inspect.signature(callback).bind(execution_id, status, token_usage)
-            except (TypeError, ValueError):
-                await callback(execution_id, status)
-            else:
-                await callback(execution_id, status, token_usage)
-        else:
-            await callback(execution_id, status, token_usage, actor_name)
+            self._active_model_actor_names[execution_id] = actor_name
+        await _invoke_model_event_callback(
+            callback,
+            execution_id,
+            status,
+            input_tokens,
+            output_tokens,
+            actor_name,
+        )
         if status != "started":
             self._active_model_execution_ids.discard(execution_id)
+            self._active_model_actor_names.pop(execution_id, None)
             self._timeout_cancelled_execution_ids.discard(execution_id)
 
     def _consume_turn(
@@ -1438,6 +1495,12 @@ class AgentsRcaRuntime:
                 if not set(draft.evidence_ids) <= allowed_evidence[name]:
                     invalid_agents.add(name)
                     invalid_reference_agents.add(name)
+                    continue
+                if (
+                    draft.finding_type == AgentFindingType.ROOT_CAUSE
+                    and draft.related_cause_type in {None, CauseType.UNKNOWN}
+                ):
+                    invalid_agents.add(name)
                     continue
                 revision = None
                 if analysis_round == 2:
@@ -1606,7 +1669,7 @@ async def _run_sdk_turn(
     execution_id: str | None = None,
     prompt_version: str = "v8.2",
     parallel_limit: RunStepGate | None = None,
-    persist_model_event: Callable[[str, str, int, str], Awaitable[None]]
+    persist_model_event: Callable[[str, str, int, int, str], Awaitable[None]]
     | None = None,
 ) -> _SdkTurnResult:
     del execution_id
@@ -1886,7 +1949,7 @@ async def _run_with_model_lifecycle(
     agent,
     agent_input,
     *,
-    persist_model_event: Callable[[str, str, int, str], Awaitable[None]] | None,
+    persist_model_event: Callable[[str, str, int, int, str], Awaitable[None]] | None,
     **runner_kwargs: Any,
 ):
     """让每次真实 SDK 调用拥有独立 Model 生命周期。"""
@@ -1910,7 +1973,7 @@ async def _run_sdk_turn_parallel(
     analysis_round: int,
     adaptive_session: AdaptiveToolSession | None,
     parallel_limit: RunStepGate,
-    persist_model_event: Callable[[str, str, int, str], Awaitable[None]]
+    persist_model_event: Callable[[str, str, int, int, str], Awaitable[None]]
     | None = None,
 ) -> _SdkTurnResult:
     """V9 显式并行 specialist；单个失败不取消同组其他只读分析。"""
@@ -2116,7 +2179,12 @@ def _synthesis_prompt(
 ) -> str:
     return (
         "Synthesize the deterministic baseline and validated specialist findings. "
-        "Final decision status is assigned by DiagOps code.\n"
+        "Final decision status is assigned by DiagOps code. "
+        "When EVIDENCE contains explicit root_cause_claims, return at least one "
+        "root_causes item: copy component, reason, and occurred_at exactly from a "
+        "claim and cite its Evidence id in supporting_evidence_ids. When no explicit "
+        "root_cause_claims exist, return an empty root_causes list; do not invent a "
+        "root cause.\n"
         f"BASELINE={_json_dump([_hypothesis_projection(item) for item in hypotheses])}\n"
         f"VALIDATED_FINDINGS={_json_dump([_finding_projection(item) for item in findings])}\n"
         f"{_project_evidence(evidence)}"

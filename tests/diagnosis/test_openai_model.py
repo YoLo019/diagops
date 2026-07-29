@@ -12,7 +12,7 @@ def test_transport_timeout_finishes_inside_overall_budget(overall, expected):
 
 
 @pytest.mark.anyio
-async def test_openai_responses_model_owns_bounded_zero_retry_client(
+async def test_openai_responses_model_owns_bounded_retry_client(
     monkeypatch,
 ):
     captured = {}
@@ -31,7 +31,7 @@ async def test_openai_responses_model_owns_bounded_zero_retry_client(
 
     async with openai_model.openai_responses_model("gpt-test", 60) as model:
         assert model.model == "gpt-test"
-        assert captured == {"timeout": 55.0, "max_retries": 0}
+        assert captured == {"timeout": 55.0, "max_retries": 2}
         assert not clients[0].closed
 
     assert clients[0].closed
