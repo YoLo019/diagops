@@ -505,8 +505,10 @@ class RuntimeCoordinator:
         record = repository.get(run.investigation_id)
         evidence = {item.id: item for item in record.evidence}
         evidence.update({item.id: item for item in result.evidence})
-        provider_results = {item.id: item for item in record.provider_results}
-        provider_results.update({item.id: item for item in result.provider_results})
+        provider_results = {
+            item.model_dump_json(): item
+            for item in [*record.provider_results, *result.provider_results]
+        }
         record = record.model_copy(
             update={
                 "evidence": list(evidence.values()),

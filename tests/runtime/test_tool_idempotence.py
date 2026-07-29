@@ -27,6 +27,7 @@ from backend.domain.runtime import (
     RuntimeRunStatus,
 )
 from backend.domain.tool_calls import ToolCallRecord, ToolCallStatus, ToolSpec
+from backend.providers.results import ProviderResult
 from backend.runtime.coordinator import RuntimeCoordinator
 from backend.runtime.diff import RuntimeDiffService
 from backend.runtime.phases import BusinessMutation, PhaseOutput, ToolCommit
@@ -662,8 +663,13 @@ async def test_agent_terminal_event_closes_running_tool_before_agent(runtime_sto
 
 
 @pytest.mark.anyio
-async def test_phase_completion_closes_open_agent_and_tool(runtime_store) -> None:
+async def test_phase_completion_closes_open_agent_and_tool_with_provider_results(
+    runtime_store,
+) -> None:
     store = runtime_store
+    record = store.investigation_repository.get("inv-1")
+    record.provider_results = [ProviderResult(provider=EvidenceProvider.LOG)]
+    store.investigation_repository.save(record)
     run = store.create_run(
         RuntimeRun(
             id="run-phase-closes-agent",
