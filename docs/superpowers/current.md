@@ -8,12 +8,18 @@ Updated: 2026-07-31
 
 ## Implemented Baseline
 
-V9 durable and observable agent runtime is the implemented baseline. It retains
-the V8.2 bounded Specialist-owned evidence tools and reproducible OpenRCA
-fixed-versus-adaptive benchmark contract while adding durable Runs, Attempts,
-lifecycle events, checkpoints, recovery, Replay, and supported Run Diff.
+V10 shared signal semantics is the implemented baseline. It retains the V9
+durable and observable agent runtime while routing both OpenRCA and production
+Prometheus telemetry through one bounded signal-semantics core, segment-aware
+Attribution, a thin field-only OpenRCA Projector, an Alertmanager webhook
+boundary, and a seven-scenario production Gate (passed 7/7 with onset error
+≤60s, evidence references 100%, read-only violations 0, zero answer leakage).
+The OpenRCA frozen six-case targeted Gate scored 2/6 and was accepted by the
+user on 2026-07-31; see
+`docs/superpowers/openrca-v10-6-case-failure-analysis.md`.
 
-Implemented baseline commit: `bcbcafc4569276b9c9617f042d8d6c73539081ac`
+Implemented baseline commit: merge `26c8670` of `agent/v10-shared-signal-semantics`
+(gates ran on source identity `6a7df40e962e514167bc539f20d89467a0f70abb`)
 
 The current platform uses SQLite by default, retains an in-memory repository for tests and explicit configuration, and includes an optional default-off OpenAI Agents SDK runtime with deterministic RCA fallback.
 

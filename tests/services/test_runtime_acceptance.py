@@ -50,7 +50,9 @@ def test_key_free_runtime_acceptance_runs_real_scenarios_and_writes_safe_artifac
     assert artifact_path.name == "result.json"
     assert artifact_path.parent.parent == tmp_path
     assert artifact["git_commit"] == "test-commit"
-    assert artifact["git_dirty"] is True
+    # git_dirty 的 True/False 语义由 test_candidate_diff_hash_is_stable... 用临时
+    # 仓库确定性覆盖；此处只断言字段存在且为布尔，避免依赖本仓库工作区状态。
+    assert isinstance(artifact["git_dirty"], bool)
     assert len(artifact["candidate_diff_sha256"]) == 64
     assert artifact["config"]["seed"] == 42
     assert REQUIRED_SCENARIOS == APPROVED_FAULT_POINTS
