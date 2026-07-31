@@ -1,0 +1,136 @@
+x-project-service: &project-service
+  build:
+    context: .
+    dockerfile: Dockerfile.production-gate
+  image: diagops-production-gate:local
+
+services:
+  diagops:
+    <<: *project-service
+    command: ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      DIAGOPS_CONFIG: /app/config/production-gate/diagops.yaml
+    volumes:
+      - diagops-state:/state
+      - evidence-logs:/evidence/logs:ro
+      - evidence-deployments:/evidence/deployments:ro
+    depends_on:
+      prometheus:
+        condition: service_started
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"
+      interval: 2s
+      timeout: 3s
+      retries: 60
+
+  prometheus:
+    image: prom/prometheus:v3.13.1
+    entrypoint:
+      - /bin/sh
+      - /etc/prometheus/seed-and-run.sh
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    volumes:
+      - ./config/production-gate/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./config/production-gate/rules.yml:/etc/prometheus/rules.yml:ro
+      - ./config/production-gate/seed-prometheus.sh:/etc/prometheus/seed-and-run.sh:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      app:
+        condition: service_healthy
+      dependency:
+        condition: service_healthy
+
+  alertmanager:
+    image: prom/alertmanager:v0.32.1
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+    volumes:
+      - ./config/production-gate/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    depends_on:
+      diagops:
+        condition: service_healthy
+
+  app:
+    <<: *project-service
+    command:
+      - uvicorn
+      - backend.services.production_lab:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    environment:
+      DIAGOPS_LAB_ROLE: app
+      DIAGOPS_PRODUCTION_GATE: "true"
+      DIAGOPS_LAB_DEPENDENCY_URL: http://dependency:8000/work
+      DIAGOPS_LAB_LOG_PATH: /evidence/logs/app.log
+      DIAGOPS_LAB_DEPLOYMENT_PATH: /evidence/deployments/deployments.json
+    volumes:
+      - evidence-logs:/evidence/logs
+      - evidence-deployments:/evidence/deployments
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  dependency:
+    <<: *project-service
+    command:
+      - uvicorn
+      - backend.services.production_lab:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    environment:
+      DIAGOPS_LAB_ROLE: dependency
+      DIAGOPS_PRODUCTION_GATE: "true"
+      DIAGOPS_LAB_DEPENDENCY_DELAY_SECONDS: "2"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  scenario-runner:
+    <<: *project-service
+    command: ["python", "-m", "backend.services.production_acceptance", "run"]
+    environment:
+      DIAGOPS_PRODUCTION_SCENARIO: ${DIAGOPS_PRODUCTION_SCENARIO:-healthy_control}
+      DIAGOPS_LAB_APP_URL: http://app:8000
+      DIAGOPS_LAB_DEPENDENCY_URL: http://dependency:8000
+      DIAGOPS_URL: http://diagops:8000
+      DIAGOPS_ALERTMANAGER_URL: http://alertmanager:9093
+      DIAGOPS_PRODUCTION_RESULT: /output/scenario.json
+    volumes:
+      - ${DIAGOPS_PRODUCTION_OUTPUT:-./output/production-acceptance/current}:/output
+    depends_on:
+      app:
+        condition: service_healthy
+      dependency:
+        condition: service_healthy
+      diagops:
+        condition: service_healthy
+      alertmanager:
+        condition: service_started
+
+volumes:
+  diagops-state:
+  evidence-logs:
+  evidence-deployments:
+  prometheus-data:

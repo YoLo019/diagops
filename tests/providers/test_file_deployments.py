@@ -38,6 +38,8 @@ def test_file_deployment_provider_matches_payment_service_release():
     assert evidence.payload["operator"] == "release-bot"
     assert evidence.payload["commit"] == "abc1234"
     assert "v1.8.2" in evidence.payload["summary"]
+    assert evidence.payload["component"] == "payment-service"
+    assert evidence.payload["signal_type"] == "deployment"
 
 
 def test_file_deployment_provider_ignores_out_of_window_deployment(tmp_path):

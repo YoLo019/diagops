@@ -1,151 +1,240 @@
+"""Runtime Workbench 前端 projection/selection 的可执行行为测试。
+
+通过 node 直接执行 `frontend/src/runtimeProjection.ts`（纯函数模块），
+验证 phase 时间线、agent 泳道、当前 Run 选择、操作开关和 allowlist 细节投影，
+不再断言源码字符串。类型与接口由 frontend production build 和
+backend Runtime API tests 覆盖。
+"""
+
+import json
+import os
+import subprocess
 from pathlib import Path
 
 FRONTEND = Path(__file__).parents[2] / "frontend"
 
+_DRIVER = """
+import {
+  allowlistedRuntimeDetail,
+  canCancelRuntimeRun,
+  canReplayRuntimeRun,
+  canResumeRuntimeRun,
+  groupAgentSwimlanes,
+  projectPhaseTimeline,
+  selectCurrentRuntimeRun,
+} from './src/runtimeProjection.ts';
 
-def test_runtime_api_types_and_all_endpoints_are_declared() -> None:
-    api = (FRONTEND / "src" / "api.ts").read_text(encoding="utf-8")
+const event = (overrides) => ({
+  sequence: 1,
+  event_type: 'phase.started',
+  phase: 'collect',
+  actor_type: 'system',
+  actor_name: null,
+  tool_call_id: null,
+  evidence_ids: [],
+  safe_payload: {},
+  occurred_at: '2026-07-30T12:00:00Z',
+  schema_version: 1,
+  ...overrides,
+});
+const run = (overrides) => ({
+  id: 'run-x',
+  run_kind: 'live',
+  status: 'running',
+  ...overrides,
+});
 
-    for type_name in [
-        "JsonValue",
-        "RuntimeRun",
-        "RuntimeAttempt",
-        "RuntimeEvent",
-        "RuntimeCheckpoint",
-        "ReplayReport",
-        "RuntimeRunDiff",
-    ]:
-        assert f"export type {type_name}" in api
-    assert "safe_payload: Record<string, JsonValue>" in api
-    for method in [
-        "createRuntimeRun",
-        "listRuntimeRuns",
-        "getRuntimeRun",
-        "getRuntimeEvents",
-        "cancelRuntimeRun",
-        "resumeRuntimeRun",
-        "replayRuntimeRun",
-        "diffRuntimeRuns",
-        "runtimeEventStreamUrl",
-    ]:
-        assert f"function {method}" in api
-    for prohibited in ["raw_prompt", "provider_payload", "chain_of_thought"]:
-        assert prohibited not in api
-
-
-def test_runtime_event_hook_is_keyed_deduplicated_and_durable_on_error() -> None:
-    hook = (FRONTEND / "src" / "useRuntimeEvents.ts").read_text(encoding="utf-8")
-
-    for source_contract in [
-        "new Map<string, RuntimeEventState>()",
-        "new EventSource(",
-        "runtimeEventStreamUrl(runId, current.lastSequence)",
-        "event.sequence <= current.lastSequence",
-        "getRuntimeEvents(runId, current.lastSequence",
-        "Math.min(",
-        "source.close()",
-        '"runtime.opaque"',
-    ]:
-        assert source_contract in hook
+const calls = JSON.parse(process.env.PROJECTION_CALLS);
+const registry = {
+  timeline: (events) => projectPhaseTimeline(events),
+  lanes: (events) => groupAgentSwimlanes(events),
+  select: (runs) => selectCurrentRuntimeRun(runs),
+  detail: (item) => allowlistedRuntimeDetail(item),
+  controls: (item) => [
+    canCancelRuntimeRun(item),
+    canResumeRuntimeRun(item),
+    canReplayRuntimeRun(item),
+  ],
+};
+const results = calls.map(({ fn, args }) => {
+  const value = registry[fn](...args);
+  return value === undefined ? null : value;
+});
+process.stdout.write(JSON.stringify({ results, event, run }));
+"""
 
 
-def test_runtime_event_hook_never_returns_the_previous_runs_snapshot() -> None:
-    hook = (FRONTEND / "src" / "useRuntimeEvents.ts").read_text(encoding="utf-8")
-    workbench = (FRONTEND / "src" / "RuntimeWorkbench.tsx").read_text(
-        encoding="utf-8"
+def _execute(calls: list[dict[str, object]]) -> list[object]:
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", _DRIVER],
+        cwd=FRONTEND,
+        env={**os.environ, "PROJECTION_CALLS": json.dumps(calls)},
+        capture_output=True,
+        encoding="utf-8",
+        timeout=30,
+        check=True,
+    )
+    return json.loads(completed.stdout)["results"]
+
+
+def _event(overrides: dict[str, object]) -> dict[str, object]:
+    base = {
+        "sequence": 1,
+        "event_type": "phase.started",
+        "phase": "collect",
+        "actor_type": "system",
+        "actor_name": None,
+        "tool_call_id": None,
+        "evidence_ids": [],
+        "safe_payload": {},
+        "occurred_at": "2026-07-30T12:00:00Z",
+        "schema_version": 1,
+    }
+    base.update(overrides)
+    return base
+
+
+def _run(overrides: dict[str, object]) -> dict[str, object]:
+    base = {"id": "run-x", "run_kind": "live", "status": "running"}
+    base.update(overrides)
+    return base
+
+
+def test_phase_timeline_projects_known_events_and_durations() -> None:
+    events = [
+        _event({"phase": "collect", "occurred_at": "2026-07-30T12:00:00Z"}),
+        _event(
+            {
+                "sequence": 2,
+                "event_type": "phase.completed",
+                "phase": "collect",
+                "occurred_at": "2026-07-30T12:00:04Z",
+                "safe_payload": {"status": "completed"},
+            }
+        ),
+        # schema 不匹配与未知类型不得进入时间线。
+        _event({"sequence": 3, "schema_version": 2, "phase": "analyze"}),
+        _event(
+            {
+                "sequence": 4,
+                "event_type": "phase.custom",
+                "phase": "analyze",
+                "occurred_at": "2026-07-30T12:00:05Z",
+            }
+        ),
+    ]
+
+    [timeline] = _execute([{"fn": "timeline", "args": [events]}])
+
+    assert timeline == [
+        {
+            "phase": "collect",
+            "status": "completed",
+            "startedAt": "2026-07-30T12:00:00Z",
+            "completedAt": "2026-07-30T12:00:04Z",
+            "durationMs": 4000,
+        }
+    ]
+
+
+def test_agent_swimlanes_group_sort_and_ignore_unknown_types() -> None:
+    events = [
+        _event(
+            {
+                "sequence": 2,
+                "event_type": "agent.completed",
+                "actor_name": "LogAgent",
+            }
+        ),
+        _event(
+            {
+                "sequence": 1,
+                "event_type": "agent.started",
+                "actor_name": "LogAgent",
+            }
+        ),
+        _event(
+            {
+                "sequence": 3,
+                "event_type": "agent.started",
+                "actor_name": None,
+            }
+        ),
+        _event({"sequence": 4, "event_type": "agent.unknown", "actor_name": "X"}),
+    ]
+
+    [lanes] = _execute([{"fn": "lanes", "args": [events]}])
+
+    assert [lane["agentName"] for lane in lanes] == ["LogAgent", "unknown"]
+    assert [item["sequence"] for item in lanes[0]["events"]] == [1, 2]
+
+
+def test_current_run_selection_prefers_actionable_live_runs() -> None:
+    replay_newer = _run({"id": "replay", "run_kind": "replay", "status": "completed"})
+    live_done = _run({"id": "done", "status": "completed"})
+    live_running = _run({"id": "running", "status": "running"})
+    live_interrupted = _run({"id": "interrupted", "status": "interrupted"})
+
+    results = _execute(
+        [
+            {"fn": "select", "args": [[replay_newer, live_done, live_running]]},
+            {"fn": "select", "args": [[replay_newer, live_done, live_interrupted]]},
+            {"fn": "select", "args": [[replay_newer, live_done]]},
+            {"fn": "select", "args": [[replay_newer]]},
+        ]
     )
 
-    assert "type SelectedRuntimeEventState" in hook
-    assert "selected.runId === runId" in hook
-    assert "{ runId, value:" in hook
-    assert "selectedEvent?.run_id === selectedRun?.id" in workbench
+    assert [item["id"] for item in results] == [
+        "running",
+        "interrupted",
+        "done",
+        "replay",
+    ]
 
 
-def test_runtime_session_list_polls_each_current_run_status() -> None:
-    workbench = (FRONTEND / "src" / "RuntimeWorkbench.tsx").read_text(
-        encoding="utf-8"
+def test_run_control_guards_follow_run_status() -> None:
+    statuses = [
+        "created",
+        "running",
+        "cancelling",
+        "interrupted",
+        "completed",
+        "failed",
+        "cancelled",
+    ]
+
+    results = _execute(
+        [{"fn": "controls", "args": [_run({"status": status})]} for status in statuses]
     )
 
-    assert "useQueries" in workbench
-    assert "selectCurrentRuntimeRun(sessionRuns.get(investigation.id) ?? [])?.status" in workbench
-    assert "refetchInterval: 5_000" in workbench
+    cancel, resume, replay = zip(*results, strict=False)
+    assert list(cancel) == [True, True, True, False, False, False, False]
+    assert list(resume) == [False, False, False, True, False, False, False]
+    assert list(replay) == [False, False, False, False, True, True, True]
 
 
-def test_current_runtime_run_prefers_actionable_live_over_newer_replay() -> None:
-    workbench = (FRONTEND / "src" / "RuntimeWorkbench.tsx").read_text(
-        encoding="utf-8"
-    )
-    projection = (FRONTEND / "src" / "runtimeProjection.ts").read_text(
-        encoding="utf-8"
-    )
-
-    assert "selectCurrentRuntimeRun" in workbench
-    assert "const currentRun = selectCurrentRuntimeRun(runs)" in workbench
-    assert 'run.run_kind === "live"' in projection
-    assert '"created", "running", "cancelling", "interrupted"' in projection
-
-
-def test_runtime_workbench_has_three_panels_history_and_valid_controls() -> None:
-    workbench = (FRONTEND / "src" / "RuntimeWorkbench.tsx").read_text(
-        encoding="utf-8"
-    )
-    projection = (FRONTEND / "src" / "runtimeProjection.ts").read_text(
-        encoding="utf-8"
+def test_allowlisted_detail_drops_non_allowlisted_fields() -> None:
+    item = _event(
+        {
+            "safe_payload": {"note": "ok"},
+            "raw_prompt": "secret prompt",
+            "provider_payload": {"token": "secret"},
+            "chain_of_thought": "hidden reasoning",
+        }
     )
 
-    for label in [
-        "多 Investigation 会话",
-        "当前 Run",
-        "Phase Timeline",
-        "Agent Swimlanes",
-        "Event / Tool / Evidence / Checkpoint",
-        "历史 Run（只读）",
-        "会话并行与单 Run 内 Agent 并行相互独立",
-    ]:
-        assert label in workbench
-    for control in [
-        "cancelRuntimeRun",
-        "resumeRuntimeRun",
-        "replayRuntimeRun",
-        "diffRuntimeRuns",
-        "invalidateQueries",
-        "canCancelRuntimeRun",
-        "canResumeRuntimeRun",
-        "canReplayRuntimeRun",
-    ]:
-        assert control in workbench or control in projection
-    assert "groupAgentSwimlanes" in projection
-    assert "projectPhaseTimeline" in projection
+    [detail] = _execute([{"fn": "detail", "args": [item]}])
 
-
-def test_runtime_projection_only_promotes_known_schema_v1_events() -> None:
-    projection = (FRONTEND / "src" / "runtimeProjection.ts").read_text(
-        encoding="utf-8"
-    )
-
-    assert '.startsWith("phase.")' not in projection
-    assert '.startsWith("agent.")' not in projection
-    assert "event.schema_version !== 1" in projection
-    for event_type in [
-        "phase.started",
-        "phase.completed",
-        "phase.failed",
-        "phase.skipped",
-        "agent.started",
-        "agent.completed",
-        "agent.failed",
-    ]:
-        assert f'"{event_type}"' in projection
-
-
-def test_app_exposes_runtime_view_and_responsive_styles() -> None:
-    app = (FRONTEND / "src" / "App.tsx").read_text(encoding="utf-8")
-    styles = (FRONTEND / "src" / "styles.css").read_text(encoding="utf-8")
-    vite = (FRONTEND / "vite.config.ts").read_text(encoding="utf-8")
-
-    assert "RuntimeWorkbench" in app
-    assert "Runtime Workbench" in app
-    assert ".runtime-workbench" in styles
-    assert ".runtime-agent-lanes" in styles
-    assert "@media (max-width: 760px)" in styles
-    assert '"/runtime-runs": "http://127.0.0.1:8000"' in vite
+    assert set(detail) == {
+        "sequence",
+        "event_type",
+        "phase",
+        "actor_type",
+        "actor_name",
+        "tool_call_id",
+        "evidence_ids",
+        "safe_payload",
+        "occurred_at",
+        "schema_version",
+    }
+    assert "secret" not in json.dumps(detail)

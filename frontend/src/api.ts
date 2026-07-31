@@ -600,20 +600,8 @@ export function getTaskGraph(id: string) {
   return request<TaskGraph>(`/investigations/${id}/task-graph`);
 }
 
-export function getAgentFindings(id: string) {
-  return request<AgentFinding[]>(`/investigations/${id}/agent-findings`);
-}
-
-export function getCoordinationReview(id: string) {
-  return request<CoordinationReview | null>(`/investigations/${id}/coordination-review`);
-}
-
 export function getRcaWorkbench(id: string) {
   return request<RcaWorkbench>(`/investigations/${id}/rca-workbench`);
-}
-
-export function getAgentConfig() {
-  return request<AgentConfig>("/config/agents");
 }
 
 export function getLatestOpenRcaBenchmark() {

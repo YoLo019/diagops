@@ -258,24 +258,24 @@ class DiagnosisExecutionEngine:
         )
 
     def _save_plan(self, plan: DiagnosisPlan) -> None:
-        self._repo_call("save_plan", plan)
+        self.repository.save_plan(plan)
 
     def _save_tasks(self, investigation_id: str, tasks: list[DiagnosisTask]) -> None:
-        self._repo_call("save_tasks", investigation_id, tasks)
+        self.repository.save_tasks(investigation_id, tasks)
 
     def _save_executions(
         self,
         investigation_id: str,
         executions: list[AgentExecution],
     ) -> None:
-        self._repo_call("save_executions", investigation_id, executions)
+        self.repository.save_executions(investigation_id, executions)
 
     def _save_tool_calls(
         self,
         investigation_id: str,
         calls: list[ToolCallRecord],
     ) -> None:
-        self._repo_call("save_tool_calls", investigation_id, calls)
+        self.repository.save_tool_calls(investigation_id, calls)
 
     def _save_context_fact(
         self,
@@ -284,8 +284,7 @@ class DiagnosisExecutionEngine:
     ) -> None:
         if not execution.evidence_ids:
             return
-        self._repo_call(
-            "save_context_facts",
+        self.repository.save_context_facts(
             investigation_id,
             [
                 ContextFact(
@@ -298,11 +297,6 @@ class DiagnosisExecutionEngine:
                 )
             ],
         )
-
-    def _repo_call(self, method_name: str, *args: Any) -> None:
-        method = getattr(self.repository, method_name, None)
-        if callable(method):
-            method(*args)
 
 
 def _task_order(task: DiagnosisTask) -> tuple[int, bool]:

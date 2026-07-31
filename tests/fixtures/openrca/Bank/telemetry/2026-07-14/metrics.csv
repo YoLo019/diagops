@@ -3,3 +3,7 @@ timestamp,cmdb_id,kpi_name,value,instance
 2026-07-14T10:00:00+08:00,bank-api,cpu_usage,11,bank-api-1
 2026-07-14T11:00:00+08:00,bank-api,cpu_usage,9,bank-api-1
 2026-07-14T12:05:00+08:00,bank-api,cpu_usage,95,bank-api-1
+2026-07-14T11:42:00+08:00,bank-api,cpu_usage,10,bank-api-1
+2026-07-14T11:47:00+08:00,bank-api,cpu_usage,11,bank-api-1
+2026-07-14T11:52:00+08:00,bank-api,cpu_usage,9,bank-api-1
+2026-07-14T11:57:00+08:00,bank-api,cpu_usage,10,bank-api-1

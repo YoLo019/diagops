@@ -5,7 +5,10 @@ from pathlib import Path
 import pytest
 
 from backend.benchmarks.openrca.models import OpenRcaFailureMode
-from backend.benchmarks.openrca.prepare import prepare_cases
+from backend.benchmarks.openrca.prepare import (
+    _expected_root_cause_count,
+    prepare_cases,
+)
 
 PARTITIONS = (
     "Bank",
@@ -42,8 +45,8 @@ def full_fixture_root(tmp_path: Path) -> Path:
                     {
                         "task_index": f"task_{(index - 1) % 7 + 1}",
                         "instruction": (
-                            "On July 14, 2026, within the time range of "
-                            "12:00 to 12:10, diagnose the incident."
+                            "A failure occurred on July 14, 2026, within the "
+                            "time range of 12:00 to 12:10. Diagnose it."
                         ),
                         "telemetry_dir": "",
                         "scoring_points": "root cause component is secret",
@@ -67,9 +70,7 @@ def full_fixture_root(tmp_path: Path) -> Path:
     return root
 
 
-def test_prepare_selects_ten_per_partition_with_seed_42(
-    full_fixture_root: Path, tmp_path: Path
-):
+def test_prepare_selects_ten_per_partition_with_seed_42(full_fixture_root: Path, tmp_path: Path):
     first = prepare_cases(full_fixture_root, tmp_path / "first", per_partition=10, seed=42)
     second = prepare_cases(full_fixture_root, tmp_path / "second", per_partition=10, seed=42)
 
@@ -85,10 +86,38 @@ def test_prepare_selects_ten_per_partition_with_seed_42(
     assert first.manifest.manifest_hash == second.manifest.manifest_hash
     assert len({case.case_id for case in first.manifest.cases}) == 40
     assert all("/telemetry/2026_07_14" in case.telemetry_dir for case in first.manifest.cases)
-    assert all(
-        case.failure_mode == OpenRcaFailureMode.MULTI
-        for case in first.manifest.cases
-    )
+    assert all(case.failure_mode == OpenRcaFailureMode.MULTI for case in first.manifest.cases)
+    assert all(case.expected_root_cause_count == 1 for case in first.runtime_cases)
+
+
+@pytest.mark.parametrize(
+    ("instruction", "expected"),
+    [
+        ("Two system failures were reported.", 2),
+        ("2 failures were reported.", 2),
+        ("A single failure was reported.", 1),
+        ("One failure was reported.", 1),
+        ("A failure was reported.", 1),
+        ("There was 1 failure.", 1),
+    ],
+)
+def test_expected_root_cause_count_uses_only_instruction(instruction, expected):
+    assert _expected_root_cause_count(instruction) == expected
+
+
+@pytest.mark.parametrize(
+    "instruction",
+    [
+        "Investigate the incident.",
+        "One failure and two failures were reported.",
+        "Three failures were reported.",
+    ],
+)
+def test_expected_root_cause_count_rejects_missing_or_ambiguous_instruction(
+    instruction,
+):
+    with pytest.raises(ValueError, match="root cause count"):
+        _expected_root_cause_count(instruction)
 
 
 def test_committed_fixture_uses_official_query_and_record_headers(fixture_root: Path):
@@ -114,10 +143,10 @@ def test_runtime_index_contains_no_ground_truth(fixture_root: Path, tmp_path: Pa
     assert "scoring_points" not in serialized
     assert "root cause component" not in serialized.lower()
     assert "record.csv" not in serialized
+    assert all(case.expected_root_cause_count == 1 for case in result.runtime_cases)
     assert all(case.timezone == "Asia/Shanghai" for case in result.runtime_cases)
     assert all(
-        case.start_time.utcoffset().total_seconds() == 8 * 3600
-        for case in result.runtime_cases
+        case.start_time.utcoffset().total_seconds() == 8 * 3600 for case in result.runtime_cases
     )
 
 
@@ -128,14 +157,10 @@ def test_prepare_rejects_telemetry_path_escape(fixture_root: Path, tmp_path: Pat
         target = copied / partition
         target.mkdir(parents=True)
         if partition == "Bank":
-            with (source / "query.csv").open(
-                encoding="utf-8-sig", newline=""
-            ) as file:
+            with (source / "query.csv").open(encoding="utf-8-sig", newline="") as file:
                 row = next(csv.DictReader(file))
             row["telemetry_dir"] = "../../record.csv"
-            with (target / "query.csv").open(
-                "w", encoding="utf-8", newline=""
-            ) as file:
+            with (target / "query.csv").open("w", encoding="utf-8", newline="") as file:
                 writer = csv.DictWriter(file, fieldnames=tuple(row))
                 writer.writeheader()
                 writer.writerow(row)

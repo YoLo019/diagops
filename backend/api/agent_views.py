@@ -34,25 +34,19 @@ def _repository() -> Any:
 
 
 def _list_agent_findings(investigation_id: str) -> list[AgentFinding]:
-    list_findings = getattr(_repository(), "list_agent_findings", None)
-    if not callable(list_findings):
-        return []
-    return [redact_model(item) for item in list_findings(investigation_id)]
+    return [
+        redact_model(item)
+        for item in _repository().list_agent_findings(investigation_id)
+    ]
 
 
 def _get_coordination_review(investigation_id: str) -> CoordinationReview | None:
-    get_review = getattr(_repository(), "get_coordination_review", None)
-    if not callable(get_review):
-        return None
-    review = get_review(investigation_id)
+    review = _repository().get_coordination_review(investigation_id)
     return None if review is None else redact_model(review)
 
 
 def _get_react_trace(investigation_id: str) -> ReActTrace | None:
-    get_trace = getattr(_repository(), "get_react_trace", None)
-    if not callable(get_trace):
-        return None
-    trace = get_trace(investigation_id)
+    trace = _repository().get_react_trace(investigation_id)
     return None if trace is None else redact_model(trace)
 
 
@@ -226,10 +220,10 @@ def list_investigation_agent_executions(
 @router.get("/{investigation_id}/context", response_model=list[ContextFact])
 def list_investigation_context(investigation_id: str) -> list[ContextFact]:
     _get_investigation_record(investigation_id)
-    list_context_facts = getattr(_repository(), "list_context_facts", None)
-    if not callable(list_context_facts):
-        return []
-    return [redact_model(item) for item in list_context_facts(investigation_id)]
+    return [
+        redact_model(item)
+        for item in _repository().list_context_facts(investigation_id)
+    ]
 
 
 @router.get("/{investigation_id}/tool-calls", response_model=list[ToolCallRecord])
@@ -244,12 +238,9 @@ def list_investigation_tool_calls(investigation_id: str) -> list[ToolCallRecord]
 @router.get("/{investigation_id}/memory", response_model=list[MemoryItem])
 def list_investigation_memory(investigation_id: str) -> list[MemoryItem]:
     record = _get_investigation_record(investigation_id)
-    list_memory = getattr(_repository(), "list_memory", None)
-    if not callable(list_memory):
-        return []
     return [
         redact_model(item)
-        for item in list_memory(record.event.service, record.event.environment)
+        for item in _repository().list_memory(record.event.service, record.event.environment)
     ]
 
 

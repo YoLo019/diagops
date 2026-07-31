@@ -1,0 +1,84 @@
+groups:
+  - name: diagops-production-gate
+    rules:
+      - alert: ApplicationErrorRate
+        expr: rate(http_requests_total{service="checkout-service",environment="prod",status="500"}[20s]) > 0
+        for: 4s
+        labels:
+          service: checkout-service
+          environment: prod
+          severity: warning
+        annotations:
+          summary: service degradation detected
+          description: service degradation detected
+
+      - alert: DependencyTimeoutRate
+        expr: rate(http_requests_total{service="checkout-service",environment="prod",status="504"}[20s]) > 0
+        for: 4s
+        labels:
+          service: checkout-service
+          environment: prod
+          severity: warning
+        annotations:
+          summary: service degradation detected
+          description: service degradation detected
+
+      - alert: RequestTrafficIncrease
+        expr: |
+          sum by (service, environment) (
+            rate(http_requests_total{service="checkout-service",environment="prod"}[20s])
+          ) > 5
+          and on (service, environment)
+          sum by (service, environment) (
+            rate(http_requests_total{service="checkout-service",environment="prod",status=~"5.."}[20s])
+          ) == 0
+        for: 4s
+        labels:
+          service: checkout-service
+          environment: prod
+          severity: warning
+        annotations:
+          summary: service degradation detected
+          description: service degradation detected
+
+      - alert: ContainerMemoryPressure
+        expr: |
+          sum by (service, environment) (
+            container_memory_usage_bytes{container="checkout-service",environment="prod"}
+          ) > 104857600
+        for: 4s
+        labels:
+          service: checkout-service
+          environment: prod
+          severity: warning
+        annotations:
+          summary: service degradation detected
+          description: service degradation detected
+
+      - alert: ContainerNetworkDrops
+        expr: |
+          sum by (service, environment) (
+            rate(container_network_receive_packets_dropped_total{container="checkout-service",environment="prod"}[20s])
+          ) > 0
+        for: 4s
+        labels:
+          service: checkout-service
+          environment: prod
+          severity: warning
+        annotations:
+          summary: service degradation detected
+          description: service degradation detected
+
+      - alert: ContainerProcessRestarts
+        expr: |
+          sum by (service, environment) (
+            increase(kube_pod_container_status_restarts_total{container="checkout-service",environment="prod"}[20s])
+          ) > 0
+        for: 4s
+        labels:
+          service: checkout-service
+          environment: prod
+          severity: warning
+        annotations:
+          summary: service degradation detected
+          description: service degradation detected

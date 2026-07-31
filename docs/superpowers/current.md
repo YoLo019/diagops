@@ -4,7 +4,7 @@ This file is the mutable routing and status entry point for the current version.
 
 It does not override an approved spec or plan, current code contracts, or the long-term product goal and production safety boundary in `AGENT.md`.
 
-Updated: 2026-07-29
+Updated: 2026-07-31
 
 ## Implemented Baseline
 
@@ -22,21 +22,24 @@ independent comparison baseline for V9.
 
 ## Active Iteration
 
-Version: V9
+Version: V10
 
-Main goal: add a durable and observable domain runtime with isolated concurrent Investigation sessions, explicit recovery, safe events, replay, and Run Diff.
+Main goal: remove audited whole-repository redundancy, replace duplicated
+OpenRCA/production metric heuristics with one bounded signal-semantics core,
+then prove cause/component/reason/onset through the OpenRCA targeted Gate and a
+seven-scenario production Gate.
 
-Iteration status: `complete`
+Iteration status: `implementing`
 
 Spec status: `approved`
 
 Plan status: `approved`
 
-Implementation status: `complete`
+Implementation status: `in_progress`
 
-Completion commit: `bcbcafc4569276b9c9617f042d8d6c73539081ac`
+Completion commit: `none`
 
-Verification evidence: `C:\Users\林佳威\.codex\worktrees\b551\sre-agent\output\runtime-acceptance\runtime-20260729T052807237954Z-790b99ae\result.json`, the key-free gate results below, the registered V8.2 OpenRCA baseline, and the V9 OpenRCA/Replay/Diff evidence in the dashboard
+Verification evidence: `D:\data\OpenRCA\results-v10-targeted-projector\run-20260730T090304525928Z`
 
 Blocker: `none`
 
@@ -69,43 +72,111 @@ State consistency rules:
 ## Active Documents
 
 ```text
-docs/superpowers/specs/2026-07-17-diagops-v9-durable-observable-runtime-design.md
-docs/superpowers/plans/2026-07-17-diagops-v9-durable-observable-runtime-implementation-plan.md
+docs/superpowers/specs/2026-07-30-diagops-v10-shared-signal-semantics-seven-scenario-gate-design.md
+docs/superpowers/plans/2026-07-30-diagops-v10-shared-signal-semantics-seven-scenario-gate-implementation-plan.md
 ```
 
-## Live Execution Dashboard
+## V10 Execution Dashboard
 
-Overall progress: `14/14 verified`
+Overall progress: `implementing; T6 verified, T7 awaiting Git authorization`
 
-Current phase: V9 complete
+Current phase: V10 execution M5 source checkpoint
 
-Next action: preserve the registered artifacts and use completion commit
-`bcbcafc4569276b9c9617f042d8d6c73539081ac` as the V9 release identity. The
-approved same-Investigation Run Diff contract remains unchanged.
-
-Status values: `pending | in_progress | blocked | verified`. Keep at most one
-row `in_progress`.
+Next action: STOP — request explicit user authorization for the Git commit
+that establishes the clean, reproducible source identity. No live Gate (T8/T9/
+T10) may run before it.
+Spec and plan were approved by the user on 2026-07-30 after the second cold
+review resolved F16–F19. Stop at T7 source checkpoint for separate Git
+authorization; do not run any live Gate before it.
 
 | ID | Phase | Task | Status | Evidence or result | Next action or blocker |
 | --- | --- | --- | --- | --- | --- |
-| A1 | Baseline | Register frozen V8.2 identity and artifacts | verified | See `Frozen V8.2 OpenRCA Baseline` | Preserve artifacts read-only |
-| A2 | V9 verification | Run key-free Ruff, pytest, frontend build, and Runtime acceptance gates | verified | Completion candidate `bcbcafc`: Ruff passed; pytest `1400/1400`; frontend production build passed with 81 modules; Runtime acceptance passed all 14 scenarios and privacy scan. Final artifact `C:\Users\林佳威\.codex\worktrees\b551\sre-agent\output\runtime-acceptance\runtime-20260729T052807237954Z-790b99ae\result.json`, SHA-256 `F712B7E9B592DBE2B8DBFF1794B4517F5D3F051C39D172C3FD217F7643D4EAA4`. | Preserve final evidence |
-| A3 | V9 verification | Verify schema V5-to-V6 migration on a copy | verified | See `V9 Verification Evidence` | Rerun only if persistence code changes |
-| B1 | V9 OpenRCA | Prepare the same frozen 40-case selection | verified | See `V9 OpenRCA Prepared Input` | Preserve inputs read-only |
-| B2 | V9 OpenRCA | Run batch 01/05 | verified | Audited merge `run-merged-20260726T092848877633Z` at `D:\data\OpenRCA\results-v9-087b404-batch01-merged`: paired recovery replaced both Bank:51 rows; 8 Fixed and 8 Adaptive predictions are non-empty and evidence-valid; 16/16 Runtime IDs are unique and completed; tokens match Runtime at Fixed `87732/27142` and Adaptive `126352/38108`; source and artifact hashes passed; manifest SHA-256 `27f90b370fc97dbddda3279cdc17f768406ba0a54e8bfde320ac11a14bbb6c05`. Original and recovery artifacts remain preserved. | Preserve all three source/merged artifacts read-only |
-| B3 | V9 OpenRCA | Run batch 02/05 | verified | Authoritative merge `run-merged-20260726T130524779541Z` at `D:\data\OpenRCA\results-v9-35df5de-batch02-merged-audited` preserves all eight Fixed rows and seven original Adaptive rows, replacing only Adaptive Telecom:5 from recovery `run-20260726T124413016863Z`. Independent audit found 8 non-empty evidence-valid rows per strategy and 16 unique completed Runtime Runs; Model lifecycles closed at Fixed `72=72+0` and Adaptive `93=93+0`; no Phase or invalid-reference failure; exact tokens Fixed `89846/22158`, Adaptive `122893/36760`; tool calls `32/113`; duplicate rejections `0/19`; manifest SHA-256 `4f079880e9bc503fa6e236991d2fe3ad618595bd53ce89a36065ae05b84a8350`. Rejected draft `run-merged-20260726T130058592316Z` is retained only for audit and named in the authoritative manifest. | Preserve original, recovery, rejected draft, and authoritative merge read-only |
-| B4 | V9 OpenRCA | Run batch 03/05 | verified | Authoritative merge `run-merged-20260727T112522188715Z` at `D:\data\OpenRCA\results-v9-557638a-batch03-merged-audited` preserves 14 original rows and replaces only Fixed Telecom:9 and Adaptive Telecom:40 from their accepted single-strategy recoveries. Independent audit found 8 non-empty evidence-valid rows per strategy and 16 unique completed Runtime Runs; Model lifecycles closed at Fixed `75=75+0` and Adaptive `104=104+0`; no Phase or invalid-reference failure; exact tokens Fixed `90466/26001`, Adaptive `136770/39673`; tool calls `32/117`; duplicate rejections `0/12`; all source hashes, artifact hashes, row provenance, partition files, and case order passed. Manifest SHA-256 is `04a22eaab60c5f67591f90c6c067532d911c0dfe691759c7c8d5a86e64aed714`. Original and both recovery artifacts remain preserved. | Preserve original, recoveries, and authoritative merge read-only |
-| B5 | V9 OpenRCA | Run batch 04/05 | verified | Authoritative merge `run-merged-20260728T103039795266Z` at `D:\data\OpenRCA\results-v9-9018f99-batch04-merged-audited` preserves ten accepted original rows and selects six row-level recovery sources. Per explicit approval, Adaptive cloudbed-2:62 retains its empty frozen 180-second timeout result instead of being rerun. Independent audit verified frozen case order, partition projections, exact source-row equality and checksums, 16 unique completed Runtime Runs and Attempts, Fixed `8/8` and Adaptive `7/8` non-empty predictions, 100% Evidence reference validity, zero Phase or invalid-reference failures, and closed Model lifecycles at Fixed `75=75+0` and Adaptive `95=93+2`. Exact totals: Fixed tokens `92189/23774`, tool calls `32`, duplicate rejections `0`; Adaptive tokens `120275/31765`, tool calls `118`, duplicate rejections `18`. Only the retained cloudbed-2:62 row is listed in `failed_cases`; the other Adaptive Model failure belongs to a non-empty original row that recovered within the same Run. Manifest SHA-256 `81f39170a65b4ea5ae1af382e03d73f1611a79b31454b1c695a9450383e3c7b0`; merge script SHA-256 `7C63123BC1C51DB9B0F2870D795934AAE3530B7C0F26623AA956328418EDCE4A`. | Preserve all source and merged artifacts read-only |
-| B6 | V9 OpenRCA | Run batch 05/05 | verified | Per explicit approval, authoritative merge `run-merged-20260728T130642194648Z` at `D:\data\OpenRCA\results-v9-9018f99-batch05-merged-audited` preserves every original Batch05 row and retains the three frozen-protocol empty results: Fixed cloudbed-2:70, Adaptive cloudbed-2:48, and Adaptive cloudbed-2:70. Independent audit verified byte-identical source CSVs, frozen case order, all artifact checksums, exactly 16 unique completed Runtime Runs and Attempts, Fixed `7/8` and Adaptive `6/8` non-empty predictions, 100% Evidence reference validity, zero invalid references and read-only violations, and the exact three approved failure classifications. Manifest SHA-256 `A927F0B74CEC8DB5AAC7A12B5AFB20F37DB838738D85C8678A966831039D4F2F`; merge script SHA-256 `1905A694F7C1BC3210DA11A4488C51326132688D3568BC6B88CC3B64CC4A28F9`. The original run, Runtime DB, transcript, merge script, and merged artifact remain preserved. | Preserve source and authoritative merge read-only |
-| B7 | V9 OpenRCA | Merge batches and run compatible and official evaluators | verified | Authoritative 40-case merge `run-merged-20260728T131350272103Z` at `D:\data\OpenRCA\results-v9-final-9018f99-merged-audited` concatenates the five exact audited batch sources in frozen order. Independent audit verified 40 unique rows per strategy, 80 unique completed Runtime Runs and Attempts, Fixed `39/40` and Adaptive `37/40` non-empty predictions, 100% Evidence reference validity, zero invalid references and read-only violations, four retained formal failures, exact source-row equality, four 10-row official query subsets, and every artifact checksum. Both strategies completed `40/40`; compatible and Microsoft official reports each contain 80 rows and score Fixed/Adaptive strict and partial `0`, equal to the frozen V8.2 baseline. The official evaluator was sparsely fetched at Microsoft OpenRCA commit `c1bd4af7f635171a1c31cdd567c07d698dff6abc`; its V8.2 validation reproduced all 80 frozen rows semantically and the same zero scores. Final hashes: manifest `66AB4BD47C80027AE0037990EAE17DBDF89833EEF4A97593EED4A897ACF33213`, summary `52B43BD7196C76DBFFDCC65647D49C5E2FDAA60332E493AD8E5B4A80D9986F87`, Fixed `0A10B5329ED4577DF0DD92B0C8DCAD720A5137C65ED9EAB472971EFC4BACFA1A`, Adaptive `F3C597DA723D808B83C23B5A246397964AD6E1C8593B01B7D776B1139FFA1DCE`, compatible report `DF38537C7AC9512BE6C77D93CBBB88D298A2B98DE782E6EB5606D8E3AED10621`, official report `695894AA795FF66A25145684C33B09D60E59A45D7B40B72935F82B73AD5D158C`. | Preserve all source, merged, query, evaluator, and validation artifacts read-only |
-| C1 | Runtime audit | Replay one real Fixed and one real Adaptive Run | verified | Historical Fixed Replay passed. Real Adaptive retry02 source Run `4558eee0-5fdc-4491-a900-26642a68d87a` completed with Agent `11/11`, Model `14/14`, and Tool `6/6`; all six started Tools have ordered terminal events, including two interrupted calls closed by the phase boundary. Its formal benchmark gate retained an empty result because three Provider connections failed and Deployment recollection produced one invalid semantic reference, but no invalid reference was persisted. Event, checkpoint, and business Replay validators all returned no errors. Full Replay on the database copy is valid with zero external calls and completed Replay Run `36fa2380-d6f6-489f-9080-3537211c2ca7`; report `a74fb5a4-93b0-4c4d-a11a-afbe13c7bd30`, errors `[]`. Source DB SHA-256 immediately after the run was `FE388E715FF719747B3F83ABB78B1A6FAC1A61A7E02366A1EB5AEDC93A93A303`; opening it through the application SQLite stack checkpointed physical pages, changing the current file hash to `3C2A54CFBE8EB4CD6892B99E6BCE661E47EB54905B07F2574AFCA9243DFE2DF1`. A true `mode=ro` audit confirms it still contains exactly one Live Run, one Attempt, 90 events, eight checkpoints, and no Replay Run or report. Audit DB `D:\data\OpenRCA\replay-v9-bcbcafc-bank51-retry02-audit\runtime-audit.db`, SHA-256 `C4D706DBBCAE1C89727FFCAD6232DB9C46C1BCC016A9FBA37AE2F2F38BE502C1`. | Preserve current source and audit copy; record the physical source-hash change and Provider/model quality as residual risks |
-| C2 | Runtime audit | Diff the paired Runs and confirm stable hashes twice | verified | Per explicit user decision on 2026-07-29, V9 retains the approved same-Investigation Diff contract. Supported source-to-Replay Diff is deterministic: Fixed hash repeated `D9D140A4A4244C3454279DC6F9C07C81BF7D8B6855DBA92583929E8D350B74BE`; Adaptive hash repeated `FDE0D27233D36A8C06ABECBED47B7F25DE3E15057D2B2E992A602A654D1F6B24`. Direct comparison of benchmark Fixed/Adaptive Runs correctly rejects distinct Investigations and is not a V9 requirement. Evidence `D:\data\OpenRCA\replay-diff-v9-final-9018f99-cloudbed2-52\result.json`, SHA-256 `5F59E3230259B625BF3D912E0C0D3D90EF93E7BF59264512F36870BC1226F504`. | Preserve evidence and contract |
-| D1 | Release evidence | Compare V9 with V8.2 and record residual risks | verified | Both official evaluations score Fixed/Adaptive strict and partial `0`, so the benchmark does not prove higher diagnosis accuracy. V9 does prove stronger evidence integrity: Adaptive validity improves from `65.615%` with 32 invalid references to `100%` with zero invalid references; Fixed remains `100%`, and both versions have zero read-only violations. V9 additionally supplies 80 durable Runs/Attempts, ordered lifecycle events, checkpoints, recovery, valid zero-external-call Replay, and deterministic supported Diff. Costs/risks: final Runtime acceptance shows enabled p50 `528.141 ms`, `+45.237%` versus V8.2-compatible sync; V9 40-case average duration rises from `291733` to `336843 ms` Fixed and `473434` to `522245 ms` Adaptive; Provider connections, model semantic references, timeouts/empty results, and the SQLite physical-hash audit caveat remain. The formal 40-case artifact is commit `9018f99`; post-artifact lifecycle corrections at completion commit `bcbcafc` are covered by fresh regression/full tests, Runtime acceptance, and real Adaptive Tool Replay rather than a regenerated 40-case score run. | Preserve comparison and residual-risk record |
-| D2 | Release decision | Record completion commit after explicit authorization | verified | User explicitly authorized V9 completion on 2026-07-29. Completion commit `bcbcafc4569276b9c9617f042d8d6c73539081ac` is a verified descendant of the V8.2 implementation baseline. Final Ruff, `1400/1400` pytest, frontend build, 14/14 Runtime acceptance, privacy scan, OpenRCA, Replay, and supported Diff gates are recorded above. | V9 complete; preserve artifacts |
+| P1 | Baseline | Verify V9/OpenRCA failure path and affected contracts | verified | V9 completion evidence in Git history and V9 specs/plans; `docs/superpowers/openrca-v9-6-case-failure-analysis.md`; current API, Provider, Analyzer, persistence, and benchmark code inspected on 2026-07-29 | Preserve evidence |
+| P2 | Requirements/design | Confirm shared-core scope, dual gates, production lab, Alertmanager boundary, and Approach A | verified | Requirements Brief and Approach A confirmed by the user on 2026-07-29 | Preserve confirmed contract |
+| P3 | Initial spec | Write and cold-review the initial V10 design | verified | Initial shared-core spec approved by the user on 2026-07-29 | Superseded after targeted evidence |
+| P4 | Initial plan | Write and cold-review the initial V10 implementation plan | verified | Initial revised plan approved by the user after M1 finding F14 on 2026-07-29 | Superseded after targeted evidence |
+| T1 | M1 | Unify Provider Evidence semantics | verified | 38/38 focused tests; OpenRCA claims removed; canonical fields and bounded degradation verified | Preserve |
+| T2 | M1 | Shared Analyzer, clustering, ranking, Attribution | verified | 62/62 focused tests; stable rules, UNKNOWN fallback, canonical component/reason and dynamic clustering verified | Preserve |
+| T3 | M1 | Deterministic authority and Runtime compatibility | verified | 227/227 focused tests; Agent completed/failed/timeout cannot overwrite; historical fixture unchanged; canonical Attribution frozen and Replay-valid | Preserve |
+| M1 | Review | Cold review shared core | verified | Combined M1 suite 329/329; Ruff and `git diff --check` passed; F14 resolved in code and recorded in plan/spec | Preserve |
+| T4 | M2 | Key-free OpenRCA Fixed, Top-N, and release Gate | verified | Benchmark suite 51/51; fixture deterministic Run has completed Run/Attempt/checkpoints, zero Model events/tokens/cost, valid zero-external-call Replay; Top-N, safe count metadata, frozen checksums and Gate failures verified | Preserve; run real 40-case only at T8 |
+| M2 | Review | Cold review OpenRCA boundary and artifacts | verified | M1+M2 combined suite 369/369; deterministic run does not build Agent Runtime or scoring locator; Top-N preserves shared-core rank; Ruff, format and `git diff --check` passed | Start T5 |
+| T5 | M3 | Alertmanager webhook boundary | verified | Events focused 38/38; full API 124/124; firing/resolved, atomic envelope rejection, ordered partial failure, safe bounds/detail, URL isolation, and at-least-once duplicate delivery verified | Preserve |
+| M3 | Review | Cold review Alertmanager boundary | verified | M1–M3 combined suite 493/493; old `/events` unchanged; no payload/exception echo or unknown field propagation; Ruff, format, example JSON and `git diff --check` passed | Start T6 |
+| T6 | M4 | Production lab service and Compose | verified | Lab focused 6/6 and full services 132/132; six-component Compose parses; DiagOps evidence mounts are read-only; fixed metrics/log fields and lab-only controls verified | Preserve |
+| T7 | M4 | Four-scenario production acceptance | verified | Real Compose Gate 4/4: deployment `0.70`, dependency `0.70`, traffic `0.60`, healthy UNKNOWN `0.20`; Evidence references 100%, read-only violations 0, duration 61.65s; artifact `output/production-acceptance/run-20260729T130529953Z/result.json`, SHA-256 `06CD6731985B534452F09276D4AD79C2DCFF9D61049C4B57229B53BEE59A0D92` | Preserve |
+| M4 | Review | Cold review production boundary | verified | API/services 268/268; Ruff, `git diff --check`, Compose config and artifact validator passed; DiagOps evidence mounts remain read-only and fault control remains lab-only | Preserve |
+| T8 | M5 | Full checks and dual final Gate | blocked | Task-aware Projector completed 6/6 with Evidence validity 100%, zero read-only violations and zero projection error/fallback, but official targeted Gate passed only Bank:12 at score 0.5; time and reason remained 0. Full pytest 1504/1504 and Ruff passed before the real run. | Stopped by the approved Gate; no tuning and no third 40-case run |
+| P5 | Recovery spec | Shared Signal Semantics and seven-scenario Gate | verified | Whole-repository audit incorporated; written spec approved by the user on 2026-07-30 | Preserve approved contract |
+| P6 | Recovery plan | Signal semantics plus whole-repository cleanup plan | verified | Amended spec and plan approved by the user on 2026-07-30 after the second cold review resolved F16–F19 | Start M0/CL0 |
+| CL0 | M0 | Delete W1/W2 dead code before Signal Core | verified | Caller scan zero in production; deleted `context_store.py` (59) + dedicated test (120), `SharedInvestigationContext` (14), `WorkbenchGraph*` (17), `QueryEvidenceProviderProtocol` (7), three frontend wrappers (12), dead-type-only test code (29); net deletion 257 lines incl. 109 production; focused 57/57, Ruff clean, frontend build passed | Preserve |
+| T1 | M1 | Implement pure Signal Core | verified | New `backend/diagnosis/signal_semantics.py`: 2 frozen dataclasses + 3 public pure functions; 35/35 focused tests (taxonomy precedence incl. packet scope, zero-baseline clamp, non-finite, gap/normal-point break, family round-robin, repeatability), Ruff clean; no I/O, dependencies, or dataset/task identifiers | Preserve |
+| T2 | M2 | OpenRCA Metric/Dependency adapters through Signal Core | verified | Private taxonomy/raw-deviation Top-N (C4) and dependency threshold/sort (C5) deleted; segment onset, bounded strength, family-balanced selection, node/service/instance hierarchy verified; fixtures gained baseline-window rows; focused 37/37, full benchmarks 96/96, Ruff clean | Preserve |
+| T3 | M2 | Production Prometheus range adapter | verified | `query_range` with ~240-point step, optional empty vs failure separation, instant fallback with explicit `onset_unavailable`; additive enum (7) and synced `metric_names` cap (F19); counter→rate templates; focused 51/51, providers/domain/tools 126/126, diagnosis/rca/api/services 682/682, Ruff clean; emptied `backend/diagnosis/__init__.py` eager re-exports (zero consumers) to break the providers↔diagnosis import cycle | Start M3/T4 |
+| M2 | Review | Cold review both adapters share one semantics core | verified | OpenRCA and Prometheus no longer own taxonomy, segment, or ranking logic; old API/config contracts unchanged; instant payload preserved as additive fallback | Preserve |
+| T4 | M3 | Segment-aware Attribution and thin Projector | verified | `_segment_aware_clusters` added with `_time_clusters` fallback for historical no-segment evidence; Analyzer db rule uses canonical `db_p95` only; Projector rewritten thin v2 (reference validation, scored-field dedup preserving authoritative order, Top-N, explicit fallback, 6-key safe audit); runner/evaluator synced; focused 138/138, Ruff clean | Start M3 review |
+| M3 | Review | Cold review C1–C5 deletion and attribution boundary | verified | Zero remnants of `_metric_signal_type`, raw-deviation Top-N, candidate counts, or second ranking in production; Ground Truth reads confined to evaluator/prepare; historical fallback and invalid-reference drop covered by fresh tests | Start M4/T5 |
+| T5 | M4 | Lab signals, schema V2 and answer-leak protection | verified | Lab exports bounded memory/drops/restarts metrics with generic 503 failures and `activated_at`; seed covers the full 60m baseline window (240s step) for the range adapter; three new generic-label alerts; schema V2 exactly seven scenarios with component/reason/occurred_at/onset fields, V1 readable, new scenarios bound onset ≤60s and forbid onset fallback; runner reads authoritative attribution via coordination-review; privacy scan covers Event/Evidence/Review; focused 81/81, Ruff clean, Compose config valid; README updated without changelog | Start M4 review |
+| M4 | Review | Cold review production Gate boundary | verified | Fault control absent from Tool surface and default image (no gate env in Dockerfile, 404 when disabled); DiagOps evidence mounts stay `:ro`; both artifact schemas `extra=forbid`; V1/V2 dispatch and answer-leak scan covered by fresh tests; zero scenario tokens in Gate configs | Start M4.5/CL1 |
+| CL1 | M4.5 | Remove W3/W4/W7 implementation-shape debt | verified | Seven repository `getattr` fallbacks replaced with direct calls (both formal repositories implement all methods; `_repo_call` deleted); full backend suite 1554/1554 with zero broken doubles; `test_runtime_workbench.py` rewritten to five executable node-driven projection/selection/redaction behavior tests; `test_frontend_smoke.py` trimmed to executable selector/grouping/redaction tests plus safety scans (no-automatic-action claims, no secret tokens); README and `current.md` limited to current operations, safety boundaries, active routing, latest Gate, and the frozen V8.2 artifact index (V2–V9 chronicle remains in historical specs/plans and Git history); focused 134/134, Ruff clean, frontend build passed | Start CL2 |
+| CL2 | M4.5 | Record W5/W6 retain/retire disposition | verified | User confirmed on 2026-07-31 after a written risk/trade-off analysis: both `retained intentionally` — W5 remains the sole Provider/model certification producer backing `certification_status`; W6 remains the historical ReAct/LLM read path required by the historical-records contract; disposition recorded in the plan; nothing deleted | Start M4.5 review |
+| M4.5 | Review | Cold review cleanup totals and contract integrity | verified | Net cleanup: CL0 −257 lines (109 production), CL1 README −61, current.md −188, frontend tests −312 source-shape lines replaced by +89 executable lines, W7 fallback −40; no public or persisted contract removed — API response models, DB schema, and repository interfaces unchanged; CL2 disposition leaves capability intact | Start M5/T6 |
+| T6 | M5 | Key-free full regression | verified | Ruff clean; pytest 1538/1538; frontend production build passed; Runtime acceptance 14/14 with privacy scan passed (artifact `output/runtime-acceptance/runtime-20260731T011951755740Z-c5e8e1af/result.json`); `git diff --check` clean; zero diff in pyproject/uv.lock/migrations/schema/package.json — no new dependency, migration, public API, or write Tool | Start T7 |
+| T7 | M5 | Source checkpoint | in_progress | HEAD `568da9733e5a703355ac9cb743d5089b612412b5` (dirty, 53 files +4003/−1772 plus 20 approved new files); official evaluator commit `c1bd4af7f635171a1c31cdd567c07d698dff6abc`; frozen six-case safe-index SHA-256 `b249e2f6b0b0dbd3b9f30aa71ef3302ff2c48a05cc50b914fb3dcbbc8800ad4b`; milestone diff review found no blocking finding (Ground Truth isolation, test integrity, safety boundaries, contract integrity all re-verified) | Awaiting explicit user Git commit authorization |
 
-Update this dashboard after every batch or verification gate. Put detailed
-commands and acceptance criteria in the active plan; keep only status, evidence
-paths, the next action, and blockers here.
+## V10 Task-Aware Projector Targeted Gate
+
+The approved task-aware Evidence Projector was executed inline against the
+frozen six-case development set and stopped at its first real Gate failure:
+
+```text
+Run: D:\data\OpenRCA\results-v10-targeted-projector\run-20260730T090304525928Z
+Run ID: run-20260730T090304525928Z
+Cases: 6/6 completed
+Evidence reference validity: 100%
+Read-only violations: 0
+Projection errors/fallbacks: 0/0
+Official rows with score > 0: 1/6
+Official partial score: 0.08333333333333333
+task_1/time: 0/2 positive
+task_2/reason: 0/2 positive
+task_3/component: 1/2 positive
+Gate errors:
+- official targeted score must pass at least 3 of 6 cases
+- official targeted task_1 must have a positive score
+- official targeted task_2 must have a positive score
+```
+
+Only `Bank:12` received a positive official score (`0.5`) because `MG01`
+matched one of two expected components. The projector selected the wrong
+times for both time cases and the wrong reasons for both reason cases. This
+shows that deterministic field-aware projection can expose candidate
+diversity without recovering the missing causal semantics required by the
+target tasks.
+
+Artifact identities:
+
+```text
+Frozen six-case runtime-cases.json:
+B249E2F6B0B0DBD3B9F30AA71EF3302FF2C48A05CC50B914FB3DCBBC8800AD4B
+fixed-predictions.csv:
+F92D84E49EB0A927F6B4FCACEC0D0AA84AA182A997BDB7CDD65CCEF5F635E828
+compatible-report.csv:
+B24629EBC9C9E337409E34F63544FD5DCB9D141DE0B544AEF08D28A77AB0F553
+official-report.csv:
+4B80A6F2DBEEEA7516C6EA2DEECF8F2130B873BA0F5F36788B66FF1914C90867
+summary.json:
+DCEC7A5F15E6DF8D64B475C91793FFBBD14520722724B44EBBC36E3A3FC648BF
+Official evaluator commit:
+c1bd4af7f635171a1c31cdd567c07d698dff6abc
+Run-reported repository HEAD:
+568da9733e5a703355ac9cb743d5089b612412b5
+```
+
+The repository was dirty, so the recorded HEAD is not a reproducible source
+identity for a formal candidate. The targeted Gate failed before the source
+identity checkpoint, and no third 40-case run was started. This result is
+OpenRCA-only and is not evidence of improved production root-cause accuracy.
 
 ## Frozen V8.2 OpenRCA Baseline
 
@@ -126,45 +197,6 @@ The merged artifact contains 40 Fixed and 40 Adaptive rows. Both official
 strict and partial scores are `0`. Fixed evidence-reference validity is
 `100%`; Adaptive validity is `65.615%`; both strategies record zero read-only
 violations. These are comparison facts, not V9 acceptance results.
-
-## V9 OpenRCA Prepared Input
-
-```text
-V9 commit: 0e53c663f5acf2dc23a1a606514137dfbc61d1d9
-Prepared root: D:\data\OpenRCA\prepared-v9-0e53c66
-Case manifest hash: 434e36603328fb5f0ec58730bcde5696931d2267dad99aca448cbfd6b52e812a
-Case manifest file SHA-256: 06DA1E47BD0D18592A256BF0700D50CC95C775020816FC316AF75757F695B2FD
-Runtime index SHA-256: C438F8AB78C7B41016C632352D9AB63397AB86E9DA823A238DEC61604699AE0C
-Batches: 5
-Cases per batch: 8
-```
-
-The seven prepared files match the frozen V8.2 inputs byte-for-byte. Validation
-found 40 unique cases, 10 cases in each partition, all 40 telemetry directories,
-no forbidden ground-truth fields in Runtime or batch indexes, and preserved
-case order across the five batches. Focused OpenRCA prepare and runner tests
-passed: `13 passed in 21.97s`.
-
-## V9 OpenRCA Batch 01 Preflight
-
-The benchmark CLI previously ignored `DIAGOPS_AGENTS_TIMEOUT_SECONDS`: model
-execution, durable Runtime metadata, and `run-manifest.json` remained at 60
-seconds. Commit `71c9c026522da7d430998513757242ec326cda5a` fixed timeout
-propagation. The first formal attempt then exposed two independent artifact
-identity defects. Commit `d4a129e7b986c558d381b6ff763c7390b3d5f8ef`
-namespaces deterministic OpenRCA Evidence IDs per Investigation; commit
-`7c57ba0318171a294560c1f2c89a57a1e91fb1a3` preserves the Runtime Run ID when
-case execution fails after Run creation. The final HEAD passes 1385 tests and
-Ruff. A key-free CLI smoke run for timeout propagation recorded `180` in the
-manifest and `180.0` in SQLite Runtime state:
-
-```text
-C:\temp\diagops-v9-timeout-smoke-20260724
-```
-
-The existing untracked `output/` directory is not part of the commits. Formal
-V9 OpenRCA artifacts must record commit
-`087b404eb551e5882abe4a0b96ffcd17651edcde`.
 
 ## Artifact And Update Contract
 
@@ -229,119 +261,3 @@ When the user declares a new active version or main iteration goal:
 8. Keep old specs and plans as history; do not rewrite them to describe the new version.
 9. Do not copy acceptance criteria into this file; keep them in the spec.
 10. Do not modify the long-term product goal in `AGENT.md` unless the user explicitly says the final or long-term goal is changing.
-
-## V9 Verification Evidence
-
-Key-free gates were rerun from the shared V9 worktree on 2026-07-22:
-
-```text
-uv run ruff check .
-exit 0; All checks passed.
-
-uv run pytest -q
-exit 0; 1383 passed, 1 warning in 217.17s.
-
-uv run pytest -q tests/runtime/test_manager.py
-tests/runtime/test_fault_injection.py
-exit 0; 28 passed in 11.37s.
-
-npm.cmd --prefix frontend run build
-exit 0; TypeScript and Vite production build succeeded; 81 modules transformed,
-Vite build time 1.48s. Existing TanStack React Query "use client" bundle
-warnings remained non-fatal.
-
-uv run python -m backend.services.runtime_acceptance
-exit 0; 14/14 required scenarios passed; privacy scan passed with zero markers.
-Artifact: output/runtime-acceptance/runtime-20260722T042706538497Z-3efea43d/result.json
-The artifact directory contains only `result.json`. It records Git HEAD
-`3f06d9ae87729185b3429c839f11cc366de75000`, `git_dirty=true`, and candidate
-diff SHA-256 `5ef53c747980a36aa5fcec9d35fda46429c070bd4445e584ba38d44cadf1793e`.
-That digest identifies the complete code/test candidate immediately before this
-evidence-only routing document was updated; it is not claimed as a digest of a
-self-referential final worktree containing the digest itself.
-```
-
-The acceptance artifact records these raw measurements without an additional
-pass threshold:
-
-```text
-Each latency mode: 10 raw samples after 1 warmup iteration
-V8.2-compatible sync wall time: p50 295.348 ms; p95 328.070 ms
-Runtime-disabled wall time: p50 293.680 ms; p95 326.143 ms
-Runtime-enabled wall time: p50 449.305 ms; p95 880.744 ms
-Runtime-disabled versus sync p50: -0.565%
-Runtime-enabled versus Runtime-disabled p50: +52.991%
-Runtime-enabled versus sync p50: +52.127%
-SQLite growth: 64716.8 bytes/Run
-Runtime events: 28/Run
-Runtime checkpoints: 8/Run
-Recovery wall time: 9.274 ms
-OpenTelemetry disabled/enabled wall time: 0.162/5.608 ms
-OpenTelemetry enabled overhead: +3361.543%
-```
-
-Final candidate gates were refreshed at commit
-`bcbcafc4569276b9c9617f042d8d6c73539081ac` on 2026-07-29:
-
-```text
-uv run ruff check .
-exit 0; All checks passed.
-
-uv run pytest -q
-exit 0; 1400 passed, 1 pre-existing Starlette warning in 215.64s.
-
-npm.cmd --prefix frontend run build
-exit 0; TypeScript and Vite production build succeeded; 81 modules transformed,
-Vite build time 1.73s. Existing TanStack React Query "use client" warnings
-remained non-fatal.
-
-uv run python -m backend.services.runtime_acceptance
-exit 0; 14/14 required scenarios passed; privacy scan passed with zero markers.
-Artifact:
-C:\Users\林佳威\.codex\worktrees\b551\sre-agent\output\runtime-acceptance\runtime-20260729T052807237954Z-790b99ae\result.json
-Artifact SHA-256:
-F712B7E9B592DBE2B8DBFF1794B4517F5D3F051C39D172C3FD217F7643D4EAA4
-```
-
-The final acceptance artifact records `git_dirty=true` because the existing
-untracked `output/` tree is intentionally excluded from commits. It records
-candidate diff SHA-256
-`1d1c833648a8ccd67cb94b3ba57c9cad6e60e592f194d9d973f46a526a56f924`.
-Its raw measurements include V8.2-compatible sync p50 `363.640 ms`,
-Runtime-disabled p50 `376.099 ms`, Runtime-enabled p50 `528.141 ms`,
-Runtime-enabled versus sync `+45.237%`, recovery `11.031 ms`, SQLite growth
-`64716.8 bytes/Run`, and OTel enabled overhead `+3772.695%`.
-
-A V8.2-compatible schema V5 SQLite source containing one historical
-Investigation was created under the system temporary directory, copied, and
-only the copy was migrated. The copy reached schema V6,
-`PRAGMA foreign_key_check` returned no rows, the historical Investigation
-remained readable, no synthetic Runtime rows were created, and
-`runtime_available=false`. The evidence copy is under
-`C:\temp\diagops-v9-migration-d8a44f1731b344cf88e3f96cf7eeaf91`.
-No user database was modified; `data/diagops.db` was absent.
-
-## Open Release Gates And Risks
-
-The real dataset, frozen V8.2 result, official query tree, evaluator output,
-Replay evidence, and supported Diff evidence are registered above. Provider
-credentials remain caller-supplied and must not be persisted in the workspace,
-commands, logs, or artifacts.
-
-V9 is complete at
-`bcbcafc4569276b9c9617f042d8d6c73539081ac`. The release record retains these
-limits:
-
-- official OpenRCA strict and partial accuracy remain `0` for V8.2 and V9;
-- Provider connection instability, semantic-reference failures, timeouts, and
-  empty results remain observable quality risks;
-- Runtime-enabled p50 is `+45.237%` versus V8.2-compatible sync in the final
-  acceptance run;
-- the formal 40-case scoring artifact is commit `9018f99`; the final candidate
-  `bcbcafc` is covered by fresh full tests, Runtime acceptance, and real
-  Adaptive Tool Replay for the post-artifact lifecycle corrections;
-- the retry02 source SQLite physical hash changed during application-stack
-  validation open, while a true read-only audit confirmed no logical Replay
-  rows were added.
-
-All 14 dashboard items are verified.

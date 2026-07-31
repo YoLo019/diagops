@@ -3,3 +3,7 @@ startTime,service,name,value
 1783994400000,telecom-api,packet_loss,2
 1783998000,telecom-api,packet_loss,1
 1784001900000,telecom-api,packet_loss,40
+2026-07-14T11:42:00+08:00,telecom-api,packet_loss,1
+2026-07-14T11:47:00+08:00,telecom-api,packet_loss,2
+2026-07-14T11:52:00+08:00,telecom-api,packet_loss,1
+2026-07-14T11:57:00+08:00,telecom-api,packet_loss,1

@@ -18,6 +18,11 @@ _ERROR_PATTERNS = {
 }
 
 _TIMESTAMP_PREFIX = re.compile(r"^(?P<timestamp>\d{4}-\d{2}-\d{2}T\S+)")
+_STRUCTURED_FIELD = re.compile(r'(?P<key>[A-Za-z_][\w-]*)=(?P<value>"[^"]*"|\S+)')
+_EXCEPTION = re.compile(r"\b([A-Za-z]\w*Exception)\b")
+_CANONICAL_LOG_FIELDS = frozenset(
+    {"service", "environment", "component", "instance", "dependency", "exception", "level"}
+)
 MAX_LOG_BYTES = 5 * 1024 * 1024
 MAX_LOG_LINES = 10_000
 MAX_LOG_MATCHES = 100
@@ -50,29 +55,54 @@ class FileLogProvider:
             if not matches:
                 continue
 
-            patterns = sorted({pattern for match in matches for pattern in match.patterns})
-            evidence.append(
-                EvidenceItem(
-                    provider=self.provider,
-                    kind=EvidenceKind.LOG_PATTERN,
-                    timestamp=matches[0].timestamp or event.started_at,
-                    summary=(
-                        f"{event.service} log file contains {len(matches)} error "
-                        f"pattern matches"
-                    ),
-                    payload={
-                        "source": "configured_log_file",
-                        "service": event.service,
-                        "environment": event.environment,
-                        "error_count": len(matches),
-                        "sample_lines": [
-                            redact_text(match.line) for match in matches[:5]
-                        ],
-                        "patterns": patterns,
-                    },
-                    confidence=1.0,
+            groups: dict[tuple[str, str, str, str], list[_LogMatch]] = {}
+            for match in matches:
+                component = match.fields.get("component") or event.service
+                dependency = match.fields.get("dependency", "")
+                exception = match.fields.get("exception", "")
+                signal_type = (
+                    "timeout"
+                    if exception == "TimeoutException"
+                    or "timeout" in match.line.casefold()
+                    else "error"
                 )
-            )
+                groups.setdefault(
+                    (component, dependency, exception, signal_type), []
+                ).append(match)
+            for (component, dependency, exception, signal_type), group in groups.items():
+                patterns = sorted(
+                    {pattern for match in group for pattern in match.patterns}
+                )
+                payload = {
+                    "source": "configured_log_file",
+                    "service": event.service,
+                    "environment": event.environment,
+                    "component": component,
+                    "signal_type": signal_type,
+                    "signal_name": exception or patterns[0],
+                    "error_count": len(group),
+                    "sample_lines": [
+                        redact_text(match.line) for match in group[:5]
+                    ],
+                    "patterns": patterns,
+                }
+                if dependency:
+                    payload["dependency"] = dependency
+                if exception:
+                    payload["exception"] = exception
+                evidence.append(
+                    EvidenceItem(
+                        provider=self.provider,
+                        kind=EvidenceKind.LOG_PATTERN,
+                        timestamp=group[0].timestamp or event.started_at,
+                        summary=(
+                            f"{event.service} log file contains {len(group)} error "
+                            f"pattern matches"
+                        ),
+                        payload=payload,
+                        confidence=1.0,
+                    )
+                )
             if remaining is not None:
                 remaining -= len(matches)
                 if remaining == 0:
@@ -121,8 +151,18 @@ class FileLogProvider:
                 name for name, pattern in _ERROR_PATTERNS.items() if pattern.search(line)
             ]
             if patterns:
+                fields = _structured_fields(line)
+                if "exception" not in fields and (
+                    exception_match := _EXCEPTION.search(line)
+                ):
+                    fields["exception"] = exception_match.group(1)
                 matches.append(
-                    _LogMatch(line=line, timestamp=parsed_at, patterns=patterns)
+                    _LogMatch(
+                        line=line,
+                        timestamp=parsed_at,
+                        patterns=patterns,
+                        fields=fields,
+                    )
                 )
                 if len(matches) >= limit:
                     break
@@ -134,6 +174,7 @@ class _LogMatch:
     line: str
     timestamp: datetime | None
     patterns: list[str]
+    fields: dict[str, str]
 
 
 def _parse_timestamp(line: str) -> datetime | None:
@@ -150,3 +191,11 @@ def _parse_timestamp(line: str) -> datetime | None:
 
 def _contains_scope(line: str, value: str) -> bool:
     return re.search(rf"(?<![\w-]){re.escape(value)}(?![\w-])", line) is not None
+
+
+def _structured_fields(line: str) -> dict[str, str]:
+    return {
+        match.group("key"): match.group("value").strip('"')
+        for match in _STRUCTURED_FIELD.finditer(line)
+        if match.group("key") in _CANONICAL_LOG_FIELDS
+    }

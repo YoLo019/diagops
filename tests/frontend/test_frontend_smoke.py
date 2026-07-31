@@ -1,3 +1,10 @@
+"""前端可执行行为与安全边界测试。
+
+保留实际执行 selector、candidate visibility、redaction 和未验证操作声明过滤
+的测试；UI 文案、类型字段和调用关系的源码形状不再逐字断言，由 frontend
+production build 与 backend API tests 覆盖。
+"""
+
 import json
 import re
 import subprocess
@@ -48,204 +55,7 @@ def test_frontend_package_json_exists() -> None:
     assert (FRONTEND / "package.json").exists()
 
 
-def test_app_contains_investigation_list_and_detail_ui_strings() -> None:
-    app = (FRONTEND / "src" / "App.tsx").read_text(encoding="utf-8")
-
-    assert "新建诊断" in app
-    assert "诊断列表" in app
-    assert "诊断详情" in app
-    assert "证据链" in app
-    assert "候选根因" in app
-    assert "建议动作" in app
-    assert "验证建议" in app
-    assert "诊断报告" in app
-    assert "任务规划" in app
-    assert "Agent 执行过程" in app
-    assert "工具调用" in app
-    assert "共享上下文" in app
-    assert "历史记忆" in app
-    assert "Agent 判断" in app
-    assert "候选根因排序" in app
-    assert "证据链预览" in app
-    assert "加载 RCA 工作台" in app
-    assert "RCA 工作台加载失败" in app
-    assert "暂无 RCA 工作台数据" in app
-    assert "类型" in app
-    assert "关联根因" in app
-    assert "严重度" in app
-    assert "缺口" in app
-    assert "支持判断" in app
-    assert "反对判断" in app
-    assert "支持证据" in app
-    assert "反对证据" in app
-    assert "记录审批状态" in app
-    assert "记录验证结果" in app
-    assert "·" not in app
-
-    for old_label in [
-        "New Investigation",
-        "Investigation List",
-        "Investigation Detail",
-        "Evidence Chain",
-        "Candidate Causes",
-        "Recommended Actions",
-        "Verification Suggestions",
-        "Diagnosis Report",
-        "Task Plan",
-        "Tool Calls",
-        "Shared Context",
-        "Historical Memory",
-        "Create Diagnosis",
-        "Record approval status",
-        "Record verification result",
-    ]:
-        assert old_label not in app
-
-
-def test_api_exposes_v4_agent_process_methods_and_v5_rca_workbench_methods() -> None:
-    api = (FRONTEND / "src" / "api.ts").read_text(encoding="utf-8")
-
-    for method_name in [
-        "getPlan",
-        "getTasks",
-        "getAgentExecutions",
-        "getContextFacts",
-        "getToolCalls",
-        "getMemoryHits",
-        "getTaskGraph",
-        "getAgentFindings",
-        "getCoordinationReview",
-        "getRcaWorkbench",
-    ]:
-        assert f"function {method_name}" in api
-
-
-def test_api_uses_summary_list_and_omits_retired_react_trace_method() -> None:
-    api = (FRONTEND / "src" / "api.ts").read_text(encoding="utf-8")
-
-    assert 'request<InvestigationSummary[]>("/investigations/summaries")' in api
-    assert "export type ReActTrace" not in api
-    assert "getReActTrace" not in api
-
-
-def test_app_omits_react_panel_and_loads_agent_resources_independently() -> None:
-    app = (FRONTEND / "src" / "App.tsx").read_text(encoding="utf-8")
-
-    assert "ReActTracePanel" not in app
-    assert "getReActTrace" not in app
-    assert "Promise.all" not in app
-    for query_key in [
-        'queryKey: ["plan", investigationId]',
-        'queryKey: ["tasks", investigationId]',
-        'queryKey: ["agent-executions", investigationId]',
-        'queryKey: ["context", investigationId]',
-        'queryKey: ["tool-calls", investigationId]',
-        'queryKey: ["memory", investigationId]',
-        'queryKey: ["task-graph", investigationId]',
-    ]:
-        assert query_key in app
-
-
-def test_v8_1_frontend_types_and_compact_diagnostics_are_present() -> None:
-    api = (FRONTEND / "src" / "api.ts").read_text(encoding="utf-8")
-    app = (FRONTEND / "src" / "App.tsx").read_text(encoding="utf-8")
-
-    for field in [
-        "step_kind?: ExecutionStepKind | null",
-        "failure_category?: FailureCategory",
-        "result_validation_category?: ResultValidationCategory | null",
-        "model_provider?: ModelProvider | null",
-        "model_name?: string | null",
-        "primary_stabilization_category?: StabilizationCategory | null",
-        "secondary_stabilization_categories?: StabilizationCategory[]",
-    ]:
-        assert field in api
-    for projection in [
-        "execution.step_kind",
-        "execution.failure_category",
-        "execution.result_validation_category",
-        "execution.model_provider",
-        "review.model_provider",
-        "review.model_name",
-        "run.primary_stabilization_category",
-    ]:
-        assert projection in app
-    assert "Promise.all" not in app
-    assert "Validation:" in app
-    assert (
-        'execution.execution_layer !== "openai_agents_sdk" && execution.error_message'
-        in app
-    )
-
-
-def test_v8_2_adaptive_strategy_and_tool_trace_are_present() -> None:
-    api = (FRONTEND / "src" / "api.ts").read_text(encoding="utf-8")
-    app = (FRONTEND / "src" / "App.tsx").read_text(encoding="utf-8")
-
-    for field in [
-        'export type InvestigationStrategy = "fixed" | "adaptive"',
-        "strategy: InvestigationStrategy",
-        "adaptive_status?: AdaptiveRunStatus",
-        "adaptive_stop_reason?: AdaptiveStopReason | null",
-        "tool_call_count?: number",
-        "max_tool_calls_per_specialist: number",
-        "max_total_tool_calls: number",
-        "tool_timeout_seconds: number",
-        "tool_calls: ToolCallRecord[]",
-        "blocking: boolean",
-    ]:
-        assert field in api
-    for projection in [
-        "setStrategy",
-        "value={strategy}",
-        "groupToolCallsByAgentAndRound",
-        "调查策略",
-        "Adaptive 状态",
-        "调用原因",
-        "查询参数",
-        "耗时",
-        "预算",
-        "停止原因",
-    ]:
-        assert projection in app
-
-
-def test_v8_2_openrca_benchmark_view_is_present() -> None:
-    api = (FRONTEND / "src" / "api.ts").read_text(encoding="utf-8")
-    app = (FRONTEND / "src" / "App.tsx").read_text(encoding="utf-8")
-    benchmark = (FRONTEND / "src" / "OpenRcaBenchmark.tsx").read_text(
-        encoding="utf-8"
-    )
-    vite = (FRONTEND / "vite.config.ts").read_text(encoding="utf-8")
-
-    for field in [
-        "export type OpenRcaBenchmarkSummary",
-        "export type OpenRcaStrategySummary",
-        "getLatestOpenRcaBenchmark",
-        "openRcaArtifactUrl",
-    ]:
-        assert field in api
-    for projection in [
-        "OpenRcaBenchmark",
-        "Investigations",
-        "OpenRCA Benchmark",
-        "setActiveView",
-        'enabled: activeView === "investigations"',
-    ]:
-        assert projection in app
-    for projection in [
-        "Fixed",
-        "Adaptive",
-        "<progress",
-        "失败案例",
-        "下载 artifact",
-        "暂无已冻结的 OpenRCA Benchmark 结果",
-    ]:
-        assert projection in benchmark
-    assert '"/benchmarks": "http://127.0.0.1:8000"' in vite
-
-
-def test_v8_2_tool_calls_group_by_agent_and_task_round() -> None:
+def test_tool_calls_group_by_agent_and_task_round() -> None:
     calls = [
         {"id": "call-log-2", "task_id": "task-log-2", "agent_name": "LogAgent"},
         {"id": "call-deploy", "task_id": "task-fixed", "agent_name": "DeploymentAgent"},
@@ -273,41 +83,6 @@ def test_v8_2_tool_calls_group_by_agent_and_task_round() -> None:
         ("LogAgent", 1, ["call-log-1"]),
         ("LogAgent", 2, ["call-log-2"]),
     ]
-
-
-def test_app_contains_v7_hybrid_rca_copy() -> None:
-    app = (FRONTEND / "src" / "App.tsx").read_text(encoding="utf-8")
-
-    for label in [
-        "混合 RCA 裁决",
-        "多 Agent 复核一致",
-        "存在冲突，需要人工确认",
-        "多 Agent 主要候选，尚未确认",
-        "多 Agent 复核未完成，以下为确定性 RCA 结果",
-        "第 1 轮",
-        "第 2 轮修订",
-        "事实（证据）",
-        "确定性推断",
-        "Agent 推断",
-        "建议（仅建议，未执行）",
-        "不确定性",
-    ]:
-        assert label in app
-    assert "已确认候选" not in app
-
-
-def test_v7_workbench_keeps_conflicts_unselected_and_findings_separate() -> None:
-    app = (FRONTEND / "src" / "App.tsx").read_text(encoding="utf-8")
-
-    assert "const selectedCause = selectDisplayedCause(" in app
-    assert "const v7FindingsByAgent = groupFindingsByAgent(v7Findings)" in app
-    assert "const customFindingsByAgent = groupFindingsByAgent(customFindings)" in app
-    assert re.search(
-        r"<h2>Agent 推断</h2>.*?"
-        r"<AgentFindingList findingsByAgent=\{run \? v7FindingsByAgent : findingsByAgent\}",
-        app,
-        re.S,
-    )
 
 
 def test_v7_selectors_execute_against_payloads() -> None:
@@ -384,16 +159,6 @@ def test_v7_selectors_execute_against_payloads() -> None:
     assert "[REDACTED_EMAIL]" in redacted
     assert "[REDACTED_URL]" in redacted
     assert results[10] == "已执行回滚"
-
-    app = (FRONTEND / "src" / "App.tsx").read_text(encoding="utf-8")
-    selector = re.search(
-        r"export function selectDisplayedCause(?P<body>.*?)\n\}\n\n"
-        r"export function isUsableV7Review",
-        app,
-        re.S,
-    )
-    assert selector is not None
-    assert "hasReview" not in selector.group("body")
 
 
 def test_v7_agent_text_suppresses_active_past_actions_only_for_sdk() -> None:
@@ -541,78 +306,6 @@ def test_v7_review_guard_and_candidate_visibility_execute_against_payloads() -> 
     assert results[13:] == [[], [{"id": "sdk-candidate"}], [{"id": "legacy"}]]
 
 
-def test_all_v7_free_text_render_sites_use_the_ui_projection() -> None:
-    app = (FRONTEND / "src" / "App.tsx").read_text(encoding="utf-8")
-
-    for expression in [
-        "projectAgentUiText(finding.summary, finding.execution_layer)",
-        "projectAgentUiText(finding.rationale, finding.execution_layer)",
-        "finding.gaps.map((gap) => projectAgentUiText(gap, finding.execution_layer))",
-        "projectAgentUiText(review.summary ?? \"\", review.execution_layer)",
-        "projectAgentUiText(review.uncertainty ?? \"\", review.execution_layer)",
-        "projectAgentUiText(candidate.summary, persistedReview?.execution_layer)",
-        "projectAgentUiText(candidate.rationale, persistedReview?.execution_layer)",
-        "projectAgentUiText(candidate.uncertainty, persistedReview?.execution_layer)",
-    ]:
-        assert expression in app
-
-    assert "const review = isUsableV7Review(persistedReview, run)" in app
-    assert "const candidates = selectVisibleCandidates(" in app
-    assert re.search(
-        r"<h2>既有 Agent 判断</h2>.*?"
-        r"<AgentFindingList findingsByAgent=\{customFindingsByAgent\}",
-        app,
-        re.S,
-    )
-
-
-def test_api_exposes_v7_workbench_fields() -> None:
-    api = (FRONTEND / "src" / "api.ts").read_text(encoding="utf-8")
-
-    for field in [
-        "execution_layer",
-        "analysis_round",
-        "revises_finding_id",
-        "run_status",
-        "decision_status",
-        "baseline_cause_type",
-        "selected_cause_type",
-        "coordination_review",
-        "agent_executions",
-        "multi_agent_run",
-        "agent_config",
-        "implementation_status",
-        "certification_status",
-    ]:
-        assert field in api
-
-    diagnosis_task = re.search(r"export type DiagnosisTask = \{(?P<body>.*?)\n\};", api, re.S)
-    assert diagnosis_task is not None
-    assert "execution_layer?: AgentExecutionLayer" in diagnosis_task.group("body")
-    assert "analysis_round?: 1 | 2 | null" in diagnosis_task.group("body")
-
-    app = (FRONTEND / "src" / "App.tsx").read_text(encoding="utf-8")
-    assert "agentConfig.implementation_status" in app
-    assert "agentConfig.certification_status" in app
-    assert "DEEPSEEK_API_KEY" not in app
-
-
-def test_frontend_uses_vite_proxy_by_default() -> None:
-    api = (FRONTEND / "src" / "api.ts").read_text(encoding="utf-8")
-    vite_config = (FRONTEND / "vite.config.ts").read_text(encoding="utf-8")
-
-    assert 'import.meta.env.VITE_API_BASE_URL ?? ""' in api
-    assert '"/investigations": "http://127.0.0.1:8000"' in vite_config
-
-
-def test_topbar_stats_allows_long_urls_to_wrap() -> None:
-    styles = (FRONTEND / "src" / "styles.css").read_text(encoding="utf-8")
-    topbar_stats = re.search(r"\.topbar-stats\s*\{[^}]+\}", styles)
-
-    assert topbar_stats is not None
-    assert "overflow-wrap: anywhere" in topbar_stats.group(0)
-
-
 def test_ui_does_not_claim_production_changes_are_automatic() -> None:
     app = (FRONTEND / "src" / "App.tsx").read_text(encoding="utf-8").lower()
 
@@ -647,19 +340,12 @@ def test_ui_does_not_claim_production_changes_are_automatic() -> None:
         assert claim not in app
 
 
-def test_frontend_sends_verification_references_and_limits_human_transitions() -> None:
-    api = (FRONTEND / "src" / "api.ts").read_text(encoding="utf-8")
-    app = (FRONTEND / "src" / "App.tsx").read_text(encoding="utf-8")
+def test_frontend_source_contains_no_secret_tokens() -> None:
+    pattern = re.compile(r"[A-Z][A-Z0-9_]*API_KEY|Bearer\s+\S+|-----BEGIN")
+    offenders = [
+        str(path.relative_to(FRONTEND))
+        for path in (FRONTEND / "src").rglob("*.*")
+        if pattern.search(path.read_text(encoding="utf-8"))
+    ]
 
-    for field in (
-        "result_evidence_ids",
-        "related_action_ids",
-        "related_cause_types",
-    ):
-        assert field in api
-    assert "allowedActionTargets(action)" in app
-    assert "allowedVerificationTargets(verification.status)" in app
-    assert "disabled={allowedActionTargets(action).length === 0}" in app
-    assert "disabled={allowedVerificationTargets(verification.status).length === 0}" in app
-    assert "选择结果 Evidence" in app
-    assert "选择关联 action 或 cause" in app
+    assert offenders == []

@@ -1,3 +1,4 @@
+import math
 from collections.abc import Callable
 
 from backend.domain.events import IncidentEvent
@@ -30,6 +31,9 @@ class RcaAnalyzer:
             self._dependency_failure(event, evidence),
             self._database_slowdown(event, evidence),
             self._single_instance_issue(event, evidence),
+            self._resource_saturation(evidence),
+            self._network_fault(evidence),
+            self._process_failure(evidence),
         ]
         hypotheses = [candidate for candidate in candidates if candidate is not None]
 
@@ -45,7 +49,10 @@ class RcaAnalyzer:
                 )
             ]
 
-        return sorted(hypotheses, key=lambda item: item.confidence, reverse=True)
+        return sorted(
+            hypotheses,
+            key=lambda item: (-item.confidence, item.cause_type.value),
+        )
 
     def _deployment_regression(
         self, event: IncidentEvent, evidence: list[EvidenceItem]
@@ -60,20 +67,32 @@ class RcaAnalyzer:
             lambda item: item.provider == EvidenceProvider.LOG
             and item.payload.get("exception") == "NullPointerException",
         )
+        deployment_errors = [
+            item
+            for item in evidence
+            if item.provider == EvidenceProvider.LOG
+            and item.payload.get("signal_type") in {"error", "timeout"}
+            and any(
+                item.timestamp >= deploy.timestamp
+                and _same_component(deploy, item)
+                for deploy in deploys
+            )
+        ]
         normal_qps_evidence = _normal_qps_evidence(evidence)
         normal_qps = event.signals.get("qps") == "normal" or bool(normal_qps_evidence)
-        has_strong_match = bool(deploys and null_pointers)
+        error_evidence = _unique_evidence([*null_pointers, *deployment_errors])
+        has_strong_match = bool(deploys and error_evidence)
 
         score = 0
         score += 4 if deploys else 0
-        score += 3 if null_pointers else 0
+        score += 3 if error_evidence else 0
         score += 2 if normal_qps else 0
         score += 1 if "deployment" in _event_text(event) else 0
 
         if not has_strong_match:
             return None
 
-        supporting = [*deploys, *null_pointers]
+        supporting = [*deploys, *error_evidence]
         supporting.extend(normal_qps_evidence)
         supporting.extend(contains_any(evidence, ["normal range", "qps stayed"]))
         return Hypothesis(
@@ -95,7 +114,14 @@ class RcaAnalyzer:
             evidence,
             lambda item: item.provider == EvidenceProvider.METRIC
             and item.kind == EvidenceKind.METRIC_TREND
-            and _is_large_positive_qps_change(item.payload.get("qps_change")),
+            and (
+                _is_large_positive_qps_change(item.payload.get("qps_change"))
+                or (
+                    item.payload.get("signal_type") == "traffic"
+                    and _number(item.payload.get("change_percent"))
+                    >= TRAFFIC_SPIKE_QPS_CHANGE
+                )
+            ),
         )
         summary_fallback = contains_any(evidence, ["qps increased sharply"])
 
@@ -139,6 +165,7 @@ class RcaAnalyzer:
             and (
                 item.payload.get("dependency") is not None
                 or item.payload.get("exception") == "TimeoutException"
+                or item.payload.get("signal_type") == "timeout"
             ),
         )
         summary_fallback = contains_any(evidence, ["timeout"])
@@ -146,7 +173,7 @@ class RcaAnalyzer:
 
         score = 0
         score += 4 if dependency_health else 0
-        score += 3 if timeout_logs else 0
+        score += 6 if timeout_logs else 0
         score += 2 if event.signals.get("dependency") else 0
         score += 1 if summary_fallback else 0
         score += 1 if "dependency" in _event_text(event) else 0
@@ -164,6 +191,62 @@ class RcaAnalyzer:
                 "Increase timeout budget only if it is safe for callers and capacity.",
                 "Enable fallback, circuit breaking, or queueing for the affected dependency path.",
             ],
+        )
+
+    def _resource_saturation(
+        self, evidence: list[EvidenceItem]
+    ) -> Hypothesis | None:
+        strong = _filter(
+            evidence,
+            lambda item: item.payload.get("signal_type")
+            in {"cpu", "memory", "disk_io"}
+            and _is_strong(item)
+            and (
+                item.payload.get("change_percent") is None
+                or _number(item.payload.get("change_percent")) > 0
+            ),
+        )
+        if not strong:
+            return None
+        return Hypothesis(
+            cause_type=CauseType.RESOURCE_SATURATION,
+            summary="Resource saturation is the strongest match for the observed anomaly.",
+            confidence=confidence_from_score(6 + min(3, len(strong) - 1)),
+            supporting_evidence_ids=_ids(strong),
+            next_actions=["Inspect capacity and the workload driving resource pressure."],
+        )
+
+    def _network_fault(self, evidence: list[EvidenceItem]) -> Hypothesis | None:
+        strong = _filter(
+            evidence,
+            lambda item: item.payload.get("signal_type")
+            in {"network_latency", "network_corruption"}
+            and _is_strong(item),
+        )
+        if not strong:
+            return None
+        return Hypothesis(
+            cause_type=CauseType.NETWORK_FAULT,
+            summary="Network degradation matches the observed latency or packet errors.",
+            confidence=confidence_from_score(6 + min(3, len(strong) - 1)),
+            supporting_evidence_ids=_ids(strong),
+            next_actions=["Inspect the affected node and network path."],
+        )
+
+    def _process_failure(self, evidence: list[EvidenceItem]) -> Hypothesis | None:
+        strong = _filter(
+            evidence,
+            lambda item: item.payload.get("signal_type") == "process"
+            and _is_strong(item),
+        )
+        if not strong:
+            return None
+        return Hypothesis(
+            cause_type=CauseType.PROCESS_OR_CONTAINER_FAILURE,
+            summary="A process or container failure matches the availability loss.",
+            confidence=confidence_from_score(6 + min(3, len(strong) - 1)),
+            supporting_evidence_ids=_ids(strong),
+            next_actions=["Inspect restarts and preserve process diagnostics."],
         )
 
     def _database_slowdown(
@@ -210,18 +293,30 @@ class RcaAnalyzer:
             and (
                 item.payload.get("cpu") is not None
                 or item.payload.get("error_rate") is not None
+                or (
+                    item.payload.get("signal_type") in {"cpu", "error"}
+                    and _is_strong(item)
+                )
             ),
         )
         summary_fallback = contains_any(evidence, ["one instance"])
+        canonical_instance = any(
+            item.payload.get("signal_type") in {"cpu", "error"}
+            and _is_strong(item)
+            for item in instance_metrics
+        )
 
         score = 0
         score += 5 if instance_metrics else 0
+        score += 2 if canonical_instance else 0
         score += 2 if event.signals.get("instance") == "abnormal" else 0
         score += 1 if event.signals.get("cpu") == "high" else 0
         score += 1 if summary_fallback else 0
         score += 1 if "one instance" in _event_text(event) else 0
 
-        if not instance_metrics:
+        if not instance_metrics or len(
+            {item.payload["instance"] for item in instance_metrics}
+        ) != 1:
             return None
 
         return Hypothesis(
@@ -247,6 +342,10 @@ def _ids(evidence: list[EvidenceItem]) -> list[str]:
     return sorted({item.id for item in evidence})
 
 
+def _unique_evidence(evidence: list[EvidenceItem]) -> list[EvidenceItem]:
+    return list({item.id: item for item in evidence}.values())
+
+
 def _event_text(event: IncidentEvent) -> str:
     return f"{event.title} {event.description}".lower()
 
@@ -256,7 +355,13 @@ def _normal_qps_evidence(evidence: list[EvidenceItem]) -> list[EvidenceItem]:
         evidence,
         lambda item: item.provider == EvidenceProvider.METRIC
         and item.kind == EvidenceKind.METRIC_TREND
-        and _is_small_qps_change(item.payload.get("qps_change")),
+        and (
+            _is_small_qps_change(item.payload.get("qps_change"))
+            or (
+                item.payload.get("signal_type") == "traffic"
+                and abs(_number(item.payload.get("change_percent"))) <= NORMAL_QPS_MAX_ABS_CHANGE
+            )
+        ),
     )
 
 
@@ -268,3 +373,20 @@ def _is_large_positive_qps_change(value: object) -> bool:
 def _is_small_qps_change(value: object) -> bool:
     percentage = parse_percentage(value)
     return percentage is not None and abs(percentage) <= NORMAL_QPS_MAX_ABS_CHANGE
+
+
+def _number(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return 0.0
+    number = float(value)
+    return number if math.isfinite(number) else 0.0
+
+
+def _is_strong(item: EvidenceItem) -> bool:
+    return _number(item.payload.get("deviation_score")) >= 1
+
+
+def _same_component(left: EvidenceItem, right: EvidenceItem) -> bool:
+    left_component = left.payload.get("component") or left.payload.get("service")
+    right_component = right.payload.get("component") or right.payload.get("service")
+    return not left_component or not right_component or left_component == right_component

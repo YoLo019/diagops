@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -162,6 +162,148 @@ def test_unknown_hypothesis_evidence_id_raises_value_error_without_findings():
 
     with pytest.raises(ValueError, match="Unknown evidence id"):
         build_coordination_review("inv-1", [], [_evidence("ev-known")], hypotheses)
+
+
+def test_deterministic_attribution_clusters_real_observation_times_and_maps_reason():
+    start = datetime(2026, 7, 3, 12, tzinfo=UTC)
+    evidence = [
+        EvidenceItem(
+            id=f"ev-network-{index}",
+            provider=EvidenceProvider.METRIC,
+            kind=EvidenceKind.METRIC_TREND,
+            timestamp=start + timedelta(seconds=offset),
+            summary="Network signal",
+            payload={
+                "component": "checkout",
+                "node": "node-a",
+                "signal_type": "network_corruption",
+                "signal_name": "packet_loss",
+                "deviation_score": score,
+            },
+        )
+        for index, (offset, score) in enumerate(
+            [(60, 1.2), (120, 2.0), (180, 1.5), (600, 3.0)]
+        )
+    ]
+    hypothesis = Hypothesis(
+        cause_type=CauseType.NETWORK_FAULT,
+        summary="Network fault",
+        confidence=0.8,
+        supporting_evidence_ids=[item.id for item in evidence],
+    )
+
+    review = build_coordination_review("inv-1", [], evidence, [hypothesis])
+
+    assert len(review.root_causes) == 2
+    assert [item.root_cause_occurred_at for item in review.root_causes] == [
+        start + timedelta(seconds=60),
+        start + timedelta(seconds=600),
+    ]
+    assert all(item.root_cause_component == "node-a" for item in review.root_causes)
+    assert all(
+        item.root_cause_reason == "network packet corruption"
+        for item in review.root_causes
+    )
+    assert set(review.root_causes[0].supporting_evidence_ids) == {
+        "ev-network-0",
+        "ev-network-1",
+        "ev-network-2",
+    }
+
+
+def test_attribution_never_merges_evidence_across_anomaly_segments():
+    start = datetime(2026, 7, 3, 12, tzinfo=UTC)
+    evidence = [
+        EvidenceItem(
+            id=f"ev-seg-{segment}-{index}",
+            provider=EvidenceProvider.METRIC,
+            kind=EvidenceKind.METRIC_TREND,
+            timestamp=start + timedelta(seconds=offset),
+            summary="Memory signal",
+            payload={
+                "component": "checkout",
+                "signal_type": "memory",
+                "signal_name": "memory_usage",
+                "deviation_score": score,
+                "anomaly_segment_id": segment,
+                "anomaly_onset": (start + timedelta(seconds=onset)).isoformat(),
+            },
+        )
+        for segment, rows in (
+            ("seg-a", [(0, 1.0), (30, 2.0)]),
+            ("seg-b", [(60, 1.5), (90, 3.0)]),
+        )
+        for index, (offset, score) in enumerate(rows)
+        for onset in [rows[0][0]]
+    ]
+    hypothesis = Hypothesis(
+        cause_type=CauseType.RESOURCE_SATURATION,
+        summary="Memory saturation",
+        confidence=0.8,
+        supporting_evidence_ids=[item.id for item in evidence],
+    )
+
+    review = build_coordination_review("inv-1", [], evidence, [hypothesis])
+
+    # 两条 segment 间隔仅 30s，时间聚类会合并；segment 聚类必须保持分离。
+    assert len(review.root_causes) == 2
+    by_ids = {
+        frozenset(item.supporting_evidence_ids): item for item in review.root_causes
+    }
+    seg_a = by_ids[frozenset({"ev-seg-seg-a-0", "ev-seg-seg-a-1"})]
+    seg_b = by_ids[frozenset({"ev-seg-seg-b-0", "ev-seg-seg-b-1"})]
+    assert seg_a.root_cause_occurred_at == start
+    assert seg_b.root_cause_occurred_at == start + timedelta(seconds=60)
+
+
+def test_attribution_keeps_historical_evidence_on_time_cluster_fallback():
+    start = datetime(2026, 7, 3, 12, tzinfo=UTC)
+    segmented = EvidenceItem(
+        id="ev-segmented",
+        provider=EvidenceProvider.METRIC,
+        kind=EvidenceKind.METRIC_TREND,
+        timestamp=start,
+        summary="Segmented memory signal",
+        payload={
+            "component": "checkout",
+            "signal_type": "memory",
+            "signal_name": "memory_usage",
+            "deviation_score": 2.0,
+            "anomaly_segment_id": "seg-a",
+            "anomaly_onset": start.isoformat(),
+        },
+    )
+    historical = EvidenceItem(
+        id="ev-historical",
+        provider=EvidenceProvider.METRIC,
+        kind=EvidenceKind.METRIC_TREND,
+        timestamp=start + timedelta(seconds=30),
+        summary="Legacy memory signal without segment",
+        payload={
+            "component": "checkout",
+            "signal_type": "memory",
+            "signal_name": "memory_usage",
+            "deviation_score": 1.0,
+        },
+    )
+    hypothesis = Hypothesis(
+        cause_type=CauseType.RESOURCE_SATURATION,
+        summary="Memory saturation",
+        confidence=0.8,
+        supporting_evidence_ids=[segmented.id, historical.id],
+    )
+
+    review = build_coordination_review("inv-1", [], [segmented, historical], [hypothesis])
+
+    # 有 segment 的证据与无 segment 的历史证据不得跨路径合并。
+    assert len(review.root_causes) == 2
+    by_ids = {
+        tuple(item.supporting_evidence_ids): item for item in review.root_causes
+    }
+    assert by_ids[("ev-segmented",)].root_cause_occurred_at == start
+    assert by_ids[("ev-historical",)].root_cause_occurred_at == start + timedelta(
+        seconds=30
+    )
 
 
 @pytest.mark.parametrize(

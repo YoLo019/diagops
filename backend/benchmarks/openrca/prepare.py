@@ -34,6 +34,16 @@ _CLOCK_PATTERN = re.compile(
     r"(\d{1,2}:\d{2})(?::\d{2})?",
     re.IGNORECASE,
 )
+_ROOT_CAUSE_COUNT_PATTERNS = {
+    1: re.compile(
+        r"\b(?:a|one|single|1)\b[^.!?\n]{0,40}\bfailure\b",
+        re.IGNORECASE,
+    ),
+    2: re.compile(
+        r"\b(?:two|2)\b[^.!?\n]{0,40}\bfailures\b",
+        re.IGNORECASE,
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -68,17 +78,13 @@ def prepare_cases(
     for partition in OpenRcaPartition:
         candidates = _load_candidates(dataset_root, partition)
         if len(candidates) < per_partition:
-            raise ValueError(
-                f"partition {partition.value} has fewer than {per_partition} cases"
-            )
+            raise ValueError(f"partition {partition.value} has fewer than {per_partition} cases")
         selected.extend(_stratified_sample(candidates, per_partition, seed))
 
     manifest_cases: list[OpenRcaManifestCase] = []
     runtime_cases: list[OpenRcaRuntimeCase] = []
     for candidate in selected:
-        telemetry_dir = _safe_telemetry_dir(
-            dataset_root, candidate.partition, candidate.row
-        )
+        telemetry_dir = _safe_telemetry_dir(dataset_root, candidate.partition, candidate.row)
         case_id = f"{candidate.partition.value}:{candidate.row_id}"
         start_time, end_time = _parse_window(candidate.row.get("instruction", ""))
         manifest_cases.append(
@@ -98,14 +104,15 @@ def prepare_cases(
                 partition=candidate.partition,
                 row_id=candidate.row_id,
                 task_index=candidate.task_index,
-                system=candidate.row.get("system", "").strip()
-                or candidate.partition.value,
-                date=candidate.row.get("date", "").strip()
-                or start_time.date().isoformat(),
+                system=candidate.row.get("system", "").strip() or candidate.partition.value,
+                date=candidate.row.get("date", "").strip() or start_time.date().isoformat(),
                 service=candidate.row.get("service", "").strip()
                 or candidate.row.get("service_scope", "").strip()
                 or candidate.partition.value,
                 instruction=candidate.row.get("instruction", ""),
+                expected_root_cause_count=_expected_root_cause_count(
+                    candidate.row.get("instruction", "")
+                ),
                 start_time=start_time,
                 end_time=end_time,
                 telemetry_dir=telemetry_dir,
@@ -135,9 +142,7 @@ def prepare_cases(
     )
 
 
-def _load_candidates(
-    dataset_root: Path, partition: OpenRcaPartition
-) -> list[_Candidate]:
+def _load_candidates(dataset_root: Path, partition: OpenRcaPartition) -> list[_Candidate]:
     directory = dataset_root / Path(partition.value)
     query_rows = _read_csv(directory / "query.csv")
     record_rows = _read_csv(directory / "record.csv")
@@ -155,15 +160,9 @@ def _load_candidates(
         components = tuple(
             sorted(
                 {
-                    (
-                        item.get("component", "")
-                        or item.get("root_cause_component", "")
-                    ).strip()
+                    (item.get("component", "") or item.get("root_cause_component", "")).strip()
                     for item in records
-                    if (
-                        item.get("component", "")
-                        or item.get("root_cause_component", "")
-                    ).strip()
+                    if (item.get("component", "") or item.get("root_cause_component", "")).strip()
                 }
             )
         )
@@ -172,9 +171,7 @@ def _load_candidates(
                 {
                     (item.get("reason", "") or item.get("root_cause_reason", "")).strip()
                     for item in records
-                    if (
-                        item.get("reason", "") or item.get("root_cause_reason", "")
-                    ).strip()
+                    if (item.get("reason", "") or item.get("root_cause_reason", "")).strip()
                 }
             )
         )
@@ -186,9 +183,7 @@ def _load_candidates(
                 task_index=task_index,
                 difficulty=_difficulty(task_index),
                 failure_mode=(
-                    OpenRcaFailureMode.MULTI
-                    if len(records) > 1
-                    else OpenRcaFailureMode.SINGLE
+                    OpenRcaFailureMode.MULTI if len(records) > 1 else OpenRcaFailureMode.SINGLE
                 ),
                 component_stratum=components,
                 reason_stratum=reasons,
@@ -197,9 +192,7 @@ def _load_candidates(
     return candidates
 
 
-def _stratified_sample(
-    candidates: list[_Candidate], count: int, seed: int
-) -> list[_Candidate]:
+def _stratified_sample(candidates: list[_Candidate], count: int, seed: int) -> list[_Candidate]:
     groups: dict[tuple[object, ...], list[_Candidate]] = defaultdict(list)
     for candidate in candidates:
         groups[
@@ -270,10 +263,7 @@ def _safe_telemetry_dir(
     value = row.get("telemetry_dir", "").strip()
     if not value:
         start_time, _ = _parse_window(row.get("instruction", ""))
-        value = (
-            f"{partition.value}/telemetry/"
-            f"{start_time.date().isoformat().replace('-', '_')}"
-        )
+        value = f"{partition.value}/telemetry/{start_time.date().isoformat().replace('-', '_')}"
     relative = Path(value)
     resolved = (dataset_root / relative).resolve()
     if relative.is_absolute() or not resolved.is_relative_to(dataset_root):
@@ -284,12 +274,8 @@ def _safe_telemetry_dir(
 def _parse_window(instruction: str) -> tuple[datetime, datetime]:
     matches = _TIME_PATTERN.findall(instruction)
     if len(matches) >= 2:
-        start_time = datetime.strptime(matches[0], "%Y-%m-%d %H:%M:%S").replace(
-            tzinfo=_TIMEZONE
-        )
-        end_time = datetime.strptime(matches[1], "%Y-%m-%d %H:%M:%S").replace(
-            tzinfo=_TIMEZONE
-        )
+        start_time = datetime.strptime(matches[0], "%Y-%m-%d %H:%M:%S").replace(tzinfo=_TIMEZONE)
+        end_time = datetime.strptime(matches[1], "%Y-%m-%d %H:%M:%S").replace(tzinfo=_TIMEZONE)
     else:
         date_match = _DATE_PATTERN.search(instruction)
         clock_match = _CLOCK_PATTERN.search(instruction)
@@ -305,11 +291,22 @@ def _parse_window(instruction: str) -> tuple[datetime, datetime]:
     return start_time, end_time
 
 
+def _expected_root_cause_count(instruction: str) -> int:
+    matches = {
+        count
+        for count, pattern in _ROOT_CAUSE_COUNT_PATTERNS.items()
+        if pattern.search(instruction)
+    }
+    if len(matches) != 1:
+        raise ValueError("OpenRCA instruction root cause count must be exactly one or two")
+    return matches.pop()
+
+
 def _manifest_hash(manifest: OpenRcaManifest) -> str:
     payload = manifest.model_dump(mode="json", exclude={"manifest_hash"})
-    encoded = json.dumps(
-        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
     return hashlib.sha256(encoded).hexdigest()
 
 

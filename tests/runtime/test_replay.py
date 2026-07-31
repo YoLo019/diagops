@@ -15,6 +15,7 @@ from backend.domain.agent_findings import (
     AgentFindingType,
     AgentName,
     CoordinationReview,
+    RootCauseAttribution,
     RootCauseCandidate,
 )
 from backend.domain.events import IncidentEvent, IncidentSource, Severity
@@ -307,6 +308,11 @@ def test_frozen_projection_contains_typed_validator_inputs_without_cached_result
         kind=EvidenceKind.DEPLOYMENT,
         timestamp=datetime(2026, 7, 18, tzinfo=UTC),
         summary="sensitive-free-text evidence summary",
+        payload={
+            "service": "checkout-service",
+            "component": "checkout-service",
+            "signal_type": "deployment",
+        },
     )
     hypothesis = Hypothesis(
         id="hyp-typed",
@@ -364,6 +370,14 @@ def test_frozen_projection_contains_typed_validator_inputs_without_cached_result
                 supporting_evidence_ids=[evidence.id],
             )
         ],
+        root_causes=[
+            RootCauseAttribution(
+                root_cause_occurred_at=evidence.timestamp,
+                root_cause_component="checkout-service",
+                root_cause_reason="deployment regression",
+                supporting_evidence_ids=[evidence.id],
+            )
+        ],
     )
     repository.save(
         record.model_copy(
@@ -392,8 +406,13 @@ def test_frozen_projection_contains_typed_validator_inputs_without_cached_result
     assert frozen["evidence"][0]["id"] == evidence.id
     assert frozen["findings"][0]["id"] == finding.id
     assert frozen["review"]["id"] == review.id
+    assert frozen["review"]["root_causes"][0]["supporting_evidence_ids"] == [
+        evidence.id
+    ]
     assert frozen["report"]["id"] == report.id
     assert "sensitive-free-text" not in str(frozen)
+    replay = ReplayService(ReplayDependencies(store=runtime_store)).replay(source.id)
+    assert replay.valid is True, replay.validation_errors
 
 
 @pytest.mark.parametrize(

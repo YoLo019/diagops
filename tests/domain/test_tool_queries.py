@@ -35,6 +35,8 @@ def test_query_contract_enum_values_are_stable():
         "p95_latency",
         "cpu",
         "memory",
+        "network_drops",
+        "process_restarts",
     ]
     assert [item.value for item in DependencyDirection] == ["upstream", "downstream"]
 
@@ -94,6 +96,13 @@ def test_specialist_queries_apply_defaults_and_strict_shapes():
         LogQuery(**window, keywords=[], unexpected=True)
 
 
+def test_prometheus_query_accepts_all_supported_metrics_in_one_call():
+    query = PrometheusQuery(**_window(), metric_names=list(PrometheusMetric))
+
+    # 上限与 enum 基数保持同步：单次工具调用可覆盖全部受支持信号。
+    assert len(query.metric_names) == 7
+
+
 @pytest.mark.parametrize(
     "query_type, values",
     [
@@ -105,7 +114,7 @@ def test_specialist_queries_apply_defaults_and_strict_shapes():
         (MetricQuery, {"metric_names": [str(index) for index in range(21)]}),
         (MetricQuery, {"metric_names": ["x" * 161]}),
         (PrometheusQuery, {"metric_names": []}),
-        (PrometheusQuery, {"metric_names": ["qps"] * 6}),
+        (PrometheusQuery, {"metric_names": ["qps"] * 8}),
         (DeploymentQuery, {"version": "x" * 121}),
         (DependencyQuery, {"target": "payment", "depth": 2}),
     ],

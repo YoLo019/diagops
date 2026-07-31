@@ -7,7 +7,7 @@ from datetime import UTC, datetime, tzinfo
 from pathlib import Path
 
 _TIMESTAMP_KEYS = ("timestamp", "startTime")
-_COMPONENT_KEYS = ("cmdb_id", "service", "serviceName")
+_COMPONENT_KEYS = ("cmdb_id", "service", "serviceName", "tc")
 _METRIC_NAME_KEYS = ("kpi_name", "name", "metric")
 _METRIC_VALUE_KEYS = ("value", "metric_value")
 _RESERVED_COLUMNS = frozenset(

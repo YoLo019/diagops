@@ -332,14 +332,7 @@ def freeze_business_projection(repository, investigation_id: str) -> dict[str, A
                 "timestamp": item.timestamp,
                 "confidence": item.confidence,
                 "status": item.status,
-                "root_cause_claims": [
-                    {
-                        "component_sha256": _relationship_hash(claim["component"]),
-                        "reason_sha256": _relationship_hash(claim["reason"]),
-                        "occurred_at": claim["occurred_at"],
-                    }
-                    for claim in root_cause_claims(item)
-                ],
+                "root_cause_claims": _frozen_root_cause_claims(item, review),
             }
             for item in record.evidence
         ],
@@ -453,6 +446,39 @@ def freeze_business_projection(repository, investigation_id: str) -> dict[str, A
         "integrity_sha256": "0" * 64,
     }
     return reseal_frozen_projection(projection)
+
+
+def _frozen_root_cause_claims(
+    evidence: EvidenceItem, review: CoordinationReview | None
+) -> list[dict[str, Any]]:
+    claims = [
+        {
+            "component_sha256": _relationship_hash(claim["component"]),
+            "reason_sha256": _relationship_hash(claim["reason"]),
+            "occurred_at": claim["occurred_at"],
+        }
+        for claim in root_cause_claims(evidence)
+    ]
+    if review is not None:
+        claims.extend(
+            {
+                "component_sha256": _relationship_hash(item.root_cause_component),
+                "reason_sha256": _relationship_hash(item.root_cause_reason),
+                "occurred_at": item.root_cause_occurred_at,
+            }
+            for item in review.root_causes
+            if evidence.id in item.supporting_evidence_ids
+        )
+    return list(
+        {
+            (
+                claim["component_sha256"],
+                claim["reason_sha256"],
+                str(claim["occurred_at"]),
+            ): claim
+            for claim in claims
+        }.values()
+    )[:32]
 
 
 class RuntimeDiffService:

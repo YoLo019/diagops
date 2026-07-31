@@ -219,6 +219,9 @@ def _require_root_cause_support(
 ) -> None:
     cited = [evidence_by_id[item] for item in root_cause.supporting_evidence_ids]
     claims = [claim for item in cited for claim in root_cause_claims(item)]
+    if not claims and all("root_cause_claims" not in item.payload for item in cited):
+        _require_canonical_root_cause_support(cited, root_cause)
+        return
     time_matches = [
         claim
         for claim in claims
@@ -244,6 +247,55 @@ def _require_root_cause_support(
         _normalize_claim(claim["reason"]) == reason
         for claim in component_matches
     ):
+        raise EvidenceContractError("root_cause_reason_mismatch")
+
+
+def _require_canonical_root_cause_support(
+    cited: list[EvidenceItem], root_cause: RootCauseAttribution
+) -> None:
+    if not any(
+        abs(item.timestamp - root_cause.root_cause_occurred_at)
+        <= timedelta(minutes=1)
+        for item in cited
+    ):
+        raise EvidenceContractError("root_cause_time_mismatch")
+
+    components = {
+        _normalize_claim(value)
+        for item in cited
+        for key in ("service", "component", "node", "instance", "dependency")
+        if isinstance((value := item.payload.get(key)), str) and value.strip()
+    }
+    if _normalize_claim(root_cause.root_cause_component) not in components:
+        raise EvidenceContractError("root_cause_component_mismatch")
+
+    reasons = set()
+    for item in cited:
+        signal_type = item.payload.get("signal_type")
+        signal_name = str(item.payload.get("signal_name") or "").casefold()
+        if item.kind == EvidenceKind.DEPLOYMENT or signal_type == "deployment":
+            reasons.add("deployment regression")
+        if signal_type == "traffic":
+            reasons.add("traffic spike")
+        if signal_type == "timeout":
+            reasons.add("dependency timeout")
+        if item.provider == EvidenceProvider.DEPENDENCY:
+            reasons.add("dependency latency")
+        if any(token in signal_name for token in ("database", "db_", "sql")):
+            reasons.add("database latency")
+        if item.payload.get("instance") and signal_type in {"cpu", "error"}:
+            reasons.add("single instance failure")
+        reason = {
+            "cpu": "container cpu load",
+            "memory": "container memory load",
+            "disk_io": "disk I/O saturation",
+            "network_latency": "network latency",
+            "network_corruption": "network packet corruption",
+            "process": "container process failure",
+        }.get(str(signal_type))
+        if reason:
+            reasons.add(reason)
+    if root_cause.root_cause_reason not in reasons:
         raise EvidenceContractError("root_cause_reason_mismatch")
 
 
