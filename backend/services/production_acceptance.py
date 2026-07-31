@@ -470,19 +470,21 @@ def _onset_available(scenario: str, evidence: list[object]) -> bool:
 
 
 def _privacy_scan(event: object, evidence: object, review: object) -> bool:
-    """持久化 Event/Evidence 不得含 scenario 标识或控制面 token；Review 不得含控制面 token。"""
-    input_text = json.dumps(
-        {"event": event, "evidence": evidence},
-        ensure_ascii=False,
-        default=str,
-    ).casefold()
+    """Event（alert 注入入口）不得含 scenario 标识或控制面 token；Evidence/Review
+    是诊断系统自己生成的 canonical 词汇（signal_type 可能与 scenario 同词），
+    只扫描控制面 token。"""
+    event_text = json.dumps(event or {}, ensure_ascii=False, default=str).casefold()
     if any(
-        token in input_text
+        token in event_text
         for token in (*_SCENARIO_TOKENS, *_CONTROL_PLANE_TOKENS)
     ):
         return False
-    review_text = json.dumps(review or {}, ensure_ascii=False, default=str).casefold()
-    return not any(token in review_text for token in _CONTROL_PLANE_TOKENS)
+    generated_text = json.dumps(
+        {"evidence": evidence, "review": review or {}},
+        ensure_ascii=False,
+        default=str,
+    ).casefold()
+    return not any(token in generated_text for token in _CONTROL_PLANE_TOKENS)
 
 
 def _parse_timestamp(value: object) -> datetime | None:

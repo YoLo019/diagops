@@ -24,7 +24,10 @@ EOF
 i=0
 for ago in $(seq $DIAGOPS_SEED_OLDEST_SECONDS -$DIAGOPS_SEED_STEP_SECONDS $DIAGOPS_SEED_NEWEST_SECONDS); do
   ts=$(( now - ago ))
-  ok_requests=$(( 100 + 12 * i ))
+  # baseline 速率 0.1/s：故障场景驱动的 24 个请求（rate[5m] 0.08/s）不构成
+  # 正向 traffic anomaly，避免干扰根因 attribution；traffic_spike 场景的
+  # 300 个请求（1/s）仍是 +900%。
+  ok_requests=$(( 100 + 24 * i ))
   cpu=$(( 10 + i ))
   served=$(( 100 + i ))
   cat >> "$baseline_file" <<EOF

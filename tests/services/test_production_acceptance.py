@@ -262,11 +262,12 @@ def _runner_request(calls, detail, review, investigation_reads):
                     "output_evidence_ids": ["ev-1"],
                 }
             ]
-        if url.endswith("/fault/memory_pressure"):
-            return {
-                "mode": "memory_pressure",
-                "activated_at": "2026-07-30T12:00:00+00:00",
-            }
+        for mode in ("memory_pressure", "network_corruption", "process_failure"):
+            if url.endswith(f"/fault/{mode}"):
+                return {
+                    "mode": mode,
+                    "activated_at": "2026-07-30T12:00:00+00:00",
+                }
         return {"status": "ok"}
 
     return request
@@ -518,3 +519,53 @@ def test_runner_privacy_scan_flags_answer_leak_in_persisted_records():
 
     assert result.privacy_scan_passed is False
     assert result.passed is False
+
+
+def test_runner_privacy_scan_allows_canonical_signal_type_matching_scenario():
+    """signal_type 的 canonical 值（如 network_corruption）与 scenario 同词时
+    不得误判为答案泄漏；event 入口仍扫描 scenario token。"""
+    calls = []
+    detail = {
+        "id": "inv-test",
+        "status": "completed",
+        "event": {"source": "webhook"},
+        "evidence": [
+            {
+                "id": "ev-1",
+                "payload": {
+                    "signal_type": "network_corruption",
+                    "anomaly_onset": "2026-07-30T12:00:20+00:00",
+                },
+            }
+        ],
+        "hypotheses": [
+            {
+                "cause_type": "network_fault",
+                "confidence": 0.9,
+                "supporting_evidence_ids": ["ev-1"],
+            }
+        ],
+    }
+    review = {
+        "root_causes": [
+            {
+                "root_cause_component": "checkout-service",
+                "root_cause_reason": "network packet corruption",
+                "root_cause_occurred_at": "2026-07-30T12:00:20+00:00",
+                "supporting_evidence_ids": ["ev-1"],
+            }
+        ]
+    }
+
+    result = run_scenario(
+        "network_corruption",
+        app_url="http://app",
+        dependency_url="http://dependency",
+        diagops_url="http://diagops",
+        alertmanager_url="http://alertmanager",
+        requester=_runner_request(calls, detail, review, []),
+        sleeper=lambda _seconds: None,
+    )
+
+    assert result.privacy_scan_passed is True
+    assert result.passed is True

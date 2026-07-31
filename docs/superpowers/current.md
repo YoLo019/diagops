@@ -78,13 +78,13 @@ docs/superpowers/plans/2026-07-30-diagops-v10-shared-signal-semantics-seven-scen
 
 ## V10 Execution Dashboard
 
-Overall progress: `implementing; T7 source identity established`
+Overall progress: `implementing; T8 first run failed and was fixed inside the approved contract`
 
 Current phase: V10 execution M5 live Gates
 
-Next action: run T8 production seven-scenario Gate on source identity commit
-`34e83097d353e6da261b32e3e92c08cc6264b7e5`, then T9 frozen six-case targeted
-Gate; T10 only if both pass.
+Next action: commit the T8 failure record and in-contract fix, re-run T8
+production seven-scenario Gate on the new source identity, then T9 frozen
+six-case targeted Gate; T10 only if both pass.
 Spec and plan were approved by the user on 2026-07-30 after the second cold
 review resolved F16–F19. Stop at T7 source checkpoint for separate Git
 authorization; do not run any live Gate before it.
@@ -123,6 +123,7 @@ authorization; do not run any live Gate before it.
 | M4.5 | Review | Cold review cleanup totals and contract integrity | verified | Net cleanup: CL0 −257 lines (109 production), CL1 README −61, current.md −188, frontend tests −312 source-shape lines replaced by +89 executable lines, W7 fallback −40; no public or persisted contract removed — API response models, DB schema, and repository interfaces unchanged; CL2 disposition leaves capability intact | Start M5/T6 |
 | T6 | M5 | Key-free full regression | verified | Ruff clean; pytest 1538/1538; frontend production build passed; Runtime acceptance 14/14 with privacy scan passed (artifact `output/runtime-acceptance/runtime-20260731T011951755740Z-c5e8e1af/result.json`); `git diff --check` clean; zero diff in pyproject/uv.lock/migrations/schema/package.json — no new dependency, migration, public API, or write Tool | Start T7 |
 | T7 | M5 | Source checkpoint | verified | User explicitly authorized the Git commit on 2026-07-31. Source identity commit `34e83097d353e6da261b32e3e92c08cc6264b7e5` on branch `agent/v10-shared-signal-semantics` (clean tree); prior HEAD `568da973`; official evaluator commit `c1bd4af7f635171a1c31cdd567c07d698dff6abc`; frozen six-case safe-index SHA-256 `b249e2f6b0b0dbd3b9f30aa71ef3302ff2c48a05cc50b914fb3dcbbc8800ad4b`; milestone diff review found no blocking finding | Start T8 |
+| T8 | M5 | Production seven-scenario Gate | in_progress | First real run on source identity `b666d271` FAILED and was stopped per plan; artifact `output/production-acceptance/run-20260731T053859716Z/result.json`, SHA-256 `e3c61f180418aa85e4afd9905500c39284d119cfbc05622a8a1f28a826bf4496`. All four old scenarios passed; all three new scenarios had correct Top-1 cause/component and onset error 0.09–0.5s, but reason read as `traffic spike`. Root causes (implementation defects inside the approved contract, no tuning): (1) seeded 200-rate baseline 0.05/s made the 24 driven requests a +60% qps anomaly, spawning a `traffic_spike` hypothesis whose attribution tied and outranked the real one — fixed by raising the seeded growth to 24/240s (0.1/s); (2) `_privacy_scan` flagged canonical `signal_type: network_corruption` as a scenario-token leak — fixed by scanning scenario tokens only in the Event entry and control-plane tokens in Evidence/Review. Focused 30/30, Ruff clean, full suite 1539/1539 after the fix | Re-run T8 on the fixed source identity |
 
 ## V10 Task-Aware Projector Targeted Gate
 
