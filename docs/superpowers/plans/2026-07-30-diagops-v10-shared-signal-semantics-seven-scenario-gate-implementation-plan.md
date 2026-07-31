@@ -562,3 +562,55 @@ diff 进行冷审：
 spec 和本计划。执行从 M0/CL0 开始，按 milestone 顺序推进；T7 source checkpoint
 处必须停止并单独取得 Git commit 授权，未经用户明确请求不得执行任何其他 Git
 finish 操作。
+
+## 14. Amendment A1（2026-07-31）：T9 失败后的单轮健壮性迭代 —— **已撤回**
+
+T8 已于 source identity `6a7df40` 通过 7/7；T9 真实运行 2/6 正分失败，按计划
+停止并记录。独立冷审（spec §16 A1-F1…A1-F8）证明本增补的核心机制不成立：
+R18 的"永不锚定"仅靠排序无法实现，baseline-aware 修正后规则对失败案例不起
+作用；R17 客观正确但不改变 Bank 失败路径。用户于 2026-07-31 决定**撤回
+Amendment A1，T11/T12 不执行**，接受 T9 结果并归档
+（`docs/superpowers/openrca-v10-6-case-failure-analysis.md`）。以下任务定义
+保留为撤回方案的历史记录。
+
+### T11. Counter 语义与 onset 可辨识性（撤回，不执行）
+
+覆盖：R17、R18。
+
+1. `backend/benchmarks/openrca/providers.py`：metric adapter 对每个
+   `(component, instance, metric)` series，合并 baseline+observation 后判定
+   严格单调不减且至少两次严格递增 → 先转相邻样本差分率再调
+   `detect_anomaly_segments`；其余 series 不变。
+2. `backend/diagnosis/signal_semantics.py`：`AnomalySegment` 增加
+   `onset_identifiable: bool`；onset 等于窗口内首个 observation 样本时间戳时
+   为 `False`。
+3. 两个 adapter 把 `not onset_identifiable` 映射为既有 additive payload 字段
+   `onset_unavailable`；证据保留不删除。
+4. Attribution 排序：cluster score 不变；同分时 onset 可辨识 cluster 优先，
+   其后维持 occurred_at/component/reason 平局裁决。时间投影永不锚定不可辨识
+   onset；全部不可辨识时走 Projector v2 既有显式 fallback。
+
+测试（先写）：
+
+- counter→rate：单调累计 series 假异常消失、gauge 波动 series 语义不变、
+  counter reset（非单调）保持 gauge 处理。
+- edge onset：首样本段 `onset_unavailable=True`、窗口中段段不受影响、
+  历史无该字段 payload 读取兼容。
+- 平局裁决：同分时可辨识优先；全部不可辨识时显式 fallback。
+- 生产路径回归：`tests/services/test_production_acceptance.py`、
+  Prometheus adapter 测试不变即通过。
+
+检查：`uv run pytest tests/benchmarks tests/diagnosis tests/providers -q`、
+`uv run ruff check .`、`uv run pytest -q`。
+
+### T12. 单轮 Gate 重跑（撤回，不执行）
+
+覆盖：R12、R13、R17、R18。
+
+1. 全套件与 Ruff 通过后，先重跑 T8（`scripts/run_production_gate.ps1`），
+   期望 7/7 不回归；T8 回归则停止，不跑 T9。
+2. T8 通过后按 T9 原命令重跑 frozen six-case targeted Gate（同一 frozen
+   safe-index，先验 hash）。
+3. 无论结果如何结束本轮：T9 通过则按原计划进入 T10 决策点；未通过则记录
+   artifact/hash/source，写失败分析归档（V9 先例），不再修订或调参。
+4. 在 `current.md` 记录两次 Gate 的 run ID、artifact SHA-256、source commit。

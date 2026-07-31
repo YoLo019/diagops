@@ -29,17 +29,17 @@ OpenRCA/production metric heuristics with one bounded signal-semantics core,
 then prove cause/component/reason/onset through the OpenRCA targeted Gate and a
 seven-scenario production Gate.
 
-Iteration status: `implementing`
+Iteration status: `complete`
 
 Spec status: `approved`
 
 Plan status: `approved`
 
-Implementation status: `in_progress`
+Implementation status: `complete`
 
-Completion commit: `none`
+Completion commit: `6a7df40e962e514167bc539f20d89467a0f70abb` (implementation concluded; both Gates ran on this source identity; archive docs follow)
 
-Verification evidence: `D:\data\OpenRCA\results-v10-targeted-projector\run-20260730T090304525928Z`
+Verification evidence: T8 production Gate `output/production-acceptance/run-20260731T111932207Z/result.json` (7/7, SHA-256 `2c3a543a3816978ee9c16d335ecf145f97eb26ffb5441e244b652a7fb258e2a9`); T9 accepted failure `D:\data\OpenRCA\results-v10-shared-signal\run-20260731T123348473710Z` + `docs/superpowers/openrca-v10-6-case-failure-analysis.md`
 
 Blocker: `none`
 
@@ -78,14 +78,16 @@ docs/superpowers/plans/2026-07-30-diagops-v10-shared-signal-semantics-seven-scen
 
 ## V10 Execution Dashboard
 
-Overall progress: `implementing; T8 passed 7/7; T9 targeted Gate failed 2/6 and stopped per plan`
+Overall progress: `complete; T8 production Gate 7/7 verified; T9 OpenRCA targeted Gate 2/6 failed, user accepted and archived on 2026-07-31`
 
-Current phase: V10 execution M5 live Gates — halted at T9
+Current phase: V10 concluded with accepted T9 failure
 
-Next action: T9 failure is recorded with artifact/hash/source and a structural
-root-cause analysis; T10 is NOT run per the approved plan. Awaiting user
-decision on whether to amend the spec for a Signal Core robustness iteration
-or accept the V10 Gate outcome.
+Next action: none for V10. Failure analysis archived at
+`docs/superpowers/openrca-v10-6-case-failure-analysis.md`; Amendment A1
+(R17/R18) withdrawn after cold review (spec §16 A1-F1…A1-F8). The V10 code on
+branch `agent/v10-shared-signal-semantics` is not merged; merge or discard is a
+separate user decision. R13 recorded blocked with user acceptance in the spec
+traceability.
 Spec and plan were approved by the user on 2026-07-30 after the second cold
 review resolved F16–F19. Stop at T7 source checkpoint for separate Git
 authorization; do not run any live Gate before it.
@@ -125,7 +127,7 @@ authorization; do not run any live Gate before it.
 | T6 | M5 | Key-free full regression | verified | Ruff clean; pytest 1538/1538; frontend production build passed; Runtime acceptance 14/14 with privacy scan passed (artifact `output/runtime-acceptance/runtime-20260731T011951755740Z-c5e8e1af/result.json`); `git diff --check` clean; zero diff in pyproject/uv.lock/migrations/schema/package.json — no new dependency, migration, public API, or write Tool | Start T7 |
 | T7 | M5 | Source checkpoint | verified | User explicitly authorized the Git commit on 2026-07-31. Source identity commit `34e83097d353e6da261b32e3e92c08cc6264b7e5` on branch `agent/v10-shared-signal-semantics` (clean tree); prior HEAD `568da973`; official evaluator commit `c1bd4af7f635171a1c31cdd567c07d698dff6abc`; frozen six-case safe-index SHA-256 `b249e2f6b0b0dbd3b9f30aa71ef3302ff2c48a05cc50b914fb3dcbbc8800ad4b`; milestone diff review found no blocking finding | Start T8 |
 | T8 | M5 | Production seven-scenario Gate | verified | First real run on source identity `b666d271` FAILED and was stopped per plan (artifact `output/production-acceptance/run-20260731T053859716Z/result.json`, SHA-256 `e3c61f180418aa85e4afd9905500c39284d119cfbc05622a8a1f28a826bf4496`): three new scenarios had correct cause/component but reason `traffic spike`. Root causes were in-contract implementation defects (seeded 0.05/s qps baseline let the 24 driven requests spawn a competing `traffic_spike` attribution; `_privacy_scan` mis-flagged canonical `signal_type: network_corruption`). Fixed in `6a7df40` (seed growth 24/240s; scenario tokens scanned only at the Event entry). Re-run PASSED 7/7 on source identity `6a7df40`: deployment `0.70`, dependency `0.70` (reason `dependency timeout`), traffic `0.60`, healthy UNKNOWN `0.20`, memory_pressure/network_corruption/process_failure all hit cause+component+reason with onset error 29.7–32.5s ≤60s; Evidence references 100%, read-only violations 0, privacy scan passed, total 105.2s <900s. Artifact `output/production-acceptance/run-20260731T111932207Z/result.json`, SHA-256 `2c3a543a3816978ee9c16d335ecf145f97eb26ffb5441e244b652a7fb258e2a9` | Start T9 |
-| T9 | M5 | Frozen six-case targeted Gate | blocked | Real deterministic run `run-20260731T123348473710Z` on source identity `6a7df40` (frozen safe-index hash verified `b249e2f6…ad4b`): 6/6 completed, Evidence 100%, projection error/fallback 0, read-only 0, but official targeted Gate FAILED — scores 0/0/0/0/0.5/0.5 (2/6 positive < 3/6; task_1 time score 0). Official report SHA-256 `366d64d4619f82d423e889cf0ac4bce31d7d49098c442dcdb62d241a185cb109`, summary SHA-256 `d0b1fff74706c6e98c6262933e8866db5f420419a7b7acdf75d9874435a48080`. Structural diagnosis from run evidence (no Ground Truth used in any fix): quasi-zero metric series (baseline 0, MAD 0) yield zero-baseline-clamped strength-10 single-point segments at the window start (e.g. DSKBps 3.0 vs 0.0, change_percent 3e11), which outrank the true `network_latency` segments that ARE detected with correct onsets (09:16/09:18 in Bank:16); ~22 sub-second `latency` trace signals also cluster at window start. Root pattern: trivial-absolute-magnitude segments are not suppressed, so attribution ranks clamp-inflated noise above real faults | Stopped per plan; no T10, no tuning — awaiting user decision |
+| T9 | M5 | Frozen six-case targeted Gate | blocked | Real deterministic run `run-20260731T123348473710Z` on source identity `6a7df40` (frozen safe-index hash verified `b249e2f6…ad4b`): 6/6 completed, Evidence 100%, projection error/fallback 0, read-only 0, but official targeted Gate FAILED — scores 0/0/0/0/0.5/0.5 (2/6 positive < 3/6; task_1 time score 0). Official report SHA-256 `366d64d4619f82d423e889cf0ac4bce31d7d49098c442dcdb62d241a185cb109`, summary SHA-256 `d0b1fff74706c6e98c6262933e8866db5f420419a7b7acdf75d9874435a48080`. Structural diagnosis from run evidence (no Ground Truth used in any fix): quasi-zero metric series (baseline 0, MAD 0) yield zero-baseline-clamped strength-10 single-point segments at the window start (e.g. DSKBps 3.0 vs 0.0, change_percent 3e11), which outrank the true `network_latency` segments that ARE detected with correct onsets (09:16/09:18 in Bank:16); ~22 sub-second `latency` trace signals also cluster at window start. Root pattern: trivial-absolute-magnitude segments are not suppressed, so attribution ranks clamp-inflated noise above real faults | User accepted the outcome on 2026-07-31 after Amendment A1 was withdrawn post cold review; archived in `docs/superpowers/openrca-v10-6-case-failure-analysis.md`; no T10 |
 
 ## V10 Task-Aware Projector Targeted Gate
 

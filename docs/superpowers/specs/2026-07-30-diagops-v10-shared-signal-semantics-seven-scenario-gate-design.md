@@ -537,7 +537,7 @@ OpenRCA targeted：
 | R10 | 七场景无答案泄漏、只读、安全且 `<900s` | B6、O7、O8 | artifact/config scan | T5、T8 | lab/acceptance tests | production Gate | approved |
 | R11 | 删除 C1–C5，禁止重复框架和第二套排序 | complexity audit | diff/caller review | T2、T4 | deletion audit | milestone review | approved |
 | R12 | 所有 live Gate 使用同一可复现 source，且 targeted 通过后才跑 40-case | B8 | release preflight | T7–T10 | source/Gate checks | source checkpoint | approved |
-| R13 | 生产七场景与 OpenRCA targeted 达到确认阈值 | B1、B6 | live evaluations | T8–T10 | focused gates | 双 targeted Gate | approved |
+| R13 | 生产七场景与 OpenRCA targeted 达到确认阈值 | B1、B6 | live evaluations | T8–T10 | focused gates | 双 targeted Gate | blocked（生产 7/7 verified；OpenRCA targeted 2/6 未达 3/6，用户 2026-07-31 接受并归档，T10 按停止规则未执行） |
 | R14 | 声明仅覆盖实际 Gate，不夸大生产泛化 | A2 | documentation audit | T5、T8–T10 | wording scan | final report | approved |
 | R15 | source checkpoint 前删除 W1–W4、W7，保留真实行为测试并保持公共/持久化合同 | whole-repo audit | caller scan、focused/full regression | CL0、CL1 | cleanup focused checks | final source audit | approved |
 | R16 | W5/W6 只有书面 retire 决策才删除，否则记录并保留认证与历史读取能力 | whole-repo audit | capability/retention decision | CL2 | decision ledger、compatibility tests | final source audit | approved |
@@ -565,6 +565,14 @@ OpenRCA targeted：
 | F17 | missed | low | spec "约 100 行生产逻辑" 与 plan "净删除约 200 行" 口径不一致 | accepted | plan CL0 注明净删除含测试、生产代码约 100 行的口径 | cold plan reread | resolved |
 | F18 | missed | low | C5 行范围 339-383 未覆盖 :389 的 dependency 排序与截取 | accepted | 行范围修正为 339-389，执行以函数边界为准 | provider deletion diff | resolved |
 | F19 | missed | medium | `PrometheusQuery.metric_names` max_length=5 与新增后 7 值 enum 的覆盖关系未明确，会破坏"单调用覆盖全部受支持信号"的现有语义 | accepted | 上限与 enum 基数同步至 7，仍为固定 allowlist 大小 | domain/tool tests | resolved |
+| A1-F1 | new_evidence | high | Amendment A1"时间投影永不锚定不可辨识 onset"未指定实现机制，仅改 attribution 排序无法实现 | accepted | 用户决定撤回 Amendment A1，不改代码；机制分析归档于 `docs/superpowers/openrca-v10-6-case-failure-analysis.md` §6 | cold review report | resolved |
+| A1-F2 | new_evidence | high | 二元 edge-onset 规则非 baseline-aware，与 V2 Gate `onset_unavailable` 消费语义相撞；baseline-aware 修正后预备数据 baseline 完整，规则对失败案例不起作用 | accepted | 随 Amendment A1 撤回；证明记录归档于失败分析 §6 | cold review report | resolved |
+| A1-F3 | new_evidence | medium | strength 饱和（threshold=ε 时 clamp 10）本身未修，R17/R18 不改变 Bank 失败路径 | accepted | 书面承认为已诊断未修复项，归档于失败分析 §6.1 | failure analysis doc | resolved |
+| A1-F4 | new_evidence | medium | OpenRCA dependency error 路径手工构造 segment，绕过 Signal Core 拿不到 onset 可辨识性 | accepted | 随 Amendment A1 撤回，无代码影响；记录为未来修复面 | cold review report | resolved |
+| A1-F5 | new_evidence | medium | R17 差分转换的排序/Δt=0/跨窗边界未定义 | accepted | 随 Amendment A1 撤回；边界条件清单保留在失败分析 §6.1 供复用 | cold review report | resolved |
+| A1-F6 | new_evidence | low | 历史 payload 缺失 `onset_unavailable` 的默认平局语义未成文 | accepted | 随 Amendment A1 撤回，无行为变化 | cold review report | resolved |
+| A1-F7 | new_evidence | low | "与生产 counter→rate 同构"措辞 overstated（生产含 reset 处理与外推） | accepted | 撤回后无措辞残留 | cold review report | resolved |
+| A1-F8 | new_evidence | low | T11 测试清单与文件 ownership 缺口 | accepted | 随 Amendment A1 撤回 | cold review report | resolved |
 
 ## 17. Alternatives
 
@@ -590,3 +598,74 @@ resolved 后，用户于 2026-07-30 书面批准当前 amended 内容，状态�
 - 执行按 plan milestone 顺序进行，T7 source checkpoint 前需单独取得 Git 授权；
 - 后续证据若改变目标、范围、行为、公共或持久化合同、安全边界、迁移或验收标准，
   本规格与 plan 同时退回 `review_required`。
+
+## 19. Amendment A1（2026-07-31）：counter 语义与 onset 可辨识性 —— **已撤回**
+
+触发：T9 frozen six-case targeted Gate 真实运行失败（2/6 正分 < 3/6，time 0），
+根因分析确认两个与 Ground Truth 无关的客观语义缺陷。本增补曾追加两条健壮性
+要求；独立冷审（findings A1-F1…A1-F8，见 §16）证明其核心机制不成立：
+
+- R18 的"永不锚定"仅靠 attribution 排序无法实现（A1-F1），且二元 edge 规则
+  非 baseline-aware、与 V2 Gate `onset_unavailable` 消费语义相撞；修正为
+  baseline-aware 后，因预备数据 baseline 窗口完整，规则对失败案例不起作用
+  （A1-F2）。
+- R17 客观正确但不改变 Bank 失败路径；strength 饱和未被触及（A1-F3）。
+
+用户于 2026-07-31 决定**撤回 Amendment A1（R17/R18 不实现），接受 T9 结果
+并归档**。原批准合同（§1–§18）保持 `approved` 不变；诊断结论与已诊断未修复
+项归档于 `docs/superpowers/openrca-v10-6-case-failure-analysis.md`。以下
+§19.1–§19.5 保留为撤回方案的历史记录，不再具有执行效力。
+
+### 19.1 诊断证据（仅来自 run 输出与原始遥测，未使用 Ground Truth 做设计）
+
+1. `metric_container.csv` 含真累计 counter（如 `total_commands_processed`、
+   `total_connections_received`、`keyspace_hits`，绝对值达 4.8e9）。OpenRCA
+   adapter 未做 counter→rate 转换，把累计值当 gauge：绝对水平远超 baseline
+   即产生 strength 10 假异常（"395546943 vs 83"）。`metric_app.csv` 的
+   rr/sr/cnt/mrt 是每分钟聚合率，不受此影响。
+2. 准零序列（baseline 恒 0、MAD=0、threshold=ε）下任何单点 blip 都被 clamp
+   成 strength 10，strength 失去排名区分度，attribution 退化为 onset 升序
+   tie-break，而窗口首样本段（edge artifact）系统性赢得平局。
+3. 钉在窗口首个 observation 样本的段无法区分"窗口内新故障"与"窗口前已存在
+   的状况"——其真实 onset 不可观测。这与生产侧已批准的 `onset_unavailable`
+   （range 数据不足时显式降级）是同构语义。
+
+### 19.2 R17：OpenRCA adapter counter→rate
+
+对 OpenRCA metric adapter 的每个 `(component, instance, metric)` series：
+若 observation+baseline 合并序列**严格单调不减且至少两次严格递增**，判定为
+累计 counter，先转换为相邻样本差分率（rate = Δvalue/Δt），再交给 Signal
+Core；其余 series 语义不变。这是遥测 schema 层语义修正，与生产 adapter 的
+counter→rate 模板同构，不读取任何 metric 名称黑名单、task 或案例标识。
+
+- 已知的可接受取舍：counter reset（窗口内值下降）使序列非单调 → 按 gauge
+  处理，记录为非目标；单调上升的 gauge（如缓慢泄漏）被转换为增长率，其
+  阶跃仍会被检测（baseline rate≈0 vs observation rate>0），语义可辩护。
+
+### 19.3 R18：onset 可辨识性与 attribution 平局裁决
+
+`detect_anomaly_segments` 为每个 segment 增加 onset 可辨识性：若 segment
+onset 等于窗口内首个 observation 样本时间戳（窗口内没有任何更早样本），则
+`onset_identifiable=False`。adapter 把它映射为既有 payload 字段
+`onset_unavailable`（additive，历史 payload 不变；证据本身保留、不删除）。
+
+Attribution 排序契约改为：cluster score 不变；同分时，onset 可辨识的
+cluster 优先于不可辨识的，其后才按 occurred_at、component、reason 平局裁决。
+时间投影永不锚定不可辨识 onset；全部 cluster 不可辨识时走 Projector v2 既有
+显式 fallback。这与 R6 的"onset fallback 显式"一致。
+
+### 19.4 兼容性与验证
+
+- 公共/持久化合同：`AnomalySegment` 增加只读字段；Evidence payload 仅 additive
+  复用 `onset_unavailable`；无 API、DB schema、artifact schema 变化。
+- 验证：聚焦测试（counter 转换、edge onset、平局裁决、历史 payload 兼容）+
+  Ruff + 全套件 + **T8 重跑不得回归** + **T9 重跑一次定结果**。
+- 停止规则：T9 重跑无论通过与否都结束本轮迭代；不再进行第二次修订或调参，
+  未通过则按 V9 先例写失败分析归档。T10 仍仅在 T9 通过后执行。
+
+### 19.5 新增需求追踪
+
+| ID | Requirement | Baseline | Acceptance | Plan task | Focused check | Final gate | Status |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| R17 | ~~OpenRCA adapter 单调累计 series 先转 rate 再进 Signal Core~~（随 Amendment A1 撤回，不实现；作为已诊断缺陷归档） | 19.1-1 | — | — | — | — | withdrawn |
+| R18 | ~~edge onset 不可辨识、additive `onset_unavailable`、attribution 同分可辨识优先~~（随 Amendment A1 撤回，不实现；冷审证明机制无效） | 19.1-2/3 | — | — | — | — | withdrawn |
