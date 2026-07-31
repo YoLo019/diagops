@@ -7,7 +7,6 @@ from pydantic import ValidationError
 from backend.domain.agent_context import (
     ContextFact,
     ContextFactType,
-    SharedInvestigationContext,
 )
 from backend.domain.agent_findings import CoordinationReview, RootCauseAttribution
 from backend.domain.agent_plan import (
@@ -27,7 +26,7 @@ from backend.domain.multi_agent import (
     ModelProvider,
     ResultValidationCategory,
 )
-from backend.domain.tool_calls import ToolCallRecord, ToolCallStatus, ToolSpec
+from backend.domain.tool_calls import ToolSpec
 
 
 def test_v82_cause_types_are_available():
@@ -92,7 +91,6 @@ def test_agent_models_defaults_are_readable_and_empty_lists_are_fresh():
     )
     plan = DiagnosisPlan(investigation_id="inv-1")
     execution = AgentExecution(task_id=task.id, agent_name="LogAgent")
-    context = SharedInvestigationContext(investigation_id="inv-1")
     memory = MemoryItem(
         service="checkout-service",
         environment="prod",
@@ -106,7 +104,6 @@ def test_agent_models_defaults_are_readable_and_empty_lists_are_fresh():
     assert memory.id.startswith("mem-")
     assert task.tool_names == []
     assert plan.tasks == []
-    assert context.facts == []
     assert memory.tags == []
     assert task.execution_layer == AgentExecutionLayer.CUSTOM
     assert task.analysis_round is None
@@ -230,28 +227,6 @@ def test_agent_models_dump_json_payloads():
         agent_name="LogAgent",
         tool_names=["read_logs"],
     )
-    tool_call = ToolCallRecord(
-        task_id=task.id,
-        agent_name="LogAgent",
-        tool_name="read_logs",
-        input={"service": "checkout-service", "window_minutes": 30},
-        status=ToolCallStatus.SUCCESS,
-        output_evidence_ids=["ev-1"],
-        duration_ms=12,
-    )
-    fact = ContextFact(
-        source_agent="LogAgent",
-        fact_type=ContextFactType.OBSERVATION,
-        summary="500 errors increased after deployment.",
-        confidence=0.86,
-        evidence_ids=["ev-1"],
-    )
-    context = SharedInvestigationContext(
-        investigation_id="inv-1",
-        facts=[fact],
-        evidence_ids=["ev-1"],
-        tool_calls=[tool_call],
-    )
     execution = AgentExecution(
         task_id=task.id,
         agent_name="LogAgent",
@@ -264,7 +239,6 @@ def test_agent_models_dump_json_payloads():
     dumped = DiagnosisPlan(investigation_id="inv-1", tasks=[task]).model_dump(mode="json")
     execution_dumped = execution.model_dump(mode="json")
     json.dumps(dumped)
-    json.dumps(context.model_dump(mode="json"))
     json.dumps(execution_dumped)
 
     assert dumped["tasks"][0]["status"] == "pending"

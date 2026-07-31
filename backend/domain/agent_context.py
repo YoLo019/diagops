@@ -4,9 +4,6 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field, model_validator
 
-from backend.domain.memory import MemoryItem
-from backend.domain.tool_calls import ToolCallRecord
-
 
 class ContextFactType(StrEnum):
     OBSERVATION = "observation"
@@ -30,14 +27,3 @@ class ContextFact(BaseModel):
         if self.fact_type != ContextFactType.MISSING_EVIDENCE and not self.evidence_ids:
             raise ValueError("evidence_ids required unless fact_type is missing_evidence")
         return self
-
-
-class SharedInvestigationContext(BaseModel):
-    investigation_id: str
-    facts: list[ContextFact] = Field(default_factory=list)
-    evidence_ids: list[str] = Field(default_factory=list)
-    agent_notes: list[str] = Field(default_factory=list)
-    tool_calls: list[ToolCallRecord] = Field(default_factory=list)
-    memory_hits: list[MemoryItem] = Field(default_factory=list)
-    conflicts: list[str] = Field(default_factory=list)
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

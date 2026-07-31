@@ -26,27 +26,57 @@ def test_error_patterns_become_log_pattern_evidence():
 
     assert result.status == ProviderStatus.SUCCESS
     assert result.provider == EvidenceProvider.LOG
-    assert len(result.evidence_items) == 1
-    evidence = result.evidence_items[0]
-    assert evidence.kind == EvidenceKind.LOG_PATTERN
-    assert evidence.payload["error_count"] == 2
-    assert "NullPointerException" in "\n".join(evidence.payload["sample_lines"])
-    assert "HTTP 500" in evidence.payload["patterns"]
-    assert "Exception" in evidence.payload["patterns"]
+    assert len(result.evidence_items) == 2
+    assert all(item.kind == EvidenceKind.LOG_PATTERN for item in result.evidence_items)
+    assert sum(item.payload["error_count"] for item in result.evidence_items) == 2
+    sample_lines = [
+        line
+        for item in result.evidence_items
+        for line in item.payload["sample_lines"]
+    ]
+    patterns = {
+        pattern
+        for item in result.evidence_items
+        for pattern in item.payload["patterns"]
+    }
+    assert "NullPointerException" in "\n".join(sample_lines)
+    assert {"HTTP 500", "Exception"} <= patterns
 
 
 def test_payload_contains_error_count_sample_lines_and_patterns():
     provider = FileLogProvider([Path("data/sample-logs/checkout-service.log")])
 
-    evidence = provider.collect(_event()).evidence_items[0]
+    evidence = provider.collect(_event()).evidence_items
 
-    assert evidence.payload["error_count"] == 2
-    assert len(evidence.payload["sample_lines"]) == 2
-    assert set(evidence.payload["patterns"]) >= {"ERROR", "Exception", "HTTP 500", "5xx"}
-    assert evidence.payload["source"] == "configured_log_file"
-    assert "path" not in evidence.payload
-    assert evidence.payload["service"] == "checkout-service"
-    assert evidence.payload["environment"] == "prod"
+    assert sum(item.payload["error_count"] for item in evidence) == 2
+    assert sum(len(item.payload["sample_lines"]) for item in evidence) == 2
+    assert {
+        pattern for item in evidence for pattern in item.payload["patterns"]
+    } >= {"ERROR", "Exception", "HTTP 500", "5xx"}
+    first = evidence[0]
+    assert first.payload["source"] == "configured_log_file"
+    assert "path" not in first.payload
+    assert first.payload["service"] == "checkout-service"
+    assert first.payload["environment"] == "prod"
+    assert first.payload["component"] == "checkout-service"
+    assert first.payload["signal_type"] == "error"
+
+
+def test_structured_log_fields_become_canonical_timeout_evidence(tmp_path):
+    log_path = tmp_path / "checkout.log"
+    log_path.write_text(
+        "2026-07-06T08:01:00+00:00 service=checkout-service environment=prod "
+        "component=checkout-api dependency=payment-service "
+        "exception=TimeoutException level=ERROR\n",
+        encoding="utf-8",
+    )
+
+    evidence = FileLogProvider([log_path]).collect(_event()).evidence_items[0]
+
+    assert evidence.payload["component"] == "checkout-api"
+    assert evidence.payload["dependency"] == "payment-service"
+    assert evidence.payload["exception"] == "TimeoutException"
+    assert evidence.payload["signal_type"] == "timeout"
 
 
 def test_missing_log_file_produces_provider_failure_through_registry(tmp_path):

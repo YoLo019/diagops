@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -20,13 +21,19 @@ from backend.benchmarks.openrca.telemetry import (
     row_trace_id,
     rows_for,
 )
+from backend.diagnosis.signal_semantics import (
+    AnomalySegment,
+    SeriesPoint,
+    classify_metric_signal,
+    detect_anomaly_segments,
+    select_balanced_evidence,
+)
 from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
 from backend.domain.tool_queries import (
     DependencyDirection,
     DependencyQuery,
     LogQuery,
-    MetricAggregation,
     MetricQuery,
 )
 from backend.providers.results import ProviderResult, ProviderStatus
@@ -56,9 +63,7 @@ class OpenRcaLogProvider(_OpenRcaProvider):
     provider = EvidenceProvider.LOG
     supported_tools = frozenset({"read_logs"})
 
-    def collect(
-        self, event: IncidentEvent, query: LogQuery | None = None
-    ) -> ProviderResult:
+    def collect(self, event: IncidentEvent, query: LogQuery | None = None) -> ProviderResult:
         start, end, limit = self._window(event, query)
         keywords = [item.casefold() for item in (query.keywords if query else [])]
         levels = {item.casefold() for item in (query.levels if query else [])}
@@ -69,9 +74,7 @@ class OpenRcaLogProvider(_OpenRcaProvider):
             timestamp = row_timestamp(row, self.case.start_time.tzinfo)
             component = row_component(row)
             level = (row.get("level") or row.get("severity") or "").strip()
-            message = (
-                row.get("message") or row.get("log") or row.get("content") or ""
-            ).strip()
+            message = (row.get("message") or row.get("log") or row.get("content") or "").strip()
             if timestamp is None or not message:
                 malformed += 1
                 continue
@@ -98,16 +101,6 @@ class OpenRcaLogProvider(_OpenRcaProvider):
                 break
         if not matches:
             return _empty_result(self.provider, malformed)
-        claims = [
-            {
-                "component": item["component"],
-                "reason": f"log error: {item['message'][:120]}",
-                "occurred_at": item["timestamp"],
-            }
-            for item in matches
-            if item["level"].casefold() in {"error", "critical", "fatal"}
-        ]
-        payload = {"matches": matches, "root_cause_claims": claims}
         return ProviderResult(
             provider=self.provider,
             status=_status(malformed),
@@ -116,11 +109,12 @@ class OpenRcaLogProvider(_OpenRcaProvider):
                     self.case,
                     self.provider,
                     EvidenceKind.LOG_PATTERN,
-                    datetime.fromisoformat(matches[-1]["timestamp"]),
-                    f"{len(matches)} bounded log matches",
-                    payload,
+                    datetime.fromisoformat(match["timestamp"]),
+                    f"log signal on {match['component']}",
+                    _log_payload(match),
                     evidence_namespace=self.evidence_namespace,
                 )
+                for match in matches
             ],
             error_message=_malformed_warning(malformed),
         )
@@ -130,13 +124,13 @@ class OpenRcaMetricProvider(_OpenRcaProvider):
     provider = EvidenceProvider.METRIC
     supported_tools = frozenset({"query_metrics"})
 
-    def collect(
-        self, event: IncidentEvent, query: MetricQuery | None = None
-    ) -> ProviderResult:
+    def collect(self, event: IncidentEvent, query: MetricQuery | None = None) -> ProviderResult:
         start, end, limit = self._window(event, query)
+        # baseline 是紧邻诊断窗口、与诊断窗口等长的前置窗口（spec R2）。
+        baseline_start = start - (end - start)
         requested = set(query.metric_names if query else [])
         requested_instance = query.instance if query else None
-        points: list[dict[str, object]] = []
+        series: dict[tuple[str, str, str], list[SeriesPoint]] = defaultdict(list)
         malformed = 0
         for row in rows_for(self.directory, "metric", "kpi"):
             timestamp = row_timestamp(row, self.case.start_time.tzinfo)
@@ -154,99 +148,34 @@ class OpenRcaMetricProvider(_OpenRcaProvider):
                     continue
                 if requested_instance and instance != requested_instance:
                     continue
-                points.append(
-                    {
-                        "timestamp": timestamp,
-                        "component": component,
-                        "instance": instance,
-                        "metric_name": metric_name,
-                        "value": value,
-                    }
+                series[(component, instance, metric_name)].append(
+                    SeriesPoint(timestamp=timestamp, value=value)
                 )
-        groups: dict[tuple[str, str, str], list[float]] = defaultdict(list)
-        for point in points:
-            if point["timestamp"].date() == self.case.start_time.date():
-                groups[
-                    (
-                        str(point["component"]),
-                        str(point["instance"]),
-                        str(point["metric_name"]),
+        candidates: list[EvidenceItem] = []
+        for (component, instance, metric_name), points in sorted(series.items()):
+            baseline = [
+                point for point in points if baseline_start <= point.timestamp < start
+            ]
+            observation = [point for point in points if start <= point.timestamp <= end]
+            for segment in detect_anomaly_segments(baseline, observation):
+                candidates.append(
+                    _evidence(
+                        self.case,
+                        self.provider,
+                        EvidenceKind.METRIC_TREND,
+                        segment.onset,
+                        f"{metric_name} anomaly on {component}",
+                        _metric_payload(component, instance, metric_name, segment),
+                        evidence_namespace=self.evidence_namespace,
                     )
-                ].append(float(point["value"]))
-
-        anomalies: list[dict[str, object]] = []
-        for point in points:
-            timestamp = point["timestamp"]
-            if not start <= timestamp <= end:
-                continue
-            key = (
-                str(point["component"]),
-                str(point["instance"]),
-                str(point["metric_name"]),
-            )
-            values = groups[key]
-            baseline = median(values)
-            mad = median(abs(value - baseline) for value in values)
-            threshold = max(3 * mad, abs(baseline) * 0.1, 1e-9)
-            if abs(float(point["value"]) - baseline) <= threshold:
-                continue
-            anomalies.append(
-                {
-                    "timestamp": timestamp.isoformat(),
-                    "component": point["component"],
-                    "instance": point["instance"],
-                    "metric_name": point["metric_name"],
-                    "value": point["value"],
-                    "median": baseline,
-                    "mad": mad,
-                }
-            )
-        anomalies.sort(key=lambda item: str(item["timestamp"]))
-        anomalies = anomalies[:limit]
-        if not anomalies:
+                )
+        selected = select_balanced_evidence(candidates, limit)
+        if not selected:
             return _empty_result(self.provider, malformed)
-        claims = [
-            {
-                "component": str(item["component"]),
-                "reason": f"metric anomaly: {item['metric_name']}",
-                "occurred_at": str(item["timestamp"]),
-            }
-            for item in anomalies
-        ]
-        aggregation = query.aggregation if query else MetricAggregation.AVG
-        aggregate_values: dict[tuple[str, str], list[float]] = defaultdict(list)
-        for item in anomalies:
-            aggregate_values[
-                (str(item["component"]), str(item["metric_name"]))
-            ].append(float(item["value"]))
-        aggregates = [
-            {
-                "component": component,
-                "metric_name": metric_name,
-                "value": _aggregate(values, aggregation),
-            }
-            for (component, metric_name), values in sorted(aggregate_values.items())
-        ]
-        payload = {
-            "aggregation": aggregation.value,
-            "aggregates": aggregates,
-            "anomalies": anomalies,
-            "root_cause_claims": claims,
-        }
         return ProviderResult(
             provider=self.provider,
             status=_status(malformed),
-            evidence_items=[
-                _evidence(
-                    self.case,
-                    self.provider,
-                    EvidenceKind.METRIC_TREND,
-                    datetime.fromisoformat(str(anomalies[-1]["timestamp"])),
-                    f"{len(anomalies)} bounded metric anomalies",
-                    payload,
-                    evidence_namespace=self.evidence_namespace,
-                )
-            ],
+            evidence_items=selected,
             error_message=_malformed_warning(malformed),
         )
 
@@ -255,10 +184,9 @@ class OpenRcaDependencyProvider(_OpenRcaProvider):
     provider = EvidenceProvider.DEPENDENCY
     supported_tools = frozenset({"query_dependencies"})
 
-    def collect(
-        self, event: IncidentEvent, query: DependencyQuery | None = None
-    ) -> ProviderResult:
+    def collect(self, event: IncidentEvent, query: DependencyQuery | None = None) -> ProviderResult:
         start, end, limit = self._window(event, query)
+        baseline_start = start - (end - start)
         spans: dict[tuple[str, str], dict[str, object]] = {}
         malformed = 0
         for row in rows_for(self.directory, "trace", "span"):
@@ -276,7 +204,7 @@ class OpenRcaDependencyProvider(_OpenRcaProvider):
             ):
                 malformed += 1
                 continue
-            if not start <= timestamp <= end:
+            if not baseline_start <= timestamp <= end:
                 continue
             spans[(trace_id, span_id)] = {
                 "trace_id": trace_id,
@@ -288,7 +216,7 @@ class OpenRcaDependencyProvider(_OpenRcaProvider):
                 "success": row_success(row),
             }
 
-        aggregates: dict[tuple[str, str], dict[str, object]] = {}
+        samples: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
         for span in spans.values():
             parent_id = span["parent_id"]
             parent = spans.get((str(span["trace_id"]), str(parent_id)))
@@ -296,70 +224,110 @@ class OpenRcaDependencyProvider(_OpenRcaProvider):
                 continue
             parent_component = str(parent["component"])
             child_component = str(span["component"])
-            if query and query.target and query.target not in {
-                parent_component,
-                child_component,
-            }:
+            if parent_component == child_component:
+                continue
+            if (
+                query
+                and query.target
+                and query.target
+                not in {
+                    parent_component,
+                    child_component,
+                }
+            ):
                 continue
             if query and query.direction == DependencyDirection.UPSTREAM:
                 parent_component, child_component = child_component, parent_component
-            key = (parent_component, child_component)
-            aggregate = aggregates.setdefault(
-                key,
+            samples[(parent_component, child_component)].append(
                 {
                     "parent": parent_component,
                     "child": child_component,
-                    "latency_total": 0.0,
-                    "count": 0,
-                    "error_count": 0,
-                    "timestamps": [],
-                },
-            )
-            aggregate["latency_total"] += float(span["duration"])
-            aggregate["count"] += 1
-            aggregate["error_count"] += int(not bool(span["success"]))
-            aggregate["timestamps"].append(span["timestamp"])
-
-        edge_claims = []
-        for aggregate in aggregates.values():
-            timestamps = aggregate.pop("timestamps")
-            latency_total = aggregate.pop("latency_total")
-            edge = {
-                **aggregate,
-                "latency": latency_total / int(aggregate["count"]),
-            }
-            claim = None
-            if edge["error_count"]:
-                claim = {
-                    "component": edge["child"],
-                    "reason": "dependency errors",
-                    "occurred_at": min(timestamps).isoformat(),
+                    "timestamp": span["timestamp"],
+                    "duration": span["duration"],
+                    "success": span["success"],
                 }
-            edge_claims.append((edge, claim))
-        edge_claims.sort(
-            key=lambda item: (str(item[0]["parent"]), str(item[0]["child"]))
-        )
-        edge_claims = edge_claims[:limit]
-        edges = [item[0] for item in edge_claims]
-        claims = [item[1] for item in edge_claims if item[1] is not None]
-        if not edges:
+            )
+
+        candidates: list[EvidenceItem] = []
+        for (parent, child), edge_samples in sorted(samples.items()):
+            window_samples = [
+                sample for sample in edge_samples if start <= sample["timestamp"] <= end
+            ]
+            if not window_samples:
+                continue
+            errors = [sample for sample in window_samples if not sample["success"]]
+            baseline_points = [
+                SeriesPoint(timestamp=sample["timestamp"], value=float(sample["duration"]))
+                for sample in edge_samples
+                if baseline_start <= sample["timestamp"] < start
+            ]
+            observation_points = [
+                SeriesPoint(timestamp=sample["timestamp"], value=float(sample["duration"]))
+                for sample in window_samples
+            ]
+            edge = {
+                "parent": parent,
+                "child": child,
+                "latency": fmean(float(sample["duration"]) for sample in window_samples),
+                "count": len(window_samples),
+                "error_count": len(errors),
+            }
+            if baseline_points:
+                edge["baseline_latency"] = median(point.value for point in baseline_points)
+            segments = detect_anomaly_segments(baseline_points, observation_points)
+            for segment in segments:
+                candidates.append(
+                    _evidence(
+                        self.case,
+                        self.provider,
+                        EvidenceKind.DEPENDENCY_HEALTH,
+                        segment.onset,
+                        f"{parent} to {child} dependency edge",
+                        _dependency_payload(
+                            parent,
+                            child,
+                            {**edge, "deviation_score": segment.strength},
+                            signal_type="latency",
+                            signal_name="dependency_latency",
+                            strength=segment.strength,
+                            onset=segment.onset,
+                            ended_at=segment.ended_at,
+                            baseline_value=segment.baseline_value,
+                        ),
+                        evidence_namespace=self.evidence_namespace,
+                    )
+                )
+            if errors:
+                # 错误事件本身即异常 observation；onset 取首个错误 span。
+                onset = min(sample["timestamp"] for sample in errors)
+                candidates.append(
+                    _evidence(
+                        self.case,
+                        self.provider,
+                        EvidenceKind.DEPENDENCY_HEALTH,
+                        onset,
+                        f"{parent} to {child} dependency edge",
+                        _dependency_payload(
+                            parent,
+                            child,
+                            {**edge, "deviation_score": 0.0},
+                            signal_type="timeout",
+                            signal_name="dependency_errors",
+                            strength=0.0,
+                            onset=onset,
+                            ended_at=max(sample["timestamp"] for sample in errors),
+                            baseline_value=edge.get("baseline_latency"),
+                        ),
+                        evidence_namespace=self.evidence_namespace,
+                    )
+                )
+        selected = select_balanced_evidence(candidates, limit)
+        if not selected:
             return _empty_result(self.provider, malformed)
-        payload = {"edges": edges, "root_cause_claims": claims}
-        latest = max(span["timestamp"] for span in spans.values())
         return ProviderResult(
             provider=self.provider,
             status=_status(malformed),
-            evidence_items=[
-                _evidence(
-                    self.case,
-                    self.provider,
-                    EvidenceKind.DEPENDENCY_HEALTH,
-                    latest,
-                    f"{len(edges)} bounded dependency edges",
-                    payload,
-                    evidence_namespace=self.evidence_namespace,
-                )
-            ],
+            evidence_items=selected,
             error_message=_malformed_warning(malformed),
         )
 
@@ -390,12 +358,103 @@ def _evidence(
     )
 
 
-def _aggregate(values: list[float], aggregation: MetricAggregation) -> float:
-    if aggregation == MetricAggregation.MAX:
-        return max(values)
-    if aggregation == MetricAggregation.SUM:
-        return sum(values)
-    return fmean(values)
+def _metric_payload(
+    component: str, instance: str, metric_name: str, segment: AnomalySegment
+) -> dict:
+    payload = {
+        "signal_type": classify_metric_signal(metric_name),
+        "signal_name": metric_name,
+        "component": component,
+        "current_value": segment.peak_value,
+        "baseline_value": segment.baseline_value,
+        "change_percent": (
+            (segment.peak_value - segment.baseline_value)
+            / max(abs(segment.baseline_value), 1e-9)
+            * 100
+        ),
+        # 兼容字段，值已归一化到 0..10，与 normalized_strength 相同。
+        "deviation_score": segment.strength,
+        "normalized_strength": segment.strength,
+        "anomaly_onset": segment.onset.isoformat(),
+        "anomaly_ended_at": segment.ended_at.isoformat(),
+        "anomaly_segment_id": segment.segment_id,
+    }
+    if instance:
+        payload["instance"] = instance
+    for key, value in _hierarchy(component).items():
+        payload.setdefault(key, value)
+    return payload
+
+
+def _dependency_payload(
+    parent: str,
+    child: str,
+    edge: dict,
+    *,
+    signal_type: str,
+    signal_name: str,
+    strength: float,
+    onset: datetime,
+    ended_at: datetime,
+    baseline_value: float | None,
+) -> dict:
+    payload = {
+        "edges": [edge],
+        "component": child,
+        "dependency": child,
+        "signal_type": signal_type,
+        "signal_name": signal_name,
+        "current_value": edge["latency"],
+        "deviation_score": strength,
+        "normalized_strength": strength,
+        "anomaly_onset": onset.isoformat(),
+        "anomaly_ended_at": ended_at.isoformat(),
+        "anomaly_segment_id": f"seg-{onset.isoformat()}",
+    }
+    if baseline_value is not None:
+        payload["baseline_value"] = baseline_value
+    return payload
+
+
+def _hierarchy(component: str) -> dict[str, str]:
+    """按公开 schema 拆分 node.service-instance 层级；原子名称保持原样。"""
+    node, separator, instance = component.partition(".")
+    if not separator or not node.strip() or not instance.strip():
+        return {}
+    service = re.sub(r"-\d+$", "", instance)
+    return {
+        "node": node,
+        "instance": instance,
+        "service": service or instance,
+    }
+
+
+def _exception_name(message: str) -> str | None:
+    match = re.search(r"\b([A-Za-z]\w*Exception)\b", message)
+    return match.group(1) if match else None
+
+
+def _log_payload(match: dict[str, str]) -> dict:
+    message = match["message"]
+    exception = _exception_name(message)
+    lowered = message.casefold()
+    if "timeout" in lowered:
+        signal_type = "timeout"
+    elif any(item in lowered for item in ("restart", "crash", "container")):
+        signal_type = "process"
+    else:
+        signal_type = "error"
+    payload = {
+        "matches": [match],
+        "component": match["component"],
+        "signal_type": signal_type,
+        "signal_name": exception or match["level"] or "log_error",
+    }
+    if match["instance"]:
+        payload["instance"] = match["instance"]
+    if exception:
+        payload["exception"] = exception
+    return payload
 
 
 def _status(malformed: int) -> ProviderStatus:
@@ -406,9 +465,7 @@ def _malformed_warning(malformed: int) -> str | None:
     return f"ignored {malformed} malformed telemetry rows" if malformed else None
 
 
-def _empty_result(
-    provider: EvidenceProvider, malformed: int
-) -> ProviderResult:
+def _empty_result(provider: EvidenceProvider, malformed: int) -> ProviderResult:
     return ProviderResult(
         provider=provider,
         status=_status(malformed),

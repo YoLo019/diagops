@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -31,6 +31,7 @@ from backend.domain.agent_findings import (
     RootCauseAttribution,
 )
 from backend.domain.agent_plan import AgentExecutionStatus, DiagnosisTaskStatus
+from backend.domain.events import IncidentEvent, IncidentSource, Severity
 from backend.domain.evidence import (
     EvidenceItem,
     EvidenceKind,
@@ -520,9 +521,102 @@ def test_adaptive_evidence_is_validated_persisted_and_visible():
         "ev-adaptive-log" in call.output_evidence_ids
         for call in repository.list_tool_calls(record.id)
     )
-    assert repository.get_coordination_review(
-        record.id
-    ).root_causes[0].supporting_evidence_ids == ["ev-adaptive-log"]
+    root_causes = repository.get_coordination_review(record.id).root_causes
+    assert root_causes == []
+
+
+@pytest.mark.parametrize("agent_outcome", ["completed", "failed", "timeout"])
+def test_agent_cannot_overwrite_deterministic_root_causes(agent_outcome):
+    class DeploymentProvider:
+        provider = EvidenceProvider.DEPLOY
+        supported_tools = frozenset({"read_deployments"})
+
+        def collect(self, event):
+            return ProviderResult(
+                provider=self.provider,
+                evidence_items=[
+                    EvidenceItem(
+                        id="ev-deterministic-deploy",
+                        provider=self.provider,
+                        kind=EvidenceKind.DEPLOYMENT,
+                        timestamp=event.started_at,
+                        summary="Deployment observed",
+                        payload={
+                            "service": event.service,
+                            "component": event.service,
+                            "signal_type": "deployment",
+                        },
+                    )
+                ],
+            )
+
+    class LogProvider:
+        provider = EvidenceProvider.LOG
+        supported_tools = frozenset({"read_logs"})
+
+        def collect(self, event):
+            return ProviderResult(
+                provider=self.provider,
+                evidence_items=[
+                    EvidenceItem(
+                        id="ev-deterministic-error",
+                        provider=self.provider,
+                        kind=EvidenceKind.LOG_PATTERN,
+                        timestamp=event.started_at + timedelta(minutes=1),
+                        summary="Error observed after deployment",
+                        payload={
+                            "component": event.service,
+                            "signal_type": "error",
+                        },
+                    )
+                ],
+            )
+
+    class AgentRuntime:
+        async def run(self, *, investigation_id, **_kwargs):
+            if agent_outcome == "timeout":
+                raise TimeoutError("injected timeout")
+            if agent_outcome == "failed":
+                return AgentsRcaRuntimeResult.failed(
+                    investigation_id, "injected failure"
+                )
+            result = sdk_result(
+                repository, investigation_id, MultiAgentRunStatus.COMPLETED
+            )
+            result.review.root_causes = [
+                RootCauseAttribution(
+                    root_cause_occurred_at=event.started_at,
+                    root_cause_component="agent-invented-component",
+                    root_cause_reason="agent invented reason",
+                    supporting_evidence_ids=["ev-deterministic-deploy"],
+                )
+            ]
+            return result
+
+    repository = InMemoryInvestigationRepository()
+    event = IncidentEvent(
+        source=IncidentSource.SIMULATED,
+        service="checkout",
+        environment="prod",
+        severity=Severity.WARNING,
+        title="Checkout errors",
+        description="Errors increased after a deployment",
+        started_at=datetime(2026, 7, 3, 12, tzinfo=UTC),
+    )
+    record = build_v2_orchestrator(
+        repository=repository,
+        providers=ProviderRegistry([DeploymentProvider(), LogProvider()]),
+        agents_runtime=AgentRuntime(),
+    ).run(event)
+
+    root_causes = repository.get_coordination_review(record.id).root_causes
+    assert len(root_causes) == 1
+    assert root_causes[0].root_cause_component == "checkout"
+    assert root_causes[0].root_cause_reason == "deployment regression"
+    assert set(root_causes[0].supporting_evidence_ids) == {
+        "ev-deterministic-deploy",
+        "ev-deterministic-error",
+    }
 
 
 def test_adaptive_agent_validation_failure_keeps_deterministic_result_and_artifacts():

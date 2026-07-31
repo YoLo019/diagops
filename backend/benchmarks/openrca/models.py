@@ -55,6 +55,7 @@ class OpenRcaRuntimeCase(BaseModel):
     date: str = ""
     service: str = "openrca-system"
     instruction: str
+    expected_root_cause_count: int | None = Field(default=None, ge=1, le=2)
     timezone: str = "Asia/Shanghai"
     start_time: datetime
     end_time: datetime
@@ -90,6 +91,8 @@ class OpenRcaStrategySummary(BaseModel):
     time_score: float | None = Field(default=None, ge=0, le=1)
     per_partition: dict[str, dict[str, float]] = Field(default_factory=dict)
     failed_cases: list[dict[str, str]] = Field(default_factory=list)
+    projection_errors: int = Field(default=0, ge=0)
+    projection_fallbacks: int = Field(default=0, ge=0)
 
 
 class OpenRcaBenchmarkSummary(BaseModel):

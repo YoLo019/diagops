@@ -21,6 +21,8 @@ class PrometheusMetric(StrEnum):
     P95_LATENCY = "p95_latency"
     CPU = "cpu"
     MEMORY = "memory"
+    NETWORK_DROPS = "network_drops"
+    PROCESS_RESTARTS = "process_restarts"
 
 
 class DependencyDirection(StrEnum):
@@ -60,7 +62,8 @@ class MetricQuery(QueryWindow):
 
 
 class PrometheusQuery(QueryWindow):
-    metric_names: list[PrometheusMetric] = Field(min_length=1, max_length=5)
+    # 上限与 PrometheusMetric 基数同步：单次调用可覆盖全部受支持信号。
+    metric_names: list[PrometheusMetric] = Field(min_length=1, max_length=7)
     aggregation: MetricAggregation = MetricAggregation.SUM
     instance: str | None = Field(default=None, max_length=160)
 

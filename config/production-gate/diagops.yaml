@@ -1,0 +1,31 @@
+storage:
+  url: sqlite:////state/diagops.db
+
+providers:
+  mock:
+    enabled: false
+  log_file:
+    enabled: true
+    paths:
+      - /evidence/logs/app.log
+  prometheus:
+    enabled: true
+    base_url: http://prometheus:9090
+  deployment_file:
+    enabled: true
+    path: /evidence/deployments/deployments.json
+  service_catalog:
+    enabled: false
+
+agents:
+  enabled: false
+  strategy: fixed
+
+runtime:
+  enabled: true
+  max_concurrent_runs: 1
+  max_parallel_steps_per_run: 3
+  lease_seconds: 30
+  heartbeat_seconds: 10
+  opentelemetry:
+    enabled: false

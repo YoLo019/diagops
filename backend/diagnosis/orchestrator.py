@@ -182,9 +182,7 @@ class DiagnosisOrchestrator:
                     finding.related_cause_type, len(cause_rank)
                 )
             )
-            save_findings = getattr(self.repository, "save_agent_findings", None)
-            if save_findings is not None:
-                save_findings(investigation_id, findings)
+            self.repository.save_agent_findings(investigation_id, findings)
             return findings
         except Exception as exc:
             logger.warning(
@@ -205,10 +203,10 @@ class DiagnosisOrchestrator:
             review = build_coordination_review(
                 investigation_id, findings, evidence, hypotheses
             )
-            validate_agent_semantics(evidence, findings, review.candidates)
-            save_review = getattr(self.repository, "save_coordination_review", None)
-            if save_review is not None:
-                save_review(review)
+            validate_agent_semantics(
+                evidence, findings, review.candidates, review.root_causes
+            )
+            self.repository.save_coordination_review(review)
             return review
         except Exception as exc:
             logger.warning(
@@ -550,6 +548,15 @@ class DiagnosisOrchestrator:
                 raise AgentResultValidationError(
                     ResultValidationCategory.REVIEW_ATTRIBUTION
                 )
+            persisted_review = self.repository.get_coordination_review(
+                investigation_id
+            )
+            authoritative_root_causes = (
+                list(persisted_review.root_causes)
+                if persisted_review is not None
+                else []
+            )
+            review.root_causes = authoritative_root_causes
             expected = build_hybrid_coordination_review(
                 investigation_id,
                 findings,
@@ -566,7 +573,7 @@ class DiagnosisOrchestrator:
                 secondary_stabilization_categories=(
                     review.secondary_stabilization_categories
                 ),
-                root_causes=review.root_causes,
+                root_causes=authoritative_root_causes,
             )
             candidate_contracts = [
                 _candidate_contract(candidate) for candidate in review.candidates

@@ -334,3 +334,23 @@ def test_evidence_timestamp_is_not_an_implicit_root_cause_time_claim() -> None:
 
     with pytest.raises(EvidenceContractError, match="root_cause_time_mismatch"):
         validate_agent_semantics([evidence], [], [], [root_cause])
+
+
+def test_sql_metric_supports_database_latency_attribution() -> None:
+    evidence = _evidence("ev-sql").model_copy(
+        update={
+            "payload": {
+                "component": "Mysql01",
+                "signal_type": "latency",
+                "signal_name": "sql_response_time",
+            }
+        }
+    )
+    root_cause = RootCauseAttribution(
+        root_cause_occurred_at=evidence.timestamp,
+        root_cause_component="Mysql01",
+        root_cause_reason="database latency",
+        supporting_evidence_ids=[evidence.id],
+    )
+
+    validate_agent_semantics([evidence], [], [], [root_cause])

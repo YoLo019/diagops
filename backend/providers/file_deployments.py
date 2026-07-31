@@ -56,6 +56,9 @@ class FileDeploymentProvider:
             payload = {
                 "service": deployment["service"],
                 "environment": deployment["environment"],
+                "component": deployment["service"],
+                "signal_type": "deployment",
+                "signal_name": "deployment",
                 "version": deployment["version"],
                 "deployed_at": deployed_at.isoformat(),
                 "operator": deployment["operator"],

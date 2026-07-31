@@ -1,0 +1,13 @@
+route:
+  receiver: diagops
+  group_wait: 1s
+  group_interval: 5m
+  repeat_interval: 1h
+
+receivers:
+  - name: diagops
+    webhook_configs:
+      - url: http://diagops:8000/events/alertmanager
+        send_resolved: true
+        max_alerts: 100
+        timeout: 180s

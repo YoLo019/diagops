@@ -125,20 +125,3 @@ class CoordinationReview(BaseModel):
         self.candidates.sort(key=lambda candidate: candidate.rank)
         self.root_causes.sort(key=lambda cause: cause.root_cause_occurred_at)
         return self
-
-
-class WorkbenchGraphNode(BaseModel):
-    id: str
-    label: str
-    type: str
-
-
-class WorkbenchGraphEdge(BaseModel):
-    source: str
-    target: str
-    relation: str
-
-
-class WorkbenchGraphSeed(BaseModel):
-    nodes: list[WorkbenchGraphNode] = Field(default_factory=list)
-    edges: list[WorkbenchGraphEdge] = Field(default_factory=list)

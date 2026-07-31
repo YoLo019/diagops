@@ -1,0 +1,22 @@
+{
+  "version": "4",
+  "groupKey": "{}:{alertname=\"ServiceDegraded\"}",
+  "status": "firing",
+  "receiver": "diagops",
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "ServiceDegraded",
+        "service": "checkout-service",
+        "environment": "prod",
+        "severity": "warning"
+      },
+      "annotations": {
+        "summary": "Service degradation detected",
+        "description": "Latency and errors increased"
+      },
+      "startsAt": "2026-07-03T15:10:00+08:00"
+    }
+  ]
+}

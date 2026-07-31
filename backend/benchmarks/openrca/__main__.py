@@ -7,6 +7,8 @@ from agents import set_tracing_disabled
 
 from backend.benchmarks.openrca.evaluator import (
     evaluate_run,
+    gate_run,
+    targeted_gate_run,
     write_official_query_inputs,
 )
 from backend.benchmarks.openrca.prepare import prepare_cases
@@ -34,15 +36,14 @@ def main() -> None:
     run.add_argument("--dataset-root", type=Path, required=True)
     run.add_argument("--safe-index", type=Path, required=True)
     run.add_argument("--output", type=Path, required=True)
-    run.add_argument("--model", required=True)
+    run.add_argument("--model")
+    run.add_argument("--mode", choices=("deterministic", "agent-shadow"))
     run.add_argument(
         "--provider",
         choices=tuple(item.value for item in ModelProvider),
         default=ModelProvider.OPENAI.value,
     )
-    run.add_argument(
-        "--strategy", choices=("fixed", "adaptive", "both"), default="both"
-    )
+    run.add_argument("--strategy", choices=("fixed", "adaptive", "both"), default="both")
     run.add_argument("--prompt-version", default="v8.2")
     run.add_argument("--input-cost-per-million", type=float, default=0)
     run.add_argument("--output-cost-per-million", type=float, default=0)
@@ -51,6 +52,12 @@ def main() -> None:
     evaluate.add_argument("--query-root", type=Path, required=True)
     evaluate.add_argument("--run-dir", type=Path, required=True)
     evaluate.add_argument("--official-query-output", type=Path)
+
+    gate = commands.add_parser("gate")
+    gate.add_argument("--run-dir", type=Path, required=True)
+
+    targeted_gate = commands.add_parser("targeted-gate")
+    targeted_gate.add_argument("--run-dir", type=Path, required=True)
 
     arguments = parser.parse_args()
     if arguments.command == "prepare":
@@ -72,6 +79,31 @@ def main() -> None:
             )
         print(report_path)
         return
+    if arguments.command == "gate":
+        failures = gate_run(arguments.run_dir)
+        if failures:
+            parser.error("; ".join(failures))
+        print("release gate passed")
+        return
+    if arguments.command == "targeted-gate":
+        failures = targeted_gate_run(arguments.run_dir)
+        if failures:
+            parser.error("; ".join(failures))
+        print("targeted gate passed")
+        return
+
+    if arguments.mode == "deterministic":
+        if arguments.model is not None:
+            parser.error("deterministic mode does not accept --model")
+        if arguments.strategy != "fixed":
+            parser.error("deterministic mode requires --strategy fixed")
+        model = "deterministic"
+        prompt_version = "v10-shared-core"
+    else:
+        if arguments.model is None:
+            parser.error("--model is required outside deterministic mode")
+        model = arguments.model
+        prompt_version = arguments.prompt_version
 
     strategies = (
         (InvestigationStrategy.FIXED, InvestigationStrategy.ADAPTIVE)
@@ -82,21 +114,23 @@ def main() -> None:
     result = run_benchmark_pair(
         OpenRcaDiagnosisRunner(
             arguments.dataset_root,
-            arguments.model,
+            None if arguments.mode == "deterministic" else model,
             repository=container.repository,
             runtime_store=container.runtime_store,
             provider=ModelProvider(arguments.provider),
-            prompt_version=arguments.prompt_version,
+            prompt_version=prompt_version,
+            deterministic=arguments.mode == "deterministic",
         ),
         arguments.safe_index,
         arguments.output,
-        model=arguments.model,
+        model=model,
         provider=ModelProvider(arguments.provider),
-        prompt_version=arguments.prompt_version,
+        prompt_version=prompt_version,
         timeout_seconds=container.settings.agents.timeout_seconds,
         input_cost_per_million=arguments.input_cost_per_million,
         output_cost_per_million=arguments.output_cost_per_million,
         strategies=strategies,
+        mode=arguments.mode or "agent",
     )
     print(result.run_id)
 

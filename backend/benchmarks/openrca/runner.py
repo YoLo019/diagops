@@ -18,6 +18,10 @@ from backend.benchmarks.openrca.models import (
     OpenRcaRuntimeIndex,
     OpenRcaStrategySummary,
 )
+from backend.benchmarks.openrca.projection import (
+    ProjectionAudit,
+    project_root_causes,
+)
 from backend.benchmarks.openrca.providers import (
     OpenRcaDependencyProvider,
     OpenRcaLogProvider,
@@ -60,6 +64,7 @@ class BenchmarkCaseOutcome:
     output_tokens: int = 0
     read_only_violations: int = 0
     runtime_run_id: str | None = None
+    projection_audit: ProjectionAudit | None = None
 
 
 class BenchmarkCaseRunner(Protocol):
@@ -85,13 +90,14 @@ class OpenRcaDiagnosisRunner:
     def __init__(
         self,
         dataset_root: Path,
-        model: str,
+        model: str | None,
         *,
         repository,
         runtime_store,
         provider: ModelProvider = ModelProvider.OPENAI,
         prompt_version: str = "v8.2",
         timeout_seconds: float = 60,
+        deterministic: bool = False,
     ) -> None:
         self.dataset_root = dataset_root
         self.model = model
@@ -100,10 +106,9 @@ class OpenRcaDiagnosisRunner:
         self.timeout_seconds = timeout_seconds
         self.repository = repository
         self.runtime_store = runtime_store
+        self.deterministic = deterministic
 
-    def configure_runtime(
-        self, *, provider, model, prompt_version, timeout_seconds
-    ) -> None:
+    def configure_runtime(self, *, provider, model, prompt_version, timeout_seconds) -> None:
         self.provider = ModelProvider(provider)
         self.model = model
         self.prompt_version = prompt_version
@@ -120,27 +125,23 @@ class OpenRcaDiagnosisRunner:
         )
         providers = ProviderRegistry(
             [
-                OpenRcaLogProvider(
-                    self.dataset_root, case, evidence_namespace=record.id
-                ),
-                OpenRcaMetricProvider(
-                    self.dataset_root, case, evidence_namespace=record.id
-                ),
-                OpenRcaDependencyProvider(
-                    self.dataset_root, case, evidence_namespace=record.id
-                ),
+                OpenRcaLogProvider(self.dataset_root, case, evidence_namespace=record.id),
+                OpenRcaMetricProvider(self.dataset_root, case, evidence_namespace=record.id),
+                OpenRcaDependencyProvider(self.dataset_root, case, evidence_namespace=record.id),
             ]
         )
         registry = build_provider_tool_registry(providers)
-        runtime = AgentsRcaRuntime(
-            model=self.model,
-            strategy=strategy,
-            tool_registry=registry,
-            model_provider=self.provider,
-            model_name=self.model,
-            prompt_version=self.prompt_version,
-            timeout_seconds=self.timeout_seconds,
-        )
+        runtime = None
+        if not self.deterministic:
+            runtime = AgentsRcaRuntime(
+                model=self.model,
+                strategy=strategy,
+                tool_registry=registry,
+                model_provider=self.provider,
+                model_name=self.model,
+                prompt_version=self.prompt_version,
+                timeout_seconds=self.timeout_seconds,
+            )
         orchestrator = DiagnosisOrchestrator(
             repository=self.repository,
             providers=providers,
@@ -157,9 +158,11 @@ class OpenRcaDiagnosisRunner:
                 run_kind=RuntimeRunKind.LIVE,
                 strategy=strategy,
                 run_reason=RuntimeRunReason.INITIAL,
-                model_provider=self.provider,
+                model_provider=None if self.deterministic else self.provider,
                 model_name=(
-                    self.model
+                    "deterministic"
+                    if self.deterministic
+                    else self.model
                     if isinstance(self.model, str)
                     else type(self.model).__name__
                 ),
@@ -191,9 +194,7 @@ class OpenRcaDiagnosisRunner:
         try:
             asyncio.run(execute())
         except Exception as exc:
-            input_tokens, output_tokens = _runtime_token_usage(
-                self.runtime_store, runtime_run.id
-            )
+            input_tokens, output_tokens = _runtime_token_usage(self.runtime_store, runtime_run.id)
             return BenchmarkCaseOutcome(
                 failure_category=f"{type(exc).__name__}: benchmark case failed",
                 duration_ms=round((perf_counter() - started) * 1000),
@@ -204,18 +205,29 @@ class OpenRcaDiagnosisRunner:
         runtime_run = self.runtime_store.get_run(runtime_run.id)
         record = self.repository.get(record.id)
         review = self.repository.get_coordination_review(record.id)
-        root_causes = list(review.root_causes) if review is not None else []
+        authoritative_root_causes = list(review.root_causes) if review is not None else []
+        projection_failed = False
+        try:
+            projection = project_root_causes(
+                task_index=case.task_index,
+                expected_count=case.expected_root_cause_count or 1,
+                evidence=list(record.evidence),
+                root_causes=authoritative_root_causes,
+            )
+            root_causes = list(projection.causes)
+            projection_audit = projection.audit
+        except Exception:
+            root_causes = []
+            projection_audit = ProjectionAudit.failed(case.task_index)
+            projection_failed = True
         evidence_ids = {item.id for item in record.evidence}
         references = [
-            evidence_id
-            for cause in root_causes
-            for evidence_id in cause.supporting_evidence_ids
+            evidence_id for cause in root_causes for evidence_id in cause.supporting_evidence_ids
         ]
         invalid_references = sum(item not in evidence_ids for item in references)
         calls = self.repository.list_tool_calls(record.id)
         duplicate_rejections = sum(
-            "duplicate query" in (call.error_message or "").casefold()
-            for call in calls
+            "duplicate query" in (call.error_message or "").casefold() for call in calls
         )
         read_only_violations = 0
         for call in calls:
@@ -236,14 +248,15 @@ class OpenRcaDiagnosisRunner:
             if summary is not None and summary.adaptive_stop_reason is not None
             else (summary.failure_reason if summary is not None else None)
         )
-        if not root_causes and not failure_category:
+        if projection_failed:
+            failure_category = "projection_error"
+        elif not root_causes and not failure_category:
             failure_category = "missing_root_cause"
-        input_tokens, output_tokens = _runtime_token_usage(
-            self.runtime_store, runtime_run.id
-        )
+        input_tokens, output_tokens = _runtime_token_usage(self.runtime_store, runtime_run.id)
         return BenchmarkCaseOutcome(
             root_causes=root_causes,
-            completed=record.status == InvestigationStatus.COMPLETED,
+            completed=record.status == InvestigationStatus.COMPLETED
+            and not projection_failed,
             failure_category=failure_category,
             evidence_reference_count=len(references),
             invalid_evidence_reference_count=invalid_references,
@@ -254,6 +267,7 @@ class OpenRcaDiagnosisRunner:
             output_tokens=output_tokens,
             read_only_violations=read_only_violations,
             runtime_run_id=runtime_run.id,
+            projection_audit=projection_audit,
         )
 
     def register_replay_artifact(
@@ -266,6 +280,8 @@ class OpenRcaDiagnosisRunner:
         prediction_path: Path,
         prediction: str,
     ) -> None:
+        if self.deterministic:
+            return
         scoring_points = _scoring_points(self.dataset_root, case)
         self.runtime_store.set_benchmark_replay_locator(
             runtime_run_id,
@@ -281,13 +297,9 @@ class OpenRcaDiagnosisRunner:
                 "row_id": case.row_id,
                 "prediction_root": str(prediction_path.parent.resolve()),
                 "prediction_file": prediction_path.name,
-                "prediction_sha256": hashlib.sha256(
-                    prediction.encode("utf-8")
-                ).hexdigest(),
+                "prediction_sha256": hashlib.sha256(prediction.encode("utf-8")).hexdigest(),
                 "query_root": str(self.dataset_root.resolve()),
-                "scoring_sha256": hashlib.sha256(
-                    scoring_points.encode("utf-8")
-                ).hexdigest(),
+                "scoring_sha256": hashlib.sha256(scoring_points.encode("utf-8")).hexdigest(),
             },
         )
 
@@ -327,16 +339,22 @@ def run_benchmark_pair(
         InvestigationStrategy.FIXED,
         InvestigationStrategy.ADAPTIVE,
     ),
+    mode: str = "agent",
 ) -> BenchmarkRunResult:
     cost_rates = (input_cost_per_million, output_cost_per_million)
     if any(not math.isfinite(rate) or rate < 0 for rate in cost_rates):
         raise ValueError("cost rates must be finite and non-negative")
-    index = OpenRcaRuntimeIndex.model_validate_json(
-        safe_index.read_text(encoding="utf-8")
-    )
+    index = OpenRcaRuntimeIndex.model_validate_json(safe_index.read_text(encoding="utf-8"))
+    if mode not in {"agent", "agent-shadow", "deterministic"}:
+        raise ValueError("unsupported OpenRCA benchmark mode")
+    if mode == "deterministic":
+        if strategies != (InvestigationStrategy.FIXED,):
+            raise ValueError("deterministic mode only supports fixed strategy")
+        if any(case.expected_root_cause_count is None for case in index.cases):
+            raise ValueError("deterministic mode requires expected root cause count")
     provider = ModelProvider(provider)
     configure = getattr(case_runner, "configure_runtime", None)
-    if configure is not None:
+    if configure is not None and mode != "deterministic":
         configure(
             provider=provider,
             model=model,
@@ -352,7 +370,8 @@ def run_benchmark_pair(
         "run_id": run_id,
         "case_manifest_hash": index.case_manifest_hash,
         "model": model,
-        "provider": provider.value,
+        "provider": None if mode == "deterministic" else provider.value,
+        "mode": mode,
         "prompt_version": prompt_version,
         "git_commit": git_commit,
         "strategies": [item.value for item in strategies],
@@ -387,9 +406,20 @@ def run_benchmark_pair(
                     "partition": case.partition.value,
                     "row_id": case.row_id,
                     "task_index": case.task_index,
-                    "prediction": _official_prediction(outcome.root_causes),
+                    "prediction": _official_prediction(
+                        outcome.root_causes,
+                        case.expected_root_cause_count,
+                    ),
                     "metadata": json.dumps(
-                        {"runtime_run_id": outcome.runtime_run_id},
+                        {
+                            "expected_root_cause_count": (case.expected_root_cause_count),
+                            "runtime_run_id": outcome.runtime_run_id,
+                            "projection": (
+                                outcome.projection_audit.metadata()
+                                if outcome.projection_audit is not None
+                                else None
+                            ),
+                        },
                         ensure_ascii=False,
                         separators=(",", ":"),
                         sort_keys=True,
@@ -407,19 +437,14 @@ def run_benchmark_pair(
                     strategy=strategy,
                     benchmark_run_id=run_id,
                     runtime_run_id=outcome.runtime_run_id,
-                    prediction_path=(
-                        output_dir / f"{strategy.value}-predictions.csv"
-                    ),
+                    prediction_path=(output_dir / f"{strategy.value}-predictions.csv"),
                     prediction=rows[strategy][-1]["prediction"],
                 )
             partition_rows = [
-                row
-                for row in rows[strategy]
-                if row["partition"] == case.partition.value
+                row for row in rows[strategy] if row["partition"] == case.partition.value
             ]
             _write_predictions(
-                output_dir
-                / f"{strategy.value}-{case.partition.value.replace('/', '-')}.csv",
+                output_dir / f"{strategy.value}-{case.partition.value.replace('/', '-')}.csv",
                 partition_rows,
             )
 
@@ -443,13 +468,17 @@ def run_benchmark_pair(
             for strategy in strategies
         },
     )
-    _write_text_atomic(
-        output_dir / "summary.json", summary.model_dump_json(indent=2) + "\n"
-    )
+    _write_text_atomic(output_dir / "summary.json", summary.model_dump_json(indent=2) + "\n")
     return BenchmarkRunResult(run_id=run_id, output_dir=output_dir)
 
 
-def _official_prediction(root_causes: list[RootCauseAttribution]) -> str:
+def _official_prediction(
+    root_causes: list[RootCauseAttribution],
+    expected_count: int | None = None,
+) -> str:
+    selected = root_causes
+    if expected_count is not None:
+        selected = selected[:expected_count]
     payload = {
         str(index): {
             "root cause occurrence datetime": item.root_cause_occurred_at.strftime(
@@ -458,10 +487,7 @@ def _official_prediction(root_causes: list[RootCauseAttribution]) -> str:
             "root cause component": item.root_cause_component,
             "root cause reason": item.root_cause_reason,
         }
-        for index, item in enumerate(
-            sorted(root_causes, key=lambda cause: cause.root_cause_occurred_at),
-            start=1,
-        )
+        for index, item in enumerate(selected, start=1)
     }
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
@@ -473,12 +499,8 @@ def _summarize(
 ) -> OpenRcaStrategySummary:
     count = len(outcomes)
     completed = sum(outcome.completed for _, outcome in outcomes)
-    reference_count = sum(
-        outcome.evidence_reference_count for _, outcome in outcomes
-    )
-    invalid_references = sum(
-        outcome.invalid_evidence_reference_count for _, outcome in outcomes
-    )
+    reference_count = sum(outcome.evidence_reference_count for _, outcome in outcomes)
+    invalid_references = sum(outcome.invalid_evidence_reference_count for _, outcome in outcomes)
     input_tokens = sum(outcome.input_tokens for _, outcome in outcomes)
     output_tokens = sum(outcome.output_tokens for _, outcome in outcomes)
     failures = [
@@ -496,30 +518,31 @@ def _summarize(
             else float(invalid_references == 0)
         ),
         invalid_evidence_references=invalid_references,
-        read_only_violations=sum(
-            outcome.read_only_violations for _, outcome in outcomes
-        ),
+        read_only_violations=sum(outcome.read_only_violations for _, outcome in outcomes),
         average_tool_calls=(
-            sum(outcome.tool_call_count for _, outcome in outcomes) / count
-            if count
-            else 0
+            sum(outcome.tool_call_count for _, outcome in outcomes) / count if count else 0
         ),
         duplicate_query_rejections=sum(
             outcome.duplicate_query_rejections for _, outcome in outcomes
         ),
         average_duration_ms=(
-            sum(outcome.duration_ms for _, outcome in outcomes) / count
-            if count
-            else 0
+            sum(outcome.duration_ms for _, outcome in outcomes) / count if count else 0
         ),
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         estimated_cost=(
-            input_tokens * input_cost_per_million
-            + output_tokens * output_cost_per_million
+            input_tokens * input_cost_per_million + output_tokens * output_cost_per_million
         )
         / 1_000_000,
         failed_cases=failures,
+        projection_errors=sum(
+            bool(outcome.projection_audit and outcome.projection_audit.projection_error)
+            for _, outcome in outcomes
+        ),
+        projection_fallbacks=sum(
+            bool(outcome.projection_audit and outcome.projection_audit.projection_fallback)
+            for _, outcome in outcomes
+        ),
     )
 
 
@@ -553,9 +576,7 @@ def _scoring_points(dataset_root: Path, case: OpenRcaRuntimeCase) -> str:
 
 
 def _write_json_atomic(path: Path, value: object) -> None:
-    _write_text_atomic(
-        path, json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-    )
+    _write_text_atomic(path, json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
 
 
 def _write_text_atomic(path: Path, value: str) -> None:

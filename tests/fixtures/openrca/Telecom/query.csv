@@ -1,2 +1,2 @@
 task_index,instruction,scoring_points
-task_3,"On July 14, 2026, investigate the incident from 12:00 to 12:30.",The only predicted root cause component is telecom-api
+task_3,"On July 14, 2026, investigate a failure from 12:00 to 12:30.",The only predicted root cause component is telecom-api

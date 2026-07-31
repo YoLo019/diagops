@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from statistics import median
 
 from backend.diagnosis.evidence_validation import validate_agent_semantics
 from backend.domain.agent_findings import (
@@ -34,6 +35,7 @@ def build_coordination_review(
     return CoordinationReview(
         investigation_id=investigation_id,
         candidates=_build_candidates(findings, hypotheses),
+        root_causes=build_root_cause_attributions(evidence, hypotheses),
     )
 
 
@@ -227,6 +229,188 @@ def _validate_references(
     missing = next((item_id for item_id in references if item_id not in evidence_ids), None)
     if missing is not None:
         raise ValueError(f"Unknown evidence id: {missing}")
+
+
+def build_root_cause_attributions(
+    evidence: list[EvidenceItem],
+    hypotheses: list[Hypothesis],
+) -> list[RootCauseAttribution]:
+    """从确定性 Hypothesis 的支持证据生成可审计根因三元组。"""
+    by_id = {item.id: item for item in evidence}
+    ranked: list[tuple[float, RootCauseAttribution]] = []
+    for hypothesis in hypotheses:
+        if hypothesis.cause_type == CauseType.UNKNOWN:
+            continue
+        grouped: dict[str, list[EvidenceItem]] = defaultdict(list)
+        for evidence_id in hypothesis.supporting_evidence_ids:
+            item = by_id.get(evidence_id)
+            if item is None:
+                raise ValueError(f"Unknown evidence id: {evidence_id}")
+            if not isinstance(item.payload.get("signal_type"), str):
+                continue
+            component = _attribution_component(hypothesis.cause_type, item)
+            if component:
+                grouped[component].append(item)
+        for component, items in grouped.items():
+            for cluster in _segment_aware_clusters(items):
+                strongest = max(
+                    cluster,
+                    key=lambda item: (
+                        _deviation(item),
+                        -item.timestamp.timestamp(),
+                        item.id,
+                    ),
+                )
+                ranked.append(
+                    (
+                        _cluster_score(cluster),
+                        RootCauseAttribution(
+                            root_cause_occurred_at=min(
+                                item.timestamp for item in cluster
+                            ),
+                            root_cause_component=component,
+                            root_cause_reason=_attribution_reason(
+                                hypothesis.cause_type, strongest, cluster
+                            ),
+                            supporting_evidence_ids=[
+                                item.id
+                                for item in sorted(
+                                    cluster, key=lambda item: (item.timestamp, item.id)
+                                )
+                            ],
+                        ),
+                    )
+                )
+    ranked.sort(
+        key=lambda item: (
+            -item[0],
+            item[1].root_cause_occurred_at,
+            item[1].root_cause_component,
+            item[1].root_cause_reason,
+        )
+    )
+    return [item for _, item in ranked]
+
+
+def _segment_aware_clusters(evidence: list[EvidenceItem]) -> list[list[EvidenceItem]]:
+    """有 anomaly_segment_id 的 Evidence 按 segment 聚类，同 component 不同 segment
+    不得合并；无 segment 的历史 Evidence 继续走 _time_clusters 兼容路径。"""
+    segmented: dict[str, list[EvidenceItem]] = defaultdict(list)
+    historical: list[EvidenceItem] = []
+    for item in evidence:
+        segment_id = item.payload.get("anomaly_segment_id")
+        if isinstance(segment_id, str) and segment_id:
+            segmented[segment_id].append(item)
+        else:
+            historical.append(item)
+    clusters = [
+        sorted(group, key=lambda item: (item.timestamp, item.id))
+        for _segment_id, group in sorted(segmented.items())
+    ]
+    clusters.extend(_time_clusters(historical))
+    return clusters
+
+
+def _time_clusters(evidence: list[EvidenceItem]) -> list[list[EvidenceItem]]:
+    ordered = sorted(evidence, key=lambda item: (item.timestamp, item.id))
+    if len(ordered) < 2:
+        return [ordered] if ordered else []
+    intervals = [
+        (right.timestamp - left.timestamp).total_seconds()
+        for left, right in zip(ordered, ordered[1:], strict=False)
+    ]
+    ordered_intervals = sorted(intervals)
+    sample_intervals = ordered_intervals[: max(1, (len(ordered_intervals) + 1) // 2)]
+    gap = max(60.0, 2 * median(sample_intervals))
+    clusters = [[ordered[0]]]
+    for item in ordered[1:]:
+        if (item.timestamp - clusters[-1][-1].timestamp).total_seconds() > gap:
+            clusters.append([])
+        clusters[-1].append(item)
+    return clusters
+
+
+def _cluster_score(cluster: list[EvidenceItem]) -> float:
+    providers = {item.provider for item in cluster}
+    signal_types = {
+        str(item.payload.get("signal_type"))
+        for item in cluster
+        if item.payload.get("signal_type")
+    }
+    diversity = min(2, max(0, len(providers) - 1) + max(0, len(signal_types) - 1))
+    return min(10, max((_deviation(item) for item in cluster), default=0)) + (
+        3 if any(_deviation(item) >= 1 for item in cluster) else 0
+    ) + diversity
+
+
+def _deviation(item: EvidenceItem) -> float:
+    value = item.payload.get("deviation_score")
+    return (
+        float(value)
+        if isinstance(value, int | float) and not isinstance(value, bool)
+        else 0.0
+    )
+
+
+def _attribution_component(
+    cause_type: CauseType, item: EvidenceItem
+) -> str | None:
+    payload = item.payload
+    if cause_type == CauseType.SINGLE_INSTANCE_ISSUE:
+        keys = ("instance", "component", "service")
+    elif cause_type in {
+        CauseType.NETWORK_FAULT,
+        CauseType.INFRASTRUCTURE_FAULT,
+        CauseType.RESOURCE_SATURATION,
+    }:
+        keys = ("node", "component", "service")
+    elif cause_type == CauseType.DOWNSTREAM_DEPENDENCY_FAILURE:
+        keys = ("dependency", "component", "service")
+    else:
+        keys = ("service", "component", "dependency", "instance")
+    return next(
+        (
+            value
+            for key in keys
+            if isinstance((value := payload.get(key)), str) and value.strip()
+        ),
+        None,
+    )
+
+
+def _attribution_reason(
+    cause_type: CauseType,
+    strongest: EvidenceItem,
+    cluster: list[EvidenceItem],
+) -> str:
+    signal_type = str(strongest.payload.get("signal_type") or "")
+    if cause_type == CauseType.DEPLOYMENT_REGRESSION:
+        return "deployment regression"
+    if cause_type == CauseType.TRAFFIC_SPIKE:
+        return "traffic spike"
+    if cause_type == CauseType.DOWNSTREAM_DEPENDENCY_FAILURE:
+        return (
+            "dependency timeout"
+            if any(item.payload.get("signal_type") == "timeout" for item in cluster)
+            else "dependency latency"
+        )
+    if cause_type == CauseType.DATABASE_SLOWDOWN:
+        return "database latency"
+    if cause_type == CauseType.SINGLE_INSTANCE_ISSUE:
+        return "single instance failure"
+    if cause_type == CauseType.NETWORK_FAULT:
+        return (
+            "network packet corruption"
+            if signal_type == "network_corruption"
+            else "network latency"
+        )
+    if cause_type == CauseType.PROCESS_OR_CONTAINER_FAILURE:
+        return "container process failure"
+    return {
+        "cpu": "container cpu load",
+        "memory": "container memory load",
+        "disk_io": "disk I/O saturation",
+    }.get(signal_type, "resource saturation")
 
 
 def _active_sdk_findings(findings: list[AgentFinding]) -> list[AgentFinding]:

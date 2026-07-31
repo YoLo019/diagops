@@ -152,7 +152,7 @@ Run with the sample deployment and log evidence:
 curl -X POST http://127.0.0.1:8000/events/simulated/deployment_regression
 ```
 
-Send a V3 manual investigation:
+Send a manual investigation:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/investigations/manual \
@@ -174,16 +174,52 @@ curl -X POST http://127.0.0.1:8000/events \
   -d @docs/examples/webhook-event.json
 ```
 
+## Receive Alertmanager Alerts
+
+```bash
+curl -X POST http://127.0.0.1:8000/events/alertmanager \
+  -H "Content-Type: application/json" \
+  -d @docs/examples/alertmanager-webhook.json
+```
+
+The endpoint processes at most 100 alerts synchronously and returns one ordered
+result per alert. Firing alerts create investigations; resolved alerts are
+ignored. Deliveries are at-least-once with no deduplication, so Alertmanager
+retries or duplicate webhooks can create duplicate investigations. Configure
+the receiver timeout above the observed batch investigation time.
+
+## Production Acceptance Gate
+
+The isolated six-service Gate uses the shared deterministic diagnostic core,
+native Prometheus alerts, Alertmanager webhooks, and read-only evidence mounts.
+It requires a running Docker Desktop Linux daemon:
+
+```powershell
+docker compose -f compose.production-gate.yaml config --quiet
+powershell -ExecutionPolicy Bypass -File scripts/run_production_gate.ps1
+```
+
+Each of the seven scenarios starts a fresh Compose project. Results are written
+under `output/production-acceptance/`; failed and unfavorable artifacts are
+preserved. The fault endpoints exist only inside images started with
+`DIAGOPS_PRODUCTION_GATE=true` and are not DiagOps tools or production APIs.
+The `memory_pressure`, `network_corruption`, and `process_failure` scenarios
+export bounded gauge/counter metrics only — they never exhaust real memory,
+modify the network, or kill processes — and their Top-1 cause, component, and
+reason must match with an onset error of at most 60 seconds; onset fallback is
+forbidden for these scenarios. The whole Gate must finish below 900 seconds
+with 100% Evidence reference validity, zero read-only violations, and a passing
+privacy scan (no scenario or control-plane tokens in persisted records).
+
 ## List Investigations
 
 ```bash
 curl http://127.0.0.1:8000/investigations
 ```
 
-## V4 Multi-Agent Workflow
+## Multi-Agent Workflow
 
-DiagOps V4 adds a read-only multi-agent investigation process on top of the V3
-platform:
+DiagOps runs a read-only multi-agent investigation process:
 
 - A task planner creates diagnosis tasks for logs, metrics, deployments,
   dependencies, service context, memory lookup, RCA synthesis, and optional LLM
@@ -198,9 +234,8 @@ platform:
 - The Chinese frontend includes an Agent panel for plan, task graph, timeline,
   context, tool calls, and memory views.
 
-V4 keeps the same production safety boundary as V3. It does not execute
-rollback, restart, scale, or configuration changes. V4 tools are currently
-read-only provider wrappers plus execution records.
+The process does not execute rollback, restart, scale, or configuration
+changes. Tools are read-only provider wrappers plus execution records.
 
 ### Agent Process APIs
 
@@ -227,20 +262,20 @@ for the investigation service and environment. It does not modify the
 investigation report, hypotheses, recommended actions, or verification
 suggestions.
 
-## V5 Agentic RCA Workbench
+## Agentic RCA Workbench
 
-DiagOps V5 adds a read-only RCA workbench on top of the V4 agent process:
+The read-only RCA workbench coordinates independent specialist findings:
 
 - LogAgent, MetricAgent, and DeploymentAgent produce independent findings.
 - The coordinator ranks multiple root-cause candidates instead of forcing one answer.
 - Candidates cite supporting and contradicting findings plus evidence IDs.
 - The frontend shows Agent 判断, 候选根因排序, and 证据链预览.
 
-V5 remains read-only. It does not execute rollback, restart, scaling, SSH, or
-configuration changes. Optional LLM enhancement is disabled by default and is
-not required for the workbench.
+The workbench remains read-only. It does not execute rollback, restart,
+scaling, SSH, or configuration changes. Optional LLM enhancement is disabled by
+default and is not required for the workbench.
 
-### V5 RCA APIs
+### RCA APIs
 
 ```text
 GET /investigations/{id}/agent-findings
@@ -248,15 +283,15 @@ GET /investigations/{id}/coordination-review
 GET /investigations/{id}/rca-workbench
 ```
 
-## Historical V6 And LLM Compatibility
+## Historical ReAct And LLM Compatibility
 
-V8.1 no longer constructs or executes the retired V6 ReAct runtime or the
+DiagOps no longer constructs or executes the retired V6 ReAct runtime or the
 pseudo-LLM analyst, and it creates no new `react_traces` or `llm_analyses`
 rows. Existing rows remain readable through persisted investigation records and
 the historical read-only ReAct API. New optional model analysis uses only the
 unified Agents SDK runtime described below.
 
-## V8.1 Multi-Agent Reliability Artifacts
+## Multi-Agent Reliability Artifacts
 
 The deterministic reliability run is safe for key-free verification and does
 not read live credentials:
@@ -283,7 +318,7 @@ Never paste credential values into chat, code, YAML, or committed files. The
 runner uses five existing simulated cases three times: 12 clean runs and 3
 adversarial safety probes.
 
-For DeepSeek V4 Pro certification, use the current cache-miss prices and an
+For DeepSeek certification, use the current cache-miss prices and an
 explicit 180-second overall budget. The adapter disables the model's default
 thinking mode for this bounded structured workflow; the longer budget covers
 the required Coordinator and Specialist turns without changing the gate:
@@ -327,54 +362,11 @@ prompts, raw response data, reasoning, and free-text model payloads. The runner
 is read-only: it records diagnostic results but does not execute remediation,
 rollback, restart, scaling, SSH, or configuration changes.
 
-### V8.1 OpenAI Canonical Baseline
+## Adaptive Investigation And OpenRCA
 
-The OpenAI canonical gate passed on 2026-07-14:
-
-```text
-Provider: openai
-Model: gpt-5.6-sol
-Run: v8-1-live-20260714T060212861267Z-b5f43e64
-Completed: 2026-07-14T06:02:12.861267Z
-Result: passed
-```
-
-The artifact contains 15/15 structurally valid real Agent reviews, 15/15
-correct candidates, 3/3 correct results for every case, 15/15 valid references,
-15/15 valid agreement and executed-action claim contracts, zero unsafe tools,
-zero successful prompt injections, and zero wrong agreements. Non-fatal tracing
-403 messages observed by the local runner did not produce model execution
-failures and are not part of the certification artifact.
-
-### V8.1 DeepSeek Certification
-
-The DeepSeek V4 Pro adapter is implemented, but its independent canonical gate
-did not pass on 2026-07-14:
-
-```text
-Provider: deepseek
-Model: deepseek-v4-pro
-Run: v8-1-live-20260714T080700796242Z-ffee9018
-Completed: 2026-07-14T08:07:00.796242Z
-Implementation: implemented
-Certification: failed
-```
-
-The live artifact contains 15 unique canonical rows with valid Provider/model
-attribution, references, agreement contracts, executed-action claim contracts,
-and zero unsafe tools, successful prompt injections, wrong agreements, or
-sensitive payload fields. It produced no passing real-review cohort. Bounded
-transport, generated-schema, and CauseType-ontology remediations improved later
-five-case diagnostics, but the final diagnostic
-`v8-1-diagnostic-20260714T090134835432Z-405b87b3` remained below the stop gate
-at 2/5 correct real reviews. No later diagnostic is counted as certification,
-and the canonical thresholds were not weakened.
-
-## V8.2 Adaptive Investigation And OpenRCA
-
-V8.2 keeps `fixed` as the default investigation strategy. `fixed` uses the
-existing bounded seed collection and deterministic RCA fallback. `adaptive`
-gives LogAgent, MetricAgent, and DeploymentAgent their own registered read-only
+DiagOps keeps `fixed` as the default investigation strategy. `fixed` uses the
+bounded seed collection and deterministic RCA fallback. `adaptive` gives
+LogAgent, MetricAgent, and DeploymentAgent their own registered read-only
 tools so they can request additional evidence within the configured budget.
 Select the strategy on a manual investigation or set `agents.strategy` in
 `config/diagops.yaml`.
@@ -384,8 +376,9 @@ Adaptive queries support these bounded parameters:
 - Every query: timezone-aware `start_time`, `end_time`, `reason`, and `limit`.
 - Logs: `keywords`, `levels`, and `instance`.
 - Metrics: `metric_names`, `aggregation`, and `instance`.
-- Prometheus: the allowlisted `qps`, `5xx_rate`, `p95_latency`, `cpu`, and
-  `memory` templates; no arbitrary PromQL.
+- Prometheus: the allowlisted `qps`, `5xx_rate`, `p95_latency`, `cpu`,
+  `memory`, `network_drops`, and `process_restarts` templates; no arbitrary
+  PromQL.
 - Deployments: `version` and `instance`.
 - Service catalog: whether to include direct dependencies.
 - Dependencies: `direction`, an allowlisted `target`, and depth fixed at one.
@@ -510,12 +503,6 @@ GET /benchmarks/openrca/latest/official-report.csv
 GET /benchmarks/openrca/latest/summary.json
 ```
 
-V8.2 is complete only after a real 40-case paired run has 40 predictions per
-strategy, Adaptive completion of at least 95%, 100% valid Evidence references,
-zero mutation or out-of-scope executions, and an upstream official Adaptive
-partial score not below Fixed. Failed cases and unfavorable results must remain
-in the frozen artifacts.
-
 The prepare, run, evaluate, and upstream `python -m main.evaluate` commands
 above are the real release-gate templates. They require the separately
 downloaded full dataset, a pinned supported model, a matching Provider key kept
@@ -523,7 +510,7 @@ only in the process environment, current caller-supplied input/output prices,
 and a separate Microsoft OpenRCA checkout for the official evaluator. A small
 fixture run is useful for development but is not the 40-case live release gate.
 
-## V9 Durable Runtime Operations
+## Runtime Operations
 
 An Investigation is one Runtime session. Different Investigations may execute
 concurrently, subject to `max_concurrent_runs`; records, budgets, event streams,
@@ -623,16 +610,15 @@ references, or checkpoint tampering. `GET /runtime-runs/{run_id}/diff` compares
 two Runs from the same Investigation using stable structured sections and
 frozen terminal business projections; it does not re-execute either Run.
 
-Database initialization migrates supported V8.2 SQLite schema V5 to schema V6
+Database initialization migrates supported SQLite schema V5 to schema V6
 in one transaction by adding `runtime_runs`, `runtime_attempts`,
 `runtime_events`, and `runtime_checkpoints`. Back up or copy the database before
 an operational migration and run `PRAGMA foreign_key_check` afterward. Existing
 Investigations remain readable and expose `runtime_available=false`; migration
 does not invent historical Runs, Attempts, Events, or Checkpoints for them.
 
-The first V9 release has no automatic Runtime event retention or cleanup.
-Runtime events remain append-only until an explicitly designed retention policy
-is approved.
+Runtime has no automatic event retention or cleanup. Runtime events remain
+append-only until an explicitly designed retention policy is approved.
 
 ### Runtime Safety And Key-free Acceptance
 
@@ -655,16 +641,6 @@ It writes only `output/runtime-acceptance/<run-id>/result.json`, reports raw
 latency, SQLite growth, recovery time, and OpenTelemetry overhead without an
 extra pass threshold, and fails if a required scenario or privacy check is
 missing.
-
-## V2 Platform Loop
-
-DiagOps V2 keeps production systems read-only. It creates an investigation,
-collects evidence, ranks RCA hypotheses, generates recommended actions, records
-approval status, and provides verification suggestions.
-
-V2 does not execute rollback, restart, scaling, or configuration changes. It
-only records recommendations, approval state, and verification results for
-engineer review.
 
 ## Manual Investigation
 
@@ -693,9 +669,9 @@ curl -X PATCH http://127.0.0.1:8000/investigations/<investigation_id>/verificati
   -d '{"status":"passed","result_note":"5xx rate recovered"}'
 ```
 
-## MVP Boundaries
+## Safety Boundaries
 
-DiagOps is read-only in V3. It does not automatically modify production
+DiagOps is read-only. It does not automatically modify production
 systems. It does not execute rollback, restart, scaling, or configuration
 changes. It collects evidence, ranks hypotheses, generates recommended actions,
 records approval status, and tracks verification results for engineer review.
