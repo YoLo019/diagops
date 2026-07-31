@@ -78,13 +78,13 @@ docs/superpowers/plans/2026-07-30-diagops-v10-shared-signal-semantics-seven-scen
 
 ## V10 Execution Dashboard
 
-Overall progress: `implementing; T6 verified, T7 awaiting Git authorization`
+Overall progress: `implementing; T7 source identity established`
 
-Current phase: V10 execution M5 source checkpoint
+Current phase: V10 execution M5 live Gates
 
-Next action: STOP — request explicit user authorization for the Git commit
-that establishes the clean, reproducible source identity. No live Gate (T8/T9/
-T10) may run before it.
+Next action: run T8 production seven-scenario Gate on source identity commit
+`34e83097d353e6da261b32e3e92c08cc6264b7e5`, then T9 frozen six-case targeted
+Gate; T10 only if both pass.
 Spec and plan were approved by the user on 2026-07-30 after the second cold
 review resolved F16–F19. Stop at T7 source checkpoint for separate Git
 authorization; do not run any live Gate before it.
@@ -122,7 +122,7 @@ authorization; do not run any live Gate before it.
 | CL2 | M4.5 | Record W5/W6 retain/retire disposition | verified | User confirmed on 2026-07-31 after a written risk/trade-off analysis: both `retained intentionally` — W5 remains the sole Provider/model certification producer backing `certification_status`; W6 remains the historical ReAct/LLM read path required by the historical-records contract; disposition recorded in the plan; nothing deleted | Start M4.5 review |
 | M4.5 | Review | Cold review cleanup totals and contract integrity | verified | Net cleanup: CL0 −257 lines (109 production), CL1 README −61, current.md −188, frontend tests −312 source-shape lines replaced by +89 executable lines, W7 fallback −40; no public or persisted contract removed — API response models, DB schema, and repository interfaces unchanged; CL2 disposition leaves capability intact | Start M5/T6 |
 | T6 | M5 | Key-free full regression | verified | Ruff clean; pytest 1538/1538; frontend production build passed; Runtime acceptance 14/14 with privacy scan passed (artifact `output/runtime-acceptance/runtime-20260731T011951755740Z-c5e8e1af/result.json`); `git diff --check` clean; zero diff in pyproject/uv.lock/migrations/schema/package.json — no new dependency, migration, public API, or write Tool | Start T7 |
-| T7 | M5 | Source checkpoint | in_progress | HEAD `568da9733e5a703355ac9cb743d5089b612412b5` (dirty, 53 files +4003/−1772 plus 20 approved new files); official evaluator commit `c1bd4af7f635171a1c31cdd567c07d698dff6abc`; frozen six-case safe-index SHA-256 `b249e2f6b0b0dbd3b9f30aa71ef3302ff2c48a05cc50b914fb3dcbbc8800ad4b`; milestone diff review found no blocking finding (Ground Truth isolation, test integrity, safety boundaries, contract integrity all re-verified) | Awaiting explicit user Git commit authorization |
+| T7 | M5 | Source checkpoint | verified | User explicitly authorized the Git commit on 2026-07-31. Source identity commit `34e83097d353e6da261b32e3e92c08cc6264b7e5` on branch `agent/v10-shared-signal-semantics` (clean tree); prior HEAD `568da973`; official evaluator commit `c1bd4af7f635171a1c31cdd567c07d698dff6abc`; frozen six-case safe-index SHA-256 `b249e2f6b0b0dbd3b9f30aa71ef3302ff2c48a05cc50b914fb3dcbbc8800ad4b`; milestone diff review found no blocking finding | Start T8 |
 
 ## V10 Task-Aware Projector Targeted Gate
 
