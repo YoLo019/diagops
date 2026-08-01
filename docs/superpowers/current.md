@@ -34,19 +34,19 @@ Main goal: correct the known OpenRCA counter, degenerate-baseline strength, and
 equal-score ranking defects without fitting the exposed six-case development
 set or regressing the V10 production Gate.
 
-Iteration status: `implementing`
+Iteration status: `blocked`
 
 Spec status: `approved`
 
 Plan status: `approved`
 
-Implementation status: `in_progress`
+Implementation status: `blocked`
 
 Completion commit: `none`
 
-Verification evidence: `none`
+Verification evidence: `T10 final checks on 0a7d81c: Ruff clean, pytest 1636 passed, frontend build ok, runtime acceptance 14/14 + privacy passed, git diff --check clean; T9 paired-gate FAIL archived in comparison.json`
 
-Blocker: `none`
+Blocker: `R13 paired gate FAIL（official partial delta 0.000 < 0.05）；holdout 已 exposed；结论归档于 spec §13（F26）与 D:\data\OpenRCA\comparisons-v10.1\comparison.json`
 
 Allowed values:
 
@@ -83,13 +83,11 @@ docs/superpowers/plans/2026-08-01-diagops-v10.1-signal-ranking-reliability-imple
 
 ## V10.1 Planning Dashboard
 
-Overall progress: `M0/M1 verified; M2 code+regression verified by review A; T8 candidate checkpoint awaiting user Git authorization`
+Overall progress: `M0/M1/M2/M3 all reviewed; T9 paired Gate FAIL（delta 0.000）归档、R13 blocked；M3 review approve（F27 informational 已记录）；不声称准确率提升`
 
-Current phase: Full iteration / Execute
+Current phase: Full iteration / Verify（blocked：R13 未达成）
 
-Next action: user authorizes the candidate Git commit, then T8 runs the
-production Gate (must stay 7/7) and M2 review B verifies artifacts; only then
-M3 one-time blind paired Gate.
+Next action: 向用户请求最终 docs 提交授权（F23：current.md/plan/spec 三份治理文件）。不声称准确率提升；production Gate 7/7 仅为模拟 lab 七场景契约 Gate。
 
 | ID | Phase | Task | Status | Evidence or result | Next action or blocker |
 | --- | --- | --- | --- | --- | --- |
@@ -100,7 +98,8 @@ M3 one-time blind paired Gate.
 | P5 | Plan | Map R1–R14 to ordered implementation and verification gates | verified | Independent cold review found no blocking；F10–F12 resolved；user approved on 2026-08-01；M1 review F17/F18 forced T6 scope amendment, user re-approved the amended plan on 2026-08-01 | Execute M2 |
 | M0 | Execute | T1–T2 blind tooling, custodian holdout, frozen V10 baseline | verified | T1: 63 focused passed + review A approve_with_followups; T2: commit `4a4b20a`, holdout 40-case SHA `aac4b89bc9b3b248bfd0fdb8b5c783805655c30d3aeff13e81eac6f23f7f9936` (overlap 0, per-partition 10), V10 baseline `run-20260801T071800886742Z` 40/40 unscored on source `7b2602457561875ae8091e4d8eeea1bcddc2d34d`; review B approve_with_followups (F13–F16 low, absorbed) | Done |
 | M1 | Execute | T3–T5 signal semantics repair | verified | T3/T4 complete (51+118 focused passed); T5 selection done, Attribution consumer-layer gap found by M1 cold review: blocking F17 (domain validator onset re-sort) + medium F18 (dependency payload), fixes approved into T6 scope and closed there; 618 merged tests passed | Done |
-| M2 | Execute | T6–T8 compatibility, regression, production Gate | in_progress | T6: F17/F18 closed, 247+111 focused passed; T7: Ruff clean, 1634 full passed, frontend build ok, runtime acceptance 14/14 + privacy; M2 review A approve_with_followups (F19 fixed with red-green evidence, F20 recorded) | T8 blocked on user candidate Git authorization |
+| M2 | Execute | T6–T8 compatibility, regression, production Gate | verified | T6: F17/F18 closed, 247+111 focused passed; T7: Ruff clean, 1634 full passed, frontend build ok, runtime acceptance 14/14 + privacy; M2 review A approve_with_followups (F19 fixed with red-green evidence, F20 recorded); T8: candidate commit `0a7d81c`, production Gate 7/7 (`run-20260801T124143735Z`, evidence 100%, read-only 0, privacy passed, new-scenario onsets 30.2–32.5s, total 107s); first attempt failed and root-caused: F21 CRLF env (fixed without source change) + F22 memory_pressure timing flake (artifact archived at `run-20260801T122813729Z`, standalone repro passed); M2 review B approve_with_followups (F23–F25 low, recorded) | Done |
+| M3 | Execute/Verify | T9 一次性揭盲 paired Gate + T10 最终对账 | blocked（R13） | T9: candidate `run-20260801T130348358205Z` 40/40 on clean `0a7d81c0813e163111e1c475d88d843112336aa7`（tooling `4a4b20a`、baseline source `7b2602457561875ae8091e4d8eeea1bcddc2d34d`、holdout SHA `aac4b89bc9b3b248bfd0fdb8b5c783805655c30d3aeff13e81eac6f23f7f9936`、official evaluator `c1bd4af7f635171a1c31cdd567c07d698dff6abc`）；paired-gate FAIL：official partial 0.025 vs 0.025（delta `0.000` < `0.05`）、compatible strict/component/reason/time 双侧相同且 reason 0、candidate 单 run gate 4 断言失败、projection fallbacks 两侧各 8、Evidence 100%、read-only 0；identity/checksum/query+answer multiset 全部通过；comparison artifact `D:\data\OpenRCA\comparisons-v10.1\comparison.json`（SHA-256 `b4b4bd3db4cceac01df8b1c76ac9e07b5dd16bf9a67853f0bedbb7b481418730`）；T10: Ruff clean、1636 passed、frontend build ok、runtime acceptance 14/14 + privacy（`runtime-20260801T152709422174Z-8e11162c`）、`git diff --check` clean；ledger F13/F15/F16 closed、F26 归档、F23 open；M3 review `approve`（40/40 预测逐行不同但命中计数持平，排除配对乌龙；Ruff/pytest 1636 重跑一致；RM1–RM3 informational 记入 F27） | 向用户请求最终 docs 提交授权（F23）；不声称准确率提升（7/7 仅为模拟 lab Gate 契约） |
 
 ## V10 Task-Aware Projector Targeted Gate
 
