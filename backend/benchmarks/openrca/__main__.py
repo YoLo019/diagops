@@ -8,10 +8,11 @@ from agents import set_tracing_disabled
 from backend.benchmarks.openrca.evaluator import (
     evaluate_run,
     gate_run,
+    paired_gate_run,
     targeted_gate_run,
     write_official_query_inputs,
 )
-from backend.benchmarks.openrca.prepare import prepare_cases
+from backend.benchmarks.openrca.prepare import load_excluded_case_ids, prepare_cases
 from backend.benchmarks.openrca.runner import (
     OpenRcaDiagnosisRunner,
     run_benchmark_pair,
@@ -31,6 +32,7 @@ def main() -> None:
     prepare.add_argument("--output", type=Path, required=True)
     prepare.add_argument("--per-partition", type=int, default=10)
     prepare.add_argument("--seed", type=int, default=42)
+    prepare.add_argument("--exclude-safe-index", type=Path, action="append", default=None)
 
     run = commands.add_parser("run")
     run.add_argument("--dataset-root", type=Path, required=True)
@@ -59,13 +61,29 @@ def main() -> None:
     targeted_gate = commands.add_parser("targeted-gate")
     targeted_gate.add_argument("--run-dir", type=Path, required=True)
 
+    paired_gate = commands.add_parser("paired-gate")
+    paired_gate.add_argument("--safe-index", type=Path, required=True)
+    paired_gate.add_argument("--baseline-run-dir", type=Path, required=True)
+    paired_gate.add_argument("--baseline-evaluation-dir", type=Path, required=True)
+    paired_gate.add_argument("--candidate-run-dir", type=Path, required=True)
+    paired_gate.add_argument("--candidate-evaluation-dir", type=Path, required=True)
+    paired_gate.add_argument("--official-evaluator-root", type=Path, required=True)
+    paired_gate.add_argument("--output", type=Path, required=True)
+
     arguments = parser.parse_args()
     if arguments.command == "prepare":
+        excluded = frozenset()
+        if arguments.exclude_safe_index:
+            try:
+                excluded = load_excluded_case_ids(arguments.exclude_safe_index)
+            except (OSError, ValueError) as exc:
+                parser.error(f"invalid exclusion safe-index: {exc}")
         result = prepare_cases(
             arguments.dataset_root,
             arguments.output,
             per_partition=arguments.per_partition,
             seed=arguments.seed,
+            excluded_case_ids=excluded,
         )
         print(result.manifest.manifest_hash)
         return
@@ -90,6 +108,20 @@ def main() -> None:
         if failures:
             parser.error("; ".join(failures))
         print("targeted gate passed")
+        return
+    if arguments.command == "paired-gate":
+        failures = paired_gate_run(
+            safe_index=arguments.safe_index,
+            baseline_run_dir=arguments.baseline_run_dir,
+            baseline_evaluation_dir=arguments.baseline_evaluation_dir,
+            candidate_run_dir=arguments.candidate_run_dir,
+            candidate_evaluation_dir=arguments.candidate_evaluation_dir,
+            official_evaluator_root=arguments.official_evaluator_root,
+            output_path=arguments.output,
+        )
+        if failures:
+            parser.error("; ".join(failures))
+        print("paired gate passed")
         return
 
     if arguments.mode == "deterministic":

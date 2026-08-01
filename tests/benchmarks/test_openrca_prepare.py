@@ -1,12 +1,15 @@
 import csv
+import json
 from collections import Counter
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
-from backend.benchmarks.openrca.models import OpenRcaFailureMode
+from backend.benchmarks.openrca.models import OpenRcaFailureMode, OpenRcaRuntimeIndex
 from backend.benchmarks.openrca.prepare import (
     _expected_root_cause_count,
+    load_excluded_case_ids,
     prepare_cases,
 )
 
@@ -176,3 +179,102 @@ def test_prepare_rejects_telemetry_path_escape(fixture_root: Path, tmp_path: Pat
 
     with pytest.raises(ValueError, match="outside dataset root"):
         prepare_cases(copied, tmp_path / "output", per_partition=1, seed=42)
+
+
+def _write_runtime_index(path: Path, case_ids: list[str]) -> None:
+    cases = []
+    for case_id in case_ids:
+        partition, row_id = case_id.rsplit(":", 1)
+        cases.append(
+            {
+                "case_id": case_id,
+                "partition": partition,
+                "row_id": row_id,
+                "task_index": "task_1",
+                "instruction": f"Excluded case {case_id}.",
+                "start_time": "2026-07-14T12:00:00+08:00",
+                "end_time": "2026-07-14T12:10:00+08:00",
+                "telemetry_dir": f"{partition}/telemetry/2026_07_14",
+            }
+        )
+    index = OpenRcaRuntimeIndex.model_validate({"case_manifest_hash": "excluded", "cases": cases})
+    path.write_text(index.model_dump_json(indent=2) + "\n", encoding="utf-8")
+
+
+def test_load_excluded_case_ids_merges_and_deduplicates_multiple_indexes(tmp_path: Path):
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    _write_runtime_index(first, ["Bank:1", "Bank:2"])
+    _write_runtime_index(second, ["Bank:2", "Telecom:3"])
+
+    excluded = load_excluded_case_ids([first, second])
+
+    assert excluded == frozenset({"Bank:1", "Bank:2", "Telecom:3"})
+
+
+def test_prepare_excludes_cases_before_sampling(full_fixture_root: Path, tmp_path: Path):
+    baseline = prepare_cases(full_fixture_root, tmp_path / "baseline", per_partition=10, seed=42)
+    selected_by_partition: dict[str, list[str]] = {}
+    for case in baseline.manifest.cases:
+        selected_by_partition.setdefault(case.partition.value, []).append(case.case_id)
+    excluded = frozenset(
+        case_id for ids in selected_by_partition.values() for case_id in ids[:2]
+    )
+
+    result = prepare_cases(
+        full_fixture_root,
+        tmp_path / "excluded",
+        per_partition=10,
+        seed=42,
+        excluded_case_ids=excluded,
+    )
+
+    result_ids = {case.case_id for case in result.manifest.cases}
+    assert result_ids.isdisjoint(excluded)
+    # 每 partition 12 个候选排除 2 个后只剩 10 个，选择必须等于剩余池。
+    assert result_ids == {
+        f"{partition}:{row}" for partition in PARTITIONS for row in range(12)
+    } - excluded
+
+
+def test_prepare_fails_when_exclusion_leaves_partition_short(
+    full_fixture_root: Path, tmp_path: Path
+):
+    excluded = frozenset({f"Bank:{row}" for row in range(3)})
+
+    with pytest.raises(ValueError, match="fewer than 10"):
+        prepare_cases(
+            full_fixture_root,
+            tmp_path / "output",
+            per_partition=10,
+            seed=42,
+            excluded_case_ids=excluded,
+        )
+
+
+def test_load_excluded_case_ids_rejects_non_strict_index(tmp_path: Path):
+    path = tmp_path / "invalid.json"
+    _write_runtime_index(path, ["Bank:1"])
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["unexpected_field"] = True
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValidationError):
+        load_excluded_case_ids([path])
+
+
+def test_prepare_without_exclusion_preserves_legacy_output(
+    full_fixture_root: Path, tmp_path: Path
+):
+    legacy = prepare_cases(full_fixture_root, tmp_path / "legacy", per_partition=10, seed=42)
+    explicit = prepare_cases(
+        full_fixture_root,
+        tmp_path / "explicit",
+        per_partition=10,
+        seed=42,
+        excluded_case_ids=frozenset(),
+    )
+
+    assert legacy.manifest.manifest_hash == explicit.manifest.manifest_hash
+    assert legacy.manifest_path.read_bytes() == explicit.manifest_path.read_bytes()
+    assert legacy.runtime_index_path.read_bytes() == explicit.runtime_index_path.read_bytes()

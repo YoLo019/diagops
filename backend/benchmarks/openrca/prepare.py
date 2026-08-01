@@ -7,6 +7,8 @@ import math
 import random
 import re
 from collections import defaultdict
+from collections.abc import Iterable
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -72,11 +74,19 @@ def prepare_cases(
     *,
     per_partition: int = 10,
     seed: int = 42,
+    excluded_case_ids: AbstractSet[str] = frozenset(),
 ) -> PrepareResult:
     dataset_root = dataset_root.resolve()
     selected: list[_Candidate] = []
     for partition in OpenRcaPartition:
         candidates = _load_candidates(dataset_root, partition)
+        if excluded_case_ids:
+            # 排除必须发生在分层抽样之前，否则已暴露 case 仍可能进入新 holdout。
+            candidates = [
+                candidate
+                for candidate in candidates
+                if f"{partition.value}:{candidate.row_id}" not in excluded_case_ids
+            ]
         if len(candidates) < per_partition:
             raise ValueError(f"partition {partition.value} has fewer than {per_partition} cases")
         selected.extend(_stratified_sample(candidates, per_partition, seed))
@@ -140,6 +150,19 @@ def prepare_cases(
         manifest_path=manifest_path,
         runtime_index_path=runtime_index_path,
     )
+
+
+def load_excluded_case_ids(paths: Iterable[Path]) -> frozenset[str]:
+    """按 strict 模型逐个读取 safe-index，合并全部 case_id 作为排除集合。
+
+    校验只由 OpenRcaRuntimeIndex(extra=forbid) 完成；任一文件非法直接抛
+    ValidationError，不允许静默跳过，避免排除集合不完整污染 holdout。
+    """
+    excluded: set[str] = set()
+    for path in paths:
+        index = OpenRcaRuntimeIndex.model_validate_json(path.read_text(encoding="utf-8"))
+        excluded.update(case.case_id for case in index.cases)
+    return frozenset(excluded)
 
 
 def _load_candidates(dataset_root: Path, partition: OpenRcaPartition) -> list[_Candidate]:
