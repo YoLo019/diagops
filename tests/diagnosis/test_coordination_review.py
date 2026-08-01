@@ -2,9 +2,14 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from backend.db.models import InvestigationRecord
+from backend.db.repositories import InMemoryInvestigationRepository
+from backend.db.session import create_db_engine, initialize_database
+from backend.db.sqlite_repository import SQLiteInvestigationRepository
 from backend.diagnosis.coordination_review import (
     LOW_CONFIDENCE,
     build_coordination_review,
+    build_root_cause_attributions,
     conflicting_agent_names,
     decide_hybrid_status,
 )
@@ -12,6 +17,7 @@ from backend.diagnosis.coordination_review import (
     build_hybrid_coordination_review as _build_hybrid_coordination_review,
 )
 from backend.domain.agent_findings import AgentFinding, AgentFindingType, AgentName
+from backend.domain.events import IncidentEvent, IncidentSource, Severity
 from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
 from backend.domain.hypotheses import CauseType, Hypothesis
 from backend.domain.multi_agent import (
@@ -195,16 +201,18 @@ def test_deterministic_attribution_clusters_real_observation_times_and_maps_reas
     review = build_coordination_review("inv-1", [], evidence, [hypothesis])
 
     assert len(review.root_causes) == 2
+    # F17：review 层顺序与 attribution 构建层一致；全 legacy cohort 按 cluster
+    # score 降序（600s 单点 cluster score 6 先于 60s 三点 cluster score 5）。
     assert [item.root_cause_occurred_at for item in review.root_causes] == [
-        start + timedelta(seconds=60),
         start + timedelta(seconds=600),
+        start + timedelta(seconds=60),
     ]
     assert all(item.root_cause_component == "node-a" for item in review.root_causes)
     assert all(
         item.root_cause_reason == "network packet corruption"
         for item in review.root_causes
     )
-    assert set(review.root_causes[0].supporting_evidence_ids) == {
+    assert set(review.root_causes[1].supporting_evidence_ids) == {
         "ev-network-0",
         "ev-network-1",
         "ev-network-2",
@@ -1025,6 +1033,312 @@ def test_hybrid_builder_rejects_finding_from_another_investigation():
             "",
             "",
         )
+
+
+# --- basis-aware Attribution（V10.1 T5, spec §8.3） ---------------------------
+
+ATTRIBUTION_BASE = datetime(2026, 7, 3, 12, tzinfo=UTC)
+
+
+def _metric_signal_evidence(
+    evidence_id: str,
+    offset_seconds: float,
+    deviation: float,
+    *,
+    component: str = "checkout",
+    signal_type: str = "memory",
+    segment_id: str | None = None,
+    strength_basis: object = None,
+    point_count: object = None,
+) -> EvidenceItem:
+    payload: dict = {
+        "component": component,
+        "signal_type": signal_type,
+        "signal_name": f"{signal_type}_metric",
+        "deviation_score": deviation,
+    }
+    if segment_id is not None:
+        payload["anomaly_segment_id"] = segment_id
+    if strength_basis is not None:
+        payload["strength_basis"] = strength_basis
+    if point_count is not None:
+        payload["anomaly_point_count"] = point_count
+    return EvidenceItem(
+        id=evidence_id,
+        provider=EvidenceProvider.METRIC,
+        kind=EvidenceKind.METRIC_TREND,
+        timestamp=ATTRIBUTION_BASE + timedelta(seconds=offset_seconds),
+        summary=f"{evidence_id} summary",
+        payload=payload,
+    )
+
+
+def _saturation_hypothesis(evidence: list[EvidenceItem]) -> Hypothesis:
+    return Hypothesis(
+        cause_type=CauseType.RESOURCE_SATURATION,
+        summary="Resource saturation",
+        confidence=0.8,
+        supporting_evidence_ids=[item.id for item in evidence],
+    )
+
+
+def _saturation_root_cause_ids(evidence: list[EvidenceItem]) -> list[list[str]]:
+    # cohort 排序语义定义在 attribution 排名函数层；F17 起 domain validator 不再
+    # 重排 root_causes，review 层顺序与本函数输出一致（见下方 consumer 合同测试）。
+    attributions = build_root_cause_attributions(
+        evidence, [_saturation_hypothesis(evidence)]
+    )
+    return [item.supporting_evidence_ids for item in attributions]
+
+
+def test_attribution_all_legacy_clusters_keep_v10_score_order():
+    evidence = [
+        _metric_signal_evidence("ev-weak", 0, 1.0, segment_id="seg-a"),
+        _metric_signal_evidence("ev-strong", 60, 5.0, segment_id="seg-b"),
+    ]
+
+    # V10 排名：cluster score 高者优先（8 先于 4），与 onset 先后无关。
+    assert _saturation_root_cause_ids(evidence) == [["ev-strong"], ["ev-weak"]]
+
+
+def test_attribution_relative_cohort_keeps_cluster_score_order():
+    evidence = [
+        _metric_signal_evidence(
+            "ev-weak", 0, 1.0, segment_id="seg-a",
+            strength_basis="relative", point_count=1,
+        ),
+        _metric_signal_evidence(
+            "ev-strong", 60, 5.0, segment_id="seg-b",
+            strength_basis="relative", point_count=1,
+        ),
+    ]
+
+    assert _saturation_root_cause_ids(evidence) == [["ev-strong"], ["ev-weak"]]
+
+
+def test_attribution_presence_cohort_orders_by_support_tuple_not_onset():
+    evidence = [
+        _metric_signal_evidence(
+            "ev-small", 0, 1.0, segment_id="seg-a",
+            strength_basis="presence_only", point_count=1,
+        ),
+        *[
+            _metric_signal_evidence(
+                f"ev-big-{index}", 100 + 30 * index, 1.0, segment_id="seg-b",
+                strength_basis="presence_only", point_count=count,
+            )
+            for index, count in enumerate([3, 2, 1])
+        ],
+    ]
+
+    # 总 point count 6 的 cluster 优先于 onset 更早的单点 cluster；
+    # presence 数值 1 不参与幅度比较（spec F6）。
+    assert _saturation_root_cause_ids(evidence) == [
+        ["ev-big-0", "ev-big-1", "ev-big-2"],
+        ["ev-small"],
+    ]
+
+
+def test_attribution_cross_cohort_compares_support_not_strength():
+    # F6：relative 噪声（deviation 10、单点）不得压住 presence 真实信号（5 点支持）。
+    evidence = [
+        _metric_signal_evidence(
+            "ev-noise", 0, 10.0, segment_id="seg-a",
+            strength_basis="relative", point_count=1,
+        ),
+        _metric_signal_evidence(
+            "ev-real", 100, 1.0, segment_id="seg-b",
+            strength_basis="presence_only", point_count=5,
+        ),
+    ]
+
+    assert _saturation_root_cause_ids(evidence) == [["ev-real"], ["ev-noise"]]
+
+
+def test_attribution_mixed_cohort_orders_by_support_tuple():
+    evidence = [
+        _metric_signal_evidence(
+            "ev-mixed-rel", 0, 2.0, segment_id="seg-a",
+            strength_basis="relative", point_count=1,
+        ),
+        _metric_signal_evidence(
+            "ev-mixed-pres", 30, 1.0, segment_id="seg-a",
+            strength_basis="presence_only", point_count=2,
+        ),
+        _metric_signal_evidence(
+            "ev-relative", 100, 10.0, segment_id="seg-b",
+            strength_basis="relative", point_count=1,
+        ),
+    ]
+
+    # mixed cluster（relative+presence）归 presence_or_mixed cohort，
+    # support tuple (3,2,1,1) 优于纯 relative 单点 (1,1,1,1)。
+    assert _saturation_root_cause_ids(evidence) == [
+        ["ev-mixed-rel", "ev-mixed-pres"],
+        ["ev-relative"],
+    ]
+
+
+def test_attribution_same_support_tuple_falls_back_to_onset():
+    evidence = [
+        _metric_signal_evidence(
+            "ev-late", 100, 1.0, segment_id="seg-b",
+            strength_basis="presence_only", point_count=2,
+        ),
+        _metric_signal_evidence(
+            "ev-early", 0, 1.0, segment_id="seg-a",
+            strength_basis="presence_only", point_count=2,
+        ),
+    ]
+
+    assert _saturation_root_cause_ids(evidence) == [["ev-early"], ["ev-late"]]
+
+
+def test_attribution_same_support_tuple_and_onset_falls_back_to_component():
+    evidence = [
+        _metric_signal_evidence(
+            "ev-b", 0, 1.0, component="node-b", segment_id="seg-a",
+            strength_basis="presence_only", point_count=2,
+        ),
+        _metric_signal_evidence(
+            "ev-a", 0, 1.0, component="node-a", segment_id="seg-b",
+            strength_basis="presence_only", point_count=2,
+        ),
+    ]
+
+    assert _saturation_root_cause_ids(evidence) == [["ev-a"], ["ev-b"]]
+
+
+def test_attribution_same_support_tuple_component_falls_back_to_reason():
+    evidence = [
+        _metric_signal_evidence(
+            "ev-mem", 0, 1.0, signal_type="memory", segment_id="seg-a",
+            strength_basis="presence_only", point_count=2,
+        ),
+        _metric_signal_evidence(
+            "ev-cpu", 0, 1.0, signal_type="cpu", segment_id="seg-b",
+            strength_basis="presence_only", point_count=2,
+        ),
+    ]
+
+    # reason "container cpu load" 字典序先于 "container memory load"。
+    assert _saturation_root_cause_ids(evidence) == [["ev-cpu"], ["ev-mem"]]
+
+
+def test_attribution_malformed_quality_fields_derive_safe_defaults_without_writeback():
+    weird = _metric_signal_evidence(
+        "ev-weird", 0, 1.0, segment_id="seg-a",
+        strength_basis="sometimes", point_count=-5,
+    )
+    legacy = _metric_signal_evidence("ev-legacy", 60, 2.0, segment_id="seg-b")
+
+    # 非法 basis/point count 派生 legacy 与默认 1；两者同 cohort 按 V10 cluster score。
+    assert _saturation_root_cause_ids([weird, legacy]) == [
+        ["ev-legacy"],
+        ["ev-weird"],
+    ]
+    assert weird.payload["strength_basis"] == "sometimes"
+    assert weird.payload["anomaly_point_count"] == -5
+
+
+@pytest.mark.parametrize("bad_deviation", [float("inf"), float("nan")])
+def test_attribution_non_finite_deviation_derives_zero_without_outranking_finite(
+    bad_deviation: float,
+):
+    # RA2-1：锚定 _deviation 的 math.isfinite 硬化分支。EvidenceItem 域校验在
+    # 构建时拒绝非有限 payload，此处模拟绕过校验的内存态 payload（原地改 dict）：
+    # inf/NaN deviation 派生安全默认 0、不写回 payload；该 cluster 不得因非
+    # 有限值排到有限真实信号（deviation 5）之前。
+    weird = _metric_signal_evidence("ev-weird", 0, 1.0, segment_id="seg-a")
+    weird.payload["deviation_score"] = bad_deviation
+    real = _metric_signal_evidence("ev-real", 60, 5.0, segment_id="seg-b")
+
+    assert _saturation_root_cause_ids([weird, real]) == [
+        ["ev-real"],
+        ["ev-weird"],
+    ]
+    assert weird.payload["deviation_score"] is bad_deviation
+
+
+# --- F17 consumer 层顺序合同（V10.1 T6, spec §13 F17） ------------------------
+
+
+def _f6_cross_cohort_inputs() -> tuple[list[EvidenceItem], Hypothesis]:
+    """F6 竞争场景：relative 单点噪声（deviation 10、更早 onset）与 presence
+    多点真实信号（strength 1.0、更晚 onset）；cohort 排序真实信号在前。"""
+    noise = _metric_signal_evidence(
+        "ev-noise", 0, 10.0, segment_id="seg-noise",
+        strength_basis="relative", point_count=1,
+    )
+    real = _metric_signal_evidence(
+        "ev-real", 100, 1.0, segment_id="seg-real",
+        strength_basis="presence_only", point_count=3,
+    )
+    evidence = [noise, real]
+    return evidence, _saturation_hypothesis(evidence)
+
+
+def _review_root_cause_ids(review) -> list[list[str]]:
+    return [item.supporting_evidence_ids for item in review.root_causes]
+
+
+def test_review_root_causes_keep_attribution_order_at_construction():
+    evidence, hypothesis = _f6_cross_cohort_inputs()
+    expected = build_root_cause_attributions(evidence, [hypothesis])
+
+    review = build_coordination_review("inv-1", [], evidence, [hypothesis])
+
+    # F17：review 层不再按 onset 重排，顺序必须与 attribution 构建层一致；
+    # presence 多点真实信号领先 relative 单点噪声，对 Top-N consumer 可观测。
+    assert _review_root_cause_ids(review) == [
+        item.supporting_evidence_ids for item in expected
+    ]
+    assert _review_root_cause_ids(review) == [["ev-real"], ["ev-noise"]]
+
+
+def test_review_root_causes_keep_attribution_order_after_inmemory_reload():
+    evidence, hypothesis = _f6_cross_cohort_inputs()
+    review = build_coordination_review("inv-1", [], evidence, [hypothesis])
+    repository = InMemoryInvestigationRepository()
+    # save_multi_agent_result 经 model_validate 全量重建 review，触发 domain
+    # validator；reload 后 cohort 排序不得被 onset 重排覆盖。
+    repository.save_multi_agent_result("inv-1", [], [], review)
+
+    reloaded = repository.get_coordination_review("inv-1")
+
+    assert reloaded is not None
+    assert _review_root_cause_ids(reloaded) == [["ev-real"], ["ev-noise"]]
+
+
+def test_review_root_causes_keep_attribution_order_after_sqlite_reload(tmp_path):
+    evidence, hypothesis = _f6_cross_cohort_inputs()
+    review = build_coordination_review("inv-1", [], evidence, [hypothesis])
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'diagops-f17.db'}")
+    initialize_database(engine)
+    repository = SQLiteInvestigationRepository(engine)
+    # coordination_reviews 外键要求父 investigation 行存在。
+    repository.save(
+        InvestigationRecord(
+            id="inv-1",
+            event=IncidentEvent(
+                source=IncidentSource.MANUAL,
+                service="checkout",
+                environment="prod",
+                severity=Severity.WARNING,
+                title="f17 sqlite reload",
+                description="f17 sqlite reload",
+                started_at=ATTRIBUTION_BASE,
+            ),
+        )
+    )
+
+    repository.save_coordination_review(review)
+    reloaded = repository.get_coordination_review("inv-1")
+
+    # SQLite reload 经 CoordinationReview(**payload) 全量重建；
+    # validator 不得把 cohort 排序重排为 onset 排序。
+    assert reloaded is not None
+    assert _review_root_cause_ids(reloaded) == [["ev-real"], ["ev-noise"]]
 
 
 def _finding(

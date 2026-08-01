@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections import defaultdict
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 from statistics import fmean, median
@@ -153,10 +155,16 @@ class OpenRcaMetricProvider(_OpenRcaProvider):
                 )
         candidates: list[EvidenceItem] = []
         for (component, instance, metric_name), points in sorted(series.items()):
-            baseline = [
-                point for point in points if baseline_start <= point.timestamp < start
+            # F10 合同：先截取本次窗口 relevant points，再统一做一次 counter
+            # normalization，最后按 start 切分；窗口外 shape 不参与 counter 判定。
+            relevant = [
+                point for point in points if baseline_start <= point.timestamp <= end
             ]
-            observation = [point for point in points if start <= point.timestamp <= end]
+            normalized = _normalize_counter_like(metric_name, relevant)
+            baseline = [point for point in normalized if point.timestamp < start]
+            observation = [
+                point for point in normalized if start <= point.timestamp <= end
+            ]
             for segment in detect_anomaly_segments(baseline, observation):
                 candidates.append(
                     _evidence(
@@ -293,6 +301,8 @@ class OpenRcaDependencyProvider(_OpenRcaProvider):
                             onset=segment.onset,
                             ended_at=segment.ended_at,
                             baseline_value=segment.baseline_value,
+                            strength_basis=segment.strength_basis,
+                            point_count=segment.point_count,
                         ),
                         evidence_namespace=self.evidence_namespace,
                     )
@@ -330,6 +340,50 @@ class OpenRcaDependencyProvider(_OpenRcaProvider):
             evidence_items=selected,
             error_message=_malformed_warning(malformed),
         )
+
+
+def _is_counter_like_name(metric_name: str) -> bool:
+    """仅识别明确累计命名：`total_` 前缀或 `_total`/`_count`/`_counter` 后缀。"""
+    name = metric_name.casefold()
+    return name.startswith("total_") or name.endswith(
+        ("_total", "_count", "_counter")
+    )
+
+
+def _normalize_counter_like(
+    metric_name: str, points: Sequence[SeriesPoint]
+) -> list[SeriesPoint]:
+    """把可确定的单调累计 series 转为右侧 timestamp 的 per-second rate。
+
+    命名不符、样本不足三个、含非有限值、时间非严格递增、值下降或正向 delta
+    不足两个时完整保留原 gauge 点；不猜测 reset 语义。
+    """
+    # ponytail: 当前只按 metric 命名与形状识别累计 counter；有可靠 metric-type
+    # metadata 后应以 metadata 替换该 name+shape heuristic，且仍不猜 reset 语义。
+    if not _is_counter_like_name(metric_name):
+        return list(points)
+    ordered = sorted(points, key=lambda point: point.timestamp)
+    if len(ordered) < 3:
+        return list(points)
+    if any(not math.isfinite(point.value) for point in ordered):
+        return list(points)
+    pairs = list(zip(ordered, ordered[1:], strict=False))
+    if any(right.timestamp <= left.timestamp for left, right in pairs):
+        return list(points)
+    deltas = [right.value - left.value for left, right in pairs]
+    if any(delta < 0 for delta in deltas):
+        return list(points)
+    if sum(1 for delta in deltas if delta > 0) < 2:
+        return list(points)
+    # 前置条件已保证 elapsed 严格为正且 delta 有限非负，rate 必然有限非负。
+    return [
+        SeriesPoint(
+            timestamp=right.timestamp,
+            value=(right.value - left.value)
+            / (right.timestamp - left.timestamp).total_seconds(),
+        )
+        for left, right in pairs
+    ]
 
 
 def _evidence(
@@ -378,6 +432,9 @@ def _metric_payload(
         "anomaly_onset": segment.onset.isoformat(),
         "anomaly_ended_at": segment.ended_at.isoformat(),
         "anomaly_segment_id": segment.segment_id,
+        # additive 质量字段：强度口径与 segment 支持点数，供 basis-aware 排序。
+        "strength_basis": segment.strength_basis,
+        "anomaly_point_count": segment.point_count,
     }
     if instance:
         payload["instance"] = instance
@@ -397,6 +454,8 @@ def _dependency_payload(
     onset: datetime,
     ended_at: datetime,
     baseline_value: float | None,
+    strength_basis: str | None = None,
+    point_count: int | None = None,
 ) -> dict:
     payload = {
         "edges": [edge],
@@ -413,6 +472,12 @@ def _dependency_payload(
     }
     if baseline_value is not None:
         payload["baseline_value"] = baseline_value
+    if strength_basis is not None and point_count is not None:
+        # additive 质量字段，与 metric adapter 同一模式（spec §8.2、F18）；仅
+        # segment 派生的 latency Evidence 投影。错误事件 Evidence 非 segment
+        # 派生，保持缺字段走 legacy 派生，不伪造质量字段。
+        payload["strength_basis"] = strength_basis
+        payload["anomaly_point_count"] = point_count
     return payload
 
 

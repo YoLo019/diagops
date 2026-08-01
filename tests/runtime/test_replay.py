@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -295,6 +295,69 @@ def test_historical_replay_isolated_from_completed_manual_rerun(runtime_store) -
 
     assert report.valid is True, report.validation_errors
     assert "bad_reference" not in report.validation_errors
+
+
+def test_historical_legacy_payload_replay_preserves_attribution_order(
+    runtime_store,
+) -> None:
+    # V10.1 兼容合同（spec R8、F17）：历史 run 的 Evidence payload 无 additive
+    # 字段；frozen projection 不派生、不写回质量字段，且 review root_causes 保持
+    # attribution 构建层顺序（全 legacy cohort 按 cluster score），不按 onset 重排。
+    from backend.diagnosis.coordination_review import build_coordination_review
+
+    repository = runtime_store.investigation_repository
+    record = repository.get("inv-1")
+    base = datetime(2026, 7, 18, tzinfo=UTC)
+
+    def legacy_metric(
+        evidence_id: str, node: str, offset_seconds: float, deviation: float
+    ) -> EvidenceItem:
+        return EvidenceItem(
+            id=evidence_id,
+            provider=EvidenceProvider.METRIC,
+            kind=EvidenceKind.METRIC_TREND,
+            timestamp=base + timedelta(seconds=offset_seconds),
+            summary=f"{evidence_id} summary",
+            payload={
+                "component": "checkout",
+                "node": node,
+                "signal_type": "memory",
+                "signal_name": "memory_usage",
+                "deviation_score": deviation,
+                "anomaly_segment_id": f"seg-{evidence_id}",
+            },
+        )
+
+    weak = legacy_metric("ev-weak", "node-weak", 0, 1.0)
+    strong = legacy_metric("ev-strong", "node-strong", 100, 5.0)
+    evidence = [weak, strong]
+    hypothesis = Hypothesis(
+        cause_type=CauseType.RESOURCE_SATURATION,
+        summary="Memory saturation",
+        confidence=0.8,
+        supporting_evidence_ids=[item.id for item in evidence],
+    )
+    review = build_coordination_review("inv-1", [], evidence, [hypothesis])
+    repository.save(record.model_copy(update={"evidence": evidence}))
+    repository.save_multi_agent_result(record.id, [], [], review)
+    source = _complete_replay_fixture_run(
+        runtime_store,
+        run_id="run-legacy-no-drift",
+        evidence_id=strong.id,
+        run_reason=RuntimeRunReason.INITIAL,
+    )
+
+    frozen = runtime_store.get_frozen_business_projection(source.id)
+
+    # cluster score 高（deviation 5）的 cluster 在前，尽管它的 onset 更晚；
+    # 冻结与 reload 不得引入 onset 重排漂移。
+    assert [
+        item["supporting_evidence_ids"] for item in frozen["review"]["root_causes"]
+    ] == [["ev-strong"], ["ev-weak"]]
+    assert "strength_basis" not in str(frozen)
+    assert "anomaly_point_count" not in str(frozen)
+    replay = ReplayService(ReplayDependencies(store=runtime_store)).replay(source.id)
+    assert replay.valid is True, replay.validation_errors
 
 
 def test_frozen_projection_contains_typed_validator_inputs_without_cached_result(

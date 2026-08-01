@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import math
 from collections import Counter, defaultdict
 from statistics import median
 
 from backend.diagnosis.evidence_validation import validate_agent_semantics
+from backend.diagnosis.signal_semantics import _point_count, _strength_basis
 from backend.domain.agent_findings import (
     AgentFinding,
     AgentFindingType,
@@ -237,7 +239,7 @@ def build_root_cause_attributions(
 ) -> list[RootCauseAttribution]:
     """从确定性 Hypothesis 的支持证据生成可审计根因三元组。"""
     by_id = {item.id: item for item in evidence}
-    ranked: list[tuple[float, RootCauseAttribution]] = []
+    ranked: list[tuple[list[EvidenceItem], RootCauseAttribution]] = []
     for hypothesis in hypotheses:
         if hypothesis.cause_type == CauseType.UNKNOWN:
             continue
@@ -263,7 +265,7 @@ def build_root_cause_attributions(
                 )
                 ranked.append(
                     (
-                        _cluster_score(cluster),
+                        cluster,
                         RootCauseAttribution(
                             root_cause_occurred_at=min(
                                 item.timestamp for item in cluster
@@ -281,15 +283,99 @@ def build_root_cause_attributions(
                         ),
                     )
                 )
-    ranked.sort(
-        key=lambda item: (
-            -item[0],
-            item[1].root_cause_occurred_at,
-            item[1].root_cause_component,
-            item[1].root_cause_reason,
+    return _rank_attributions(ranked)
+
+
+def _rank_attributions(
+    ranked: list[tuple[list[EvidenceItem], RootCauseAttribution]],
+) -> list[RootCauseAttribution]:
+    """按 cluster derived basis 分 cohort 排序再按队首合并（spec §8.3、F6）。
+
+    relative/legacy cohort 沿用现有 cluster score 排名；presence/mixed cohort 按
+    共同 support tuple。跨 cohort 只比较 support tuple，再用 onset/component/reason
+    决胜；绝不比较跨 basis 的 numeric strength。cluster score 公式本身不变。
+    """
+    entries = [
+        (_cluster_basis(cluster), _cluster_score(cluster), cluster, attribution)
+        for cluster, attribution in ranked
+    ]
+    cohorts = {
+        "relative": sorted(
+            (entry for entry in entries if entry[0] == "relative"),
+            key=_cohort_score_key,
+        ),
+        "legacy": sorted(
+            (entry for entry in entries if entry[0] == "legacy"),
+            key=_cohort_score_key,
+        ),
+        "presence_or_mixed": sorted(
+            (entry for entry in entries if entry[0] == "presence_or_mixed"),
+            key=_cross_cohort_key,
+        ),
+    }
+    ordered: list[RootCauseAttribution] = []
+    while any(cohorts.values()):
+        best_cohort = min(
+            (name for name, queue in cohorts.items() if queue),
+            key=lambda name: _cross_cohort_key(cohorts[name][0]),
         )
+        ordered.append(cohorts[best_cohort].pop(0)[3])
+    return ordered
+
+
+def _cluster_basis(cluster: list[EvidenceItem]) -> str:
+    """全 relative 为 relative，全缺字段为 legacy，其余为 presence_or_mixed。"""
+    bases = {_strength_basis(item) for item in cluster}
+    if bases == {"relative"}:
+        return "relative"
+    if bases == {"legacy"}:
+        return "legacy"
+    return "presence_or_mixed"
+
+
+def _support_tuple(cluster: list[EvidenceItem]) -> tuple[int, int, int, int]:
+    """跨 basis 可比较的共同 support：总 point count、独立 Evidence 数、
+    provider 数、signal-type 数。缺字段 item 的 point count 派生默认 1。"""
+    return (
+        sum(_point_count(item) for item in cluster),
+        len({item.id for item in cluster}),
+        len({item.provider for item in cluster}),
+        len(
+            {
+                str(item.payload.get("signal_type"))
+                for item in cluster
+                if item.payload.get("signal_type")
+            }
+        ),
     )
-    return [item for _, item in ranked]
+
+
+def _cohort_score_key(
+    entry: tuple[str, float, list[EvidenceItem], RootCauseAttribution],
+) -> tuple:
+    _, score, _, attribution = entry
+    return (
+        -score,
+        attribution.root_cause_occurred_at,
+        attribution.root_cause_component,
+        attribution.root_cause_reason,
+    )
+
+
+def _cross_cohort_key(
+    entry: tuple[str, float, list[EvidenceItem], RootCauseAttribution],
+) -> tuple:
+    _, _, cluster, attribution = entry
+    support = _support_tuple(cluster)
+    return (
+        -support[0],
+        -support[1],
+        -support[2],
+        -support[3],
+        attribution.root_cause_occurred_at,
+        attribution.root_cause_component,
+        attribution.root_cause_reason,
+    )
 
 
 def _segment_aware_clusters(evidence: list[EvidenceItem]) -> list[list[EvidenceItem]]:
@@ -345,9 +431,12 @@ def _cluster_score(cluster: list[EvidenceItem]) -> float:
 
 def _deviation(item: EvidenceItem) -> float:
     value = item.payload.get("deviation_score")
+    # malformed/boolean/non-finite strength 统一派生安全默认 0，不写回 payload。
     return (
         float(value)
-        if isinstance(value, int | float) and not isinstance(value, bool)
+        if isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and math.isfinite(value)
         else 0.0
     )
 

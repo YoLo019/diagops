@@ -8,7 +8,11 @@ from backend.domain.agent_context import (
     ContextFact,
     ContextFactType,
 )
-from backend.domain.agent_findings import CoordinationReview, RootCauseAttribution
+from backend.domain.agent_findings import (
+    CoordinationReview,
+    RootCauseAttribution,
+    RootCauseCandidate,
+)
 from backend.domain.agent_plan import (
     AgentExecution,
     DiagnosisPlan,
@@ -63,7 +67,10 @@ def test_root_cause_attribution_requires_grounded_non_empty_values():
             RootCauseAttribution.model_validate(values)
 
 
-def test_coordination_review_orders_root_causes_by_occurrence_time():
+def test_coordination_review_preserves_root_cause_order_and_sorts_candidates():
+    """F17：root_causes 排序所有权在 attribution 构建层，domain validator 不再
+    按 occurred_at 重排；candidates 仍按 rank 排序。"""
+
     def attribution(hour: int) -> RootCauseAttribution:
         return RootCauseAttribution(
             root_cause_component=f"service-{hour}",
@@ -72,13 +79,24 @@ def test_coordination_review_orders_root_causes_by_occurrence_time():
             supporting_evidence_ids=[f"ev-{hour}"],
         )
 
+    def candidate(rank: int) -> RootCauseCandidate:
+        return RootCauseCandidate(
+            cause_type=CauseType.RESOURCE_SATURATION,
+            summary=f"candidate {rank}",
+            rank=rank,
+            confidence=0.8,
+        )
+
     review = CoordinationReview(
-        investigation_id="inv-1", root_causes=[attribution(9), attribution(8)]
+        investigation_id="inv-1",
+        candidates=[candidate(2), candidate(1)],
+        root_causes=[attribution(9), attribution(8)],
     )
 
+    assert [item.rank for item in review.candidates] == [1, 2]
     assert [item.root_cause_component for item in review.root_causes] == [
-        "service-8",
         "service-9",
+        "service-8",
     ]
 
 

@@ -12,6 +12,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from statistics import median
+from typing import Literal
 
 from backend.domain.evidence import EvidenceItem
 
@@ -54,7 +55,11 @@ class SeriesPoint:
 
 @dataclass(frozen=True)
 class AnomalySegment:
-    """同一 series 内连续异常点的聚合；onset 为首个异常 observation。"""
+    """同一 series 内连续异常点的聚合；onset 为首个异常 observation。
+
+    strength_basis 区分幅度可比较的 relative 强度与退化 baseline 下的
+    presence_only（仅确认越过异常边界，strength 固定 1.0）。
+    """
 
     segment_id: str
     onset: datetime
@@ -63,6 +68,7 @@ class AnomalySegment:
     peak_value: float
     baseline_value: float
     point_count: int
+    strength_basis: Literal["relative", "presence_only"]
 
 
 def classify_metric_signal(metric_name: str) -> str:
@@ -107,6 +113,9 @@ def detect_anomaly_segments(
     center = median(baseline_values)
     mad = median(abs(value - center) for value in baseline_values)
     threshold = max(3 * mad, abs(center) * 0.1, _EPSILON)
+    # 退化 baseline 没有可用于跨 series 比较的幅度尺度：非零 observation 仍形成
+    # segment，但 strength 只表示越过异常边界（spec §8.2）。
+    degenerate = abs(center) <= _EPSILON and mad <= _EPSILON
 
     ordered = sorted(
         (point for point in observation_points if math.isfinite(point.value)),
@@ -125,17 +134,17 @@ def detect_anomaly_segments(
     for point in ordered:
         deviation = abs(point.value - center) / threshold
         if deviation <= 1.0:
-            segments.extend(_close_segment(current, center))
+            segments.extend(_close_segment(current, center, degenerate))
             current = []
             continue
         if (
             current
             and (point.timestamp - current[-1][0].timestamp).total_seconds() > max_gap
         ):
-            segments.extend(_close_segment(current, center))
+            segments.extend(_close_segment(current, center, degenerate))
             current = []
         current.append((point, deviation))
-    segments.extend(_close_segment(current, center))
+    segments.extend(_close_segment(current, center, degenerate))
     return tuple(segments)
 
 
@@ -163,7 +172,7 @@ def select_balanced_evidence(
     for item in merged:
         by_family.setdefault(_family(item), []).append(item)
     for family_items in by_family.values():
-        family_items.sort(key=_sort_key)
+        family_items[:] = _sort_family(family_items)
     families = sorted(by_family, key=_family_rank)
 
     selected: list[EvidenceItem] = []
@@ -184,7 +193,7 @@ def select_balanced_evidence(
 
 
 def _close_segment(
-    current: list[tuple[SeriesPoint, float]], center: float
+    current: list[tuple[SeriesPoint, float]], center: float, degenerate: bool
 ) -> list[AnomalySegment]:
     if not current:
         return []
@@ -195,10 +204,11 @@ def _close_segment(
             segment_id=f"seg-{onset.isoformat()}",
             onset=onset,
             ended_at=current[-1][0].timestamp,
-            strength=min(strongest_deviation, _MAX_STRENGTH),
+            strength=1.0 if degenerate else min(strongest_deviation, _MAX_STRENGTH),
             peak_value=strongest_point.value,
             baseline_value=center,
             point_count=len(current),
+            strength_basis="presence_only" if degenerate else "relative",
         )
     ]
 
@@ -241,4 +251,71 @@ def _strength(item: EvidenceItem) -> float:
         and not isinstance(value, bool)
         and math.isfinite(value)
         else 0.0
+    )
+
+
+def _strength_basis(item: EvidenceItem) -> str:
+    """派生内存态 basis：缺字段或非法值一律 legacy，绝不写回 payload（spec F8）。"""
+    value = item.payload.get("strength_basis")
+    return value if value in ("relative", "presence_only") else "legacy"
+
+
+def _point_count(item: EvidenceItem) -> int:
+    """segment 支持点数；缺失或非法（非 int、bool、小于 1）派生安全默认 1。"""
+    value = item.payload.get("anomaly_point_count")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return 1
+    return value
+
+
+def _sort_family(items: list[EvidenceItem]) -> list[EvidenceItem]:
+    """family 内按 derived basis 建 relative/presence/legacy 三队列再按队首合并。
+
+    跨 basis 竞争只比较队首共同 support（point count），再按 onset、component、
+    signal name、Evidence ID；绝不比较不同 basis 的 numeric strength（spec §8.3、F6）。
+    """
+    queues = {
+        "relative": sorted(
+            (item for item in items if _strength_basis(item) == "relative"),
+            key=_relative_key,
+        ),
+        "presence_only": sorted(
+            (item for item in items if _strength_basis(item) == "presence_only"),
+            key=_cross_basis_key,
+        ),
+        "legacy": sorted(
+            (item for item in items if _strength_basis(item) == "legacy"),
+            key=_sort_key,
+        ),
+    }
+    ordered: list[EvidenceItem] = []
+    while any(queues.values()):
+        best_basis = min(
+            (basis for basis, queue in queues.items() if queue),
+            key=lambda basis: _cross_basis_key(queues[basis][0]),
+        )
+        ordered.append(queues[best_basis].pop(0))
+    return ordered
+
+
+def _relative_key(item: EvidenceItem) -> tuple[float, int, datetime, str, str, str]:
+    # relative 队列：strength 降序，同 strength 时支持点数先于 onset。
+    return (
+        -_strength(item),
+        -_point_count(item),
+        item.timestamp,
+        str(item.payload.get("component", "")),
+        str(item.payload.get("signal_name", "")),
+        item.id,
+    )
+
+
+def _cross_basis_key(item: EvidenceItem) -> tuple[int, datetime, str, str, str]:
+    # presence 队列内部与跨 basis 队首竞争共用同一共同 support 键。
+    return (
+        -_point_count(item),
+        item.timestamp,
+        str(item.payload.get("component", "")),
+        str(item.payload.get("signal_name", "")),
+        item.id,
     )

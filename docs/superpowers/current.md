@@ -83,13 +83,13 @@ docs/superpowers/plans/2026-08-01-diagops-v10.1-signal-ranking-reliability-imple
 
 ## V10.1 Planning Dashboard
 
-Overall progress: `spec and plan approved; M0 (T1 blind tooling) in progress`
+Overall progress: `M0/M1 verified; M2 code+regression verified by review A; T8 candidate checkpoint awaiting user Git authorization`
 
 Current phase: Full iteration / Execute
 
-Next action: M0 execution subagent implements T1 (exclusion-aware prepare and
-immutable paired Gate tooling); T2 requires separate user Git authorization for
-one focused commit and a detached 7b26024 baseline worktree before it starts.
+Next action: user authorizes the candidate Git commit, then T8 runs the
+production Gate (must stay 7/7) and M2 review B verifies artifacts; only then
+M3 one-time blind paired Gate.
 
 | ID | Phase | Task | Status | Evidence or result | Next action or blocker |
 | --- | --- | --- | --- | --- | --- |
@@ -97,8 +97,10 @@ one focused commit and a detached 7b26024 baseline worktree before it starts.
 | P2 | Requirements | Confirm defect scope, unbiased holdout policy and V10 compatibility gates | verified | User confirmed the recommended Requirements Brief on 2026-08-01 | Preserve decision |
 | P3 | Design | Select the minimum semantic repair and blind paired evaluation approach | verified | User selected scheme A on 2026-08-01 | Preserve decision |
 | P4 | Spec | Write and independently cold-review the V10.1 contract | verified | F1–F9 resolved；focused re-review closed blocking F4/F5 and high F6；user approved on 2026-08-01 | Preserve artifact |
-| P5 | Plan | Map R1–R14 to ordered implementation and verification gates | verified | Independent cold review found no blocking；F10–F12 resolved and focused re-review closed all three；user approved on 2026-08-01 with subagent-per-milestone execution strategy | Execute M0 |
-| M0 | Execute | T1–T2 blind tooling, custodian holdout, frozen V10 baseline | in_progress | T1 complete: 63 focused passed, 116 benchmarks passed, Ruff clean; M0 review A approve_with_followups (F13/F14 low absorbed into T2 custodian runbook) | T2 blocked on user Git authorization (focused commit + detached 7b26024 worktree) |
+| P5 | Plan | Map R1–R14 to ordered implementation and verification gates | verified | Independent cold review found no blocking；F10–F12 resolved；user approved on 2026-08-01；M1 review F17/F18 forced T6 scope amendment, user re-approved the amended plan on 2026-08-01 | Execute M2 |
+| M0 | Execute | T1–T2 blind tooling, custodian holdout, frozen V10 baseline | verified | T1: 63 focused passed + review A approve_with_followups; T2: commit `4a4b20a`, holdout 40-case SHA `aac4b89bc9b3b248bfd0fdb8b5c783805655c30d3aeff13e81eac6f23f7f9936` (overlap 0, per-partition 10), V10 baseline `run-20260801T071800886742Z` 40/40 unscored on source `7b2602457561875ae8091e4d8eeea1bcddc2d34d`; review B approve_with_followups (F13–F16 low, absorbed) | Done |
+| M1 | Execute | T3–T5 signal semantics repair | verified | T3/T4 complete (51+118 focused passed); T5 selection done, Attribution consumer-layer gap found by M1 cold review: blocking F17 (domain validator onset re-sort) + medium F18 (dependency payload), fixes approved into T6 scope and closed there; 618 merged tests passed | Done |
+| M2 | Execute | T6–T8 compatibility, regression, production Gate | in_progress | T6: F17/F18 closed, 247+111 focused passed; T7: Ruff clean, 1634 full passed, frontend build ok, runtime acceptance 14/14 + privacy; M2 review A approve_with_followups (F19 fixed with red-green evidence, F20 recorded) | T8 blocked on user candidate Git authorization |
 
 ## V10 Task-Aware Projector Targeted Gate
 

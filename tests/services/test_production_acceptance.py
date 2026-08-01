@@ -1,8 +1,17 @@
 import json
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from backend.db.models import InvestigationRecord
+from backend.db.session import create_db_engine, initialize_database
+from backend.db.sqlite_repository import SQLiteInvestigationRepository
+from backend.diagnosis.coordination_review import build_coordination_review
+from backend.domain.events import IncidentEvent, IncidentSource, Severity
+from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
+from backend.rca.analyzer import RcaAnalyzer
 from backend.services.production_acceptance import (
+    _EXPECTED_ATTRIBUTIONS,
     aggregate_scenario_results,
     run_scenario,
     validate_acceptance_artifact,
@@ -569,3 +578,87 @@ def test_runner_privacy_scan_allows_canonical_signal_type_matching_scenario():
 
     assert result.privacy_scan_passed is True
     assert result.passed is True
+
+
+def test_production_competition_presence_signal_outranks_relative_noise(tmp_path):
+    # 生产竞争回归（V10.1 T6, spec F6/F17/R6）：真实零基线 network 信号
+    # （presence-only、多点支持、更晚 onset）与 relative 单点噪声
+    # （deviation 10、更早 onset）同时存在时，经 SQLite 持久化 reload 的
+    # authoritative review Top-1 仍是真实信号；绝不比较跨 basis 的
+    # numeric strength。
+    base = datetime(2026, 7, 30, 12, 0, tzinfo=UTC)
+
+    def metric_signal(
+        evidence_id: str,
+        offset_seconds: float,
+        payload: dict,
+    ) -> EvidenceItem:
+        return EvidenceItem(
+            id=evidence_id,
+            provider=EvidenceProvider.METRIC,
+            kind=EvidenceKind.METRIC_TREND,
+            timestamp=base + timedelta(seconds=offset_seconds),
+            summary=f"{evidence_id} summary",
+            payload=payload,
+        )
+
+    noise = metric_signal(
+        "ev-noise",
+        0,
+        {
+            "component": "checkout",
+            "signal_type": "cpu",
+            "signal_name": "cpu_usage",
+            "deviation_score": 10.0,
+            "anomaly_segment_id": "seg-noise",
+            "strength_basis": "relative",
+            "anomaly_point_count": 1,
+        },
+    )
+    real = metric_signal(
+        "ev-real",
+        100,
+        {
+            "component": "checkout-service",
+            "signal_type": "network_corruption",
+            "signal_name": "container_network_receive_packets_dropped",
+            "deviation_score": 1.0,
+            "anomaly_segment_id": "seg-real",
+            "strength_basis": "presence_only",
+            "anomaly_point_count": 3,
+        },
+    )
+    evidence = [noise, real]
+    event = IncidentEvent(
+        source=IncidentSource.SIMULATED,
+        service="checkout-service",
+        environment="prod",
+        severity=Severity.WARNING,
+        title="production competition",
+        description="presence real signal versus relative noise",
+        started_at=base,
+    )
+    hypotheses = RcaAnalyzer().analyze(event, evidence)
+    assert {item.cause_type.value for item in hypotheses} >= {
+        "network_fault",
+        "resource_saturation",
+    }
+    review = build_coordination_review("inv-compete", [], evidence, hypotheses)
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'diagops-compete.db'}")
+    initialize_database(engine)
+    repository = SQLiteInvestigationRepository(engine)
+    repository.save(InvestigationRecord(id="inv-compete", event=event))
+    repository.save_coordination_review(review)
+
+    reloaded = repository.get_coordination_review("inv-compete")
+
+    assert reloaded is not None
+    expected_cause, expected_component, expected_reason = _EXPECTED_ATTRIBUTIONS[
+        "network_corruption"
+    ]
+    assert expected_cause == "network_fault"
+    top = reloaded.root_causes[0]
+    assert top.supporting_evidence_ids == ["ev-real"]
+    assert top.root_cause_component == expected_component
+    assert top.root_cause_reason == expected_reason
+    assert reloaded.root_causes[1].supporting_evidence_ids == ["ev-noise"]

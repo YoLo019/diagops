@@ -398,3 +398,78 @@ def test_hypothesis_order_is_stable_when_input_order_changes():
     assert [item.cause_type for item in forward] == [
         item.cause_type for item in reverse
     ]
+
+
+def _hypothesis_shape(hypotheses):
+    return [
+        (item.cause_type, item.confidence, tuple(item.supporting_evidence_ids))
+        for item in hypotheses
+    ]
+
+
+def test_additive_quality_fields_do_not_change_analysis():
+    # V10.1 additive payload 与旧 payload 走同一分析路径，结果完全一致。
+    legacy_payload = {
+        "component": "checkout",
+        "signal_type": "cpu",
+        "signal_name": "cpu_usage",
+        "deviation_score": 2,
+    }
+    additive_payload = {
+        **legacy_payload,
+        "strength_basis": "presence_only",
+        "anomaly_point_count": 3,
+    }
+
+    legacy = RcaAnalyzer().analyze(
+        _event(),
+        [
+            _evidence(
+                "ev-cpu",
+                EvidenceProvider.METRIC,
+                EvidenceKind.METRIC_TREND,
+                legacy_payload,
+            )
+        ],
+    )
+    additive = RcaAnalyzer().analyze(
+        _event(),
+        [
+            _evidence(
+                "ev-cpu",
+                EvidenceProvider.METRIC,
+                EvidenceKind.METRIC_TREND,
+                additive_payload,
+            )
+        ],
+    )
+
+    assert _hypothesis_shape(additive) == _hypothesis_shape(legacy)
+    assert additive[0].cause_type == CauseType.RESOURCE_SATURATION
+
+
+def test_malformed_quality_fields_do_not_change_analysis():
+    # 非法质量字段不进入分析决策，也不导致异常。
+    payload = {
+        "component": "checkout",
+        "signal_type": "cpu",
+        "signal_name": "cpu_usage",
+        "deviation_score": 2,
+        "strength_basis": "sometimes",
+        "anomaly_point_count": -5,
+    }
+
+    hypotheses = RcaAnalyzer().analyze(
+        _event(),
+        [
+            _evidence(
+                "ev-cpu",
+                EvidenceProvider.METRIC,
+                EvidenceKind.METRIC_TREND,
+                payload,
+            )
+        ],
+    )
+
+    assert hypotheses[0].cause_type == CauseType.RESOURCE_SATURATION
+    assert hypotheses[0].supporting_evidence_ids == ["ev-cpu"]

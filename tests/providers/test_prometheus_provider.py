@@ -170,7 +170,31 @@ def test_range_anomalies_create_segment_evidence_for_all_signals(monkeypatch):
         assert item.payload["deviation_score"] == item.payload["normalized_strength"]
         assert item.payload["baseline_value"] == 10.0
         assert item.payload["component"] == "checkout-service"
+        assert item.payload["strength_basis"] == "relative"
+        assert item.payload["anomaly_point_count"] == 9
         assert "base_url" not in item.payload
+
+
+def test_zero_baseline_range_anomaly_is_presence_only(monkeypatch):
+    # 退化 baseline（median≈0 且 MAD≈0）只确认越过异常边界，不伪造幅度置信度。
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _mock_urlopen(
+            range_points={"memory_usage": _series(baseline=0.0, anomaly=5.0)},
+            empty=frozenset({"packets_dropped", "restarts"}),
+            anomalous=frozenset(),
+        ),
+    )
+
+    result = PrometheusProvider("http://prometheus.test").collect(_event())
+
+    memory = next(
+        item for item in result.evidence_items if item.payload["signal_name"] == "memory"
+    )
+    assert memory.payload["strength_basis"] == "presence_only"
+    assert memory.payload["normalized_strength"] == 1.0
+    assert memory.payload["deviation_score"] == 1.0
+    assert memory.payload["anomaly_point_count"] == 9
 
 
 def test_optional_signal_types_map_to_network_corruption_and_process(monkeypatch):
@@ -221,6 +245,9 @@ def test_empty_core_series_falls_back_to_instant_with_onset_unavailable(monkeypa
     assert instant.payload["baseline_values"] == {"qps": 123.4}
     assert instant.payload["change_percent"] == 0.0
     assert instant.payload["service"] == "checkout-service"
+    # instant fallback 没有 segment，不得伪造 additive segment 字段（历史 payload 同理）。
+    assert "strength_basis" not in instant.payload
+    assert "anomaly_point_count" not in instant.payload
 
 
 def test_range_failure_falls_back_to_instant_with_onset_unavailable(monkeypatch):

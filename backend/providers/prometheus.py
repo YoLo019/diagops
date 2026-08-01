@@ -281,6 +281,9 @@ def _segment_evidence(
             "anomaly_onset": segment.onset.isoformat(),
             "anomaly_ended_at": segment.ended_at.isoformat(),
             "anomaly_segment_id": segment.segment_id,
+            # additive 质量字段：强度口径与 segment 支持点数，供 basis-aware 排序。
+            "strength_basis": segment.strength_basis,
+            "anomaly_point_count": segment.point_count,
             "query_names": [name],
             "observed_values": {name: segment.peak_value},
             "baseline_values": {name: segment.baseline_value},

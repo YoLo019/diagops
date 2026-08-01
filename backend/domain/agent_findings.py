@@ -122,6 +122,10 @@ class CoordinationReview(BaseModel):
 
     @model_validator(mode="after")
     def sort_ranked_values(self) -> "CoordinationReview":
+        # root_causes 的排序所有权在 attribution 构建层
+        # （build_root_cause_attributions 的 basis cohort 排序）；本 validator 在
+        # 构建与持久化 reload 时都不得重排，否则 cohort 排序对 Projector Top-N、
+        # 生产 review 与 reports 不可观测（V10.1 F17）。candidates 仍按 rank
+        # 排序，兼容乱序输入。
         self.candidates.sort(key=lambda candidate: candidate.rank)
-        self.root_causes.sort(key=lambda cause: cause.root_cause_occurred_at)
         return self

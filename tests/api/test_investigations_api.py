@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 
 from backend.db.models import InvestigationRecord
 from backend.domain.events import IncidentEvent
+from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
 from backend.main import app
 from backend.services.container import get_container, reset_container
 
@@ -144,6 +145,62 @@ def test_unknown_investigation_returns_404():
     response = client.get("/investigations/inv-not-found")
 
     assert response.status_code == 404
+
+
+def test_detail_returns_legacy_and_additive_evidence_payloads_as_stored():
+    # V10.1 兼容合同：API 把 payload 当受限 JSON 透传；旧 payload 不补 derived
+    # 字段，新 additive payload 原样保留。
+    container = reset_container()
+    legacy_payload = {
+        "component": "checkout",
+        "signal_type": "cpu",
+        "signal_name": "cpu_usage",
+        "deviation_score": 2.0,
+    }
+    additive_payload = {
+        **legacy_payload,
+        "strength_basis": "presence_only",
+        "anomaly_point_count": 3,
+    }
+    record = container.repository.save(
+        InvestigationRecord(
+            event=IncidentEvent(
+                source="manual",
+                service="checkout",
+                environment="prod",
+                severity="warning",
+                title="payload compat",
+                description="payload compat record",
+                started_at="2026-07-18T00:00:00Z",
+            ),
+            evidence=[
+                EvidenceItem(
+                    id="ev-legacy",
+                    provider=EvidenceProvider.METRIC,
+                    kind=EvidenceKind.METRIC_TREND,
+                    timestamp="2026-07-18T00:01:00Z",
+                    summary="legacy metric evidence",
+                    payload=legacy_payload,
+                ),
+                EvidenceItem(
+                    id="ev-additive",
+                    provider=EvidenceProvider.METRIC,
+                    kind=EvidenceKind.METRIC_TREND,
+                    timestamp="2026-07-18T00:01:00Z",
+                    summary="additive metric evidence",
+                    payload=additive_payload,
+                ),
+            ],
+        )
+    )
+
+    client = TestClient(app)
+    response = client.get(f"/investigations/{record.id}")
+
+    assert response.status_code == 200
+    payloads = {item["id"]: item["payload"] for item in response.json()["evidence"]}
+    assert payloads["ev-legacy"] == legacy_payload
+    assert payloads["ev-additive"] == additive_payload
 
 
 def test_update_action_status_only_changes_state():

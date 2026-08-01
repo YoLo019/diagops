@@ -209,6 +209,56 @@ def test_save_get_list_round_trips_completed_investigation(tmp_path):
     assert repository.list() == [record]
 
 
+def test_metric_payload_round_trips_legacy_and_additive_without_writeback(tmp_path):
+    # V10.1 兼容合同：缺 additive 字段的历史 payload 逐字节 round-trip，
+    # derived legacy 只存在于内存 accessor，绝不写回；新 additive 字段原样保留。
+    repository, _engine = build_repository(tmp_path)
+    legacy_payload = {
+        "component": "checkout",
+        "signal_type": "cpu",
+        "signal_name": "cpu_usage",
+        "deviation_score": 2.0,
+    }
+    additive_payload = {
+        **legacy_payload,
+        "strength_basis": "presence_only",
+        "anomaly_point_count": 3,
+    }
+    timestamp = datetime(2026, 7, 3, 14, 0, tzinfo=UTC)
+    record = completed_record().model_copy(
+        update={
+            "evidence": [
+                EvidenceItem(
+                    id="ev-legacy",
+                    provider=EvidenceProvider.METRIC,
+                    kind=EvidenceKind.METRIC_TREND,
+                    timestamp=timestamp,
+                    summary="legacy metric evidence",
+                    payload=legacy_payload,
+                ),
+                EvidenceItem(
+                    id="ev-additive",
+                    provider=EvidenceProvider.METRIC,
+                    kind=EvidenceKind.METRIC_TREND,
+                    timestamp=timestamp,
+                    summary="additive metric evidence",
+                    payload=additive_payload,
+                ),
+            ]
+        }
+    )
+
+    repository.save(record)
+    stored = repository.get(record.id)
+
+    payloads = {item.id: item.payload for item in stored.evidence}
+    assert payloads["ev-legacy"] == legacy_payload
+    assert "strength_basis" not in payloads["ev-legacy"]
+    assert "anomaly_point_count" not in payloads["ev-legacy"]
+    assert "legacy" not in str(payloads["ev-legacy"])
+    assert payloads["ev-additive"] == additive_payload
+
+
 def test_summary_query_is_newest_first_and_does_not_load_detail_payloads(tmp_path):
     repository, engine = build_repository(tmp_path)
     older = completed_record()
