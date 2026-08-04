@@ -4,7 +4,7 @@ This file is the mutable routing and status entry point for the current version.
 
 It does not override an approved spec or plan, current code contracts, or the long-term product goal and production safety boundary in `AGENT.md`.
 
-Updated: 2026-08-01
+Updated: 2026-08-04
 
 ## Implemented Baseline
 
@@ -28,25 +28,26 @@ independent comparison baseline for V9.
 
 ## Active Iteration
 
-Version: V10.1
+Version: V11
 
-Main goal: correct the known OpenRCA counter, degenerate-baseline strength, and
-equal-score ranking defects without fitting the exposed six-case development
-set or regressing the V10 production Gate.
+Main goal: make adaptive, evidence-seeking Multi-Agent reasoning the diagnostic
+authority for a general-purpose SRE workflow while preserving the existing
+read-only safety, durable runtime, historical records, and benchmark-neutral
+provider contracts.
 
-Iteration status: `blocked`
+Iteration status: `implementing`
 
 Spec status: `approved`
 
 Plan status: `approved`
 
-Implementation status: `blocked`
+Implementation status: `in_progress`
 
 Completion commit: `none`
 
-Verification evidence: `T10 final checks on 0a7d81c: Ruff clean, pytest 1636 passed, frontend build ok, runtime acceptance 14/14 + privacy passed, git diff --check clean; T9 paired-gate FAIL archived in comparison.json`
+Verification evidence: `none`
 
-Blocker: `R13 paired gate FAIL（official partial delta 0.000 < 0.05）；holdout 已 exposed；结论归档于 spec §13（F26）与 D:\data\OpenRCA\comparisons-v10.1\comparison.json`
+Blocker: `none`
 
 Allowed values:
 
@@ -77,11 +78,27 @@ State consistency rules:
 ## Active Documents
 
 ```text
-docs/superpowers/specs/2026-08-01-diagops-v10.1-signal-ranking-reliability-design.md
-docs/superpowers/plans/2026-08-01-diagops-v10.1-signal-ranking-reliability-implementation-plan.md
+docs/superpowers/specs/2026-08-02-diagops-v11-adaptive-multi-agent-rca-design.md
+docs/superpowers/plans/2026-08-02-diagops-v11-adaptive-multi-agent-rca-implementation-plan.md
 ```
 
-## V10.1 Planning Dashboard
+## V11 Planning Dashboard
+
+Overall progress: `V11 Spec/Plan approved, execution authorized 2026-08-02; M0/T1 done：真实 RCAEval RE2 全链路完成（byte-verified 双向对账 2700/2700、真实 prepare runtime manifest_hash bb119fc9…/150 cases/26 GB、二次 prepare diff -r 零差异字节等价）；M0 exit review 2026-08-04 approve_with_followups（出口判据满足，M0-I2 措辞 followup 已修复并 closed：28 focused + 142 regression passed, Ruff clean；M0-L1/L2 low open，M5 前处理）；T2 解除阻塞，M0 已提交（分支 rebase 到 58c6382 后单个 M0 提交，用户 2026-08-04 授权）`
+
+Current phase: Full iteration / M0 done and committed, ready for M1
+
+Next action: 开始 M1（T2–T3：domain contracts、run ownership、Schema V7 与 V11 runtime 隔离），沿用 milestone 执行 + 独立评审模式。
+
+| ID | Phase | Task | Status | Evidence or result | Next action or blocker |
+| --- | --- | --- | --- | --- | --- |
+| P1 | Context | Verify V10.1 failure chain, current authority boundary, contracts, and reusable runtime | verified | V10.1 OpenRCA delta 0; deterministic benchmark path did not exercise Agents; current fixed specialists, persisted deterministic roots, APIs, schema V6, checkpoints and read-only tools inspected | Preserve evidence |
+| P2 | Requirements | Confirm general SRE scope, Agent authority, safety, blindness, cost, latency, and evaluation rules | verified | User confirmed bounded dynamic tools, 30–120s async, ≤3x intended-budget tokens, evidence refs ≥95%, P95 ≤120s, inconclusive wrong, and separate equal-token ablation | Preserve decisions |
+| P3 | Design | Select adaptive evidence investigation over fixed specialists or majority debate | verified | User selected scheme B; independent first pass and Critic retained without majority voting | Preserve decision |
+| P4 | Spec | Write and independently review the V11 contract | verified | Legacy-reuse audit traced runtime, persistence, entry, report/action, tools, API/UI, and benchmarks; L22–L30 closed; user approved the amended R1–R27 Spec on 2026-08-02 | Preserve approved contract |
+| P5 | Plan | Map approved requirements to implementation and verification tasks | approved | Rewritten as T1–T13/M0–M5; independent review found H1–H3/M1–M2, all closed in focused re-review with no remaining blocking/high/medium issue; R1–R27 Plan-task mapping recorded in Spec; user approved and authorized execution on 2026-08-02 | Execute M0/T1 |
+
+## Archived V10.1 Planning Dashboard
 
 Overall progress: `M0/M1/M2/M3 all reviewed; T9 paired Gate FAIL（delta 0.000）归档、R13 blocked；M3 review approve（F27 informational 已记录）；不声称准确率提升`
 
