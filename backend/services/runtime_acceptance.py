@@ -67,6 +67,7 @@ from backend.runtime.faults import (
 from backend.runtime.manager import RuntimeManager
 from backend.runtime.phase_executor import DiagnosisPhaseExecutor
 from backend.runtime.phases import (
+    V10_PHASE_ORDER,
     BusinessMutation,
     PhaseCommit,
     PhaseOutput,
@@ -1077,7 +1078,7 @@ async def _cancel_parallel_specialists() -> dict[str, object]:
         for event in cancel_events
         if event.event_type == RuntimeEventType.PHASE_COMPLETED
     }
-    assert len(store.list_checkpoints(healthy_run.id)) == len(RuntimePhase)
+    assert len(store.list_checkpoints(healthy_run.id)) == len(V10_PHASE_ORDER)
     await cancel_coordinator.shutdown()
     await healthy_coordinator.shutdown()
     return {
@@ -1126,7 +1127,7 @@ async def _otel_unavailable() -> dict[str, object]:
     roots = [span for span in spans if span.name == "runtime.attempt"]
     phases = [span for span in spans if span.name == "runtime.phase"]
     assert len(roots) == 1
-    assert len(phases) == len(RuntimePhase)
+    assert len(phases) == len(V10_PHASE_ORDER)
     assert all(span.context.trace_id == roots[0].context.trace_id for span in phases)
     assert all(span.parent.span_id == roots[0].context.span_id for span in phases)
     assert store.get_run(run.id).status == RuntimeRunStatus.COMPLETED

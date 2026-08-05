@@ -229,6 +229,19 @@ runtime_runs = Table(
     Column("next_event_sequence", Integer, nullable=False, default=0),
     Column("frozen_business_projection", JSON, nullable=True),
     Column("benchmark_replay_locator", JSON, nullable=True),
+    Column(
+        "execution_contract_version",
+        String,
+        nullable=False,
+        server_default="v10_legacy",
+    ),
+    Column(
+        "authority_mode",
+        String,
+        nullable=False,
+        server_default="legacy_deterministic",
+    ),
+    Column("execution_contract", JSON, nullable=False, server_default="{}"),
 )
 
 runtime_attempts = Table(

@@ -39,7 +39,11 @@ def test_multi_agent_contract_values_are_stable():
         "failed",
         "skipped",
     ]
-    assert [item.value for item in ModelProvider] == ["openai", "deepseek"]
+    assert [item.value for item in ModelProvider] == [
+        "openai",
+        "deepseek",
+        "openai_compatible",
+    ]
     assert [item.value for item in ExecutionStepKind] == [
         "initial_coordination",
         "specialist_collection",
@@ -49,6 +53,10 @@ def test_multi_agent_contract_values_are_stable():
         "hybrid_arbitration",
         "review_persistence",
         "result_validation",
+        "lead_planning",
+        "investigator_analysis",
+        "critic_review",
+        "lead_adjudication",
     ]
     assert [item.value for item in FailureCategory] == [
         "none",

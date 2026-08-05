@@ -5,6 +5,9 @@ from collections.abc import Callable
 from typing import Any
 from uuid import uuid4
 
+from backend.domain.runtime import RuntimeRunStatus
+from backend.runtime.store import RuntimeConflict
+
 
 class RuntimeManager:
     """进程内 Run 调度器；Phase 内并发由 DiagnosisPhaseExecutor 负责。"""
@@ -57,6 +60,27 @@ class RuntimeManager:
             if existing is not None and not existing.done():
                 return existing
             coordinator = self._coordinator_factory(run_id)
+            store = getattr(coordinator, "store", None)
+            if store is not None:
+                run = store.get_run(run_id)
+                if (
+                    run.status == RuntimeRunStatus.INTERRUPTED
+                    and not run.is_v11
+                ):
+                    attempts = store.list_attempts(run_id)
+                    if not attempts:
+                        raise RuntimeConflict(
+                            "legacy recovery rejected; create an explicit V11 live rerun"
+                        )
+                    store.append_recovery_rejection(
+                        run_id,
+                        attempt_id=attempts[-1].id,
+                        checkpoint_id=run.latest_checkpoint_id,
+                        message="create an explicit V11 live rerun",
+                    )
+                    raise RuntimeConflict(
+                        "legacy recovery rejected; create an explicit V11 live rerun"
+                    )
             self._coordinators[run_id] = coordinator
             task = asyncio.create_task(
                 self._run_resume(run_id, coordinator),

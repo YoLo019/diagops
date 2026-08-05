@@ -49,7 +49,7 @@ from backend.runtime.coordinator import RuntimeCoordinator
 from backend.runtime.diff import RuntimeDiffService
 from backend.runtime.faults import DeterministicFaultInjector, RuntimeInjectedFault
 from backend.runtime.phase_executor import DiagnosisPhaseExecutor
-from backend.runtime.phases import PhaseInput
+from backend.runtime.phases import V10_PHASE_ORDER, PhaseInput
 from backend.runtime.replay import ReplayDependencies, ReplayService
 from backend.runtime.sqlite_store import SQLiteRuntimeStore
 from backend.runtime.store import InMemoryRuntimeStore, RuntimePersistenceError
@@ -1447,5 +1447,5 @@ def test_sqlite_runtime_coordinator_commits_real_phase_outputs(tmp_path) -> None
 
     assert completed.status.value == "completed"
     assert repository.get(investigation.id).report is not None
-    assert len(store.list_checkpoints(run.id)) == len(RuntimePhase)
+    assert len(store.list_checkpoints(run.id)) == len(V10_PHASE_ORDER)
     engine.dispose()

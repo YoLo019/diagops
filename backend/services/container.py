@@ -17,7 +17,11 @@ from backend.diagnosis.coordinator import DiagnosisCoordinator
 from backend.diagnosis.deepseek_model import create_deepseek_model
 from backend.diagnosis.orchestrator import DiagnosisOrchestrator
 from backend.domain.events import IncidentEvent
-from backend.domain.multi_agent import ModelProvider
+from backend.domain.multi_agent import (
+    AuthorityMode,
+    ExecutionContractVersion,
+    ModelProvider,
+)
 from backend.domain.runtime import (
     RuntimeRun,
     RuntimeRunKind,
@@ -33,7 +37,7 @@ from backend.runtime.manager import RuntimeManager
 from backend.runtime.phase_executor import DiagnosisPhaseExecutor
 from backend.runtime.replay import ReplayDependencies, ReplayService
 from backend.runtime.sqlite_store import SQLiteRuntimeStore
-from backend.runtime.store import InMemoryRuntimeStore
+from backend.runtime.store import InMemoryRuntimeStore, RuntimeConflict
 from backend.runtime.telemetry import RuntimeTelemetry
 from backend.runtime.writer import RuntimeWriter
 from backend.safety.redaction import redact_model
@@ -211,12 +215,35 @@ class AppContainer:
         event: IncidentEvent,
         *,
         strategy=None,
+        execution_contract_version: ExecutionContractVersion = (
+            ExecutionContractVersion.V10_LEGACY
+        ),
+        runtime_run_id: str | None = None,
     ):
+        if ExecutionContractVersion(execution_contract_version) == ExecutionContractVersion.V11:
+            if not self.settings.runtime.enabled:
+                raise RuntimeConflict("V11 execution requires enabled Runtime")
+            if runtime_run_id is None:
+                raise RuntimeConflict(
+                    "V11 service execution requires a persisted RuntimeRun"
+                )
+            run = self.runtime_store.get_run(runtime_run_id)
+            if (
+                not run.is_v11
+                or getattr(event, "investigation_id", run.investigation_id)
+                not in {None, run.investigation_id}
+            ):
+                raise RuntimeConflict("V11 RuntimeRun does not own this service request")
+            await self.runtime_writer.start()
+            task = await self.runtime_manager.start(run.id)
+            await task
+            return self.repository.get(run.investigation_id)
         if not self.settings.runtime.enabled:
             return await asyncio.to_thread(
                 self.orchestrator.run,
                 event,
                 strategy=strategy,
+                execution_contract_version=execution_contract_version,
             )
         effective_strategy = strategy or self.settings.agents.strategy
         record = redact_model(
@@ -249,8 +276,17 @@ class AppContainer:
         model_provider=None,
         model_name: str | None = None,
         prompt_version: str | None = None,
+        execution_contract_version: ExecutionContractVersion = (
+            ExecutionContractVersion.V10_LEGACY
+        ),
     ) -> RuntimeRun:
-        self.repository.get(investigation_id)
+        version = ExecutionContractVersion(execution_contract_version)
+        source_record = self.repository.get(investigation_id)
+        if version == ExecutionContractVersion.V11:
+            investigation_id = self._v11_investigation_id(
+                source_record,
+                strategy=strategy,
+            )
         agents_runtime = self.orchestrator.agents_runtime
         effective_provider = model_provider or getattr(
             agents_runtime, "model_provider", None
@@ -259,6 +295,25 @@ class AppContainer:
         effective_prompt = prompt_version or getattr(
             agents_runtime, "prompt_version", None
         )
+        authority = (
+            AuthorityMode.AGENT
+            if version == ExecutionContractVersion.V11
+            else AuthorityMode.LEGACY_DETERMINISTIC
+        )
+        contract = {}
+        if version == ExecutionContractVersion.V11:
+            contract = {
+                "execution_contract_version": version.value,
+                "authority_mode": authority.value,
+                "model_provider": effective_provider.value
+                if isinstance(effective_provider, ModelProvider)
+                else effective_provider,
+                "model_name": effective_model,
+                "prompt_version": effective_prompt,
+                "tool_budget": self.settings.agents.max_total_tool_calls,
+                "token_budget": getattr(agents_runtime, "runtime_token_budget", None),
+                "timeout_seconds": float(self.settings.agents.timeout_seconds),
+            }
         run = RuntimeRun(
             investigation_id=investigation_id,
             run_kind=RuntimeRunKind.LIVE,
@@ -271,8 +326,47 @@ class AppContainer:
             tool_budget=self.settings.agents.max_total_tool_calls,
             token_budget=getattr(agents_runtime, "runtime_token_budget", None),
             timeout_seconds=float(self.settings.agents.timeout_seconds),
+            execution_contract_version=version,
+            authority_mode=authority,
+            execution_contract=contract,
         )
         return self.runtime_store.create_run(run)
+
+    def _v11_investigation_id(self, source: InvestigationRecord, *, strategy) -> str:
+        """为 legacy 历史投影创建隔离的 V11 investigation，保留源记录不变。"""
+        if source.active_runtime_run_id is not None:
+            return source.id
+        has_projection = any(
+            (
+                source.status != InvestigationStatus.PENDING,
+                bool(source.evidence),
+                bool(source.provider_results),
+                bool(source.specialist_results),
+                bool(source.hypotheses),
+                source.report is not None,
+                source.llm_analysis is not None,
+                source.multi_agent_run is not None,
+                bool(source.actions),
+                bool(source.verification_suggestions),
+                self.repository.get_plan(source.id) is not None,
+                bool(self.repository.list_tasks(source.id)),
+                bool(self.repository.list_context_facts(source.id)),
+                bool(self.repository.list_tool_calls(source.id)),
+                bool(self.repository.list_agent_findings(source.id)),
+                bool(self.repository.list_executions(source.id)),
+                self.repository.get_coordination_review(source.id) is not None,
+                self.repository.get_react_trace(source.id) is not None,
+            )
+        )
+        if not has_projection:
+            return source.id
+        linked = InvestigationRecord(
+            event=source.event,
+            strategy=strategy,
+            runtime_available=source.runtime_available,
+            source_investigation_id=source.id,
+        )
+        return self.repository.save(linked).id
 
     def replay_run(self, run_id: str):
         return self.replay_service.replay(run_id)

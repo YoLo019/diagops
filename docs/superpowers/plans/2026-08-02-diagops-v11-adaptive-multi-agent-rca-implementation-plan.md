@@ -254,6 +254,15 @@ Acceptance:
 - Pre-INTAKE terminal runs replay as `not_activated` with no inherited output.
 - No V11 entry or handler reaches a forbidden legacy diagnostic function.
 
+### M1 execution evidence (2026-08-05)
+
+| Task | Status | Evidence | Review state |
+| --- | --- | --- | --- |
+| T2 | implemented / verified | Test-first RED→GREEN domain, ownership, migration, and persistence coverage; `uv run pytest tests/domain tests/db/test_migrations.py tests/db/test_runtime_migrations.py tests/db/test_v5_agentic_rca_persistence.py -q` → `198 passed in 8.07s`; scoped Ruff clean | Independent migration review pending |
+| T3 | implemented / verified | Test-first RED→GREEN activation/recovery coverage; `uv run pytest tests/runtime tests/api/test_runtime_runs_api.py -q` → `391 passed, 1 skipped, 1 warning in 160.40s`; scoped Ruff clean; legacy golden, replay/diff, deadline, and V11 isolation checks included | Independent runtime review pending |
+
+M1 scope is limited to T2–T3. M2 evidence/model/skill work has not started.
+
 ### M1 review
 
 Independently inspect all migration paths, phase callers, transaction boundaries,
@@ -812,8 +821,8 @@ request only the missing authority.
 | Task | Status | Requirements | Evidence |
 | --- | --- | --- | --- |
 | T1 | done | R15, R17, R25 | 代码侧：M0 review 三轮后 approve（全部 findings closed）；修正案 TDD red→green 落地，55 focused + 142 benchmarks regression passed + ruff clean。真实 artifact 全链路（2026-08-04）：归一化 270 cases + custodian pin（SHA `b064b858…`，archive hash `10863f25…`）；`verify_against_raw.py`（SHA `88fa5ab2…`）双向逐文件对账 2700/2700 全匹配（provenance 升级为 byte-verified）；真实 prepare 产出 `D:\data\RCAEval\prepared-v11-m0`——runtime manifest_hash `bb119fc9fe338f7cf2d6f03a82f87a0038a1a589fde0c96ad99b02504a5f3d73`（150 cases：OB30+SS30+TT90，1560 telemetry files，26 GB），label manifest_hash `06413003c877177e01d907106ad1181631d16a568b26a4dea86e52d73108a05d`，产物内 SHA256SUMS 1561 行全 OK；taxonomy 词 grep 对 manifest/文件名 0 命中（遥测正文合法包含服务名，见 M0-I2）；二次独立 prepare `diff -r` 零差异 + manifest_hash 逐字符一致（真实数据字节等价确定性，此前仅合成 fixture 覆盖）；M0-R1/R2 closed、M0-R3 closed（用户追认 256 MiB）、M0-I3 closed、M0-I4 recorded、M0-I2 closed（测试断言范围修正，28 focused + 142 regression passed）。剩余 open：M0-L1/L2（low，M5 freeze 前处理）；M0 exit review 2026-08-04 `approve_with_followups`，出口判据满足（见 §10 评审记录） |
-| T2 | pending | R2, R4–R6, R9–R10, R20, R27 | pending |
-| T3 | pending | R7–R10, R13, R18, R20, R27 | pending |
+| T2 | implemented / verified | R2, R4–R6, R9–R10, R20, R27 | RED→GREEN domain/migration/persistence tests; `198 passed in 8.07s`; scoped Ruff clean; full requirement acceptance remains subject to later M3–M5 tasks and M1 independent review |
+| T3 | implemented / verified | R7–R10, R13, R18, R20, R27 | RED→GREEN runtime isolation/recovery tests; `391 passed, 1 skipped, 1 warning in 160.40s`; scoped Ruff clean; full requirement acceptance remains subject to later M3–M5 tasks and M1 independent review |
 | T4 | pending | R3, R11, R21–R22, R24, R27 | pending |
 | T5 | pending | R21–R23 | pending |
 | T6 | pending | R8, R11–R13, R26–R27 | pending |
@@ -896,4 +905,4 @@ reconciliation.
 - Specification: approved by the user on 2026-08-02 after L22–L30 reuse review.
 - Implementation Plan: independently reviewed with H1–H3/M1–M2 closed; approved
   by the user on 2026-08-02 with authorization to begin execution.
-- Implementation: started 2026-08-02 in worktree `agent+v11-m0`; T1 in progress.
+- Implementation: M0/T1 complete; M1/T2–T3 implemented and verified on 2026-08-05 in the delegated worktree; independent migration/runtime review pending; M2 not started.

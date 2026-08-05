@@ -3,12 +3,25 @@ from enum import StrEnum
 from typing import Annotated, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    model_serializer,
+    model_validator,
+)
 
+from backend.domain.agent_plan import LeadDecision
 from backend.domain.hypotheses import CauseType
 from backend.domain.multi_agent import (
     AgentExecutionLayer,
+    AuthorityMode,
+    CausalCheckName,
+    CausalCheckStatus,
     CoordinationDecisionStatus,
+    CriticVerdict,
+    DiagnosticStatus,
     ModelProvider,
     MultiAgentRunStatus,
     StabilizationCategory,
@@ -19,6 +32,13 @@ class AgentName(StrEnum):
     LOG = "LogAgent"
     METRIC = "MetricAgent"
     DEPLOYMENT = "DeploymentAgent"
+
+
+class FindingActor(StrEnum):
+    LOG = AgentName.LOG.value
+    METRIC = AgentName.METRIC.value
+    DEPLOYMENT = AgentName.DEPLOYMENT.value
+    INVESTIGATOR = "InvestigatorAgent"
 
 
 class AgentFindingType(StrEnum):
@@ -37,7 +57,8 @@ class AgentFindingSeverity(StrEnum):
 class AgentFinding(BaseModel):
     id: str = Field(default_factory=lambda: f"finding-{uuid4().hex}")
     investigation_id: str
-    agent_name: AgentName
+    agent_name: FindingActor
+    agent_instance_id: str | None = Field(default=None, max_length=128)
     finding_type: AgentFindingType
     summary: str = Field(min_length=1)
     confidence: float = Field(ge=0, le=1, allow_inf_nan=False)
@@ -50,10 +71,38 @@ class AgentFinding(BaseModel):
     execution_layer: AgentExecutionLayer = AgentExecutionLayer.CUSTOM
     analysis_round: Literal[1, 2] = 1
     revises_finding_id: str | None = None
+    task_id: str | None = None
+    runtime_run_id: str | None = None
+    critic_assessment_id: str | None = None
+    affected_entity: str | None = Field(default=None, max_length=128)
+    failure_mechanism: str | None = Field(default=None, max_length=256)
+    contradicting_evidence_ids: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    @field_serializer("agent_name")
+    def serialize_agent_name(self, value: FindingActor | AgentName) -> str:
+        return FindingActor(getattr(value, "value", value)).value
+
+    @model_serializer(mode="wrap")
+    def serialize_legacy_payload(self, handler):
+        data = handler(self)
+        if self.runtime_run_id is None:
+            for field_name in (
+                "agent_instance_id",
+                "task_id",
+                "runtime_run_id",
+                "critic_assessment_id",
+                "affected_entity",
+                "failure_mechanism",
+                "contradicting_evidence_ids",
+            ):
+                if field_name not in self.model_fields_set:
+                    data.pop(field_name, None)
+        return data
 
     @model_validator(mode="after")
     def validate_finding(self) -> "AgentFinding":
+        self.agent_name = FindingActor(self.agent_name)
         if self.finding_type != AgentFindingType.GAP and not self.evidence_ids:
             raise ValueError("evidence_ids required unless finding_type is gap")
         if self.blocking and (
@@ -62,14 +111,70 @@ class AgentFinding(BaseModel):
             raise ValueError("blocking requires a gap finding with gaps")
         if self.analysis_round == 1 and self.revises_finding_id is not None:
             raise ValueError("round 1 cannot set revises_finding_id")
-        if self.analysis_round == 2 and self.revises_finding_id is None:
+        if self.agent_name == FindingActor.INVESTIGATOR:
+            if self.runtime_run_id is None or self.task_id is None:
+                raise ValueError("V11 Investigator finding requires run and task ownership")
+            if self.agent_instance_id is None:
+                raise ValueError("V11 Investigator finding requires agent_instance_id")
+            if self.analysis_round == 2 and self.critic_assessment_id is None:
+                raise ValueError("V11 round 2 requires critic_assessment_id")
+        elif self.analysis_round == 2 and self.revises_finding_id is None:
             raise ValueError("round 2 requires revises_finding_id")
+        return self
+
+
+class CausalCheck(BaseModel):
+    name: CausalCheckName
+    status: CausalCheckStatus
+    summary: str = Field(min_length=1, max_length=256)
+    evidence_ids: list[str] = Field(default_factory=list, max_length=32)
+    gap: str | None = Field(default=None, max_length=256)
+
+    @model_validator(mode="after")
+    def validate_check_contract(self) -> "CausalCheck":
+        if self.status in {CausalCheckStatus.PASS, CausalCheckStatus.FAIL}:
+            if not self.evidence_ids:
+                raise ValueError("pass and fail checks require evidence_ids")
+            if self.gap is not None:
+                raise ValueError("pass and fail checks cannot carry a gap")
+        elif not self.gap:
+            raise ValueError("unknown checks require a named gap")
+        return self
+
+
+class CriticAssessment(BaseModel):
+    id: str = Field(default_factory=lambda: f"assessment-{uuid4().hex}")
+    candidate_id: str
+    verdict: CriticVerdict
+    checks: list[CausalCheck] = Field(min_length=7, max_length=7)
+    supporting_evidence_ids: list[str] = Field(default_factory=list, max_length=32)
+    contradicting_evidence_ids: list[str] = Field(default_factory=list, max_length=32)
+    gap: str | None = Field(default=None, max_length=256)
+    supplemental_task_ids: list[str] = Field(default_factory=list, max_length=3)
+    summary: str = Field(min_length=1, max_length=512)
+    runtime_run_id: str | None = None
+    review_round: Literal[1, 2] = 1
+
+    @model_validator(mode="after")
+    def validate_assessment_contract(self) -> "CriticAssessment":
+        names = [check.name for check in self.checks]
+        if len(set(names)) != 7 or set(names) != set(CausalCheckName):
+            raise ValueError("Critic assessment requires exactly seven named checks")
+        if self.verdict == CriticVerdict.NEEDS_EVIDENCE:
+            if not self.gap or not self.supplemental_task_ids:
+                raise ValueError("needs_evidence requires a gap and supplemental tasks")
+            if self.review_round == 2:
+                raise ValueError("Critic reconciliation cannot request more evidence")
+        elif self.gap or self.supplemental_task_ids:
+            raise ValueError("supplemental work is only valid for needs_evidence")
         return self
 
 
 class RootCauseCandidate(BaseModel):
     id: str = Field(default_factory=lambda: f"candidate-{uuid4().hex}")
-    cause_type: CauseType
+    cause_type: CauseType | None = None
+    affected_entity: str | None = Field(default=None, max_length=128)
+    failure_mechanism: str | None = Field(default=None, max_length=256)
     summary: str = Field(min_length=1)
     rank: int = Field(ge=1)
     confidence: float = Field(ge=0, le=1, allow_inf_nan=False)
@@ -79,6 +184,31 @@ class RootCauseCandidate(BaseModel):
     contradicting_evidence_ids: list[str] = Field(default_factory=list)
     rationale: str = ""
     uncertainty: str = ""
+    onset_window_start: datetime | None = None
+    onset_window_end: datetime | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize_legacy_payload(self, handler):
+        data = handler(self)
+        for field_name in (
+            "affected_entity",
+            "failure_mechanism",
+            "onset_window_start",
+            "onset_window_end",
+        ):
+            if field_name not in self.model_fields_set:
+                data.pop(field_name, None)
+        return data
+
+    @model_validator(mode="after")
+    def validate_onset_window(self) -> "RootCauseCandidate":
+        if (
+            self.onset_window_start is not None
+            and self.onset_window_end is not None
+            and self.onset_window_start > self.onset_window_end
+        ):
+            raise ValueError("onset window start must not be later than end")
+        return self
 
 
 class RootCauseAttribution(BaseModel):
@@ -105,6 +235,12 @@ class CoordinationReview(BaseModel):
     investigation_id: str
     candidates: list[RootCauseCandidate] = Field(default_factory=list)
     root_causes: list[RootCauseAttribution] = Field(default_factory=list)
+    critic_assessments: list[CriticAssessment] = Field(default_factory=list)
+    lead_decision: "LeadDecision | None" = None
+    diagnostic_status: DiagnosticStatus | None = None
+    stop_reason: str | None = Field(default=None, max_length=256)
+    runtime_run_id: str | None = None
+    authority_mode: AuthorityMode = AuthorityMode.LEGACY_DETERMINISTIC
     execution_layer: AgentExecutionLayer = AgentExecutionLayer.CUSTOM
     run_status: MultiAgentRunStatus = MultiAgentRunStatus.COMPLETED
     decision_status: CoordinationDecisionStatus | None = None
@@ -128,4 +264,54 @@ class CoordinationReview(BaseModel):
         # 生产 review 与 reports 不可观测（V10.1 F17）。candidates 仍按 rank
         # 排序，兼容乱序输入。
         self.candidates.sort(key=lambda candidate: candidate.rank)
+        if self.authority_mode == AuthorityMode.AGENT:
+            if self.runtime_run_id is None:
+                raise ValueError("V11 CoordinationReview requires runtime_run_id")
+            if self.lead_decision is None:
+                raise ValueError("V11 CoordinationReview requires lead_decision")
+            if any(
+                assessment.runtime_run_id is not None
+                and assessment.runtime_run_id != self.runtime_run_id
+                for assessment in self.critic_assessments
+            ):
+                raise ValueError("V11 Critic assessment owner mismatch")
+            candidate_ids = {candidate.id for candidate in self.candidates}
+            assessment_candidates = {
+                assessment.candidate_id for assessment in self.critic_assessments
+            }
+            if not assessment_candidates <= candidate_ids:
+                raise ValueError("Critic assessment references an unknown candidate")
+            if not set(self.lead_decision.candidate_ids) <= candidate_ids:
+                raise ValueError("Lead decision references an unknown candidate")
+            accepted = {
+                assessment.candidate_id
+                for assessment in self.critic_assessments
+                if assessment.verdict == CriticVerdict.ACCEPT
+            }
+            if self.lead_decision.action.value == "conclude" and not set(
+                self.lead_decision.candidate_ids
+            ) <= accepted:
+                raise ValueError("Lead can conclude only with Critic-accepted candidates")
         return self
+
+    @property
+    def authoritative_candidate_ids(self) -> list[str]:
+        if self.authority_mode != AuthorityMode.AGENT or self.lead_decision is None:
+            return []
+        return list(self.lead_decision.candidate_ids)
+
+    @model_serializer(mode="wrap")
+    def serialize_legacy_payload(self, handler):
+        data = handler(self)
+        if self.runtime_run_id is None:
+            for field_name in (
+                "critic_assessments",
+                "lead_decision",
+                "diagnostic_status",
+                "stop_reason",
+                "runtime_run_id",
+                "authority_mode",
+            ):
+                if field_name not in self.model_fields_set:
+                    data.pop(field_name, None)
+        return data

@@ -81,6 +81,80 @@ class RuntimePersistenceError(RuntimeErrorBase):
     pass
 
 
+def validate_v11_phase_ownership(
+    run: RuntimeRun,
+    commit,
+    record,
+    *,
+    previous_run: RuntimeRun | None = None,
+    previous_projection: dict | None = None,
+) -> None:
+    """在业务摘要计算前拒绝未激活、串 owner 或未冻结的 V11 提交。"""
+    if not run.is_v11:
+        return
+    mutation = commit.business_mutation
+    if commit.phase == RuntimePhase.INTAKE:
+        if not mutation.activate_projection:
+            raise RuntimeIntegrityError("V11 INTAKE must activate its projection")
+        if (
+            mutation.investigation is None
+            or mutation.investigation.active_runtime_run_id != run.id
+        ):
+            raise RuntimeIntegrityError("V11 INTAKE activation owner mismatch")
+        active_owner = record.active_runtime_run_id
+        if active_owner is not None and active_owner != run.id:
+            if previous_run is None or previous_run.status not in {
+                RuntimeRunStatus.COMPLETED,
+                RuntimeRunStatus.FAILED,
+                RuntimeRunStatus.CANCELLED,
+            }:
+                raise RuntimeConflict("previous projection owner is not terminal")
+            if previous_projection is None:
+                raise RuntimeConflict("previous projection owner has no frozen view")
+            from backend.runtime.diff import parse_frozen_projection
+
+            try:
+                parse_frozen_projection(previous_projection)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeConflict("previous projection owner has invalid frozen view") from exc
+    elif record.active_runtime_run_id != run.id:
+        raise RuntimeIntegrityError("V11 business commit does not own active projection")
+
+    owned_values = (
+        [mutation.investigation, mutation.plan, mutation.review, mutation.react_trace]
+        + list(mutation.tasks or ())
+        + list(mutation.executions or ())
+        + list(mutation.findings or ())
+        + list(mutation.tool_calls or ())
+    )
+    for value in owned_values:
+        if value is None:
+            continue
+        payloads = [value]
+        for attribute in (
+            "tasks",
+            "critic_assessments",
+            "evidence",
+            "actions",
+            "verification_suggestions",
+        ):
+            payloads.extend(getattr(value, attribute, ()) or ())
+        payloads.extend(
+            item
+            for item in (
+                getattr(value, "report", None),
+                getattr(value, "multi_agent_run", None),
+            )
+            if item is not None
+        )
+        for payload in payloads:
+            owner = getattr(payload, "active_runtime_run_id", None)
+            if owner is None:
+                owner = getattr(payload, "runtime_run_id", None)
+            if owner != run.id:
+                raise RuntimeIntegrityError("V11 business payload owner mismatch")
+
+
 class RuntimeStore(Protocol):
     def create_run(self, run: RuntimeRun) -> RuntimeRun: ...
 
@@ -155,6 +229,7 @@ class RuntimeStore(Protocol):
         *,
         attempt_id: str,
         checkpoint_id: str | None,
+        message: str | None = None,
     ) -> RuntimeEvent: ...
 
     def list_events(
@@ -234,7 +309,12 @@ class InMemoryRuntimeStore:
                     from backend.runtime.diff import freeze_business_projection
 
                     frozen = freeze_business_projection(
-                        self.investigation_repository, stored.investigation_id
+                        self.investigation_repository,
+                        stored.investigation_id,
+                        runtime_run_id=(stored.id if stored.is_v11 else None),
+                        authority_mode=(
+                            stored.authority_mode.value if stored.is_v11 else None
+                        ),
                     )
                 if frozen is not None:
                     self._frozen_business_projections[stored.id] = frozen
@@ -478,11 +558,23 @@ class InMemoryRuntimeStore:
         with self._lock:
             run = self._require_run(run_id)
             now = datetime.now(UTC)
+            owns_projection = (
+                not run.is_v11
+                or self.investigation_repository.get(
+                    run.investigation_id
+                ).active_runtime_run_id
+                == run.id
+            )
             if run.status == RuntimeRunStatus.CREATED:
                 from backend.runtime.diff import freeze_business_projection
 
                 frozen_projection = freeze_business_projection(
-                    self.investigation_repository, run.investigation_id
+                    self.investigation_repository,
+                    run.investigation_id,
+                    runtime_run_id=(run.id if run.is_v11 else None),
+                    authority_mode=(
+                        run.authority_mode.value if run.is_v11 else None
+                    ),
                 )
                 run.cancel_requested_at = now
                 self._apply_transition(run, RuntimeRunStatus.CANCELLED)
@@ -493,10 +585,11 @@ class InMemoryRuntimeStore:
                 raise RuntimeConflict(f"run cannot be cancelled from {run.status.value}")
             if run.status == RuntimeRunStatus.CANCELLED:
                 run.failure_category = RuntimeFailureCategory.CANCELLED
-                self.investigation_repository.update_status(
-                    run.investigation_id,
-                    InvestigationStatus.CANCELLED,
-                )
+                if owns_projection:
+                    self.investigation_repository.update_status(
+                        run.investigation_id,
+                        InvestigationStatus.CANCELLED,
+                    )
                 self._frozen_business_projections[run.id] = frozen_projection
             return run.model_copy(deep=True)
 
@@ -560,6 +653,13 @@ class InMemoryRuntimeStore:
         with self._lock:
             run = self._require_run(commit.run_id)
             attempt = self._attempts.get(commit.attempt_id)
+            owns_projection = (
+                not run.is_v11
+                or self.investigation_repository.get(
+                    run.investigation_id
+                ).active_runtime_run_id
+                == run.id
+            )
             if run.status != commit.expected_run_status:
                 raise RuntimeConflict("runtime terminal status conflict")
             self._validate_fence(run, commit.lease_owner, commit.lease_version)
@@ -593,7 +693,12 @@ class InMemoryRuntimeStore:
 
             frozen_projection = finalize_frozen_projection(
                 freeze_business_projection(
-                    self.investigation_repository, run.investigation_id
+                    self.investigation_repository,
+                    run.investigation_id,
+                    runtime_run_id=(run.id if run.is_v11 else None),
+                    authority_mode=(
+                        run.authority_mode.value if run.is_v11 else None
+                    ),
                 ),
                 (
                     checkpoint
@@ -642,7 +747,7 @@ class InMemoryRuntimeStore:
                 RuntimeRunStatus.FAILED: InvestigationStatus.FAILED,
                 RuntimeRunStatus.CANCELLED: InvestigationStatus.CANCELLED,
             }.get(commit.target_run_status)
-            if investigation_status is not None:
+            if investigation_status is not None and owns_projection:
                 self.investigation_repository.update_status(
                     run.investigation_id,
                     investigation_status,
@@ -665,6 +770,14 @@ class InMemoryRuntimeStore:
             run = self._require_run(commit.run_id)
             if run.status != RuntimeRunStatus.RUNNING:
                 raise RuntimeConflict("tool commit requires running runtime")
+            if run.is_v11:
+                record = self.investigation_repository.get(run.investigation_id)
+                if record.active_runtime_run_id != run.id:
+                    raise RuntimeIntegrityError(
+                        "V11 tool commit does not own active projection"
+                    )
+                if getattr(commit.call, "runtime_run_id", None) != run.id:
+                    raise RuntimeIntegrityError("V11 tool payload owner mismatch")
             self._validate_fence(run, commit.lease_owner, commit.lease_version)
             attempt = self._attempts.get(commit.attempt_id)
             if (
@@ -746,6 +859,7 @@ class InMemoryRuntimeStore:
         *,
         attempt_id: str,
         checkpoint_id: str | None,
+        message: str | None = None,
     ) -> RuntimeEvent:
         """在无活跃 lease 时记录恢复拒绝；仅允许引用最后一个 interrupted Attempt。"""
         published: list[RuntimeEvent] = []
@@ -762,6 +876,17 @@ class InMemoryRuntimeStore:
                 raise RuntimeIntegrityError(
                     "recovery rejection attempt is not interrupted"
                 )
+            if run.is_v11:
+                from backend.runtime.diff import freeze_business_projection
+
+                self._frozen_business_projections[run.id] = (
+                    freeze_business_projection(
+                        self.investigation_repository,
+                        run.investigation_id,
+                        runtime_run_id=run.id,
+                        authority_mode=run.authority_mode.value,
+                    )
+                )
             event = RuntimeEvent(
                 run_id=run_id,
                 attempt_id=attempt_id,
@@ -776,6 +901,7 @@ class InMemoryRuntimeStore:
                         if checkpoint_id is not None
                         else {}
                     ),
+                    **({"message": message} if message is not None else {}),
                 },
             )
             self._events[run_id].append(event)
@@ -866,6 +992,17 @@ class InMemoryRuntimeStore:
                     run.failure_category = RuntimeFailureCategory.LEASE_LOST
                     attempt.failure_category = RuntimeFailureCategory.LEASE_LOST
                     self._apply_transition(run, RuntimeRunStatus.INTERRUPTED)
+                    if run.is_v11:
+                        from backend.runtime.diff import freeze_business_projection
+
+                        self._frozen_business_projections[run.id] = (
+                            freeze_business_projection(
+                                self.investigation_repository,
+                                run.investigation_id,
+                                runtime_run_id=run.id,
+                                authority_mode=run.authority_mode.value,
+                            )
+                        )
                     first_sequence = len(self._events[run.id]) + 1
                     run_event = RuntimeEvent(
                         run_id=run.id,
@@ -904,11 +1041,29 @@ class InMemoryRuntimeStore:
             durable_token_usage,
             durable_tool_call_count,
             ensure_phase_precondition,
+            phase_profile_for,
         )
 
         published: list[RuntimeEvent] = []
         with self._lock:
             run = self._require_run(commit.run_id)
+            record = self.investigation_repository.get(run.investigation_id)
+            previous_owner = record.active_runtime_run_id
+            validate_v11_phase_ownership(
+                run,
+                commit,
+                record,
+                previous_run=(
+                    self._runs.get(previous_owner)
+                    if previous_owner is not None and previous_owner != run.id
+                    else None
+                ),
+                previous_projection=(
+                    self._frozen_business_projections.get(previous_owner)
+                    if previous_owner is not None and previous_owner != run.id
+                    else None
+                ),
+            )
             digest = checkpoint_digest(
                 run_id=commit.run_id,
                 attempt_id=commit.attempt_id,
@@ -981,6 +1136,7 @@ class InMemoryRuntimeStore:
                     current_phase=run.current_phase,
                     latest_checkpoint_id=run.latest_checkpoint_id,
                     commit=commit,
+                    phase_order=phase_profile_for(run.execution_contract_version).order,
                 )
             except ValueError as exc:
                 raise RuntimeConflict(str(exc)) from exc
@@ -1119,7 +1275,15 @@ class InMemoryRuntimeStore:
             return
         linked = self._require_run(linked_run_id)
         if linked.investigation_id != run.investigation_id:
-            raise RuntimeConflict(f"{relation} run belongs to another investigation")
+            linked_source = self.investigation_repository.get(
+                run.investigation_id
+            ).source_investigation_id
+            if not (
+                relation == "parent"
+                and run.is_v11
+                and linked_source == linked.investigation_id
+            ):
+                raise RuntimeConflict(f"{relation} run belongs to another investigation")
         if relation == "parent" and (
             linked.run_kind != RuntimeRunKind.LIVE
             or linked.status

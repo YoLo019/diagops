@@ -6,7 +6,11 @@ from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from backend.domain.multi_agent import InvestigationStrategy, ModelProvider
+from backend.domain.multi_agent import (
+    ExecutionContractVersion,
+    InvestigationStrategy,
+    ModelProvider,
+)
 from backend.domain.runtime import (
     ReplayReport,
     RuntimeAttempt,
@@ -38,9 +42,14 @@ class RuntimeRunCreateRequest(BaseModel):
     model_provider: ModelProvider | None = None
     model_name: str | None = None
     prompt_version: str | None = None
+    execution_contract_version: ExecutionContractVersion = (
+        ExecutionContractVersion.V10_LEGACY
+    )
 
     @model_validator(mode="after")
     def validate_live_run_contract(self):
+        if self.execution_contract_version == ExecutionContractVersion.V11:
+            return self
         RuntimeRun(
             investigation_id="request-validation",
             run_kind="live",
@@ -131,6 +140,7 @@ async def create_runtime_run(
             model_provider=request.model_provider,
             model_name=request.model_name,
             prompt_version=request.prompt_version,
+            execution_contract_version=request.execution_contract_version,
         )
         await container.runtime_writer.start()
         await container.runtime_manager.start(run.id)

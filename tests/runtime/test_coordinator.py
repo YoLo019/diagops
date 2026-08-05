@@ -26,6 +26,7 @@ from backend.domain.runtime import (
 from backend.domain.tool_calls import ToolCallRecord, ToolCallStatus, ToolSpec
 from backend.runtime.coordinator import RuntimeCoordinator
 from backend.runtime.phases import (
+    V10_PHASE_ORDER,
     BusinessMutation,
     PhaseCommit,
     PhaseOutput,
@@ -487,11 +488,11 @@ async def test_execute_commits_every_phase_and_completes_attempt() -> None:
 
     await coordinator.execute(run.id, owner="worker-a")
 
-    assert executor.phases == list(RuntimePhase)
+    assert executor.phases == list(V10_PHASE_ORDER)
     assert store.get_run(run.id).status == RuntimeRunStatus.COMPLETED
     assert store.list_attempts(run.id)[0].status == RuntimeAttemptStatus.COMPLETED
     assert [item.completed_phase for item in store.list_checkpoints(run.id)] == list(
-        RuntimePhase
+        V10_PHASE_ORDER
     )
     conflict_events = [
         item.event_type.value
@@ -728,7 +729,7 @@ async def test_resume_creates_new_attempt_and_starts_after_complete_checkpoint()
     completed = await coordinator.resume(run.id, owner="worker-b")
 
     assert completed.status == RuntimeRunStatus.COMPLETED
-    assert executor.phases == list(RuntimePhase)[1:]
+    assert executor.phases == list(V10_PHASE_ORDER)[1:]
     assert [item.status for item in store.list_attempts(run.id)] == [
         RuntimeAttemptStatus.INTERRUPTED,
         RuntimeAttemptStatus.COMPLETED,

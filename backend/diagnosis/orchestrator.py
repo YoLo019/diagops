@@ -47,6 +47,7 @@ from backend.domain.multi_agent import (
     AdaptiveStopReason,
     AgentExecutionLayer,
     CoordinationDecisionStatus,
+    ExecutionContractVersion,
     ExecutionStepKind,
     FailureCategory,
     InvestigationStrategy,
@@ -142,12 +143,19 @@ class DiagnosisOrchestrator:
         self,
         event: IncidentEvent,
         strategy: InvestigationStrategy | None = None,
+        execution_contract_version: ExecutionContractVersion = (
+            ExecutionContractVersion.V10_LEGACY
+        ),
     ) -> InvestigationRecord:
         # 延迟导入避免 Runtime 适配层与既有编排器产生模块循环。
         from backend.runtime.phase_executor import DiagnosisPhaseExecutor
 
         return asyncio.run(
-            DiagnosisPhaseExecutor(self).execute(event, strategy)
+            DiagnosisPhaseExecutor(self).execute(
+                event,
+                strategy,
+                execution_contract_version=execution_contract_version,
+            )
         ).record
 
     def _record_v5_coordination(

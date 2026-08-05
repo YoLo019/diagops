@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+import time
 from contextlib import suppress
 from datetime import UTC, datetime
 
@@ -20,7 +21,6 @@ from backend.domain.runtime import (
 from backend.domain.tool_calls import ToolCallStatus
 from backend.runtime.faults import NoFaultInjector, RuntimeInjectedFault
 from backend.runtime.phases import (
-    RUNTIME_PHASE_ORDER,
     BusinessMutation,
     PhaseCommit,
     PhaseInput,
@@ -29,6 +29,7 @@ from backend.runtime.phases import (
     durable_projection_digest,
     durable_token_usage,
     durable_tool_call_count,
+    phase_profile_for,
 )
 from backend.runtime.store import (
     RuntimeConflict,
@@ -47,6 +48,10 @@ logger = logging.getLogger(__name__)
 
 class _RuntimeCancellationRequested(Exception):
     """表示持有有效 lease 的 Run 已请求取消，应在安全边界收敛终态。"""
+
+
+class _RuntimeDeadlineExceeded(Exception):
+    """表示 Run 的绝对 deadline 已到，禁止继续产生业务提交。"""
 
 
 class RuntimeCoordinator:
@@ -80,6 +85,7 @@ class RuntimeCoordinator:
         self._agent_spans: dict[tuple[str, str], object] = {}
         self._model_spans: dict[tuple[str, str], object] = {}
         self._tool_spans: dict[tuple[str, str], object] = {}
+        self._deadlines: dict[str, float] = {}
         self._state_lock = asyncio.Lock()
 
     async def execute(self, run_id: str, owner: str) -> RuntimeRun:
@@ -183,6 +189,13 @@ class RuntimeCoordinator:
     def check_execution(self, run_id: str, owner: str, lease_version: int) -> None:
         self.fault_injector.hit("lease_lost")
         run = self.store.get_run(run_id)
+        if run.is_v11:
+            deadline = self._deadlines.get(run_id)
+            if deadline is None:
+                deadline = self._deadline_for(run)
+                self._deadlines[run_id] = deadline
+            if time.monotonic() >= deadline:
+                raise _RuntimeDeadlineExceeded
         if (
             run.status not in {RuntimeRunStatus.RUNNING, RuntimeRunStatus.CANCELLING}
             or run.lease_owner != owner
@@ -241,8 +254,11 @@ class RuntimeCoordinator:
                 # Trace context 是审计增强字段，写入失败不得改变 Run 生命周期。
                 logger.warning(
                     "attempt trace context persistence failed category=otel_context_persistence"
-                )
+        )
         try:
+            if run.is_v11:
+                self._deadlines[run.id] = self._deadline_for(run)
+            self.check_execution(run.id, owner, run.lease_version)
             await self._emit_start(run, attempt, owner)
             if recovery:
                 await self._emit_recovery_events(
@@ -264,7 +280,8 @@ class RuntimeCoordinator:
                 if recovery and run.token_budget is not None
                 else run.token_budget
             )
-            for phase in RUNTIME_PHASE_ORDER[start_index:]:
+            phase_profile = phase_profile_for(run.execution_contract_version)
+            for phase in phase_profile.order[start_index:]:
                 active_phase = phase
                 active_phase_scope = self.telemetry.span(
                     "runtime.phase",
@@ -302,6 +319,8 @@ class RuntimeCoordinator:
                         investigation_id=run.investigation_id,
                         strategy=run.strategy,
                         run_reason=run.run_reason,
+                        execution_contract_version=run.execution_contract_version,
+                        execution_contract=run.execution_contract,
                         model_provider=run.model_provider,
                         model_name=run.model_name,
                         prompt_version=run.prompt_version,
@@ -373,10 +392,33 @@ class RuntimeCoordinator:
                 self._phase_spans.pop(attempt.id, None)
                 active_phase_scope = None
                 active_phase = None
+            if (
+                run.is_v11
+                and self.store.investigation_repository.get(run.investigation_id).status.value
+                == "failed"
+            ):
+                await self._fail_if_owned(
+                    run.id,
+                    attempt,
+                    owner,
+                    run.lease_version,
+                    failure_category=RuntimeFailureCategory.OUTPUT_VALIDATION,
+                )
+                return self.store.get_run(run.id)
             await self._complete(run, attempt, owner)
             return self.store.get_run(run.id)
         except _RuntimeCancellationRequested:
             await self._finish_cancel(run.id, attempt, owner, run.lease_version)
+            return self.store.get_run(run.id)
+        except _RuntimeDeadlineExceeded:
+            await self._fail_if_owned(
+                run.id,
+                attempt,
+                owner,
+                run.lease_version,
+                phase=active_phase,
+                failure_category=RuntimeFailureCategory.TIMEOUT,
+            )
             return self.store.get_run(run.id)
         except asyncio.CancelledError:
             await self._finish_cancel(run.id, attempt, owner, run.lease_version)
@@ -419,6 +461,7 @@ class RuntimeCoordinator:
             async with self._state_lock:
                 self._active.pop(run.id, None)
                 self._local_cancel.pop(run.id, None)
+            self._deadlines.pop(run.id, None)
 
     async def _emit_start(self, run: RuntimeRun, attempt: RuntimeAttempt, owner: str) -> None:
         for event_type, actor in (
@@ -867,6 +910,7 @@ class RuntimeCoordinator:
         lease_version: int,
         *,
         phase: RuntimePhase | None = None,
+        failure_category: RuntimeFailureCategory = RuntimeFailureCategory.UNKNOWN,
     ) -> None:
         run = self.store.get_run(run_id)
         if run.status != RuntimeRunStatus.RUNNING:
@@ -881,7 +925,7 @@ class RuntimeCoordinator:
                         phase=phase,
                         safe_payload={
                             "status": "failed",
-                            "failure_category": RuntimeFailureCategory.UNKNOWN.value,
+                            "failure_category": failure_category.value,
                         },
                     )
                 )
@@ -891,7 +935,7 @@ class RuntimeCoordinator:
                     actor_type=RuntimeActorType.RUNTIME,
                     safe_payload={
                         "status": "failed",
-                        "failure_category": RuntimeFailureCategory.UNKNOWN.value,
+                        "failure_category": failure_category.value,
                     },
                 )
             )
@@ -906,9 +950,15 @@ class RuntimeCoordinator:
                     expected_attempt_status=RuntimeAttemptStatus.RUNNING,
                     target_attempt_status=RuntimeAttemptStatus.FAILED,
                     events=tuple(events),
-                    failure_category=RuntimeFailureCategory.UNKNOWN,
+                    failure_category=failure_category,
                 )
             )
+
+    @staticmethod
+    def _deadline_for(run: RuntimeRun) -> float:
+        started = run.started_at or run.created_at
+        elapsed = max(0.0, (datetime.now(UTC) - started).total_seconds())
+        return time.monotonic() + max(0.0, run.timeout_seconds - elapsed)
 
     async def _renew_loop(
         self,
@@ -1113,9 +1163,12 @@ class RuntimeCoordinator:
         if run.latest_checkpoint_id is None:
             return RuntimeResumeState(), 0
         checkpoint = self._validated_checkpoint(run)
+        order = phase_profile_for(run.execution_contract_version).order
+        if checkpoint.completed_phase not in order:
+            raise RuntimeConflict("checkpoint phase belongs to another execution profile")
         return (
             checkpoint.resume_state,
-            RUNTIME_PHASE_ORDER.index(checkpoint.completed_phase) + 1,
+            order.index(checkpoint.completed_phase) + 1,
         )
 
     def _running_attempt(self, run_id: str) -> RuntimeAttempt:

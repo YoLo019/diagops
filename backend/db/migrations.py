@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from sqlalchemy import delete, insert, inspect, select
+from sqlalchemy import delete, insert, inspect, select, update
 from sqlalchemy.engine import Connection
 
 from backend.db.schema import (
@@ -23,7 +23,7 @@ from backend.db.schema import (
     tool_calls,
 )
 
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 7
 Migration = Callable[[Connection], None]
 
 _V3_TABLES = {
@@ -52,6 +52,11 @@ _V6_ADDITIONS = {
     "runtime_checkpoints",
     "runtime_events",
     "runtime_runs",
+}
+_V7_RUNTIME_COLUMNS = {
+    "execution_contract_version",
+    "authority_mode",
+    "execution_contract",
 }
 
 
@@ -84,10 +89,59 @@ def migrate_v5_to_v6(connection: Connection) -> None:
         table.create(connection)
 
 
+def migrate_v6_to_v7(connection: Connection) -> None:
+    """为既有 Runtime 行补齐唯一的 V11 执行身份，不生成业务产物。"""
+    inspector = inspect(connection)
+    columns = {
+        column["name"] for column in inspector.get_columns(runtime_runs.name)
+    }
+    if "execution_contract_version" not in columns:
+        connection.exec_driver_sql(
+            "ALTER TABLE runtime_runs ADD COLUMN execution_contract_version "
+            "VARCHAR NOT NULL DEFAULT 'v10_legacy'"
+        )
+    if "authority_mode" not in columns:
+        connection.exec_driver_sql(
+            "ALTER TABLE runtime_runs ADD COLUMN authority_mode "
+            "VARCHAR NOT NULL DEFAULT 'legacy_deterministic'"
+        )
+    if "execution_contract" not in columns:
+        connection.exec_driver_sql(
+            "ALTER TABLE runtime_runs ADD COLUMN execution_contract "
+            "JSON NOT NULL DEFAULT '{}'"
+        )
+
+    rows = connection.execute(select(runtime_runs)).mappings().all()
+    for row in rows:
+        contract = {
+            "execution_contract_version": "v10_legacy",
+            "authority_mode": "legacy_deterministic",
+            "run_kind": row["run_kind"],
+            "run_reason": row["run_reason"],
+            "strategy": row["strategy"],
+            "model_provider": row["model_provider"],
+            "model_name": row["model_name"],
+            "prompt_version": row["prompt_version"],
+            "tool_budget": row["tool_budget"],
+            "token_budget": row["token_budget"],
+            "timeout_seconds": row["timeout_seconds"],
+        }
+        connection.execute(
+            update(runtime_runs)
+            .where(runtime_runs.c.id == row["id"])
+            .values(
+                execution_contract_version="v10_legacy",
+                authority_mode="legacy_deterministic",
+                execution_contract=contract,
+            )
+        )
+
+
 MIGRATIONS: dict[int, Migration] = {
     3: migrate_v3_to_v4,
     4: migrate_v4_to_v5,
     5: migrate_v5_to_v6,
+    6: migrate_v6_to_v7,
 }
 
 
@@ -105,10 +159,14 @@ def initialize_schema(connection: Connection) -> None:
         raise SchemaCompatibilityError("existing database has no schema_version")
 
     versions = set(connection.execute(select(schema_version.c.version)).scalars())
+    if versions == {CURRENT_SCHEMA_VERSION}:
+        _migrate_legacy_v6_runtime_timeout(connection)
+        _validate_physical_schema(connection, CURRENT_SCHEMA_VERSION)
+        return
     if versions not in ({3}, {4}, {3, 4}, {5}, {6}):
         raise SchemaCompatibilityError(f"unsupported schema version set: {sorted(versions)}")
     current = max(versions)
-    if current == 6:
+    if current in {6, CURRENT_SCHEMA_VERSION}:
         _migrate_legacy_v6_runtime_timeout(connection)
     _validate_physical_schema(connection, current, validate_indexes=False)
     while current < CURRENT_SCHEMA_VERSION:
@@ -173,6 +231,8 @@ def _validate_physical_schema(
             item["name"] for item in inspector.get_columns(table_name)
         }
         expected_columns = {column.name for column in expected_table.columns}
+        if version < 7 and table_name == runtime_runs.name:
+            expected_columns -= _V7_RUNTIME_COLUMNS
         if not expected_columns <= actual_columns:
             raise SchemaCompatibilityError(
                 f"table {table_name} missing columns: "

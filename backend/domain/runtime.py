@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -9,7 +11,12 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from backend.domain.multi_agent import InvestigationStrategy, ModelProvider
+from backend.domain.multi_agent import (
+    AuthorityMode,
+    ExecutionContractVersion,
+    InvestigationStrategy,
+    ModelProvider,
+)
 from backend.safety.redaction import redact_text, redact_value
 
 
@@ -32,6 +39,13 @@ class RuntimePhase(StrEnum):
     COORDINATION = "coordination"
     REPORT_GENERATION = "report_generation"
     FINALIZE = "finalize"
+    LEAD_PLANNING = "lead_planning"
+    INVESTIGATOR_ROUND_1 = "investigator_round_1"
+    CRITIC_REVIEW = "critic_review"
+    INVESTIGATOR_ROUND_2 = "investigator_round_2"
+    CRITIC_RECONCILIATION = "critic_reconciliation"
+    LEAD_ADJUDICATION = "lead_adjudication"
+    RESULT_VALIDATION = "result_validation"
 
 
 class RuntimeRunKind(StrEnum):
@@ -136,7 +150,59 @@ class RuntimeFailureCategory(StrEnum):
     MODEL_FAILURE = "model_failure"
     TIMEOUT = "timeout"
     OUTPUT_VALIDATION = "output_validation"
+    CONTRACT_INTEGRITY = "contract_integrity"
     UNKNOWN = "unknown"
+
+
+class RunOwnership(BaseModel):
+    investigation_id: str = Field(min_length=1)
+    runtime_run_id: str = Field(min_length=1)
+
+
+def execution_contract_digest(contract: dict[str, Any]) -> str:
+    """返回不含凭据的 execution contract 稳定摘要。"""
+    encoded = json.dumps(
+        contract,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _validate_contract_value(value: Any, path: str = "execution_contract") -> None:
+    if value is None or isinstance(value, (str, int, bool)):
+        return
+    if isinstance(value, float):
+        if not isfinite(value):
+            raise ValueError(f"{path} contains a non-finite number")
+        return
+    if isinstance(value, list):
+        if len(value) > 64:
+            raise ValueError(f"{path} exceeds the maximum item count")
+        for index, item in enumerate(value):
+            _validate_contract_value(item, f"{path}[{index}]")
+        return
+    if isinstance(value, dict):
+        if len(value) > 64:
+            raise ValueError(f"{path} exceeds the maximum item count")
+        for key, item in value.items():
+            if not isinstance(key, str) or not key or len(key) > 64:
+                raise ValueError(f"{path} contains an invalid key")
+            if key.lower().replace("-", "_") in {
+                "api_key",
+                "authorization",
+                "credential",
+                "password",
+                "secret",
+                "prompt",
+                "reasoning",
+            }:
+                raise ValueError(f"{path} contains prohibited key: {key}")
+            _validate_contract_value(item, f"{path}.{key}")
+        return
+    raise ValueError(f"{path} contains an unsupported value")
 
 
 ALLOWED_TRANSITIONS: dict[RuntimeRunStatus, frozenset[RuntimeRunStatus]] = {
@@ -198,6 +264,9 @@ class RuntimeRun(RuntimeModel):
     lease_owner: str | None = None
     lease_expires_at: datetime | None = None
     lease_version: int = Field(default=0, ge=0)
+    execution_contract_version: ExecutionContractVersion = ExecutionContractVersion.V10_LEGACY
+    authority_mode: AuthorityMode = AuthorityMode.LEGACY_DETERMINISTIC
+    execution_contract: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("model_name", "prompt_version")
     @classmethod
@@ -230,6 +299,73 @@ class RuntimeRun(RuntimeModel):
         elif self.parent_run_id is None:
             raise ValueError("additional and manual runs require a parent")
         return self
+
+    @model_validator(mode="after")
+    def validate_execution_identity(self) -> RuntimeRun:
+        if not self.execution_contract:
+            self.execution_contract = self._legacy_contract()
+        _validate_contract_value(self.execution_contract)
+        if self.execution_contract_version == ExecutionContractVersion.V11:
+            if self.authority_mode != AuthorityMode.AGENT:
+                raise ValueError("V11 runs require agent authority")
+            required = {
+                "model_provider",
+                "model_name",
+                "prompt_version",
+                "tool_budget",
+                "token_budget",
+                "timeout_seconds",
+            }
+            if not required <= self.execution_contract.keys():
+                raise ValueError("V11 execution contract is incomplete")
+            if self.timeout_seconds > 120:
+                raise ValueError("V11 timeout_seconds exceeds the hard deadline")
+        elif self.authority_mode != AuthorityMode.LEGACY_DETERMINISTIC:
+            raise ValueError("legacy execution contracts require legacy authority")
+        contract_version = self.execution_contract.get("execution_contract_version")
+        if (
+            contract_version is not None
+            and contract_version != self.execution_contract_version.value
+        ):
+            raise ValueError("execution contract version mismatch")
+        contract_authority = self.execution_contract.get("authority_mode")
+        if contract_authority is not None and contract_authority != self.authority_mode.value:
+            raise ValueError("execution contract authority mismatch")
+        for field_name in (
+            "model_provider",
+            "model_name",
+            "prompt_version",
+            "tool_budget",
+            "token_budget",
+            "timeout_seconds",
+        ):
+            if field_name in self.execution_contract:
+                expected = getattr(self, field_name)
+                actual = self.execution_contract[field_name]
+                if isinstance(expected, StrEnum):
+                    expected = expected.value
+                if actual != expected:
+                    raise ValueError(f"execution contract projection mismatch: {field_name}")
+        return self
+
+    def _legacy_contract(self) -> dict[str, Any]:
+        return {
+            "execution_contract_version": ExecutionContractVersion.V10_LEGACY.value,
+            "authority_mode": AuthorityMode.LEGACY_DETERMINISTIC.value,
+            "run_kind": self.run_kind.value,
+            "run_reason": self.run_reason.value,
+            "strategy": self.strategy.value,
+            "model_provider": self.model_provider.value if self.model_provider else None,
+            "model_name": self.model_name,
+            "prompt_version": self.prompt_version,
+            "tool_budget": self.tool_budget,
+            "token_budget": self.token_budget,
+            "timeout_seconds": self.timeout_seconds,
+        }
+
+    @property
+    def is_v11(self) -> bool:
+        return self.execution_contract_version == ExecutionContractVersion.V11
 
 
 class RuntimeAttempt(RuntimeModel):

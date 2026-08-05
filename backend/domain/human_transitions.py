@@ -49,6 +49,7 @@ def validate_action_transition(
     action = next((item for item in record.actions if item.id == action_id), None)
     if action is None:
         raise ValueError(f"Unknown action: {action_id}")
+    _validate_runtime_owner(record, action)
     target = ActionStatus(target)
     allowed = (
         {
@@ -106,6 +107,7 @@ def validate_verification_transition(
     )
     if verification is None:
         raise ValueError(f"Unknown verification suggestion: {verification_id}")
+    _validate_runtime_owner(record, verification)
     target = VerificationStatus(target)
     if verification.status != VerificationStatus.PENDING or target not in {
         VerificationStatus.PASSED,
@@ -159,3 +161,11 @@ def validate_verification_transition(
             "related_cause_types": list(dict.fromkeys(cause_types)),
         }
     )
+
+
+def _validate_runtime_owner(record: InvestigationRecord, projection: object) -> None:
+    active_owner = getattr(record, "active_runtime_run_id", None)
+    projection_owner = getattr(projection, "runtime_run_id", None)
+    if active_owner is not None or projection_owner is not None:
+        if active_owner != projection_owner:
+            raise ValueError("projection owner mismatch")

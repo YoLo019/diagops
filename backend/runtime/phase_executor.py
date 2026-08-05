@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
 from backend.db.models import InvestigationRecord, InvestigationStatus
@@ -21,13 +21,18 @@ from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem
 from backend.domain.hypotheses import Hypothesis
 from backend.domain.multi_agent import (
+    ExecutionContractVersion,
     FailureCategory,
     InvestigationStrategy,
     ResultValidationCategory,
 )
 from backend.domain.runtime import RuntimePhase, RuntimeResumeState, RuntimeRunReason
 from backend.runtime.concurrency import RunStepGate
-from backend.runtime.phases import RUNTIME_PHASE_ORDER, BusinessMutation, PhaseOutput
+from backend.runtime.phases import (
+    BusinessMutation,
+    PhaseOutput,
+    phase_profile_for,
+)
 from backend.runtime.telemetry import RuntimeTelemetry
 from backend.safety.redaction import redact_model, safe_failure
 
@@ -39,12 +44,14 @@ class _DiagnosisState:
     event: IncidentEvent
     strategy: InvestigationStrategy
     run_reason: RuntimeRunReason = RuntimeRunReason.INITIAL
+    runtime_run_id: str | None = None
     safe_event: IncidentEvent | None = None
     record: InvestigationRecord | None = None
     supporting_evidence: list[EvidenceItem] = field(default_factory=list)
     hypotheses: list[Hypothesis] = field(default_factory=list)
     v7_result: object | None = None
     session_tool_budget: int | None = None
+    session_token_budget: int | None = None
     preexisting_terminal_tool_ids: frozenset[str] = frozenset()
     check_execution: Callable[[], None] = field(default=lambda: None)
     hit_fault: Callable[[str], None] = field(default=lambda _point: None)
@@ -79,6 +86,7 @@ class DiagnosisPhaseExecutor:
         self._durable_sessions: dict[str, DiagnosisPhaseExecutor] = {}
         self._durable_attempt_ids: dict[str, str] = {}
         self._is_durable_session = False
+        self._execution_contract_version = ExecutionContractVersion.V10_LEGACY
         self._handlers: dict[
             RuntimePhase, Callable[[_DiagnosisState], Awaitable[PhaseOutput]]
         ] = {
@@ -90,6 +98,21 @@ class DiagnosisPhaseExecutor:
             RuntimePhase.COORDINATION: self.coordination,
             RuntimePhase.REPORT_GENERATION: self.report_generation,
             RuntimePhase.FINALIZE: self.finalize,
+        }
+        self._v11_handlers: dict[
+            RuntimePhase, Callable[[_DiagnosisState], Awaitable[PhaseOutput]]
+        ] = {
+            RuntimePhase.INTAKE: self._v11_intake,
+            RuntimePhase.EVIDENCE_COLLECTION: self._v11_pass,
+            RuntimePhase.LEAD_PLANNING: self._v11_pass,
+            RuntimePhase.INVESTIGATOR_ROUND_1: self._v11_pass,
+            RuntimePhase.CRITIC_REVIEW: self._v11_pass,
+            RuntimePhase.INVESTIGATOR_ROUND_2: self._v11_skip,
+            RuntimePhase.CRITIC_RECONCILIATION: self._v11_skip,
+            RuntimePhase.LEAD_ADJUDICATION: self._v11_pass,
+            RuntimePhase.RESULT_VALIDATION: self._v11_pass,
+            RuntimePhase.REPORT_GENERATION: self._v11_pass,
+            RuntimePhase.FINALIZE: self._v11_finalize,
         }
 
     async def execute_phase(self, phase_input) -> PhaseOutput:
@@ -105,6 +128,7 @@ class DiagnosisPhaseExecutor:
                 self._durable_sessions[phase_input.run_id] = executor
                 self._durable_attempt_ids[phase_input.run_id] = phase_input.attempt_id
             executor._bind_phase_callbacks(phase_input)
+            executor._execution_contract_version = phase_input.execution_contract_version
             output = await executor.execute_phase(phase_input)
             if phase_input.phase == RuntimePhase.FINALIZE:
                 self._durable_sessions.pop(phase_input.run_id, None)
@@ -114,7 +138,9 @@ class DiagnosisPhaseExecutor:
         if state is None:
             state = self._rehydrate_runtime_state(phase_input)
             self._runtime_states[phase_input.run_id] = state
-        if phase_input.phase == RuntimePhase.INTAKE:
+        if phase_input.execution_contract_version == ExecutionContractVersion.V11:
+            output = await self._v11_handlers[phase_input.phase](state)
+        elif phase_input.phase == RuntimePhase.INTAKE:
             output = await self._intake_existing(state)
         else:
             output = await self._handlers[phase_input.phase](state)
@@ -234,7 +260,15 @@ class DiagnosisPhaseExecutor:
         self,
         event: IncidentEvent,
         strategy: InvestigationStrategy | None = None,
+        execution_contract_version: ExecutionContractVersion = (
+            ExecutionContractVersion.V10_LEGACY
+        ),
     ) -> DiagnosisPhaseResult:
+        if (
+            ExecutionContractVersion(execution_contract_version)
+            == ExecutionContractVersion.V11
+        ):
+            raise ValueError("V11 execution requires a persisted RuntimeRun")
         state = _DiagnosisState(
             event=event,
             strategy=InvestigationStrategy(
@@ -243,7 +277,9 @@ class DiagnosisPhaseExecutor:
         )
         outputs: dict[RuntimePhase, PhaseOutput] = {}
         try:
-            for phase in RUNTIME_PHASE_ORDER:
+            for phase in phase_profile_for(
+                self._execution_contract_version
+            ).order:
                 outputs[phase] = await self._handlers[phase](state)
         except asyncio.CancelledError:
             if state.record is not None:
@@ -296,6 +332,61 @@ class DiagnosisPhaseExecutor:
             record.id, InvestigationStatus.RUNNING
         )
         return self._output(state, status="completed")
+
+    async def _v11_intake(self, state: _DiagnosisState) -> PhaseOutput:
+        if state.runtime_run_id is None:
+            raise ValueError("V11 intake requires a persisted runtime run")
+        output = await self._intake_existing(state)
+        mutation = output.business_mutation
+        if mutation.investigation is None:
+            raise ValueError("V11 intake requires an investigation projection")
+        activated = self._orchestrator.repository.activate_projection(
+            mutation.investigation.id,
+            state.runtime_run_id,
+        )
+        state.record = activated
+        return replace(
+            output,
+            business_mutation=replace(
+                mutation,
+                investigation=activated,
+                plan=None,
+                tasks=None,
+                context_facts=None,
+                tool_calls=None,
+                findings=(),
+                executions=(),
+                review=None,
+                react_trace=None,
+                replace_multi_agent_result=True,
+                activate_projection=True,
+            ),
+        )
+
+    async def _v11_pass(self, state: _DiagnosisState) -> PhaseOutput:
+        return self._output(state)
+
+    async def _v11_skip(self, state: _DiagnosisState) -> PhaseOutput:
+        return self._output(state, status="skipped")
+
+    async def _v11_finalize(self, state: _DiagnosisState) -> PhaseOutput:
+        record, _ = self._required(state)
+        status = (
+            record.multi_agent_run.diagnostic_status
+            if record.multi_agent_run is not None
+            else None
+        )
+        if status is not None:
+            state.record = self._orchestrator.repository.update_status(
+                record.id, InvestigationStatus.COMPLETED
+            )
+        else:
+            state.record = self._orchestrator.repository.update_status(
+                record.id,
+                InvestigationStatus.FAILED,
+                failure_reason="v11 diagnostic status is missing",
+            )
+        return self._output(state)
 
     async def _intake_existing(self, state: _DiagnosisState) -> PhaseOutput:
         record, safe_event = self._required(state)
@@ -648,10 +739,14 @@ class DiagnosisPhaseExecutor:
                     - state.preexisting_terminal_tool_ids
                 ),
             ),
-            remaining_token_budget=getattr(
-                self._orchestrator.agents_runtime,
-                "runtime_token_budget",
-                None,
+            remaining_token_budget=(
+                state.session_token_budget
+                if state.session_token_budget is not None
+                else getattr(
+                    self._orchestrator.agents_runtime,
+                    "runtime_token_budget",
+                    None,
+                )
             ),
             successful_tool_keys=sorted(
                 {
@@ -707,11 +802,13 @@ class DiagnosisPhaseExecutor:
             event=record.event,
             strategy=InvestigationStrategy(phase_input.strategy),
             run_reason=phase_input.run_reason,
+            runtime_run_id=phase_input.run_id,
             safe_event=redact_model(record.event),
             record=record,
             supporting_evidence=supporting_evidence,
             hypotheses=list(record.hypotheses),
             session_tool_budget=phase_input.tool_budget,
+            session_token_budget=phase_input.token_budget,
             preexisting_terminal_tool_ids=preexisting_terminal_tool_ids,
             check_execution=phase_input.check_execution or (lambda: None),
             hit_fault=phase_input.hit_fault or (lambda _point: None),

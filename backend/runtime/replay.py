@@ -618,6 +618,12 @@ class ReplayService:
                 model_provider=source.model_provider,
                 model_name=source.model_name,
                 prompt_version=source.prompt_version,
+                tool_budget=source.tool_budget,
+                token_budget=source.token_budget,
+                timeout_seconds=source.timeout_seconds,
+                execution_contract_version=source.execution_contract_version,
+                authority_mode=source.authority_mode,
+                execution_contract=source.execution_contract,
                 failure_category=(None if not errors else RuntimeFailureCategory.OUTPUT_VALIDATION),
                 completed_at=datetime.now(UTC),
             )

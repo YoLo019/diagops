@@ -1,7 +1,7 @@
 from enum import StrEnum
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, model_serializer, model_validator
 
 from backend.domain.hypotheses import CauseType
 
@@ -49,6 +49,8 @@ class RecommendedAction(BaseModel):
     supporting_evidence_ids: list[str]
     status: ActionStatus = ActionStatus.PROPOSED
     note: str | None = None
+    related_candidate_ids: list[str] = Field(default_factory=list, max_length=32)
+    runtime_run_id: str | None = None
 
     @model_validator(mode="after")
     def validate_action_contract(self) -> "RecommendedAction":
@@ -60,7 +62,18 @@ class RecommendedAction(BaseModel):
         }
         if needs_approval and not self.requires_approval:
             raise ValueError("medium and high risk actions require approval")
+        if self.related_candidate_ids and self.runtime_run_id is None:
+            raise ValueError("V11 action candidates require runtime_run_id")
         return self
+
+    @model_serializer(mode="wrap")
+    def serialize_legacy_payload(self, handler):
+        data = handler(self)
+        if self.runtime_run_id is None:
+            for field_name in ("related_candidate_ids", "runtime_run_id"):
+                if field_name not in self.model_fields_set:
+                    data.pop(field_name, None)
+        return data
 
 
 class VerificationSuggestion(BaseModel):
@@ -73,3 +86,20 @@ class VerificationSuggestion(BaseModel):
     result_evidence_ids: list[str] = Field(default_factory=list)
     related_action_ids: list[str] = Field(default_factory=list)
     related_cause_types: list[CauseType] = Field(default_factory=list)
+    related_candidate_ids: list[str] = Field(default_factory=list, max_length=32)
+    runtime_run_id: str | None = None
+
+    @model_validator(mode="after")
+    def validate_runtime_owner(self) -> "VerificationSuggestion":
+        if self.related_candidate_ids and self.runtime_run_id is None:
+            raise ValueError("V11 verification candidates require runtime_run_id")
+        return self
+
+    @model_serializer(mode="wrap")
+    def serialize_legacy_payload(self, handler):
+        data = handler(self)
+        if self.runtime_run_id is None:
+            for field_name in ("related_candidate_ids", "runtime_run_id"):
+                if field_name not in self.model_fields_set:
+                    data.pop(field_name, None)
+        return data

@@ -32,6 +32,15 @@ _PROVIDER_BY_TOOL = {
     "query_dependencies": EvidenceProvider.DEPENDENCY,
 }
 
+_LEGACY_EVIDENCE_PROVIDERS = (
+    EvidenceProvider.LOG,
+    EvidenceProvider.METRIC,
+    EvidenceProvider.DEPLOY,
+    EvidenceProvider.DEPENDENCY,
+    EvidenceProvider.SERVICE_CATALOG,
+    EvidenceProvider.RELATED_ALERT,
+)
+
 
 class ProviderRegistry:
     def __init__(
@@ -113,7 +122,7 @@ class ProviderRegistry:
                 status=ProviderStatus.SKIPPED,
                 error_message=f"{provider.value} provider not configured",
             )
-            for provider in EvidenceProvider
+            for provider in _LEGACY_EVIDENCE_PROVIDERS
             if provider not in configured
         )
         return results

@@ -55,7 +55,7 @@ _V4_TABLES = (
 
 
 @pytest.mark.parametrize("historical_version", [3, 4])
-def test_historical_schema_migrates_to_v6_and_preserves_rows(
+def test_historical_schema_migrates_to_v7_and_preserves_rows(
     tmp_path, historical_version: int
 ) -> None:
     engine = create_db_engine(f"sqlite:///{tmp_path / f'v{historical_version}.db'}")
@@ -75,10 +75,10 @@ def test_historical_schema_migrates_to_v6_and_preserves_rows(
     restored = SQLiteInvestigationRepository(engine).get("inv-history")
     assert restored.event.title == "history"
     assert restored.strategy == InvestigationStrategy.FIXED
-    assert CURRENT_SCHEMA_VERSION == 6
+    assert CURRENT_SCHEMA_VERSION == 7
 
 
-def test_v4_schema_with_single_current_marker_migrates_to_v6(tmp_path) -> None:
+def test_v4_schema_with_single_current_marker_migrates_to_v7(tmp_path) -> None:
     engine = create_db_engine(f"sqlite:///{tmp_path / 'v4-single-marker.db'}")
     _create_historical_schema(engine, 4)
     with engine.begin() as connection:
@@ -97,7 +97,7 @@ def test_v4_schema_with_single_current_marker_migrates_to_v6(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("database_url", ["sqlite:///:memory:", "file"])
-def test_fresh_database_reaches_v6_and_enforces_foreign_keys(
+def test_fresh_database_reaches_v7_and_enforces_foreign_keys(
     tmp_path, database_url: str
 ) -> None:
     if database_url == "file":
@@ -108,7 +108,7 @@ def test_fresh_database_reaches_v6_and_enforces_foreign_keys(
 
     with engine.connect() as connection:
         assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
-        assert connection.execute(select(schema_version.c.version)).scalars().all() == [6]
+        assert connection.execute(select(schema_version.c.version)).scalars().all() == [7]
     with engine.begin() as connection:
         with pytest.raises(IntegrityError):
             connection.execute(

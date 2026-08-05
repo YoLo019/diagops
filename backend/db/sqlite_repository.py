@@ -37,7 +37,7 @@ from backend.db.schema import (
 from backend.db.serialization import record_to_rows, rows_to_record
 from backend.domain.actions import ActionStatus, VerificationStatus
 from backend.domain.agent_context import ContextFact
-from backend.domain.agent_findings import AgentFinding, CoordinationReview
+from backend.domain.agent_findings import AgentFinding, CoordinationReview, FindingActor
 from backend.domain.agent_plan import AgentExecution, DiagnosisPlan, DiagnosisTask
 from backend.domain.human_transitions import (
     validate_action_transition,
@@ -118,6 +118,63 @@ class SQLiteInvestigationRepository:
             )
         return record
 
+    def activate_projection(
+        self, investigation_id: str, runtime_run_id: str
+    ) -> InvestigationRecord:
+        with self.engine.begin() as connection:
+            return self.activate_projection_with_connection(
+                connection, investigation_id, runtime_run_id
+            )
+
+    def activate_projection_with_connection(
+        self,
+        connection: Connection,
+        investigation_id: str,
+        runtime_run_id: str,
+    ) -> InvestigationRecord:
+        """在业务事务内切换 owner，并清理所有 latest 诊断子投影。"""
+        record = self._get_with_connection(connection, investigation_id)
+        if (
+            record.active_runtime_run_id is not None
+            and record.active_runtime_run_id != runtime_run_id
+            and record.status
+            not in {
+                InvestigationStatus.COMPLETED,
+                InvestigationStatus.FAILED,
+                InvestigationStatus.CANCELLED,
+            }
+        ):
+            raise ValueError("active projection owner is still running")
+        cleared = record.model_copy(
+            update={
+                "active_runtime_run_id": runtime_run_id,
+                "evidence": [],
+                "provider_results": [],
+                "specialist_results": [],
+                "hypotheses": [],
+                "report": None,
+                "llm_analysis": None,
+                "multi_agent_run": None,
+                "actions": [],
+                "verification_suggestions": [],
+            }
+        )
+        self.save_with_connection(connection, cleared)
+        for table in (
+            diagnosis_plans,
+            diagnosis_tasks,
+            agent_executions,
+            context_facts,
+            tool_calls,
+            agent_findings,
+            coordination_reviews,
+            react_traces,
+        ):
+            connection.execute(
+                delete(table).where(table.c.investigation_id == investigation_id)
+            )
+        return cleared
+
     def get(self, investigation_id: str) -> InvestigationRecord:
         with self.engine.connect() as connection:
             return self._get_with_connection(connection, investigation_id)
@@ -171,14 +228,29 @@ class SQLiteInvestigationRepository:
         for row in rows:
             event = row["event"]
             top = row["top_hypothesis"]
+            run_summary = event.get("_diagops_multi_agent_run") or {}
             summaries.append(
                 InvestigationSummary(
                     id=row["id"],
                     status=row["status"],
                     service=redact_text(event["service"]),
                     title=redact_text(event["title"]),
+                    strategy=event.get(
+                        "_diagops_investigation_strategy", "fixed"
+                    ),
                     top_cause_type=top["cause_type"] if top else "unknown",
                     confidence=top["confidence"] if top else 0.0,
+                    top_affected_entity=(
+                        top.get("affected_entity") if top else None
+                    ),
+                    top_failure_mechanism=(
+                        top.get("failure_mechanism") if top else None
+                    ),
+                    diagnostic_status=run_summary.get("diagnostic_status"),
+                    authority_mode=run_summary.get("authority_mode"),
+                    active_runtime_run_id=event.get(
+                        "_diagops_active_runtime_run_id"
+                    ),
                     action_count=row["action_count"],
                     verification_count=row["verification_count"],
                     failure_reason=(
@@ -469,14 +541,43 @@ class SQLiteInvestigationRepository:
         investigation_id: str,
         findings: Sequence[AgentFinding],
     ) -> list[AgentFinding]:
+        validated = [
+            AgentFinding.model_validate(item.model_dump(mode="python"))
+            for item in findings
+        ]
+        if any(item.investigation_id != investigation_id for item in validated):
+            raise ValueError("Agent finding investigation mismatch")
+        existing = {
+            item.id: item for item in self.list_agent_findings(investigation_id)
+        }
+        all_findings = {**existing, **{item.id: item for item in validated}}
+        tasks = {task.id: task for task in self.list_tasks(investigation_id)}
+        review = self.get_coordination_review(investigation_id)
+        for finding in validated:
+            if finding.analysis_round == 2 and finding.agent_name != FindingActor.INVESTIGATOR:
+                previous = all_findings.get(finding.revises_finding_id or "")
+                if previous is None or previous.agent_name != finding.agent_name:
+                    raise ValueError("legacy round-two finding must revise the same actor")
+            if finding.agent_name == FindingActor.INVESTIGATOR:
+                task = tasks.get(finding.task_id or "")
+                if task is None or task.runtime_run_id != finding.runtime_run_id:
+                    raise ValueError("V11 finding task ownership mismatch")
+                if finding.analysis_round == 2:
+                    assessment_ids = {
+                        assessment.id for assessment in review.critic_assessments
+                    } if review is not None else set()
+                    if finding.critic_assessment_id not in assessment_ids:
+                        raise ValueError("V11 finding Critic assessment ownership mismatch")
+                if review is not None and review.runtime_run_id != finding.runtime_run_id:
+                    raise ValueError("V11 finding and review owner mismatch")
         rows = []
-        for finding in findings:
+        for finding in validated:
             row = self._agent_payload_row(investigation_id, finding, status=None)
             row["agent_name"] = row["payload"]["agent_name"]
             rows.append(row)
         with self.engine.begin() as connection:
             self._upsert_payload_rows(connection, agent_findings, rows)
-        return list(findings)
+        return validated
 
     def list_agent_findings(self, investigation_id: str) -> list[AgentFinding]:
         with self.engine.connect() as connection:
@@ -599,6 +700,37 @@ class SQLiteInvestigationRepository:
                 )
             ).mappings().one_or_none()
         return None if row is None else ReActTrace.model_validate(row["payload"])
+
+    def save_v11_react_trace(self, trace: ReActTrace) -> ReActTrace:
+        """只在 V11 writer 路径保存结构化、同一 run 的 ReAct 摘要。"""
+        if trace.runtime_run_id is None or any(
+            step.runtime_run_id != trace.runtime_run_id
+            or step.assistant_text is not None
+            for step in trace.steps
+        ):
+            raise ValueError("V11 ReAct trace requires structured same-run steps")
+        with self.engine.begin() as connection:
+            self.save_v11_react_trace_with_connection(connection, trace)
+        return trace
+
+    def save_v11_react_trace_with_connection(
+        self, connection: Connection, trace: ReActTrace
+    ) -> ReActTrace:
+        """在调用方事务内保存 V11 ReAct 摘要，保持 checkpoint 原子性。"""
+        payload = trace.model_dump(mode="json")
+        row = {
+            "id": trace.id,
+            "investigation_id": trace.investigation_id,
+            "created_at": payload["created_at"],
+            "payload": payload,
+        }
+        connection.execute(
+            delete(react_traces).where(
+                react_traces.c.investigation_id == trace.investigation_id
+            )
+        )
+        connection.execute(insert(react_traces).values(row))
+        return trace
 
     def _replace_children(
         self,

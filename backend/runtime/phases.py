@@ -18,7 +18,12 @@ from backend.db.sqlite_repository import SQLiteInvestigationRepository
 from backend.domain.agent_context import ContextFact
 from backend.domain.agent_findings import AgentFinding, CoordinationReview
 from backend.domain.agent_plan import AgentExecution, DiagnosisPlan, DiagnosisTask
-from backend.domain.multi_agent import InvestigationStrategy, ModelProvider
+from backend.domain.multi_agent import (
+    ExecutionContractVersion,
+    InvestigationStrategy,
+    ModelProvider,
+)
+from backend.domain.react_trace import ReActTrace
 from backend.domain.runtime import RuntimePhase, RuntimeResumeState, RuntimeRunReason
 from backend.domain.tool_calls import ToolCallRecord, ToolCallStatus
 from backend.tools.registry import ToolInvocationResult
@@ -33,6 +38,10 @@ class PhaseInput:
     investigation_id: str | None = None
     strategy: InvestigationStrategy | None = None
     run_reason: RuntimeRunReason = RuntimeRunReason.INITIAL
+    execution_contract_version: ExecutionContractVersion = (
+        ExecutionContractVersion.V10_LEGACY
+    )
+    execution_contract: dict[str, Any] | None = None
     model_provider: ModelProvider | None = None
     model_name: str | None = None
     prompt_version: str | None = None
@@ -73,13 +82,24 @@ class BusinessMutation:
     findings: tuple[AgentFinding, ...] | None = None
     executions: tuple[AgentExecution, ...] | None = None
     review: CoordinationReview | None = None
+    react_trace: ReActTrace | None = None
     replace_multi_agent_result: bool = False
+    activate_projection: bool = False
 
     def apply_memory(self, repository: InMemoryInvestigationRepository) -> None:
         self._validate_investigation_record()
         repository.get(self.investigation_id)
+        if self.activate_projection:
+            owner = (
+                self.investigation.active_runtime_run_id
+                if self.investigation is not None
+                else None
+            )
+            if owner is None:
+                raise ValueError("projection activation requires a runtime owner")
+            repository.activate_projection(self.investigation_id, owner)
         if self.investigation is not None:
-            repository.save(self.investigation)
+            repository.save(self._projection_record())
         if self.plan is not None:
             repository.save_plan(self.plan)
         if self.tasks is not None:
@@ -88,6 +108,8 @@ class BusinessMutation:
             repository.save_context_facts(
                 self.investigation_id, list(self.context_facts)
             )
+        if self.react_trace is not None:
+            repository.save_v11_react_trace(self.react_trace)
         if self.tool_calls is not None:
             repository.save_tool_calls(self.investigation_id, list(self.tool_calls))
         if self.replace_multi_agent_result:
@@ -111,8 +133,19 @@ class BusinessMutation:
         ).scalar_one_or_none()
         if exists is None:
             raise ValueError(f"Unknown investigation: {self.investigation_id}")
+        if self.activate_projection:
+            owner = (
+                self.investigation.active_runtime_run_id
+                if self.investigation is not None
+                else None
+            )
+            if owner is None:
+                raise ValueError("projection activation requires a runtime owner")
+            repository.activate_projection_with_connection(
+                connection, self.investigation_id, owner
+            )
         if self.investigation is not None:
-            repository.save_with_connection(connection, self.investigation)
+            repository.save_with_connection(connection, self._projection_record())
         if self.plan is not None:
             repository.save_plan_with_connection(connection, self.plan)
         if self.tasks is not None:
@@ -122,6 +155,10 @@ class BusinessMutation:
         if self.context_facts is not None:
             repository.save_context_facts_with_connection(
                 connection, self.investigation_id, self.context_facts
+            )
+        if self.react_trace is not None:
+            repository.save_v11_react_trace_with_connection(
+                connection, self.react_trace
             )
         if self.tool_calls is not None:
             repository.save_tool_calls_with_connection(
@@ -142,6 +179,23 @@ class BusinessMutation:
             and self.investigation.id != self.investigation_id
         ):
             raise ValueError("business mutation investigation mismatch")
+
+    def _projection_record(self) -> InvestigationRecord:
+        if not self.activate_projection or self.investigation is None:
+            return self.investigation
+        return self.investigation.model_copy(
+            update={
+                "evidence": [],
+                "provider_results": [],
+                "specialist_results": [],
+                "hypotheses": [],
+                "report": None,
+                "llm_analysis": None,
+                "multi_agent_run": None,
+                "actions": [],
+                "verification_suggestions": [],
+            }
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,7 +230,7 @@ class PhaseCommit:
             raise ValueError("phase commit status must be completed or skipped")
 
 
-RUNTIME_PHASE_ORDER: tuple[RuntimePhase, ...] = (
+V10_PHASE_ORDER: tuple[RuntimePhase, ...] = (
     RuntimePhase.INTAKE,
     RuntimePhase.EVIDENCE_COLLECTION,
     RuntimePhase.DETERMINISTIC_RCA,
@@ -187,22 +241,76 @@ RUNTIME_PHASE_ORDER: tuple[RuntimePhase, ...] = (
     RuntimePhase.FINALIZE,
 )
 
+V11_PHASE_ORDER: tuple[RuntimePhase, ...] = (
+    RuntimePhase.INTAKE,
+    RuntimePhase.EVIDENCE_COLLECTION,
+    RuntimePhase.LEAD_PLANNING,
+    RuntimePhase.INVESTIGATOR_ROUND_1,
+    RuntimePhase.CRITIC_REVIEW,
+    RuntimePhase.INVESTIGATOR_ROUND_2,
+    RuntimePhase.CRITIC_RECONCILIATION,
+    RuntimePhase.LEAD_ADJUDICATION,
+    RuntimePhase.RESULT_VALIDATION,
+    RuntimePhase.REPORT_GENERATION,
+    RuntimePhase.FINALIZE,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class PhaseProfile:
+    version: ExecutionContractVersion
+    order: tuple[RuntimePhase, ...]
+    handler_names: tuple[str, ...]
+    ui_labels: tuple[tuple[str, str], ...]
+
+
+_V10_PROFILE = PhaseProfile(
+    version=ExecutionContractVersion.V10_LEGACY,
+    order=V10_PHASE_ORDER,
+    handler_names=tuple(phase.value for phase in V10_PHASE_ORDER),
+    ui_labels=tuple((phase.value, phase.value) for phase in V10_PHASE_ORDER),
+)
+_V11_PROFILE = PhaseProfile(
+    version=ExecutionContractVersion.V11,
+    order=V11_PHASE_ORDER,
+    handler_names=tuple(phase.value for phase in V11_PHASE_ORDER),
+    ui_labels=tuple((phase.value, phase.value) for phase in V11_PHASE_ORDER),
+)
+
+
+def phase_profile_for(
+    version: ExecutionContractVersion | str,
+) -> PhaseProfile:
+    """只按持久化执行版本选择 phase，避免 current config 串线。"""
+    version = ExecutionContractVersion(version)
+    return _V11_PROFILE if version == ExecutionContractVersion.V11 else _V10_PROFILE
+
+
+def phase_order_for(
+    version: ExecutionContractVersion | str,
+) -> tuple[RuntimePhase, ...]:
+    return phase_profile_for(version).order
+
+
+RUNTIME_PHASE_ORDER = V10_PHASE_ORDER
+
 
 def ensure_phase_precondition(
     *,
     current_phase: RuntimePhase | None,
     latest_checkpoint_id: str | None,
     commit: PhaseCommit,
+    phase_order: tuple[RuntimePhase, ...] = V10_PHASE_ORDER,
 ) -> None:
     """用 checkpoint CAS 与稳定 Phase 顺序拒绝重复或越级提交。"""
     if commit.expected_checkpoint_id != latest_checkpoint_id:
         raise ValueError("phase checkpoint compare-and-set failed")
     if commit.expected_previous_phase != current_phase:
         raise ValueError("phase predecessor changed")
-    expected_index = 0 if current_phase is None else RUNTIME_PHASE_ORDER.index(current_phase) + 1
+    expected_index = 0 if current_phase is None else phase_order.index(current_phase) + 1
     if (
-        expected_index >= len(RUNTIME_PHASE_ORDER)
-        or RUNTIME_PHASE_ORDER[expected_index] != commit.phase
+        expected_index >= len(phase_order)
+        or phase_order[expected_index] != commit.phase
     ):
         raise ValueError("phase commit is duplicate or out of order")
 

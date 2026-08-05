@@ -4,7 +4,7 @@ This file is the mutable routing and status entry point for the current version.
 
 It does not override an approved spec or plan, current code contracts, or the long-term product goal and production safety boundary in `AGENT.md`.
 
-Updated: 2026-08-04
+Updated: 2026-08-05
 
 ## Implemented Baseline
 
@@ -35,17 +35,17 @@ authority for a general-purpose SRE workflow while preserving the existing
 read-only safety, durable runtime, historical records, and benchmark-neutral
 provider contracts.
 
-Iteration status: `implementing`
+Iteration status: `verifying`
 
 Spec status: `approved`
 
 Plan status: `approved`
 
-Implementation status: `in_progress`
+Implementation status: `verifying`
 
 Completion commit: `none`
 
-Verification evidence: `none`
+Verification evidence: `M1/T2–T3 focused RED→GREEN tests and scoped Ruff are green; independent migration/runtime review remains pending`
 
 Blocker: `none`
 
@@ -84,11 +84,11 @@ docs/superpowers/plans/2026-08-02-diagops-v11-adaptive-multi-agent-rca-implement
 
 ## V11 Planning Dashboard
 
-Overall progress: `V11 Spec/Plan approved, execution authorized 2026-08-02; M0/T1 done：真实 RCAEval RE2 全链路完成（byte-verified 双向对账 2700/2700、真实 prepare runtime manifest_hash bb119fc9…/150 cases/26 GB、二次 prepare diff -r 零差异字节等价）；M0 exit review 2026-08-04 approve_with_followups（出口判据满足，M0-I2 措辞 followup 已修复并 closed：28 focused + 142 regression passed, Ruff clean；M0-L1/L2 low open，M5 前处理）；T2 解除阻塞，M0 已提交（分支 rebase 到 58c6382 后单个 M0 提交，用户 2026-08-04 授权）`
+Overall progress: `V11 Spec/Plan approved, execution authorized 2026-08-02; M0/T1 done：真实 RCAEval RE2 全链路完成（byte-verified 双向对账 2700/2700、真实 prepare runtime manifest_hash bb119fc9…/150 cases/26 GB、二次 prepare diff -r 零差异字节等价）；M0 exit review 2026-08-04 approve_with_followups（出口判据满足，M0-I2 措辞 followup 已修复并 closed：28 focused + 142 regression passed, Ruff clean；M0-L1/L2 low open，M5 前处理）；M1/T2–T3 已实现并完成 focused verification，等待独立 migration/runtime review；M2 未开始`
 
-Current phase: Full iteration / M0 done and committed, ready for M1
+Current phase: Full iteration / M1 T2–T3 implemented and verified, independent review pending
 
-Next action: 开始 M1（T2–T3：domain contracts、run ownership、Schema V7 与 V11 runtime 隔离），沿用 milestone 执行 + 独立评审模式。
+Next action: 对 M1 T2–T3 做独立 migration/runtime review；关闭阻塞或高风险发现后再开始 M2。
 
 | ID | Phase | Task | Status | Evidence or result | Next action or blocker |
 | --- | --- | --- | --- | --- | --- |
@@ -96,7 +96,9 @@ Next action: 开始 M1（T2–T3：domain contracts、run ownership、Schema V7 
 | P2 | Requirements | Confirm general SRE scope, Agent authority, safety, blindness, cost, latency, and evaluation rules | verified | User confirmed bounded dynamic tools, 30–120s async, ≤3x intended-budget tokens, evidence refs ≥95%, P95 ≤120s, inconclusive wrong, and separate equal-token ablation | Preserve decisions |
 | P3 | Design | Select adaptive evidence investigation over fixed specialists or majority debate | verified | User selected scheme B; independent first pass and Critic retained without majority voting | Preserve decision |
 | P4 | Spec | Write and independently review the V11 contract | verified | Legacy-reuse audit traced runtime, persistence, entry, report/action, tools, API/UI, and benchmarks; L22–L30 closed; user approved the amended R1–R27 Spec on 2026-08-02 | Preserve approved contract |
-| P5 | Plan | Map approved requirements to implementation and verification tasks | approved | Rewritten as T1–T13/M0–M5; independent review found H1–H3/M1–M2, all closed in focused re-review with no remaining blocking/high/medium issue; R1–R27 Plan-task mapping recorded in Spec; user approved and authorized execution on 2026-08-02 | Execute M0/T1 |
+| P5 | Plan | Map approved requirements to implementation and verification tasks | approved | Rewritten as T1–T13/M0–M5; independent review found H1–H3/M1–M2, all closed in focused re-review with no remaining blocking/high/medium issue; R1–R27 Plan-task mapping recorded in Spec; user approved and authorized execution on 2026-08-02 | M0/T1 complete; M1/T2–T3 evidence recorded |
+| M1/T2 | Execute | Domain contracts, run ownership, and Schema V7 | implemented / verified | RED→GREEN domain and migration tests; `198 passed in 8.07s`; T2 Ruff clean; fresh, V3/V4/V5/legacy-V6/current-V6 upgrade manifests agree and only the three approved physical columns are added | Independent migration review |
+| M1/T3 | Execute | Versioned phase profiles, activation, gates, replay, and diff | implemented / verified | RED→GREEN ownership/recovery tests; `391 passed, 1 skipped, 1 warning in 160.40s`; T3 Ruff clean; legacy golden compatibility and V11 isolation/deadline/recovery checks green | Independent runtime review; M2 not started |
 
 ## Archived V10.1 Planning Dashboard
 

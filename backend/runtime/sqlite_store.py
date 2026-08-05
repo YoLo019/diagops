@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from backend.db.models import InvestigationStatus
 from backend.db.schema import (
+    investigations,
     runtime_attempts,
     runtime_checkpoints,
     runtime_events,
@@ -44,6 +45,7 @@ from backend.runtime.store import (
     RuntimeNotFound,
     RuntimePersistenceError,
     RuntimeTerminalCommit,
+    validate_v11_phase_ownership,
 )
 from backend.safety.redaction import safe_failure
 
@@ -84,7 +86,10 @@ class SQLiteRuntimeStore:
             )
         elif terminal:
             values["frozen_business_projection"] = freeze_business_projection(
-                self.investigation_repository, run.investigation_id
+                self.investigation_repository,
+                run.investigation_id,
+                runtime_run_id=(run.id if run.is_v11 else None),
+                authority_mode=(run.authority_mode.value if run.is_v11 else None),
             )
         else:
             values["frozen_business_projection"] = None
@@ -232,7 +237,7 @@ class SQLiteRuntimeStore:
                 ).mappings().one_or_none()
                 if row is None:
                     raise RuntimeConflict("runtime lease acquisition lost the race")
-                run = self._run_from_row(row)
+                run = self._run_from_row(row, connection)
                 self._hit_failpoint("after_lease_before_attempt")
                 self._insert_attempt(
                     connection,
@@ -512,9 +517,23 @@ class SQLiteRuntimeStore:
     def request_cancel(self, run_id: str) -> RuntimeRun:
         now = datetime.now(UTC)
         source_run = self.get_run(run_id)
+        owns_projection = (
+            not source_run.is_v11
+            or self.investigation_repository.get(
+                source_run.investigation_id
+            ).active_runtime_run_id
+            == source_run.id
+        )
         frozen_projection = (
             freeze_business_projection(
-                self.investigation_repository, source_run.investigation_id
+                self.investigation_repository,
+                source_run.investigation_id,
+                runtime_run_id=(source_run.id if source_run.is_v11 else None),
+                authority_mode=(
+                    source_run.authority_mode.value
+                    if source_run.is_v11
+                    else None
+                ),
             )
             if source_run.status == RuntimeRunStatus.CREATED
             else None
@@ -554,7 +573,7 @@ class SQLiteRuntimeStore:
                 .values(**values)
                 .returning(runtime_runs)
             ).mappings().one()
-            if target == RuntimeRunStatus.CANCELLED:
+            if target == RuntimeRunStatus.CANCELLED and owns_projection:
                 record = self.investigation_repository.get(row["investigation_id"])
                 self.investigation_repository.save_with_connection(
                     connection,
@@ -671,7 +690,12 @@ class SQLiteRuntimeStore:
         published: list[RuntimeEvent] = []
         source_run = self.get_run(commit.run_id)
         frozen_projection = freeze_business_projection(
-            self.investigation_repository, source_run.investigation_id
+            self.investigation_repository,
+            source_run.investigation_id,
+            runtime_run_id=(source_run.id if source_run.is_v11 else None),
+            authority_mode=(
+                source_run.authority_mode.value if source_run.is_v11 else None
+            ),
         )
         from backend.runtime.diff import finalize_frozen_projection
 
@@ -825,21 +849,26 @@ class SQLiteRuntimeStore:
                     record = self.investigation_repository.get(
                         run_row["investigation_id"]
                     )
-                    self.investigation_repository.save_with_connection(
-                        connection,
-                        record.model_copy(
-                            update={
-                                "status": investigation_status,
-                                "failure_reason": (
-                                    safe_failure(commit.failure_category.value)
-                                    if investigation_status == InvestigationStatus.FAILED
-                                    and commit.failure_category is not None
-                                    else None
-                                ),
-                                "updated_at": now,
-                            }
-                        ),
-                    )
+                    if (
+                        not source_run.is_v11
+                        or record.active_runtime_run_id == commit.run_id
+                    ):
+                        self.investigation_repository.save_with_connection(
+                            connection,
+                            record.model_copy(
+                                update={
+                                    "status": investigation_status,
+                                    "failure_reason": (
+                                        safe_failure(commit.failure_category.value)
+                                        if investigation_status
+                                        == InvestigationStatus.FAILED
+                                        and commit.failure_category is not None
+                                        else None
+                                    ),
+                                    "updated_at": now,
+                                }
+                            ),
+                        )
         except (
             ValidationError,
             RuntimeLeaseLost,
@@ -856,6 +885,15 @@ class SQLiteRuntimeStore:
         return self._run_from_row(run_row)
 
     def commit_tool(self, commit) -> ToolCallRecord:
+        run_snapshot = self.get_run(commit.run_id)
+        if run_snapshot.is_v11:
+            record = self.investigation_repository.get(run_snapshot.investigation_id)
+            if record.active_runtime_run_id != run_snapshot.id:
+                raise RuntimeIntegrityError(
+                    "V11 tool commit does not own active projection"
+                )
+            if getattr(commit.call, "runtime_run_id", None) != run_snapshot.id:
+                raise RuntimeIntegrityError("V11 tool payload owner mismatch")
         now = datetime.now(UTC)
         try:
             with self.engine.begin() as connection:
@@ -943,11 +981,16 @@ class SQLiteRuntimeStore:
         *,
         attempt_id: str,
         checkpoint_id: str | None,
+        message: str | None = None,
     ) -> RuntimeEvent:
         try:
             with self.engine.begin() as connection:
-                attempt_run_id = connection.execute(
-                    select(runtime_attempts.c.run_id)
+                run_row = connection.execute(
+                    select(
+                        runtime_runs.c.investigation_id,
+                        runtime_runs.c.execution_contract_version,
+                        runtime_runs.c.authority_mode,
+                    )
                     .select_from(
                         runtime_attempts.join(
                             runtime_runs,
@@ -961,10 +1004,18 @@ class SQLiteRuntimeStore:
                         runtime_runs.c.id == run_id,
                         runtime_runs.c.status == RuntimeRunStatus.INTERRUPTED.value,
                     )
-                ).scalar_one_or_none()
-                if attempt_run_id != run_id:
+                ).mappings().one_or_none()
+                if run_row is None:
                     raise RuntimeIntegrityError(
                         "recovery rejection attempt is not interrupted"
+                    )
+                frozen_projection = None
+                if run_row["execution_contract_version"] == "v11":
+                    frozen_projection = freeze_business_projection(
+                        self.investigation_repository,
+                        run_row["investigation_id"],
+                        runtime_run_id=run_id,
+                        authority_mode=run_row["authority_mode"],
                     )
                 sequence = connection.execute(
                     update(runtime_runs)
@@ -973,7 +1024,12 @@ class SQLiteRuntimeStore:
                         runtime_runs.c.status == RuntimeRunStatus.INTERRUPTED.value,
                     )
                     .values(
-                        next_event_sequence=runtime_runs.c.next_event_sequence + 1
+                        next_event_sequence=runtime_runs.c.next_event_sequence + 1,
+                        **(
+                            {"frozen_business_projection": frozen_projection}
+                            if frozen_projection is not None
+                            else {}
+                        ),
                     )
                     .returning(runtime_runs.c.next_event_sequence)
                 ).scalar_one_or_none()
@@ -995,6 +1051,7 @@ class SQLiteRuntimeStore:
                             if checkpoint_id is not None
                             else {}
                         ),
+                        **({"message": message} if message is not None else {}),
                     },
                 )
                 connection.execute(
@@ -1084,7 +1141,24 @@ class SQLiteRuntimeStore:
                         runtime_runs.c.id == run_id
                     )
                 ).mappings().one()
+                frozen_projection = None
+                if snapshot["execution_contract_version"] == "v11":
+                    frozen_projection = freeze_business_projection(
+                        self.investigation_repository,
+                        snapshot["investigation_id"],
+                        runtime_run_id=run_id,
+                        authority_mode=snapshot["authority_mode"],
+                    )
                 previous_sequence = snapshot["next_event_sequence"]
+                values = {
+                    "status": RuntimeRunStatus.INTERRUPTED.value,
+                    "failure_category": RuntimeFailureCategory.LEASE_LOST.value,
+                    "lease_owner": None,
+                    "lease_expires_at": None,
+                    "next_event_sequence": previous_sequence + 2,
+                }
+                if frozen_projection is not None:
+                    values["frozen_business_projection"] = frozen_projection
                 row = connection.execute(
                     update(runtime_runs)
                     .where(
@@ -1096,13 +1170,7 @@ class SQLiteRuntimeStore:
                         == snapshot["lease_expires_at"],
                         runtime_runs.c.lease_expires_at < now_text,
                     )
-                    .values(
-                        status=RuntimeRunStatus.INTERRUPTED.value,
-                        failure_category=RuntimeFailureCategory.LEASE_LOST.value,
-                        lease_owner=None,
-                        lease_expires_at=None,
-                        next_event_sequence=previous_sequence + 2,
-                    )
+                    .values(**values)
                     .returning(runtime_runs)
                 ).mappings().one_or_none()
                 if row is None:
@@ -1189,6 +1257,7 @@ class SQLiteRuntimeStore:
             durable_token_usage,
             durable_tool_call_count,
             ensure_phase_precondition,
+            phase_profile_for,
         )
 
         digest = checkpoint_digest(
@@ -1199,6 +1268,23 @@ class SQLiteRuntimeStore:
             schema_version=commit.schema_version,
         )
         run_snapshot = self.get_run(commit.run_id)
+        record = self.investigation_repository.get(run_snapshot.investigation_id)
+        previous_owner = record.active_runtime_run_id
+        validate_v11_phase_ownership(
+            run_snapshot,
+            commit,
+            record,
+            previous_run=(
+                self.get_run(previous_owner)
+                if previous_owner is not None and previous_owner != run_snapshot.id
+                else None
+            ),
+            previous_projection=(
+                self.get_frozen_business_projection(previous_owner)
+                if previous_owner is not None and previous_owner != run_snapshot.id
+                else None
+            ),
+        )
         try:
             projection_digest = durable_projection_digest(
                 repository=self.investigation_repository,
@@ -1285,6 +1371,9 @@ class SQLiteRuntimeStore:
                         ),
                         latest_checkpoint_id=run_row["latest_checkpoint_id"],
                         commit=commit,
+                        phase_order=phase_profile_for(
+                            run_snapshot.execution_contract_version
+                        ).order,
                     )
                 except ValueError as exc:
                     raise RuntimeConflict(str(exc)) from exc
@@ -1436,9 +1525,24 @@ class SQLiteRuntimeStore:
         ).mappings().one_or_none()
         if row is None:
             raise RuntimeIntegrityError(f"unknown {relation} runtime run: {linked_id}")
-        linked = self._run_from_row(row)
+        linked = self._run_from_row(row, connection)
         if linked.investigation_id != run.investigation_id:
-            raise RuntimeConflict(f"{relation} run belongs to another investigation")
+            source_payload = connection.execute(
+                select(investigations.c.event).where(
+                    investigations.c.id == run.investigation_id
+                )
+            ).scalar_one_or_none()
+            source_id = (
+                source_payload.get("_diagops_source_investigation_id")
+                if isinstance(source_payload, dict)
+                else None
+            )
+            if not (
+                relation == "parent"
+                and run.is_v11
+                and source_id == linked.investigation_id
+            ):
+                raise RuntimeConflict(f"{relation} run belongs to another investigation")
         if relation == "parent" and (
             linked.run_kind != RuntimeRunKind.LIVE
             or linked.status
@@ -1484,13 +1588,108 @@ class SQLiteRuntimeStore:
             )
         )
 
-    @staticmethod
-    def _run_from_row(row) -> RuntimeRun:
+    def _run_from_row(self, row, connection=None) -> RuntimeRun:
         data = dict(row)
         data.pop("next_event_sequence", None)
         data.pop("frozen_business_projection", None)
         data.pop("benchmark_replay_locator", None)
-        return RuntimeRun.model_validate(data)
+        try:
+            return RuntimeRun.model_validate(data)
+        except ValidationError:
+            if not self._has_contract_projection_mismatch(data):
+                raise
+            now = datetime.now(UTC)
+            values = {
+                "status": RuntimeRunStatus.FAILED.value,
+                "failure_category": RuntimeFailureCategory.CONTRACT_INTEGRITY.value,
+                "completed_at": now.isoformat(),
+                "lease_owner": None,
+                "lease_expires_at": None,
+            }
+            if data.get("execution_contract_version") == "v11":
+                try:
+                    values["frozen_business_projection"] = (
+                        freeze_business_projection(
+                            self.investigation_repository,
+                            data["investigation_id"],
+                            runtime_run_id=data["id"],
+                            authority_mode=data.get("authority_mode", "agent"),
+                        )
+                    )
+                except (AttributeError, TypeError, ValueError):
+                    pass
+            if connection is None:
+                with self.engine.begin() as write_connection:
+                    write_connection.execute(
+                        update(runtime_runs)
+                        .where(runtime_runs.c.id == data["id"])
+                        .values(**values)
+                    )
+            else:
+                connection.execute(
+                    update(runtime_runs)
+                    .where(runtime_runs.c.id == data["id"])
+                    .values(**values)
+                )
+            data.update(values)
+            data.pop("frozen_business_projection", None)
+            data["execution_contract"] = self._safe_contract_projection(data)
+            return RuntimeRun.model_validate(data)
+
+    @staticmethod
+    def _has_contract_projection_mismatch(data: dict) -> bool:
+        contract = data.get("execution_contract")
+        if not isinstance(contract, dict):
+            return True
+        for field_name in (
+            "execution_contract_version",
+            "authority_mode",
+            "model_provider",
+            "model_name",
+            "prompt_version",
+            "tool_budget",
+            "token_budget",
+            "timeout_seconds",
+        ):
+            if field_name in contract:
+                expected = data.get(field_name)
+                if isinstance(expected, str):
+                    expected = expected
+                if contract[field_name] != expected:
+                    return True
+        version = data.get("execution_contract_version", "v10_legacy")
+        if version == "v11" and not {
+            "model_provider",
+            "model_name",
+            "prompt_version",
+            "tool_budget",
+            "token_budget",
+            "timeout_seconds",
+        } <= contract.keys():
+            return True
+        return False
+
+    @staticmethod
+    def _safe_contract_projection(data: dict) -> dict:
+        version = data.get("execution_contract_version", "v10_legacy")
+        authority = data.get("authority_mode", "legacy_deterministic")
+        if version not in {"v10_legacy", "v11"}:
+            version, authority = "v10_legacy", "legacy_deterministic"
+        if version == "v11" and authority != "agent":
+            version, authority = "v10_legacy", "legacy_deterministic"
+        return {
+            "execution_contract_version": version,
+            "authority_mode": authority,
+            "run_kind": data.get("run_kind"),
+            "run_reason": data.get("run_reason"),
+            "strategy": data.get("strategy"),
+            "model_provider": data.get("model_provider"),
+            "model_name": data.get("model_name"),
+            "prompt_version": data.get("prompt_version"),
+            "tool_budget": data.get("tool_budget"),
+            "token_budget": data.get("token_budget"),
+            "timeout_seconds": data.get("timeout_seconds", 60.0),
+        }
 
     @staticmethod
     def _event_from_row(row) -> RuntimeEvent:

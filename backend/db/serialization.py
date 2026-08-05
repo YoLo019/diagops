@@ -15,6 +15,8 @@ from backend.safety.redaction import assert_safe_value
 
 _STRATEGY_KEY = "_diagops_investigation_strategy"
 _MULTI_AGENT_RUN_KEY = "_diagops_multi_agent_run"
+_ACTIVE_RUNTIME_RUN_KEY = "_diagops_active_runtime_run_id"
+_SOURCE_INVESTIGATION_KEY = "_diagops_source_investigation_id"
 
 
 def record_to_rows(record: InvestigationRecord) -> dict[str, Any]:
@@ -25,6 +27,10 @@ def record_to_rows(record: InvestigationRecord) -> dict[str, Any]:
         investigation_event[_MULTI_AGENT_RUN_KEY] = record.multi_agent_run.model_dump(
             mode="json"
         )
+    if record.active_runtime_run_id is not None:
+        investigation_event[_ACTIVE_RUNTIME_RUN_KEY] = record.active_runtime_run_id
+    if record.source_investigation_id is not None:
+        investigation_event[_SOURCE_INVESTIGATION_KEY] = record.source_investigation_id
     rows = {
         "investigation": {
             "id": record.id,
@@ -54,7 +60,7 @@ def record_to_rows(record: InvestigationRecord) -> dict[str, Any]:
 
 def rows_to_record(rows: Mapping[str, Any]) -> InvestigationRecord:
     investigation = rows["investigation"]
-    return InvestigationRecord(
+    record = InvestigationRecord(
         id=investigation["id"],
         event=IncidentEvent(**investigation["event"]),
         strategy=investigation["event"].get(
@@ -67,6 +73,8 @@ def rows_to_record(rows: Mapping[str, Any]) -> InvestigationRecord:
             if investigation["event"].get(_MULTI_AGENT_RUN_KEY) is not None
             else None
         ),
+        active_runtime_run_id=investigation["event"].get(_ACTIVE_RUNTIME_RUN_KEY),
+        source_investigation_id=investigation["event"].get(_SOURCE_INVESTIGATION_KEY),
         status=InvestigationStatus(investigation["status"]),
         evidence=[
             EvidenceItem(**item["payload"])
@@ -107,6 +115,15 @@ def rows_to_record(rows: Mapping[str, Any]) -> InvestigationRecord:
         updated_at=investigation["updated_at"],
         completed_at=investigation["completed_at"],
     )
+    # 历史事件没有 payload-only owner 字段；移除显式 null 才能保持旧序列化字节。
+    event_payload = investigation["event"]
+    for field_name, payload_key in (
+        ("active_runtime_run_id", _ACTIVE_RUNTIME_RUN_KEY),
+        ("source_investigation_id", _SOURCE_INVESTIGATION_KEY),
+    ):
+        if payload_key not in event_payload:
+            record.model_fields_set.discard(field_name)
+    return record
 
 
 def _child_rows(record_id: str, models: Sequence[Any]) -> list[dict[str, Any]]:

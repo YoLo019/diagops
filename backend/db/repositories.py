@@ -10,7 +10,7 @@ from backend.db.models import (
 )
 from backend.domain.actions import ActionStatus, VerificationStatus
 from backend.domain.agent_context import ContextFact
-from backend.domain.agent_findings import AgentFinding, CoordinationReview
+from backend.domain.agent_findings import AgentFinding, CoordinationReview, FindingActor
 from backend.domain.agent_plan import AgentExecution, DiagnosisPlan, DiagnosisTask
 from backend.domain.human_transitions import (
     validate_action_transition,
@@ -49,6 +49,46 @@ def _validate_multi_agent_result(
         and validated_review.investigation_id != investigation_id
     ):
         raise ValueError("Coordination review investigation mismatch")
+    owners = {
+        item.runtime_run_id
+        for item in validated_findings
+        if item.runtime_run_id is not None
+    }
+    owners.update(
+        item.runtime_run_id
+        for item in validated_executions
+        if item.runtime_run_id is not None
+    )
+    if validated_review is not None and validated_review.runtime_run_id is not None:
+        owners.add(validated_review.runtime_run_id)
+    if validated_review is not None:
+        owners.update(
+            assessment.runtime_run_id
+            for assessment in validated_review.critic_assessments
+            if assessment.runtime_run_id is not None
+        )
+    if len(owners) > 1:
+        raise ValueError("V11 aggregate mixes runtime owners")
+    finding_by_id = {item.id: item for item in validated_findings}
+    for finding in validated_findings:
+        if finding.analysis_round != 2 or finding.agent_name == FindingActor.INVESTIGATOR:
+            continue
+        previous = finding_by_id.get(finding.revises_finding_id or "")
+        if previous is None or previous.agent_name != finding.agent_name:
+            raise ValueError("legacy round-two finding must revise the same actor")
+    if validated_review is not None and validated_review.authority_mode.value == "agent":
+        if validated_review.runtime_run_id is None:
+            raise ValueError("V11 review requires runtime_run_id")
+        if any(
+            item.runtime_run_id != validated_review.runtime_run_id
+            for item in validated_findings + validated_executions
+        ):
+            raise ValueError("V11 aggregate owner mismatch")
+        if any(
+            assessment.runtime_run_id != validated_review.runtime_run_id
+            for assessment in validated_review.critic_assessments
+        ):
+            raise ValueError("V11 aggregate owner mismatch")
     return validated_findings, validated_executions, validated_review
 
 
@@ -75,6 +115,48 @@ class InMemoryInvestigationRepository:
         with self._lock:
             self._records[record.id] = record
             return record
+
+    def activate_projection(
+        self, investigation_id: str, runtime_run_id: str
+    ) -> InvestigationRecord:
+        """在共享锁内切换 latest owner，并清除上一轮可变诊断投影。"""
+        with self._lock:
+            record = self.get(investigation_id)
+            if (
+                record.active_runtime_run_id is not None
+                and record.active_runtime_run_id != runtime_run_id
+                and record.status
+                not in {
+                    InvestigationStatus.COMPLETED,
+                    InvestigationStatus.FAILED,
+                    InvestigationStatus.CANCELLED,
+                }
+            ):
+                raise ValueError("active projection owner is still running")
+            cleared = record.model_copy(
+                update={
+                    "active_runtime_run_id": runtime_run_id,
+                    "evidence": [],
+                    "provider_results": [],
+                    "specialist_results": [],
+                    "hypotheses": [],
+                    "report": None,
+                    "llm_analysis": None,
+                    "multi_agent_run": None,
+                    "actions": [],
+                    "verification_suggestions": [],
+                }
+            )
+            self._records[investigation_id] = cleared
+            self._plans.pop(investigation_id, None)
+            self._tasks.pop(investigation_id, None)
+            self._context_facts.pop(investigation_id, None)
+            self._tool_calls.pop(investigation_id, None)
+            self._agent_findings.pop(investigation_id, None)
+            self._executions.pop(investigation_id, None)
+            self._coordination_reviews.pop(investigation_id, None)
+            self._react_traces.pop(investigation_id, None)
+            return cleared
 
     def get(self, investigation_id: str) -> InvestigationRecord:
         with self._lock:
@@ -253,10 +335,36 @@ class InMemoryInvestigationRepository:
         investigation_id: str,
         findings: list[AgentFinding],
     ) -> list[AgentFinding]:
+        validated = [
+            AgentFinding.model_validate(item.model_dump(mode="python"))
+            for item in findings
+        ]
+        if any(item.investigation_id != investigation_id for item in validated):
+            raise ValueError("Agent finding investigation mismatch")
         bucket = self._agent_findings.setdefault(investigation_id, {})
-        for finding in findings:
+        all_findings = {**bucket, **{item.id: item for item in validated}}
+        review = self.get_coordination_review(investigation_id)
+        for finding in validated:
+            if finding.analysis_round == 2 and finding.agent_name != FindingActor.INVESTIGATOR:
+                previous = all_findings.get(finding.revises_finding_id or "")
+                if previous is None or previous.agent_name != finding.agent_name:
+                    raise ValueError("legacy round-two finding must revise the same actor")
+            if finding.agent_name == FindingActor.INVESTIGATOR:
+                tasks = {task.id: task for task in self.list_tasks(investigation_id)}
+                task = tasks.get(finding.task_id or "")
+                if task is None or task.runtime_run_id != finding.runtime_run_id:
+                    raise ValueError("V11 finding task ownership mismatch")
+                if finding.analysis_round == 2:
+                    assessment_ids = {
+                        item.id for item in review.critic_assessments
+                    } if review is not None else set()
+                    if finding.critic_assessment_id not in assessment_ids:
+                        raise ValueError("V11 finding Critic assessment ownership mismatch")
+                if review is not None and review.runtime_run_id != finding.runtime_run_id:
+                    raise ValueError("V11 finding and review owner mismatch")
+        for finding in validated:
             bucket[finding.id] = finding
-        return list(findings)
+        return validated
 
     def list_agent_findings(self, investigation_id: str) -> list[AgentFinding]:
         return list(self._agent_findings.get(investigation_id, {}).values())
@@ -330,3 +438,14 @@ class InMemoryInvestigationRepository:
 
     def get_react_trace(self, investigation_id: str) -> ReActTrace | None:
         return self._react_traces.get(investigation_id)
+
+    def save_v11_react_trace(self, trace: ReActTrace) -> ReActTrace:
+        """只保存已由模型校验的 V11 结构化摘要轨迹。"""
+        if trace.runtime_run_id is None or any(
+            step.runtime_run_id != trace.runtime_run_id
+            or step.assistant_text is not None
+            for step in trace.steps
+        ):
+            raise ValueError("V11 ReAct trace requires structured same-run steps")
+        self._react_traces[trace.investigation_id] = trace
+        return trace

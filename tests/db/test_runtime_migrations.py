@@ -25,18 +25,18 @@ _RUNTIME_TABLE_NAMES = {
 }
 
 
-def test_v5_database_migrates_to_v6_without_synthetic_runs(tmp_path) -> None:
+def test_v5_database_migrates_to_v7_without_synthetic_runs(tmp_path) -> None:
     engine = create_db_engine(f"sqlite:///{tmp_path / 'v5.db'}")
     _create_v5_fixture(engine, investigation_id="inv-history")
 
     initialize_database(engine)
 
     with engine.connect() as connection:
-        assert connection.execute(select(schema_version.c.version)).scalar_one() == 6
+        assert connection.execute(select(schema_version.c.version)).scalar_one() == 7
         assert connection.execute(select(runtime_runs)).all() == []
         assert connection.execute(select(investigations.c.id)).scalar_one() == "inv-history"
         assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
-    assert CURRENT_SCHEMA_VERSION == 6
+    assert CURRENT_SCHEMA_VERSION == 7
     assert _RUNTIME_TABLE_NAMES <= set(inspect(engine).get_table_names())
     assert "timeout_seconds" in {
         column["name"] for column in inspect(engine).get_columns("runtime_runs")
@@ -69,6 +69,44 @@ def test_legacy_v6_runtime_row_gets_compatible_timeout_default(tmp_path) -> None
             select(runtime_runs).where(runtime_runs.c.id == "run-legacy-v6")
         ).mappings().one()
     assert row["timeout_seconds"] == 60
+
+
+def test_current_v6_runtime_upgrades_to_the_fresh_v7_manifest(tmp_path) -> None:
+    engine = _fresh_engine(tmp_path, "current-v6.db")
+    _insert_investigation(engine, "inv-current-v6")
+    with engine.begin() as connection:
+        connection.execute(
+            runtime_runs.insert().values(
+                **_run_values("run-current-v6", "inv-current-v6")
+            )
+        )
+        connection.execute(schema_version.delete())
+        connection.execute(schema_version.insert().values(version=6))
+        for column in (
+            "execution_contract",
+            "authority_mode",
+            "execution_contract_version",
+        ):
+            connection.exec_driver_sql(
+                f"ALTER TABLE runtime_runs DROP COLUMN {column}"
+            )
+
+    initialize_database(engine)
+
+    fresh_engine = _fresh_engine(tmp_path, "fresh-v7.db")
+    fresh = {
+        item["name"]
+        for item in inspect(fresh_engine).get_columns("runtime_runs")
+    }
+    upgraded = {item["name"] for item in inspect(engine).get_columns("runtime_runs")}
+    assert upgraded == fresh
+    with engine.connect() as connection:
+        row = connection.execute(
+            select(runtime_runs).where(runtime_runs.c.id == "run-current-v6")
+        ).mappings().one()
+    assert row["execution_contract_version"] == "v10_legacy"
+    assert row["authority_mode"] == "legacy_deterministic"
+    assert row["execution_contract"]["run_kind"] == "live"
 
 
 def test_runtime_event_and_attempt_sequences_are_unique(tmp_path) -> None:

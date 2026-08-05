@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from backend.domain.evidence import JsonValue
 
@@ -45,8 +45,16 @@ class ReActTraceStep(BaseModel):
     output_evidence_ids: list[str] = Field(default_factory=list)
     status: ReActTraceStepStatus = ReActTraceStepStatus.THINKING
     error_message: str | None = None
+    structured_summary: dict[str, JsonValue] | None = None
+    runtime_run_id: str | None = None
     started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     completed_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_v11_summary(self) -> "ReActTraceStep":
+        if self.runtime_run_id is not None and self.assistant_text is not None:
+            raise ValueError("V11 ReAct writers must not persist assistant_text")
+        return self
 
     @field_validator("tool_name")
     @classmethod
@@ -82,6 +90,7 @@ class ReActTrace(BaseModel):
     steps: list[ReActTraceStep] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     completed_at: datetime | None = None
+    runtime_run_id: str | None = None
 
     @field_validator("steps")
     @classmethod

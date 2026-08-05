@@ -119,7 +119,14 @@ def test_simulation_provider_is_not_called_for_manual_event() -> None:
     results = registry.collect_results(event)
 
     assert recording.calls == 0
-    assert {result.provider for result in results} == set(EvidenceProvider)
+    assert {result.provider for result in results} == {
+        EvidenceProvider.LOG,
+        EvidenceProvider.METRIC,
+        EvidenceProvider.DEPLOY,
+        EvidenceProvider.DEPENDENCY,
+        EvidenceProvider.SERVICE_CATALOG,
+        EvidenceProvider.RELATED_ALERT,
+    }
     assert all(result.status == ProviderStatus.SKIPPED for result in results)
     hypotheses = RcaAnalyzer().analyze(event, registry.evidence_from_results(results))
     assert hypotheses[0].cause_type == "unknown"

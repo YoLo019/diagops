@@ -14,17 +14,24 @@ from backend.domain.agent_findings import (
     CoordinationReview,
     RootCauseCandidate,
 )
-from backend.domain.agent_plan import AgentExecution, AgentExecutionStatus
+from backend.domain.agent_plan import (
+    AgentExecution,
+    AgentExecutionStatus,
+    LeadDecision,
+)
 from backend.domain.events import IncidentEvent, IncidentSource, Severity
 from backend.domain.hypotheses import CauseType
 from backend.domain.multi_agent import (
     AdaptiveRunStatus,
     AdaptiveStopReason,
     AgentExecutionLayer,
+    AuthorityMode,
     CoordinationDecisionStatus,
+    DiagnosticStatus,
     ExecutionStepKind,
     FailureCategory,
     InvestigationStrategy,
+    LeadAction,
     ModelProvider,
     MultiAgentRunStatus,
     MultiAgentRunSummary,
@@ -71,6 +78,42 @@ def test_sqlite_investigation_strategy_round_trips_without_schema_change():
     persisted = repository.get(record.id)
     assert persisted.strategy == InvestigationStrategy.ADAPTIVE
     assert persisted.multi_agent_run == record.multi_agent_run
+
+
+@pytest.mark.parametrize("repository_kind", ["memory", "sqlite"])
+def test_v11_summary_projection_round_trips_owner_and_status(
+    repository_kind, tmp_path
+):
+    if repository_kind == "memory":
+        repository = InMemoryInvestigationRepository()
+    else:
+        repository = build_sqlite_repository()
+    record = InvestigationRecord(
+        event=IncidentEvent(
+            source=IncidentSource.MANUAL,
+            service="checkout",
+            environment="production",
+            severity=Severity.WARNING,
+            title="Checkout summary",
+            description="Summary projection",
+            started_at=dt(0),
+        ),
+        strategy=InvestigationStrategy.ADAPTIVE,
+        multi_agent_run=MultiAgentRunSummary(
+            status=MultiAgentRunStatus.COMPLETED,
+            diagnostic_status=DiagnosticStatus.INCONCLUSIVE,
+            authority_mode=AuthorityMode.AGENT,
+            runtime_run_id="run-v11",
+        ),
+        active_runtime_run_id="run-v11",
+    )
+    repository.save(record)
+
+    summary = repository.list_summaries()[0]
+    assert summary.strategy == InvestigationStrategy.ADAPTIVE
+    assert summary.active_runtime_run_id == "run-v11"
+    assert summary.diagnostic_status == DiagnosticStatus.INCONCLUSIVE
+    assert summary.authority_mode == AuthorityMode.AGENT
 
 
 def finding(
@@ -199,6 +242,34 @@ def test_sqlite_multi_agent_result_rolls_back_rows_when_review_insert_fails():
     assert repository.list_agent_findings("inv-1") == []
     assert repository.list_executions("inv-1") == []
     assert repository.get_coordination_review("inv-1") == original_review
+
+
+@pytest.mark.parametrize("repository_kind", ["memory", "sqlite"])
+def test_v11_multi_agent_result_rejects_missing_payload_owners(repository_kind):
+    repository = (
+        InMemoryInvestigationRepository()
+        if repository_kind == "memory"
+        else build_sqlite_repository()
+    )
+    v11_review = review("review-v11-owner").model_copy(
+        update={
+            "authority_mode": AuthorityMode.AGENT,
+            "runtime_run_id": "run-v11",
+            "lead_decision": LeadDecision(
+                action=LeadAction.INCONCLUSIVE,
+                summary="No safe conclusion.",
+                stop_reason="evidence ended",
+            ),
+        }
+    )
+
+    with pytest.raises(ValueError, match="owner"):
+        repository.save_multi_agent_result(
+            "inv-1",
+            [finding("finding-v11-owner")],
+            [attributed_execution("execution-v11-owner")],
+            v11_review,
+        )
 
 
 def test_in_memory_repository_saves_lists_and_replaces_agentic_rca_payloads():
