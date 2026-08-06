@@ -45,7 +45,7 @@ Implementation status: `verifying`
 
 Completion commit: `none`
 
-Verification evidence: `M1/T2–T3 review-fix RED→GREEN evidence is green; T2 198 passed, T3 412 passed/2 skipped/1 warning, both scoped Ruff gates clean; final independent re-review remains pending`
+Verification evidence: `M1/T2–T3 second-round review-fix RED→GREEN evidence is green; T2 199 passed, T3 420 passed/2 skipped/1 warning, review_fixes 27 passed/1 skipped, both scoped Ruff gates and diff-check clean; final independent re-review remains pending`
 
 Blocker: `none`
 
@@ -97,13 +97,21 @@ Next action: 对 M1 T2–T3 做独立 migration/runtime review；关闭阻塞或
 | P3 | Design | Select adaptive evidence investigation over fixed specialists or majority debate | verified | User selected scheme B; independent first pass and Critic retained without majority voting | Preserve decision |
 | P4 | Spec | Write and independently review the V11 contract | verified | Legacy-reuse audit traced runtime, persistence, entry, report/action, tools, API/UI, and benchmarks; L22–L30 closed; user approved the amended R1–R27 Spec on 2026-08-02 | Preserve approved contract |
 | P5 | Plan | Map approved requirements to implementation and verification tasks | approved | Rewritten as T1–T13/M0–M5; independent review found H1–H3/M1–M2, all closed in focused re-review with no remaining blocking/high/medium issue; R1–R27 Plan-task mapping recorded in Spec; user approved and authorized execution on 2026-08-02 | M0/T1 complete; M1/T2–T3 evidence recorded |
-| M1/T2 | Execute | Domain contracts, run ownership, and Schema V7 | implemented / verified | 初始审查问题 H8–H10 已补最小 RED 并 GREEN；`uv run pytest tests/domain tests/db/test_migrations.py tests/db/test_runtime_migrations.py tests/db/test_v5_agentic_rca_persistence.py -q` → `198 passed in 7.94s`; T2 Ruff clean；fresh、V3/V4/V5、legacy-V6/current-V6 manifest 一致且仅三列物理变更 | 等待独立迁移复审 |
-| M1/T3 | Execute | Versioned phase profiles, activation, gates, replay, and diff | implemented / verified | 初始审查问题 H1–H7 已补最小 RED 并 GREEN；`uv run pytest tests/runtime tests/api/test_runtime_runs_api.py -q` → `412 passed, 2 skipped, 1 warning in 114.59s`; T3 Ruff clean；V10/V11 phase、owner、replay/diff、contract-integrity reload、service/API gate 回归通过 | 等待独立运行时复审；M2 未开始 |
+| M1/T2 | Execute | Domain contracts, run ownership, and Schema V7 | implemented / verified | 初始审查问题 H8–H10 已补最小 RED 并 GREEN；第二轮 Medium 1–3 的 domain/memory/SQLite 直接写入回归先 RED 后 GREEN；`uv run pytest tests/domain tests/db/test_migrations.py tests/db/test_runtime_migrations.py tests/db/test_v5_agentic_rca_persistence.py -q` → `199 passed in 6.81s`; T2 Ruff clean；fresh、V3/V4/V5、legacy-V6/current-V6 manifest 一致且仅三列物理变更 | 等待独立迁移复审 |
+| M1/T3 | Execute | Versioned phase profiles, activation, gates, replay, and diff | implemented / verified | 初始审查问题 H1–H7 已补最小 RED 并 GREEN；第二轮 ownerless RESULT_VALIDATION、计划/任务和 Investigation 聚合写入回归先 RED 后 GREEN；`uv run pytest tests/runtime tests/api/test_runtime_runs_api.py -q` → `420 passed, 2 skipped, 1 warning in 117.53s`; `tests/runtime/test_review_fixes.py` → `27 passed, 1 skipped`; T3 Ruff clean；V10/V11 phase、owner、replay/diff、contract-integrity reload、service/API gate 回归通过 | 等待独立运行时复审；M2 未开始 |
 
 M1 review-fix record (2026-08-06): High 1–6 and Medium 7–10 were reproduced
 with focused regressions, fixed at shared profile/ownership/transaction/entry
 boundaries, and rerun GREEN. The review-fix worktree contains no M2 or main
 merge changes; final independent re-review is the remaining handoff.
+
+M1 second-round review-fix record (2026-08-06): the re-review reproduced three
+medium persistence bypasses. RESULT_VALIDATION without an explicit round can no
+longer fall through as a legacy execution; memory and SQLite plan/task writes
+revalidate forged models before assignment or delete/insert, and Investigation
+aggregate saves revalidate nested V11 owner fields. Focused RED→GREEN evidence
+and the complete T2/T3 Gates are recorded above; no approved requirement or
+milestone scope changed, and independent re-review remains pending.
 
 ## Archived V10.1 Planning Dashboard
 

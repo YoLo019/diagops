@@ -13,8 +13,10 @@ from backend.db.models import (
     InvestigationSummary,
 )
 from backend.db.repositories import (
+    _validate_investigation_record,
     _validate_investigator_finding_linkage,
     _validate_multi_agent_result,
+    _validate_plan_and_tasks,
 )
 from backend.db.schema import (
     agent_executions,
@@ -67,6 +69,7 @@ class SQLiteInvestigationRepository:
         self, connection: Connection, record: InvestigationRecord
     ) -> InvestigationRecord:
         """使用调用方事务保存调查聚合，供 Runtime 原子 Phase commit 复用。"""
+        _validate_investigation_record(record)
         rows = record_to_rows(record)
         exists = connection.execute(
             select(investigations.c.id).where(investigations.c.id == record.id)
@@ -405,8 +408,7 @@ class SQLiteInvestigationRepository:
 
     def save_plan(self, plan: DiagnosisPlan) -> DiagnosisPlan:
         with self.engine.begin() as connection:
-            self.save_plan_with_connection(connection, plan)
-        return plan
+            return self.save_plan_with_connection(connection, plan)
 
     def save_plan_with_connection(
         self,
@@ -414,6 +416,10 @@ class SQLiteInvestigationRepository:
         plan: DiagnosisPlan,
     ) -> DiagnosisPlan:
         """在 RuntimeWriter 的事务中同步替换计划及其任务投影。"""
+        validated, tasks = _validate_plan_and_tasks(
+            plan.investigation_id, plan=plan
+        )
+        plan = validated
         payload = plan.model_dump(mode="json")
         row = {
             "id": plan.id,
@@ -427,7 +433,7 @@ class SQLiteInvestigationRepository:
             )
         )
         connection.execute(insert(diagnosis_plans).values(row))
-        self._replace_tasks(connection, plan.investigation_id, plan.tasks)
+        self._replace_tasks(connection, plan.investigation_id, tasks)
         return plan
 
     def get_plan(self, investigation_id: str) -> DiagnosisPlan | None:
@@ -449,8 +455,7 @@ class SQLiteInvestigationRepository:
         tasks: Sequence[DiagnosisTask],
     ) -> list[DiagnosisTask]:
         with self.engine.begin() as connection:
-            self.save_tasks_with_connection(connection, investigation_id, tasks)
-        return list(tasks)
+            return self.save_tasks_with_connection(connection, investigation_id, tasks)
 
     def save_tasks_with_connection(
         self,
@@ -459,8 +464,11 @@ class SQLiteInvestigationRepository:
         tasks: Sequence[DiagnosisTask],
     ) -> list[DiagnosisTask]:
         """在调用方事务内替换任务列表。"""
-        self._replace_tasks(connection, investigation_id, tasks)
-        return list(tasks)
+        _, validated = _validate_plan_and_tasks(
+            investigation_id, tasks=tasks
+        )
+        self._replace_tasks(connection, investigation_id, validated)
+        return validated
 
     def list_tasks(self, investigation_id: str) -> list[DiagnosisTask]:
         with self.engine.connect() as connection:

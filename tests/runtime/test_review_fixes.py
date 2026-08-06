@@ -6,6 +6,7 @@ from sqlalchemy import update
 from backend.config.settings import AppSettings, RuntimeSettings, StorageSettings
 from backend.db.models import InvestigationRecord
 from backend.db.schema import runtime_runs
+from backend.domain.actions import ActionRiskLevel, ActionType, RecommendedAction
 from backend.domain.agent_findings import (
     AgentFinding,
     AgentFindingType,
@@ -17,6 +18,7 @@ from backend.domain.agent_findings import (
 )
 from backend.domain.agent_plan import (
     AgentExecution,
+    DiagnosisPlan,
     DiagnosisTask,
     DiagnosisTaskType,
 )
@@ -505,3 +507,85 @@ def test_v11_result_validation_execution_persistence_rejects_missing_owner(
         runtime_store.investigation_repository.save_executions(
             "inv-1", [execution]
         )
+
+
+def test_v11_result_validation_without_round_is_rejected_before_persistence(
+    runtime_store,
+) -> None:
+    execution = AgentExecution(
+        id="execution-result-validation-no-round",
+        task_id="task-result-validation-no-round",
+        agent_name="CoordinatorAgent",
+        step_kind=ExecutionStepKind.RESULT_VALIDATION,
+        runtime_run_id="run-result-validation-no-round",
+    ).model_copy(update={"runtime_run_id": None})
+
+    with pytest.raises(ValueError, match="runtime_run_id"):
+        runtime_store.investigation_repository.save_executions("inv-1", [execution])
+
+    assert runtime_store.investigation_repository.list_executions("inv-1") == []
+
+
+def _v11_task(task_id: str, runtime_run_id: str) -> DiagnosisTask:
+    return DiagnosisTask(
+        id=task_id,
+        title="Trace the first failure",
+        description="Find the earliest causal boundary.",
+        task_type=DiagnosisTaskType.GENERAL_INVESTIGATION,
+        agent_name=FindingActor.INVESTIGATOR,
+        analysis_round=1,
+        runtime_run_id=runtime_run_id,
+        evidence_scope={"entity_ids": ["checkout-service"]},
+    )
+
+
+def test_v11_task_save_revalidates_missing_owner_before_persistence(runtime_store) -> None:
+    task = _v11_task("task-save-owner", "run-save-owner").model_copy(
+        update={"runtime_run_id": None}
+    )
+
+    with pytest.raises(ValueError, match="runtime_run_id"):
+        runtime_store.investigation_repository.save_tasks("inv-1", [task])
+
+    assert runtime_store.investigation_repository.list_tasks("inv-1") == []
+
+
+def test_v11_plan_save_revalidates_mixed_owner_before_persistence(runtime_store) -> None:
+    task = _v11_task("task-plan-owner", "run-plan-owner")
+    plan = DiagnosisPlan(
+        id="plan-owner",
+        investigation_id="inv-1",
+        runtime_run_id="run-plan-owner",
+        tasks=[task],
+    ).model_copy(update={"runtime_run_id": "run-foreign"})
+
+    with pytest.raises(ValueError, match="runtime_run_id"):
+        runtime_store.investigation_repository.save_plan(plan)
+
+    assert runtime_store.investigation_repository.get_plan("inv-1") is None
+
+
+def test_v11_investigation_save_revalidates_nested_action_owner_before_persistence(
+    runtime_store,
+) -> None:
+    action = RecommendedAction(
+        id="action-owner",
+        action_type=ActionType.CHECK,
+        title="Check the service owner",
+        description="Record a bounded follow-up.",
+        risk_level=ActionRiskLevel.LOW,
+        requires_approval=False,
+        supporting_evidence_ids=["evidence-owner"],
+        related_candidate_ids=["candidate-owner"],
+        runtime_run_id="run-good",
+    ).model_copy(update={"runtime_run_id": None})
+    record = runtime_store.investigation_repository.get("inv-1").model_copy(
+        update={"active_runtime_run_id": "run-good", "actions": [action]}
+    )
+
+    with pytest.raises(ValueError, match="runtime_run_id"):
+        runtime_store.investigation_repository.save(record)
+
+    restored = runtime_store.investigation_repository.get("inv-1")
+    assert restored.active_runtime_run_id is None
+    assert restored.actions == []

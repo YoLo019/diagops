@@ -147,6 +147,7 @@ def test_agent_execution_round_trips_result_validation_category():
         status="failed",
         execution_layer="openai_agents_sdk",
         step_kind="result_validation",
+        runtime_run_id="run-validation",
         failure_category="invalid_output",
         result_validation_category="review_contract",
     )

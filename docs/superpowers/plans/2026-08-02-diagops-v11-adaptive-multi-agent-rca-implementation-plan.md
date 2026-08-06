@@ -258,8 +258,8 @@ Acceptance:
 
 | Task | Status | Evidence | Review state |
 | --- | --- | --- | --- |
-| T2 | implemented / verified | Test-first RED→GREEN domain, ownership, migration, persistence, Critic-owner, finding-linkage, and execution-owner coverage; `uv run pytest tests/domain tests/db/test_migrations.py tests/db/test_runtime_migrations.py tests/db/test_v5_agentic_rca_persistence.py -q` → `198 passed in 7.94s`; scoped Ruff clean | Review fixes complete; independent migration re-review pending |
-| T3 | implemented / verified | Test-first RED→GREEN phase-profile, frozen source-integrity, BusinessMutation, contract-repair, summary projection, service/API gate, and replay/diff coverage; `uv run pytest tests/runtime tests/api/test_runtime_runs_api.py -q` → `412 passed, 2 skipped, 1 warning in 114.59s`; scoped Ruff clean | Review fixes complete; independent runtime re-review pending |
+| T2 | implemented / verified | Test-first RED→GREEN domain, ownership, migration, persistence, Critic-owner, finding-linkage, and execution-owner coverage; second-round Medium 1–3 direct-write regressions first RED then GREEN; `uv run pytest tests/domain tests/db/test_migrations.py tests/db/test_runtime_migrations.py tests/db/test_v5_agentic_rca_persistence.py -q` → `199 passed in 6.81s`; scoped Ruff clean | Review fixes complete; independent migration re-review pending |
+| T3 | implemented / verified | Test-first RED→GREEN phase-profile, frozen source-integrity, BusinessMutation, contract-repair, summary projection, service/API gate, and replay/diff coverage; second-round ownerless RESULT_VALIDATION and forged plan/task/Investigation aggregate regressions first RED then GREEN; `uv run pytest tests/runtime tests/api/test_runtime_runs_api.py -q` → `420 passed, 2 skipped, 1 warning in 117.53s`; `tests/runtime/test_review_fixes.py` → `27 passed, 1 skipped`; scoped Ruff clean | Review fixes complete; independent runtime re-review pending |
 
 M1 scope is limited to T2–T3. M2 evidence/model/skill work has not started.
 
@@ -270,8 +270,15 @@ freeze paths, run ownership, deadline arithmetic, cancellation races, and direct
 entries. On 2026-08-06, the ten reproduced findings from the first M1 review
 (High 1–6, Medium 7–10) were fixed with shared validators/profile selection,
 transaction-local fail-closed repair, and pre-link service/API checks; focused
-RED→GREEN regressions and both full Gates are recorded above. The remaining
-action is independent migration/runtime re-review; M2 remains out of scope.
+RED→GREEN regressions and both full Gates are recorded above. The second-round
+review reproduced three medium persistence bypasses: an ownerless
+RESULT_VALIDATION execution without `analysis_round`, direct plan/task writes
+that skipped V11 revalidation, and direct Investigation aggregate writes that
+skipped nested owner validation. They were fixed with the existing
+`model_validate(model_dump(...))` boundary pattern, preserving historical
+payload field presence and validating SQLite before replacement. The approved
+contract and milestone scope are unchanged; independent migration/runtime
+re-review remains the next action and M2 remains out of scope.
 
 ## 5. M2 — Local evidence and model boundaries
 

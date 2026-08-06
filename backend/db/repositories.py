@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from threading import RLock
 
@@ -21,6 +22,43 @@ from backend.domain.memory import MemoryItem
 from backend.domain.multi_agent import AgentExecutionLayer
 from backend.domain.react_trace import ReActTrace
 from backend.domain.tool_calls import ToolCallRecord
+
+
+def _validate_investigation_record(record: InvestigationRecord) -> InvestigationRecord:
+    """在写入前重建聚合，避免 model_copy 绕过嵌套 V11 owner 校验。"""
+    return InvestigationRecord.model_validate(record.model_dump(mode="python"))
+
+
+def _validate_plan_and_tasks(
+    investigation_id: str,
+    *,
+    plan: DiagnosisPlan | None = None,
+    tasks: Sequence[DiagnosisTask] = (),
+) -> tuple[DiagnosisPlan | None, list[DiagnosisTask]]:
+    """在替换计划投影前重建模型并拒绝混合 runtime owner。"""
+    validated_plan = (
+        None
+        if plan is None
+        else DiagnosisPlan.model_validate(plan.model_dump(mode="python"))
+    )
+    if validated_plan is not None and validated_plan.investigation_id != investigation_id:
+        raise ValueError("Diagnosis plan investigation mismatch")
+    validated_tasks = [
+        DiagnosisTask.model_validate(item.model_dump(mode="python")) for item in tasks
+    ]
+    stored_tasks = (
+        list(validated_plan.tasks) if validated_plan is not None else validated_tasks
+    )
+    owners = {
+        item.runtime_run_id
+        for item in stored_tasks
+        if item.runtime_run_id is not None
+    }
+    if validated_plan is not None and validated_plan.runtime_run_id is not None:
+        owners.add(validated_plan.runtime_run_id)
+    if len(owners) > 1:
+        raise ValueError("V11 plan and tasks mix runtime owners")
+    return validated_plan, stored_tasks
 
 
 def _validate_multi_agent_result(
@@ -146,6 +184,7 @@ class InMemoryInvestigationRepository:
 
     def save(self, record: InvestigationRecord) -> InvestigationRecord:
         with self._lock:
+            _validate_investigation_record(record)
             self._records[record.id] = record
             return record
 
@@ -283,9 +322,13 @@ class InMemoryInvestigationRepository:
             raise ValueError(f"Unknown verification suggestion: {verification_id}")
 
     def save_plan(self, plan: DiagnosisPlan) -> DiagnosisPlan:
-        self._plans[plan.investigation_id] = plan
-        self._tasks[plan.investigation_id] = list(plan.tasks)
-        return plan
+        with self._lock:
+            validated, tasks = _validate_plan_and_tasks(
+                plan.investigation_id, plan=plan
+            )
+            self._plans[plan.investigation_id] = validated
+            self._tasks[plan.investigation_id] = tasks
+            return validated
 
     def get_plan(self, investigation_id: str) -> DiagnosisPlan | None:
         plan = self._plans.get(investigation_id)
@@ -299,8 +342,11 @@ class InMemoryInvestigationRepository:
         tasks: list[DiagnosisTask],
     ) -> list[DiagnosisTask]:
         with self._lock:
-            self._tasks[investigation_id] = list(tasks)
-            return list(tasks)
+            _, validated = _validate_plan_and_tasks(
+                investigation_id, tasks=tasks
+            )
+            self._tasks[investigation_id] = validated
+            return validated
 
     def list_tasks(self, investigation_id: str) -> list[DiagnosisTask]:
         return list(self._tasks.get(investigation_id, []))

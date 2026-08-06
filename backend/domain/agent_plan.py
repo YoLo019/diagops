@@ -213,6 +213,7 @@ class AgentExecution(BaseModel):
     @model_validator(mode="after")
     def validate_v11_execution(self) -> "AgentExecution":
         v11_actor = self.agent_name in {item.value for item in ExecutionActor}
+        # V11 writer 会显式写入 owner 字段；历史 RESULT_VALIDATION payload 省略该字段，需保持可读。
         v11_step = self.step_kind in {
             ExecutionStepKind.LEAD_PLANNING,
             ExecutionStepKind.INVESTIGATOR_ANALYSIS,
@@ -220,7 +221,10 @@ class AgentExecution(BaseModel):
             ExecutionStepKind.LEAD_ADJUDICATION,
         } or (
             self.step_kind == ExecutionStepKind.RESULT_VALIDATION
-            and self.analysis_round is not None
+            and (
+                self.analysis_round is not None
+                or "runtime_run_id" in self.model_fields_set
+            )
         )
         if (v11_actor or v11_step) and self.runtime_run_id is None:
             raise ValueError("V11 execution requires runtime_run_id")

@@ -16,6 +16,7 @@ from backend.domain.agent_findings import (
     RootCauseCandidate,
 )
 from backend.domain.agent_plan import (
+    AgentExecution,
     DiagnosisPlan,
     DiagnosisTask,
     DiagnosisTaskType,
@@ -29,6 +30,7 @@ from backend.domain.multi_agent import (
     CriticVerdict,
     DiagnosticStatus,
     ExecutionContractVersion,
+    ExecutionStepKind,
     ModelProvider,
     MultiAgentRunSummary,
 )
@@ -126,6 +128,16 @@ def test_v11_plan_and_summary_require_runtime_owner() -> None:
         MultiAgentRunSummary(
             status="completed",
             authority_mode=AuthorityMode.AGENT,
+        )
+
+
+def test_v11_result_validation_without_round_is_not_legacy() -> None:
+    with pytest.raises(ValidationError, match="runtime_run_id"):
+        AgentExecution(
+            task_id="task-result-validation-no-round",
+            agent_name="CoordinatorAgent",
+            step_kind=ExecutionStepKind.RESULT_VALIDATION,
+            runtime_run_id=None,
         )
 
 

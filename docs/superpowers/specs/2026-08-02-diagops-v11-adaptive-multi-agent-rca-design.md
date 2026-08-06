@@ -1420,7 +1420,7 @@ historical replay—not because the old benchmark score is unchanged.
 | R24 | Four versioned data-only diagnostic skills are selectable without adding executable plugins or MCP | Strategies are prose only; no Skill/MCP subsystem exists | Catalog schema/hash, required-tool, prompt, and no-dynamic-load checks | T4, T7, T11–T13 | pending |
 | R25 | Formal scoring uses offline evidence and locally isolates runtime inputs from labels until prediction freeze | Current spec assumed an unavailable external custodian | Mount/path/environment denial tests and evaluator ordering/hash checks | T1, T11–T13 | pending |
 | R26 | Official OpenAI, existing DeepSeek, and certified OpenAI-compatible Chat Completions endpoints share one safe model boundary without vendor lock-in | Current settings expose only OpenAI/DeepSeek; the DeepSeek adapter hardcodes its URL/key and runtime treats every non-OpenAI provider as DeepSeek | Generic-adapter contract tests, fake-endpoint failure matrix, secret/tracing scans, live capability certification, and paired-run identity checks | T6, T10–T13 | pending |
-| R27 | Reused V10 infrastructure is isolated from V11 diagnostic semantics and every V11 artifact/entry is bound to one durable run | Current phase executor, direct orchestrator, Agent runtime, report/action paths, manifests, and latest-projection rows can execute or retain legacy semantics | Versioned-phase/profile tests, forbidden-call sentinels, all-entry RuntimeRun gate, supplemental-finding ownership, registry exposure, atomic projection activation/rerun/action ownership, run-create mismatch, and `contract_integrity` suites | T2–T4, T6–T11, T13 | M1/T2–T3: ten reproduced review findings closed at shared profile, frozen-owner, BusinessMutation, transaction-repair, summary, Critic/finding-linkage, execution-owner, and service/API boundaries; Schema V7, V10/V11 profiles, activation/freeze/recovery, adapter gates, and replay/diff isolation green; remaining entry/provider/product sentinels continue in T4/T6–T11/T13 |
+| R27 | Reused V10 infrastructure is isolated from V11 diagnostic semantics and every V11 artifact/entry is bound to one durable run | Current phase executor, direct orchestrator, Agent runtime, report/action paths, manifests, and latest-projection rows can execute or retain legacy semantics | Versioned-phase/profile tests, forbidden-call sentinels, all-entry RuntimeRun gate, supplemental-finding ownership, registry exposure, atomic projection activation/rerun/action ownership, run-create mismatch, `contract_integrity`, and persistence-boundary revalidation suites | T2–T4, T6–T11, T13 | M1/T2–T3: first-round ten findings plus second-round three medium persistence bypasses closed at shared profile, frozen-owner, BusinessMutation, aggregate model-validation, transaction-repair, summary, Critic/finding-linkage, execution-owner, and service/API boundaries; Schema V7, V10/V11 profiles, activation/freeze/recovery, adapter gates, and replay/diff isolation green; remaining entry/provider/product sentinels continue in T4/T6–T11/T13 |
 
 ## 14. Alternatives considered
 
@@ -1478,8 +1478,18 @@ reuse audit then traced every declared reuse through runtime, persistence,
 entry-point, report/action, tool, API, and benchmark consumers and found
 L22–L29. Focused re-review closed L22–L27/L29 and found L28 incomplete plus
 L30; the atomic activation, owner-aware pre-INTAKE termination, and
-action/verification ownership amendments closed both. Final focused re-review
-found no remaining blocking, high, or medium issue.
+action/verification ownership amendments closed both. The pre-implementation
+focused re-review found no remaining blocking, high, or medium issue.
+
+M1 implementation second-round review (2026-08-06) found no blocking or high
+issue and three medium persistence-boundary issues: ownerless
+`RESULT_VALIDATION` executions without `analysis_round`, direct plan/task
+writes that skipped V11 revalidation, and direct Investigation aggregate writes
+that skipped nested owner validation. The fixes reuse the existing Pydantic
+revalidation boundary, validate SQLite before replacement, preserve legacy
+payload field presence, and add focused RED→GREEN evidence without changing
+the approved contract or milestone scope. Independent re-review remains
+pending.
 
 | ID | Severity | Finding | Resolution |
 | --- | --- | --- | --- |
