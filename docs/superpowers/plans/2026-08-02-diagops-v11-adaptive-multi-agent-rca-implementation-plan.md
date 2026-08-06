@@ -260,6 +260,7 @@ Acceptance:
 | --- | --- | --- | --- |
 | T2 | implemented / verified | Test-first RED→GREEN domain, ownership, migration, persistence, Critic-owner, finding-linkage, and execution-owner coverage; second-round Medium 1–3 direct-write regressions first RED then GREEN; `uv run pytest tests/domain tests/db/test_migrations.py tests/db/test_runtime_migrations.py tests/db/test_v5_agentic_rca_persistence.py -q` → `199 passed in 6.81s`; scoped Ruff clean | Review fixes complete; independent migration re-review pending |
 | T3 | implemented / verified | Test-first RED→GREEN phase-profile, frozen source-integrity, BusinessMutation, contract-repair, summary projection, service/API gate, and replay/diff coverage; second-round ownerless RESULT_VALIDATION and forged plan/task/Investigation aggregate regressions first RED then GREEN; `uv run pytest tests/runtime tests/api/test_runtime_runs_api.py -q` → `420 passed, 2 skipped, 1 warning in 117.53s`; `tests/runtime/test_review_fixes.py` → `27 passed, 1 skipped`; scoped Ruff clean | Review fixes complete; independent runtime re-review pending |
+| T2–T3 third-round review fixes | implemented / verified | Third-round findings RR-H1/RR-M1/RR-M2/RR-L2 closed: deadline/budget monotonicity + V11 terminal-transition coverage added in `tests/runtime/test_v11_deadline_budget.py`（6 项，其中 RR-L2 先 RED 后 GREEN）；T4/T5 提前落地契约的 domain 覆盖补齐于 `tests/domain/test_evidence_memory_contracts.py`（9 项，未改实现直接 GREEN，确认契约本就正确）；RR-M2 contract-integrity 修复持久化先 RED 后 GREEN；`uv run pytest tests/domain tests/db/test_migrations.py tests/db/test_runtime_migrations.py tests/db/test_v5_agentic_rca_persistence.py tests/db/test_schema_v7_red.py -q` → `209 passed in 7.08s`；`uv run pytest tests/runtime tests/api/test_runtime_runs_api.py -q` → `427 passed, 3 skipped, 1 warning in 118.42s`；scoped Ruff clean；`git diff --check` clean | Third-round fixes verified; RR-L1/RR-L3 open (low, due before M2) |
 
 M1 scope is limited to T2–T3. M2 evidence/model/skill work has not started.
 
@@ -279,6 +280,28 @@ skipped nested owner validation. They were fixed with the existing
 payload field presence and validating SQLite before replacement. The approved
 contract and milestone scope are unchanged; independent migration/runtime
 re-review remains the next action and M2 remains out of scope.
+
+M1 third-round review (2026-08-07): conclusion `approve_with_followups`. Four
+findings closed: RR-H1 (high) — T3 step 8 的 absolute deadline/budget
+monotonicity tests 此前在 T3 证据行的整体 RED→GREEN 声称中被隐含覆盖，实测零测试；
+现于 `tests/runtime/test_v11_deadline_budget.py` 补齐四类覆盖（check_execution
+deadline → TIMEOUT 终态、`_deadline_for` 跨 attempt 绝对锚定不重置、V11
+investigation failed → run FAILED/OUTPUT_VALIDATION、`timeout_seconds=121`
+构造拒绝），特此修正该不实声称——在补齐前不得视为已测。RR-M1 (medium) — T4/T5
+契约（EvidenceProvenance/EvidenceScope/新 evidence provider·kind、
+MemoryVerificationStatus、ModelProvider.OPENAI_COMPATIBLE）提前落地却无测试；
+`tests/domain/test_evidence_memory_contracts.py` 补 9 项最小构造/校验/序列化
+往返测试，未改实现即全部通过，确认契约正确仅缺覆盖。RR-M2 (medium) —
+`_repair_contract_integrity` 不写回修正后的 execution_contract，每次读路径重复
+修复并重 freeze/改写业务投影；修复为同事务持久化 `_safe_contract_projection`，
+先 RED（二次读取 investigation.updated_at 漂移、契约列仍为篡改值）后 GREEN，
+既有 idempotence 语义不变。RR-L2 (low) — CANCELLING 的 V11 run 在 deadline
+到期时 `_fail_if_owned` 仅处理 RUNNING 而滞留 CANCELLING；修复为 deadline
+分支先 `_finish_cancel` 再 `_fail_if_owned`，先 RED（滞留 cancelling）后
+GREEN（收敛 CANCELLED）。两项 low 记录为 open 跟进、M2 前处理：RR-L1
+（`phase_executor._v11_intake` 双激活窗口，已核实可恢复）与 RR-L3
+（`sqlite_store` 跨模块调用 repository 私有 `_get_with_connection`）。
+Approved 契约与 milestone 范围不变。
 
 ## 5. M2 — Local evidence and model boundaries
 
@@ -911,9 +934,21 @@ hardening conditional on real-artifact validation; telemetry suffix allowlist
 `{.csv,.json,.log}` plus 64 MiB cap accepted as provisional pending real-artifact
 reconciliation.
 
+M1 third-round review (migration/runtime, 2026-08-07): conclusion
+`approve_with_followups`.
+
+| ID | Severity | Finding | Resolution |
+| --- | --- | --- | --- |
+| RR-H1 | high | T3 step 8 absolute deadline/budget monotonicity tests 被 T3 证据行隐含声称已测，实测零覆盖 | Closed on 2026-08-07: `tests/runtime/test_v11_deadline_budget.py` 6 项覆盖（TIMEOUT 终态、跨 attempt 绝对 deadline 锚定、investigation failed → OUTPUT_VALIDATION、timeout_seconds=121 拒绝、CANCELLING 收敛、单调性）；T3 证据声称已修正 |
+| RR-M1 | medium | T4/T5 契约（evidence provenance/scope、memory verification、OPENAI_COMPATIBLE provider）提前落地 M1 且无测试 | Closed on 2026-08-07: `tests/domain/test_evidence_memory_contracts.py` 9 项；未改实现直接通过，确认契约正确仅缺覆盖 |
+| RR-M2 | medium | `_repair_contract_integrity` 不持久化修正后的 execution_contract，读路径重复修复、V11 重复 freeze/reseal、业务投影被反复改写 | Closed on 2026-08-07: 同事务写回 `_safe_contract_projection`；RED（updated_at 漂移 + 契约列仍篡改）→ GREEN；既有 idempotence 测试语义不变 |
+| RR-L2 | low | CANCELLING 的 V11 run 遇 deadline 到期滞留 CANCELLING 直至 lease 过期 | Closed on 2026-08-07: `_RuntimeDeadlineExceeded` 分支先 `_finish_cancel` 后 `_fail_if_owned`；RED（滞留 cancelling）→ GREEN（收敛 CANCELLED） |
+| RR-L1 | low | `phase_executor._v11_intake` 双激活窗口（已核实可恢复） | open，M2 前处理 |
+| RR-L3 | low | `sqlite_store._repair_contract_integrity` 跨模块调用 repository 私有 `_get_with_connection` | open，M2 前处理 |
+
 ## 11. Approval state
 
 - Specification: approved by the user on 2026-08-02 after L22–L30 reuse review.
 - Implementation Plan: independently reviewed with H1–H3/M1–M2 closed; approved
   by the user on 2026-08-02 with authorization to begin execution.
-- Implementation: M0/T1 complete; M1/T2–T3 implemented and verified on 2026-08-05 in the delegated worktree; independent migration/runtime review pending; M2 not started.
+- Implementation: M0/T1 complete; M1/T2–T3 implemented and verified on 2026-08-05 in the delegated worktree; third-round independent migration/runtime review concluded `approve_with_followups` on 2026-08-07 with RR-H1/RR-M1/RR-M2/RR-L2 closed and RR-L1/RR-L3 open (low, due before M2); M2 not started.

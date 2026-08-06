@@ -1704,6 +1704,9 @@ class SQLiteRuntimeStore:
                     }
                 ),
             )
+        # 修复必须随同事务持久化校正后的契约投影；否则每次读取都会重复修复，
+        # 导致 V11 重复 freeze/reseal 且业务投影被读路径反复改写。
+        values["execution_contract"] = self._safe_contract_projection(data)
         connection.execute(
             update(runtime_runs)
             .where(runtime_runs.c.id == data["id"])

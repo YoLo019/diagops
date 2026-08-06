@@ -411,6 +411,9 @@ class RuntimeCoordinator:
             await self._finish_cancel(run.id, attempt, owner, run.lease_version)
             return self.store.get_run(run.id)
         except _RuntimeDeadlineExceeded:
+            # CANCELLING 的 Run 遇到 deadline 也要收敛终态：先按取消收尾，
+            # 仍为 RUNNING 时再按 TIMEOUT 失败提交；两者互斥且各自幂等。
+            await self._finish_cancel(run.id, attempt, owner, run.lease_version)
             await self._fail_if_owned(
                 run.id,
                 attempt,

@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 from backend.config.settings import AppSettings, RuntimeSettings, StorageSettings
 from backend.db.models import InvestigationRecord
@@ -240,6 +240,42 @@ def test_sqlite_contract_integrity_reload_terminates_running_attempt_and_is_idem
     runtime_store.get_run(run.id)
 
     assert [event.id for event in runtime_store.list_events(run.id)] == event_ids
+
+
+def test_sqlite_contract_integrity_repair_persists_repaired_contract_once(
+    runtime_store,
+) -> None:
+    if not hasattr(runtime_store, "engine"):
+        pytest.skip("contract repair requires SQLite durable event storage")
+    run = runtime_store.create_run(_v11_run(run_id="run-contract-persist"))
+    with runtime_store.engine.begin() as connection:
+        connection.execute(
+            update(runtime_runs)
+            .where(runtime_runs.c.id == run.id)
+            .values(execution_contract={**run.execution_contract, "model_name": "tampered"})
+        )
+
+    repaired = runtime_store.get_run(run.id)
+    assert repaired.status == RuntimeRunStatus.FAILED
+    assert repaired.failure_category == RuntimeFailureCategory.CONTRACT_INTEGRITY
+    frozen_once = runtime_store.get_frozen_business_projection(run.id)
+    updated_once = runtime_store.investigation_repository.get("inv-1").updated_at
+
+    again = runtime_store.get_run(run.id)
+
+    # 修复必须一次性持久化：二次读取不得重 freeze、重写 Run 行或触碰业务投影。
+    assert again.execution_contract == repaired.execution_contract
+    assert runtime_store.get_frozen_business_projection(run.id) == frozen_once
+    assert (
+        runtime_store.investigation_repository.get("inv-1").updated_at == updated_once
+    )
+    with runtime_store.engine.begin() as connection:
+        persisted_contract = connection.execute(
+            select(runtime_runs.c.execution_contract).where(
+                runtime_runs.c.id == run.id
+            )
+        ).scalar_one()
+    assert persisted_contract == repaired.execution_contract
 
 
 def _container_record(investigation_id: str) -> InvestigationRecord:

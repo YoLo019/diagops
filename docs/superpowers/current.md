@@ -45,7 +45,7 @@ Implementation status: `verifying`
 
 Completion commit: `none`
 
-Verification evidence: `M1/T2–T3 second-round review-fix RED→GREEN evidence is green; T2 199 passed, T3 420 passed/2 skipped/1 warning, review_fixes 27 passed/1 skipped, both scoped Ruff gates and diff-check clean; final independent re-review remains pending`
+Verification evidence: `M1/T2–T3 third-round review-fix RED→GREEN evidence is green; RR-H1 deadline/budget 覆盖 6 项 + RR-M1 domain 契约 9 项补齐，RR-M2/RR-L2 先 RED 后 GREEN；T2 gate 209 passed，T3 gate 427 passed/3 skipped/1 warning，scoped Ruff 与 diff-check clean；第三轮独立复审 approve_with_followups，RR-L1/RR-L3 low open（M2 前处理）`
 
 Blocker: `none`
 
@@ -84,11 +84,11 @@ docs/superpowers/plans/2026-08-02-diagops-v11-adaptive-multi-agent-rca-implement
 
 ## V11 Planning Dashboard
 
-Overall progress: `V11 Spec/Plan approved, execution authorized 2026-08-02; M0/T1 done：真实 RCAEval RE2 全链路完成（byte-verified 双向对账 2700/2700、真实 prepare runtime manifest_hash bb119fc9…/150 cases/26 GB、二次 prepare diff -r 零差异字节等价）；M0 exit review 2026-08-04 approve_with_followups（出口判据满足，M0-I2 措辞 followup 已修复并 closed：28 focused + 142 regression passed, Ruff clean；M0-L1/L2 low open，M5 前处理）；M1/T2–T3 已完成 10 项审查复现问题的 RED→GREEN 修复并通过完整 Gate，等待复审；M2 未开始`
+Overall progress: `V11 Spec/Plan approved, execution authorized 2026-08-02; M0/T1 done：真实 RCAEval RE2 全链路完成（byte-verified 双向对账 2700/2700、真实 prepare runtime manifest_hash bb119fc9…/150 cases/26 GB、二次 prepare diff -r 零差异字节等价）；M0 exit review 2026-08-04 approve_with_followups（出口判据满足，M0-I2 措辞 followup 已修复并 closed：28 focused + 142 regression passed, Ruff clean；M0-L1/L2 low open，M5 前处理）；M1/T2–T3 第三轮独立复审 2026-08-07 approve_with_followups（RR-H1/RR-M1/RR-M2/RR-L2 已 RED→GREEN 关闭，RR-L1/RR-L3 low open 待 M2 前处理）；M2 未开始`
 
-Current phase: Full iteration / M1 T2–T3 implemented and verified, independent review pending
+Current phase: Full iteration / M1 T2–T3 third-round review fixes verified, low followups open
 
-Next action: 对 M1 T2–T3 做独立 migration/runtime review；关闭阻塞或高风险发现后再开始 M2。
+Next action: M2 开始前处理 RR-L1/RR-L3 两项 low 跟进项；随后按 Plan §5 启动 M2。
 
 | ID | Phase | Task | Status | Evidence or result | Next action or blocker |
 | --- | --- | --- | --- | --- | --- |
@@ -112,6 +112,15 @@ revalidate forged models before assignment or delete/insert, and Investigation
 aggregate saves revalidate nested V11 owner fields. Focused RED→GREEN evidence
 and the complete T2/T3 Gates are recorded above; no approved requirement or
 milestone scope changed, and independent re-review remains pending.
+
+M1 third-round review-fix record (2026-08-07): the final independent review
+concluded `approve_with_followups`. RR-H1 — T3 step 8 的 deadline/budget
+monotonicity 测试此前被证据行隐含声称已测、实测零覆盖，现补 6 项
+（`tests/runtime/test_v11_deadline_budget.py`）并修正该声称；RR-M1 — T4/T5
+提前落地契约补 9 项 domain 测试（未改实现即通过，契约正确仅缺覆盖）；
+RR-M2 — contract-integrity 修复同事务持久化校正契约，先 RED 后 GREEN；
+RR-L2 — CANCELLING 遇 deadline 收敛 CANCELLED，先 RED 后 GREEN。
+RR-L1/RR-L3 记录为 open/low，M2 前处理；approved 契约与 milestone 范围不变。
 
 ## Archived V10.1 Planning Dashboard
 
