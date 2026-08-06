@@ -37,6 +37,7 @@ from backend.domain.multi_agent import (
 )
 from backend.domain.reports import IncidentReport
 from backend.domain.runtime import RuntimeDiffSection, RuntimeEventType, RuntimeRunDiff
+from backend.runtime.phases import phase_profile_for
 from backend.runtime.replay import list_all_runtime_events
 from backend.safety.redaction import assert_safe_label
 
@@ -321,6 +322,7 @@ class FrozenBusinessProjection(_FrozenModel):
     verification_suggestion_ids: list[SafeId] = Field(
         default_factory=list, max_length=512
     )
+    execution_contract_version: str | None = None
     projection_state: Literal["activated", "not_activated"] = "activated"
     runtime_run_id: SafeId | None = None
     active_runtime_run_id: SafeId | None = None
@@ -381,6 +383,51 @@ def parse_frozen_projection(projection: Any) -> FrozenBusinessProjection:
     return validated
 
 
+def validate_frozen_projection_source(
+    projection: FrozenBusinessProjection,
+    source_run,
+) -> None:
+    """校验冻结快照的 owner、authority 和 contract version 必须来自同一 Run。"""
+    if not source_run.is_v11:
+        if projection.execution_contract_version not in {
+            None,
+            source_run.execution_contract_version.value,
+        }:
+            raise ValueError("frozen projection contract version mismatch")
+        return
+    if projection.investigation_id != source_run.investigation_id:
+        raise ValueError("frozen projection investigation mismatch")
+    if (
+        projection.execution_contract_version
+        != source_run.execution_contract_version.value
+    ):
+        raise ValueError("frozen projection contract version mismatch")
+    if projection.runtime_run_id != source_run.id:
+        raise ValueError("frozen projection runtime owner mismatch")
+    if projection.authority_mode != source_run.authority_mode.value:
+        raise ValueError("frozen projection authority mismatch")
+    if projection.projection_state == "activated":
+        if projection.active_runtime_run_id != source_run.id:
+            raise ValueError("frozen projection active owner mismatch")
+    elif projection.active_runtime_run_id is not None:
+        raise ValueError("frozen projection inactive owner mismatch")
+    if any(
+        item.runtime_run_id not in {None, source_run.id}
+        for item in projection.findings
+    ):
+        raise ValueError("frozen projection finding owner mismatch")
+    if projection.review is not None:
+        if projection.review.runtime_run_id != source_run.id:
+            raise ValueError("frozen projection review owner mismatch")
+        if projection.review.authority_mode != source_run.authority_mode.value:
+            raise ValueError("frozen projection review authority mismatch")
+    if projection.report is not None:
+        if projection.report.runtime_run_id != source_run.id:
+            raise ValueError("frozen projection report owner mismatch")
+        if projection.report.authority_mode != source_run.authority_mode.value:
+            raise ValueError("frozen projection report authority mismatch")
+
+
 def finalize_frozen_projection(
     projection: dict[str, Any], checkpoints=()
 ) -> dict[str, Any]:
@@ -406,6 +453,7 @@ def freeze_business_projection(
     findings = repository.list_agent_findings(investigation_id)
     summary = record.multi_agent_run
     snapshot_is_v11 = runtime_run_id is not None
+    execution_contract_version = "v11" if snapshot_is_v11 else None
     projection_is_active = (
         not snapshot_is_v11 or record.active_runtime_run_id == runtime_run_id
     )
@@ -430,6 +478,7 @@ def freeze_business_projection(
         "schema_version": 1,
         "investigation_id": investigation_id,
         "environment": record.event.environment,
+        "execution_contract_version": execution_contract_version,
         "projection_state": "activated" if projection_is_active else "not_activated",
         "runtime_run_id": runtime_run_id,
         "active_runtime_run_id": (
@@ -751,6 +800,7 @@ class RuntimeDiffService:
             business = parse_frozen_projection(
                 self.store.get_frozen_business_projection(run.id)
             )
+            validate_frozen_projection_source(business, run)
         except (TypeError, ValueError):
             # 终态 Run 缺失快照时只能报告不可用；回读当前 Investigation 会篡改历史。
             causes: Any = {"status": "unavailable"}
@@ -779,7 +829,10 @@ class RuntimeDiffService:
                 "execution_contract_version": run.execution_contract_version.value,
                 "authority_mode": run.authority_mode.value,
             },
-            "phases": self._phases(semantic_events),
+            "phases": self._phases(
+                semantic_events,
+                phase_profile_for(run.execution_contract_version).order,
+            ),
             "agents": self._agents(semantic_events),
             "tools": self._tools(semantic_events),
             "evidence_references": sorted(
@@ -896,7 +949,7 @@ class RuntimeDiffService:
         }
 
     @staticmethod
-    def _phases(events) -> list[dict[str, Any]]:
+    def _phases(events, phase_order=()) -> list[dict[str, Any]]:
         starts: dict[str, datetime] = {}
         rows: dict[str, dict[str, Any]] = {}
         for event in events:
@@ -915,7 +968,11 @@ class RuntimeDiffService:
                     "status": event.safe_payload.get("status"),
                     "duration_ms": _duration_ms(starts.get(phase), event.occurred_at),
                 }
-        return [rows[key] for key in sorted(rows)]
+        order = {str(phase): index for index, phase in enumerate(phase_order)}
+        return sorted(
+            rows.values(),
+            key=lambda row: (order.get(row["phase"], len(order)), row["phase"]),
+        )
 
     @staticmethod
     def _agents(events) -> list[dict[str, Any]]:

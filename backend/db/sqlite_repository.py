@@ -12,7 +12,10 @@ from backend.db.models import (
     InvestigationStatus,
     InvestigationSummary,
 )
-from backend.db.repositories import _validate_multi_agent_result
+from backend.db.repositories import (
+    _validate_investigator_finding_linkage,
+    _validate_multi_agent_result,
+)
 from backend.db.schema import (
     agent_executions,
     agent_findings,
@@ -45,7 +48,7 @@ from backend.domain.human_transitions import (
 )
 from backend.domain.hypotheses import CauseType
 from backend.domain.memory import MemoryItem
-from backend.domain.multi_agent import AgentExecutionLayer
+from backend.domain.multi_agent import AgentExecutionLayer, AuthorityMode
 from backend.domain.react_trace import ReActTrace
 from backend.domain.tool_calls import ToolCallRecord
 from backend.safety.redaction import redact_text
@@ -229,37 +232,78 @@ class SQLiteInvestigationRepository:
             event = row["event"]
             top = row["top_hypothesis"]
             run_summary = event.get("_diagops_multi_agent_run") or {}
-            summaries.append(
-                InvestigationSummary(
-                    id=row["id"],
-                    status=row["status"],
-                    service=redact_text(event["service"]),
-                    title=redact_text(event["title"]),
-                    strategy=event.get(
-                        "_diagops_investigation_strategy", "fixed"
-                    ),
-                    top_cause_type=top["cause_type"] if top else "unknown",
-                    confidence=top["confidence"] if top else 0.0,
-                    top_affected_entity=(
-                        top.get("affected_entity") if top else None
-                    ),
-                    top_failure_mechanism=(
-                        top.get("failure_mechanism") if top else None
-                    ),
-                    diagnostic_status=run_summary.get("diagnostic_status"),
-                    authority_mode=run_summary.get("authority_mode"),
-                    active_runtime_run_id=event.get(
-                        "_diagops_active_runtime_run_id"
-                    ),
-                    action_count=row["action_count"],
-                    verification_count=row["verification_count"],
-                    failure_reason=(
-                        redact_text(row["failure_reason"])
-                        if row["failure_reason"]
-                        else None
-                    ),
-                )
+            summary = InvestigationSummary(
+                id=row["id"],
+                status=row["status"],
+                service=redact_text(event["service"]),
+                title=redact_text(event["title"]),
+                strategy=event.get("_diagops_investigation_strategy", "fixed"),
+                top_cause_type=top["cause_type"] if top else "unknown",
+                confidence=top["confidence"] if top else 0.0,
+                top_affected_entity=top.get("affected_entity") if top else None,
+                top_failure_mechanism=(
+                    top.get("failure_mechanism") if top else None
+                ),
+                diagnostic_status=run_summary.get("diagnostic_status"),
+                authority_mode=run_summary.get("authority_mode"),
+                active_runtime_run_id=event.get("_diagops_active_runtime_run_id"),
+                action_count=row["action_count"],
+                verification_count=row["verification_count"],
+                failure_reason=(
+                    redact_text(row["failure_reason"])
+                    if row["failure_reason"]
+                    else None
+                ),
             )
+            review = self.get_coordination_review(row["id"])
+            v11_projection = bool(
+                review is not None and review.authority_mode == AuthorityMode.AGENT
+                or run_summary.get("authority_mode") == AuthorityMode.AGENT.value
+                or event.get("_diagops_active_runtime_run_id") is not None
+            )
+            if v11_projection:
+                candidate = None
+                if review is not None and review.authority_mode == AuthorityMode.AGENT:
+                    candidate_ids = set(review.authoritative_candidate_ids)
+                    candidate = next(
+                        (
+                            item
+                            for item in review.candidates
+                            if item.id in candidate_ids
+                        ),
+                        None,
+                    )
+                summary = summary.model_copy(
+                    update={
+                        "top_cause_type": "unknown",
+                        "confidence": candidate.confidence if candidate else 0.0,
+                        "top_affected_entity": (
+                            candidate.affected_entity if candidate else None
+                        ),
+                        "top_failure_mechanism": (
+                            candidate.failure_mechanism if candidate else None
+                        ),
+                        "diagnostic_status": (
+                            review.diagnostic_status
+                            if review is not None
+                            else run_summary.get("diagnostic_status")
+                        ),
+                        "authority_mode": (
+                            review.authority_mode
+                            if review is not None
+                            else run_summary.get("authority_mode")
+                        ),
+                        "lead_decision": (
+                            review.lead_decision if review is not None else None
+                        ),
+                        "critic_assessments": (
+                            list(review.critic_assessments)
+                            if review is not None
+                            else []
+                        ),
+                    }
+                )
+            summaries.append(summary)
         return summaries
 
     def update_status(
@@ -428,13 +472,19 @@ class SQLiteInvestigationRepository:
         investigation_id: str,
         executions: Sequence[AgentExecution],
     ) -> list[AgentExecution]:
-        rows = [
-            self._agent_payload_row(investigation_id, execution, task_id=execution.task_id)
-            for execution in executions
-        ]
         with self.engine.begin() as connection:
+            validated = [
+                AgentExecution.model_validate(item.model_dump(mode="python"))
+                for item in executions
+            ]
+            rows = [
+                self._agent_payload_row(
+                    investigation_id, execution, task_id=execution.task_id
+                )
+                for execution in validated
+            ]
             self._upsert_payload_rows(connection, agent_executions, rows)
-        return list(executions)
+        return validated
 
     def list_executions(self, investigation_id: str) -> list[AgentExecution]:
         with self.engine.connect() as connection:
@@ -541,41 +591,61 @@ class SQLiteInvestigationRepository:
         investigation_id: str,
         findings: Sequence[AgentFinding],
     ) -> list[AgentFinding]:
-        validated = [
-            AgentFinding.model_validate(item.model_dump(mode="python"))
-            for item in findings
-        ]
-        if any(item.investigation_id != investigation_id for item in validated):
-            raise ValueError("Agent finding investigation mismatch")
-        existing = {
-            item.id: item for item in self.list_agent_findings(investigation_id)
-        }
-        all_findings = {**existing, **{item.id: item for item in validated}}
-        tasks = {task.id: task for task in self.list_tasks(investigation_id)}
-        review = self.get_coordination_review(investigation_id)
-        for finding in validated:
-            if finding.analysis_round == 2 and finding.agent_name != FindingActor.INVESTIGATOR:
-                previous = all_findings.get(finding.revises_finding_id or "")
-                if previous is None or previous.agent_name != finding.agent_name:
-                    raise ValueError("legacy round-two finding must revise the same actor")
-            if finding.agent_name == FindingActor.INVESTIGATOR:
-                task = tasks.get(finding.task_id or "")
-                if task is None or task.runtime_run_id != finding.runtime_run_id:
-                    raise ValueError("V11 finding task ownership mismatch")
-                if finding.analysis_round == 2:
-                    assessment_ids = {
-                        assessment.id for assessment in review.critic_assessments
-                    } if review is not None else set()
-                    if finding.critic_assessment_id not in assessment_ids:
-                        raise ValueError("V11 finding Critic assessment ownership mismatch")
-                if review is not None and review.runtime_run_id != finding.runtime_run_id:
-                    raise ValueError("V11 finding and review owner mismatch")
-        rows = []
-        for finding in validated:
-            row = self._agent_payload_row(investigation_id, finding, status=None)
-            row["agent_name"] = row["payload"]["agent_name"]
-            rows.append(row)
         with self.engine.begin() as connection:
+            validated = [
+                AgentFinding.model_validate(item.model_dump(mode="python"))
+                for item in findings
+            ]
+            if any(item.investigation_id != investigation_id for item in validated):
+                raise ValueError("Agent finding investigation mismatch")
+            existing = {
+                row["payload"]["id"]: AgentFinding(**row["payload"])
+                for row in self._fetch_agent_rows(
+                    connection, agent_findings, investigation_id
+                )
+            }
+            all_findings = {**existing, **{item.id: item for item in validated}}
+            tasks = {
+                task.id: task
+                for task in (
+                    DiagnosisTask(**row["payload"])
+                    for row in self._fetch_children(
+                        connection, diagnosis_tasks, investigation_id
+                    )
+                )
+            }
+            review_row = connection.execute(
+                select(coordination_reviews).where(
+                    coordination_reviews.c.investigation_id == investigation_id
+                )
+            ).mappings().one_or_none()
+            review = (
+                None
+                if review_row is None
+                else CoordinationReview(**review_row["payload"])
+            )
+            for finding in validated:
+                if (
+                    finding.analysis_round == 2
+                    and finding.agent_name != FindingActor.INVESTIGATOR
+                ):
+                    previous = all_findings.get(finding.revises_finding_id or "")
+                    if previous is None or previous.agent_name != finding.agent_name:
+                        raise ValueError(
+                            "legacy round-two finding must revise the same actor"
+                        )
+                _validate_investigator_finding_linkage(finding, tasks, review)
+                if (
+                    finding.agent_name == FindingActor.INVESTIGATOR
+                    and review is not None
+                    and review.runtime_run_id != finding.runtime_run_id
+                ):
+                    raise ValueError("V11 finding and review owner mismatch")
+            rows = []
+            for finding in validated:
+                row = self._agent_payload_row(investigation_id, finding, status=None)
+                row["agent_name"] = row["payload"]["agent_name"]
+                rows.append(row)
             self._upsert_payload_rows(connection, agent_findings, rows)
         return validated
 
@@ -588,21 +658,25 @@ class SQLiteInvestigationRepository:
         self,
         review: CoordinationReview,
     ) -> CoordinationReview:
-        payload = review.model_dump(mode="json")
-        row = {
-            "id": review.id,
-            "investigation_id": review.investigation_id,
-            "created_at": payload["created_at"],
-            "payload": payload,
-        }
         with self.engine.begin() as connection:
+            validated = CoordinationReview.model_validate(
+                review.model_dump(mode="python")
+            )
+            payload = validated.model_dump(mode="json")
+            row = {
+                "id": validated.id,
+                "investigation_id": validated.investigation_id,
+                "created_at": payload["created_at"],
+                "payload": payload,
+            }
             connection.execute(
                 delete(coordination_reviews).where(
-                    coordination_reviews.c.investigation_id == review.investigation_id
+                    coordination_reviews.c.investigation_id
+                    == validated.investigation_id
                 )
             )
             connection.execute(insert(coordination_reviews).values(row))
-        return review
+        return validated
 
     def save_multi_agent_result(
         self,

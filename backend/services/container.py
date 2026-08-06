@@ -37,7 +37,11 @@ from backend.runtime.manager import RuntimeManager
 from backend.runtime.phase_executor import DiagnosisPhaseExecutor
 from backend.runtime.replay import ReplayDependencies, ReplayService
 from backend.runtime.sqlite_store import SQLiteRuntimeStore
-from backend.runtime.store import InMemoryRuntimeStore, RuntimeConflict
+from backend.runtime.store import (
+    InMemoryRuntimeStore,
+    RuntimeConflict,
+    RuntimeContractError,
+)
 from backend.runtime.telemetry import RuntimeTelemetry
 from backend.runtime.writer import RuntimeWriter
 from backend.safety.redaction import redact_model
@@ -281,13 +285,29 @@ class AppContainer:
         ),
     ) -> RuntimeRun:
         version = ExecutionContractVersion(execution_contract_version)
+        if version == ExecutionContractVersion.V11 and not self.settings.runtime.enabled:
+            raise RuntimeConflict("V11 execution requires enabled Runtime")
+        agents_runtime = self.orchestrator.agents_runtime
+        configured_provider = getattr(agents_runtime, "model_provider", None)
+        configured_model = getattr(agents_runtime, "_model_name", None)
+        configured_prompt = getattr(agents_runtime, "prompt_version", None)
+        if version == ExecutionContractVersion.V11:
+            requested_provider = getattr(model_provider, "value", model_provider)
+            server_provider = getattr(
+                configured_provider, "value", configured_provider
+            )
+            if requested_provider is not None and requested_provider != server_provider:
+                raise RuntimeContractError("V11 model_provider is server-owned")
+            if model_name is not None and model_name != configured_model:
+                raise RuntimeContractError("V11 model_name is server-owned")
+            if prompt_version is not None and prompt_version != configured_prompt:
+                raise RuntimeContractError("V11 prompt_version is server-owned")
         source_record = self.repository.get(investigation_id)
         if version == ExecutionContractVersion.V11:
             investigation_id = self._v11_investigation_id(
                 source_record,
                 strategy=strategy,
             )
-        agents_runtime = self.orchestrator.agents_runtime
         effective_provider = model_provider or getattr(
             agents_runtime, "model_provider", None
         )

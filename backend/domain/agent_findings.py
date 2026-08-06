@@ -270,8 +270,7 @@ class CoordinationReview(BaseModel):
             if self.lead_decision is None:
                 raise ValueError("V11 CoordinationReview requires lead_decision")
             if any(
-                assessment.runtime_run_id is not None
-                and assessment.runtime_run_id != self.runtime_run_id
+                assessment.runtime_run_id != self.runtime_run_id
                 for assessment in self.critic_assessments
             ):
                 raise ValueError("V11 Critic assessment owner mismatch")

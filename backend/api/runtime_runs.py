@@ -24,6 +24,7 @@ from backend.domain.runtime import (
 )
 from backend.runtime.store import (
     RuntimeConflict,
+    RuntimeContractError,
     RuntimeIntegrityError,
     RuntimeNotFound,
     RuntimePersistenceError,
@@ -86,6 +87,8 @@ def _run_or_http(run_id: str) -> RuntimeRun:
 def _map_runtime_error(exc: Exception) -> HTTPException:
     if isinstance(exc, RuntimeNotFound):
         return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, RuntimeContractError):
+        return HTTPException(status_code=422, detail=str(exc))
     if isinstance(exc, (RuntimeConflict, RuntimeIntegrityError)):
         return HTTPException(status_code=409, detail=str(exc))
     if isinstance(exc, RuntimePersistenceError):
@@ -147,7 +150,12 @@ async def create_runtime_run(
         return run
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except (RuntimeConflict, RuntimeIntegrityError, RuntimePersistenceError) as exc:
+    except (
+        RuntimeConflict,
+        RuntimeContractError,
+        RuntimeIntegrityError,
+        RuntimePersistenceError,
+    ) as exc:
         raise _map_runtime_error(exc) from exc
 
 

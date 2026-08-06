@@ -86,6 +86,7 @@ def _assessment(candidate_id: str = "candidate-1") -> CriticAssessment:
         checks=[_check(name) for name in CausalCheckName],
         supporting_evidence_ids=["ev-1"],
         summary="The candidate passes the required causal checks.",
+        runtime_run_id="run-v11",
     )
 
 

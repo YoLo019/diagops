@@ -165,6 +165,36 @@ export type InvestigationRecord = {
   runtime_available: boolean;
 };
 
+export type LeadDecision = {
+  action: string;
+  summary: string;
+  task_ids: string[];
+  candidate_ids: string[];
+  evidence_ids: string[];
+  selected_skills: string[];
+  stop_reason?: string | null;
+};
+
+export type CriticAssessment = {
+  id: string;
+  candidate_id: string;
+  verdict: string;
+  checks: Array<{
+    name: string;
+    status: string;
+    summary: string;
+    evidence_ids: string[];
+    gap?: string | null;
+  }>;
+  supporting_evidence_ids: string[];
+  contradicting_evidence_ids: string[];
+  gap?: string | null;
+  supplemental_task_ids: string[];
+  summary: string;
+  runtime_run_id?: string | null;
+  review_round: 1 | 2;
+};
+
 export type InvestigationSummary = {
   id: string;
   status: string;
@@ -173,6 +203,13 @@ export type InvestigationSummary = {
   strategy: InvestigationStrategy;
   top_cause_type: string;
   confidence: number;
+  top_affected_entity?: string | null;
+  top_failure_mechanism?: string | null;
+  diagnostic_status?: string | null;
+  authority_mode?: string | null;
+  lead_decision?: LeadDecision | null;
+  critic_assessments?: CriticAssessment[];
+  active_runtime_run_id?: string | null;
   action_count: number;
   verification_count: number;
   failure_reason?: string | null;

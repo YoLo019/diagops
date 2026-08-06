@@ -77,6 +77,10 @@ class RuntimeIntegrityError(RuntimeErrorBase):
     pass
 
 
+class RuntimeContractError(RuntimeIntegrityError):
+    """调用者提供的 Runtime 合同字段与服务端固定配置不一致。"""
+
+
 class RuntimePersistenceError(RuntimeErrorBase):
     pass
 
@@ -778,6 +782,7 @@ class InMemoryRuntimeStore:
                     )
                 if getattr(commit.call, "runtime_run_id", None) != run.id:
                     raise RuntimeIntegrityError("V11 tool payload owner mismatch")
+                validate_v11_phase_ownership(run, commit, record)
             self._validate_fence(run, commit.lease_owner, commit.lease_version)
             attempt = self._attempts.get(commit.attempt_id)
             if (

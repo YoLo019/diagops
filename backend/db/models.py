@@ -6,6 +6,8 @@ from pydantic import BaseModel, Field, model_serializer, model_validator
 
 from backend.diagnosis.context import SpecialistResult
 from backend.domain.actions import RecommendedAction, VerificationSuggestion
+from backend.domain.agent_findings import CoordinationReview, CriticAssessment
+from backend.domain.agent_plan import LeadDecision
 from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem
 from backend.domain.hypotheses import Hypothesis
@@ -102,6 +104,8 @@ class InvestigationSummary(BaseModel):
     top_failure_mechanism: str | None = None
     diagnostic_status: DiagnosticStatus | None = None
     authority_mode: AuthorityMode | None = None
+    lead_decision: LeadDecision | None = None
+    critic_assessments: list[CriticAssessment] = Field(default_factory=list)
     active_runtime_run_id: str | None = None
     action_count: int = 0
     verification_count: int = 0
@@ -117,6 +121,8 @@ class InvestigationSummary(BaseModel):
                 self.top_failure_mechanism is not None,
                 self.diagnostic_status is not None,
                 self.authority_mode is not None,
+                self.lead_decision is not None,
+                bool(self.critic_assessments),
                 self.active_runtime_run_id is not None,
             )
         )
@@ -126,6 +132,8 @@ class InvestigationSummary(BaseModel):
                 "top_failure_mechanism",
                 "diagnostic_status",
                 "authority_mode",
+                "lead_decision",
+                "critic_assessments",
                 "active_runtime_run_id",
             ):
                 data.pop(field_name, None)
@@ -134,32 +142,86 @@ class InvestigationSummary(BaseModel):
         return data
 
     @classmethod
-    def from_record(cls, record: InvestigationRecord) -> "InvestigationSummary":
+    def from_record(
+        cls,
+        record: InvestigationRecord,
+        review: CoordinationReview | None = None,
+    ) -> "InvestigationSummary":
         """从完整调查记录生成不含详情集合的安全列表投影。"""
         top = record.hypotheses[0] if record.hypotheses else None
+        authoritative_candidate = None
+        if review is not None and review.authority_mode == AuthorityMode.AGENT:
+            candidate_ids = set(review.authoritative_candidate_ids)
+            authoritative_candidate = next(
+                (
+                    candidate
+                    for candidate in review.candidates
+                    if candidate.id in candidate_ids
+                ),
+                None,
+            )
+        v11_review = (
+            review
+            if review is not None and review.authority_mode == AuthorityMode.AGENT
+            else None
+        )
+        v11_projection = bool(
+            v11_review is not None
+            or record.active_runtime_run_id is not None
+            or (
+                record.multi_agent_run is not None
+                and record.multi_agent_run.authority_mode == AuthorityMode.AGENT
+            )
+        )
         return cls(
             id=record.id,
             status=record.status.value,
             service=redact_text(record.event.service),
             title=redact_text(record.event.title),
             strategy=record.strategy,
-            top_cause_type=top.cause_type.value if top else "unknown",
-            confidence=top.confidence if top else 0.0,
+            top_cause_type=(
+                "unknown"
+                if v11_projection
+                else top.cause_type.value if top else "unknown"
+            ),
+            confidence=(
+                authoritative_candidate.confidence
+                if v11_review is not None and authoritative_candidate is not None
+                else 0.0
+                if v11_projection
+                else top.confidence if top else 0.0
+            ),
             top_affected_entity=(
-                getattr(top, "affected_entity", None) if top is not None else None
+                authoritative_candidate.affected_entity
+                if v11_review is not None and authoritative_candidate is not None
+                else None
+                if v11_projection
+                else getattr(top, "affected_entity", None) if top is not None else None
             ),
             top_failure_mechanism=(
-                getattr(top, "failure_mechanism", None) if top is not None else None
+                authoritative_candidate.failure_mechanism
+                if v11_review is not None and authoritative_candidate is not None
+                else None
+                if v11_projection
+                else getattr(top, "failure_mechanism", None) if top is not None else None
             ),
             diagnostic_status=(
-                record.multi_agent_run.diagnostic_status
+                v11_review.diagnostic_status
+                if v11_review is not None
+                else record.multi_agent_run.diagnostic_status
                 if record.multi_agent_run is not None
                 else None
             ),
             authority_mode=(
-                record.multi_agent_run.authority_mode
+                v11_review.authority_mode
+                if v11_review is not None
+                else record.multi_agent_run.authority_mode
                 if record.multi_agent_run is not None
                 else None
+            ),
+            lead_decision=v11_review.lead_decision if v11_review is not None else None,
+            critic_assessments=(
+                list(v11_review.critic_assessments) if v11_review is not None else []
             ),
             active_runtime_run_id=record.active_runtime_run_id,
             action_count=len(record.actions),

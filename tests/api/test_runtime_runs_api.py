@@ -16,7 +16,7 @@ from backend.config.settings import (
 from backend.db.models import InvestigationRecord
 from backend.db.schema import runtime_attempts, runtime_events
 from backend.domain.events import IncidentEvent, IncidentSource, Severity
-from backend.domain.multi_agent import InvestigationStrategy
+from backend.domain.multi_agent import ExecutionContractVersion, InvestigationStrategy
 from backend.domain.runtime import (
     RuntimeRun,
     RuntimeRunKind,
@@ -388,4 +388,23 @@ def test_app_lifespan_disposes_its_sqlite_engine(tmp_path: Path) -> None:
         pass
 
     assert container.engine is None
+
+
+def test_v11_explicit_execution_tuple_mismatch_is_422_before_linked_run() -> None:
+    container = get_container()
+    container.repository.save(_record("inv-api-v11"))
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/investigations/inv-api-v11/runtime-runs",
+            json={
+                "strategy": "adaptive",
+                "run_reason": "initial",
+                "execution_contract_version": ExecutionContractVersion.V11.value,
+                "model_name": "caller-selected-model",
+            },
+        )
+
+    assert response.status_code == 422
+    assert [item.id for item in container.repository.list()] == ["inv-api-v11"]
 

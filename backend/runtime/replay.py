@@ -19,7 +19,7 @@ from backend.domain.runtime import (
     RuntimeRunStatus,
 )
 from backend.runtime.faults import NoFaultInjector, RuntimeInjectedFault
-from backend.runtime.phases import checkpoint_digest
+from backend.runtime.phases import checkpoint_digest, phase_profile_for
 
 _EVENT_PAGE_SIZE = 500
 
@@ -49,6 +49,7 @@ class _LifecycleState:
     active_attempt_id: str | None = None
     started_attempt_ids: set[str] = None  # type: ignore[assignment]
     open_phase: Any | None = None
+    phase_order_index: int = -1
     open_agents: set[str] = None  # type: ignore[assignment]
     open_models: dict[str, str] = None  # type: ignore[assignment]
     tool_states: dict[str, str] = None  # type: ignore[assignment]
@@ -119,12 +120,21 @@ class ReplayService:
         if frozen is None:
             errors.append("frozen_business_projection_unavailable")
         else:
-            from backend.runtime.diff import parse_frozen_projection
+            from backend.runtime.diff import (
+                parse_frozen_projection,
+                validate_frozen_projection_source,
+            )
 
             try:
                 projection = parse_frozen_projection(frozen)
-            except (TypeError, ValueError):
-                errors.append("frozen_business_projection_invalid")
+                validate_frozen_projection_source(projection, source)
+            except (TypeError, ValueError) as exc:
+                errors.append(
+                    "frozen_projection_source_mismatch"
+                    if "frozen projection" in str(exc)
+                    else "frozen_business_projection_invalid"
+                )
+                projection = None
         errors.extend(self._validate_events(source, events, projection))
         errors.extend(self._validate_checkpoints(source, projection))
         errors.extend(self._validate_business_projection(source, projection))
@@ -138,15 +148,32 @@ class ReplayService:
         seen: set[int] = set()
         expected = 1
         lifecycle = _LifecycleState()
-        evidence_ids = {item.id for item in projection.evidence} if projection else set()
+        phase_order = {
+            str(phase): index
+            for index, phase in enumerate(
+                phase_profile_for(source.execution_contract_version).order
+            )
+        }
+        evidence_ids = (
+            {item.id for item in projection.evidence} if projection else set()
+        )
         task_ids = set(projection.task_ids) if projection else set()
         execution_ids = set(projection.execution_ids) if projection else set()
         tool_ids = set(projection.tool_call_ids) if projection else set()
         checkpoints = {
             item.id: item for item in self.dependencies.store.list_checkpoints(source.id)
         }
-        attempts = {item.id: item for item in self.dependencies.store.list_attempts(source.id)}
+        attempts = {
+            item.id: item
+            for item in self.dependencies.store.list_attempts(source.id)
+        }
         for event in events:
+            if event.event_type == RuntimeEventType.PHASE_STARTED and event.phase is not None:
+                phase_index = phase_order.get(str(event.phase))
+                if phase_index is None or phase_index < lifecycle.phase_order_index:
+                    errors.append("illegal_phase_order")
+                else:
+                    lifecycle.phase_order_index = phase_index
             if event.sequence in seen:
                 errors.append("event_sequence_duplicate")
             elif event.sequence != expected:

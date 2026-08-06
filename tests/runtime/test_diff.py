@@ -20,6 +20,7 @@ from backend.domain.runtime import (
     RuntimeRunStatus,
 )
 from backend.runtime.diff import RuntimeDiffService, canonical_diff_json
+from backend.runtime.phases import V11_PHASE_ORDER
 from backend.runtime.store import (
     InMemoryRuntimeStore,
     RuntimeTerminalCommit,
@@ -122,6 +123,36 @@ def _events(run_id: str, agent: str, tool: str, tokens: int, cost: float):
         for index, (event_type, actor, payload) in enumerate(definitions, start=1)
     ]
 
+
+def test_diff_orders_phases_by_persisted_contract_profile() -> None:
+    events = [
+        RuntimeEvent(
+            id="phase-finalize",
+            run_id="run-diff",
+            attempt_id="attempt-diff",
+            sequence=2,
+            event_type=RuntimeEventType.PHASE_COMPLETED,
+            phase=RuntimePhase.FINALIZE,
+            actor_type=RuntimeActorType.PHASE,
+            safe_payload={"status": "completed"},
+            occurred_at=datetime(2026, 7, 18, 0, 1, tzinfo=UTC),
+        ),
+        RuntimeEvent(
+            id="phase-intake",
+            run_id="run-diff",
+            attempt_id="attempt-diff",
+            sequence=1,
+            event_type=RuntimeEventType.PHASE_COMPLETED,
+            phase=RuntimePhase.INTAKE,
+            actor_type=RuntimeActorType.PHASE,
+            safe_payload={"status": "completed"},
+            occurred_at=datetime(2026, 7, 18, 0, 0, tzinfo=UTC),
+        ),
+    ]
+
+    phases = RuntimeDiffService._phases(events, V11_PHASE_ORDER)
+
+    assert [item["phase"] for item in phases] == ["intake", "finalize"]
 
 def test_diff_is_stable_typed_and_omits_free_text() -> None:
     store, repository, left, right = _fixture()

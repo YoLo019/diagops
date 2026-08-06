@@ -254,12 +254,12 @@ Acceptance:
 - Pre-INTAKE terminal runs replay as `not_activated` with no inherited output.
 - No V11 entry or handler reaches a forbidden legacy diagnostic function.
 
-### M1 execution evidence (2026-08-05)
+### M1 execution evidence (2026-08-06)
 
 | Task | Status | Evidence | Review state |
 | --- | --- | --- | --- |
-| T2 | implemented / verified | Test-first RED→GREEN domain, ownership, migration, and persistence coverage; `uv run pytest tests/domain tests/db/test_migrations.py tests/db/test_runtime_migrations.py tests/db/test_v5_agentic_rca_persistence.py -q` → `198 passed in 8.07s`; scoped Ruff clean | Independent migration review pending |
-| T3 | implemented / verified | Test-first RED→GREEN activation/recovery coverage; `uv run pytest tests/runtime tests/api/test_runtime_runs_api.py -q` → `391 passed, 1 skipped, 1 warning in 160.40s`; scoped Ruff clean; legacy golden, replay/diff, deadline, and V11 isolation checks included | Independent runtime review pending |
+| T2 | implemented / verified | Test-first RED→GREEN domain, ownership, migration, persistence, Critic-owner, finding-linkage, and execution-owner coverage; `uv run pytest tests/domain tests/db/test_migrations.py tests/db/test_runtime_migrations.py tests/db/test_v5_agentic_rca_persistence.py -q` → `198 passed in 7.94s`; scoped Ruff clean | Review fixes complete; independent migration re-review pending |
+| T3 | implemented / verified | Test-first RED→GREEN phase-profile, frozen source-integrity, BusinessMutation, contract-repair, summary projection, service/API gate, and replay/diff coverage; `uv run pytest tests/runtime tests/api/test_runtime_runs_api.py -q` → `412 passed, 2 skipped, 1 warning in 114.59s`; scoped Ruff clean | Review fixes complete; independent runtime re-review pending |
 
 M1 scope is limited to T2–T3. M2 evidence/model/skill work has not started.
 
@@ -267,7 +267,11 @@ M1 scope is limited to T2–T3. M2 evidence/model/skill work has not started.
 
 Independently inspect all migration paths, phase callers, transaction boundaries,
 freeze paths, run ownership, deadline arithmetic, cancellation races, and direct
-entries. Close blocking/high findings before adding evidence Providers.
+entries. On 2026-08-06, the ten reproduced findings from the first M1 review
+(High 1–6, Medium 7–10) were fixed with shared validators/profile selection,
+transaction-local fail-closed repair, and pre-link service/API checks; focused
+RED→GREEN regressions and both full Gates are recorded above. The remaining
+action is independent migration/runtime re-review; M2 remains out of scope.
 
 ## 5. M2 — Local evidence and model boundaries
 

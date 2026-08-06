@@ -218,7 +218,10 @@ class AgentExecution(BaseModel):
             ExecutionStepKind.INVESTIGATOR_ANALYSIS,
             ExecutionStepKind.CRITIC_REVIEW,
             ExecutionStepKind.LEAD_ADJUDICATION,
-        }
+        } or (
+            self.step_kind == ExecutionStepKind.RESULT_VALIDATION
+            and self.analysis_round is not None
+        )
         if (v11_actor or v11_step) and self.runtime_run_id is None:
             raise ValueError("V11 execution requires runtime_run_id")
         return self

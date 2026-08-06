@@ -4,7 +4,7 @@ This file is the mutable routing and status entry point for the current version.
 
 It does not override an approved spec or plan, current code contracts, or the long-term product goal and production safety boundary in `AGENT.md`.
 
-Updated: 2026-08-05
+Updated: 2026-08-06
 
 ## Implemented Baseline
 
@@ -45,7 +45,7 @@ Implementation status: `verifying`
 
 Completion commit: `none`
 
-Verification evidence: `M1/T2–T3 focused RED→GREEN tests and scoped Ruff are green; independent migration/runtime review remains pending`
+Verification evidence: `M1/T2–T3 review-fix RED→GREEN evidence is green; T2 198 passed, T3 412 passed/2 skipped/1 warning, both scoped Ruff gates clean; final independent re-review remains pending`
 
 Blocker: `none`
 
@@ -84,7 +84,7 @@ docs/superpowers/plans/2026-08-02-diagops-v11-adaptive-multi-agent-rca-implement
 
 ## V11 Planning Dashboard
 
-Overall progress: `V11 Spec/Plan approved, execution authorized 2026-08-02; M0/T1 done：真实 RCAEval RE2 全链路完成（byte-verified 双向对账 2700/2700、真实 prepare runtime manifest_hash bb119fc9…/150 cases/26 GB、二次 prepare diff -r 零差异字节等价）；M0 exit review 2026-08-04 approve_with_followups（出口判据满足，M0-I2 措辞 followup 已修复并 closed：28 focused + 142 regression passed, Ruff clean；M0-L1/L2 low open，M5 前处理）；M1/T2–T3 已实现并完成 focused verification，等待独立 migration/runtime review；M2 未开始`
+Overall progress: `V11 Spec/Plan approved, execution authorized 2026-08-02; M0/T1 done：真实 RCAEval RE2 全链路完成（byte-verified 双向对账 2700/2700、真实 prepare runtime manifest_hash bb119fc9…/150 cases/26 GB、二次 prepare diff -r 零差异字节等价）；M0 exit review 2026-08-04 approve_with_followups（出口判据满足，M0-I2 措辞 followup 已修复并 closed：28 focused + 142 regression passed, Ruff clean；M0-L1/L2 low open，M5 前处理）；M1/T2–T3 已完成 10 项审查复现问题的 RED→GREEN 修复并通过完整 Gate，等待复审；M2 未开始`
 
 Current phase: Full iteration / M1 T2–T3 implemented and verified, independent review pending
 
@@ -97,8 +97,13 @@ Next action: 对 M1 T2–T3 做独立 migration/runtime review；关闭阻塞或
 | P3 | Design | Select adaptive evidence investigation over fixed specialists or majority debate | verified | User selected scheme B; independent first pass and Critic retained without majority voting | Preserve decision |
 | P4 | Spec | Write and independently review the V11 contract | verified | Legacy-reuse audit traced runtime, persistence, entry, report/action, tools, API/UI, and benchmarks; L22–L30 closed; user approved the amended R1–R27 Spec on 2026-08-02 | Preserve approved contract |
 | P5 | Plan | Map approved requirements to implementation and verification tasks | approved | Rewritten as T1–T13/M0–M5; independent review found H1–H3/M1–M2, all closed in focused re-review with no remaining blocking/high/medium issue; R1–R27 Plan-task mapping recorded in Spec; user approved and authorized execution on 2026-08-02 | M0/T1 complete; M1/T2–T3 evidence recorded |
-| M1/T2 | Execute | Domain contracts, run ownership, and Schema V7 | implemented / verified | RED→GREEN domain and migration tests; `198 passed in 8.07s`; T2 Ruff clean; fresh, V3/V4/V5/legacy-V6/current-V6 upgrade manifests agree and only the three approved physical columns are added | Independent migration review |
-| M1/T3 | Execute | Versioned phase profiles, activation, gates, replay, and diff | implemented / verified | RED→GREEN ownership/recovery tests; `391 passed, 1 skipped, 1 warning in 160.40s`; T3 Ruff clean; legacy golden compatibility and V11 isolation/deadline/recovery checks green | Independent runtime review; M2 not started |
+| M1/T2 | Execute | Domain contracts, run ownership, and Schema V7 | implemented / verified | 初始审查问题 H8–H10 已补最小 RED 并 GREEN；`uv run pytest tests/domain tests/db/test_migrations.py tests/db/test_runtime_migrations.py tests/db/test_v5_agentic_rca_persistence.py -q` → `198 passed in 7.94s`; T2 Ruff clean；fresh、V3/V4/V5、legacy-V6/current-V6 manifest 一致且仅三列物理变更 | 等待独立迁移复审 |
+| M1/T3 | Execute | Versioned phase profiles, activation, gates, replay, and diff | implemented / verified | 初始审查问题 H1–H7 已补最小 RED 并 GREEN；`uv run pytest tests/runtime tests/api/test_runtime_runs_api.py -q` → `412 passed, 2 skipped, 1 warning in 114.59s`; T3 Ruff clean；V10/V11 phase、owner、replay/diff、contract-integrity reload、service/API gate 回归通过 | 等待独立运行时复审；M2 未开始 |
+
+M1 review-fix record (2026-08-06): High 1–6 and Medium 7–10 were reproduced
+with focused regressions, fixed at shared profile/ownership/transaction/entry
+boundaries, and rerun GREEN. The review-fix worktree contains no M2 or main
+merge changes; final independent re-review is the remaining handoff.
 
 ## Archived V10.1 Planning Dashboard
 

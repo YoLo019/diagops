@@ -92,6 +92,39 @@ def _validate_multi_agent_result(
     return validated_findings, validated_executions, validated_review
 
 
+def _validate_investigator_finding_linkage(
+    finding: AgentFinding,
+    tasks: dict[str, DiagnosisTask],
+    review: CoordinationReview | None,
+) -> None:
+    """校验 Investigator finding 与任务、Critic 请求的同轮归属。"""
+    if finding.agent_name != FindingActor.INVESTIGATOR:
+        return
+    task = tasks.get(finding.task_id or "")
+    if task is None or task.runtime_run_id != finding.runtime_run_id:
+        raise ValueError("V11 finding task ownership mismatch")
+    if task.analysis_round != finding.analysis_round:
+        raise ValueError("V11 finding task round mismatch")
+    if finding.analysis_round != 2:
+        return
+    assessment = next(
+        (
+            item
+            for item in (review.critic_assessments if review is not None else [])
+            if item.id == finding.critic_assessment_id
+        ),
+        None,
+    )
+    if assessment is None:
+        raise ValueError("V11 finding Critic assessment ownership mismatch")
+    if assessment.runtime_run_id != finding.runtime_run_id:
+        raise ValueError("V11 finding Critic assessment owner mismatch")
+    if task.critic_assessment_id != assessment.id:
+        raise ValueError("V11 finding task Critic assessment mismatch")
+    if task.id not in assessment.supplemental_task_ids:
+        raise ValueError("V11 finding task is not linked to Critic request")
+
+
 class InMemoryInvestigationRepository:
     def __init__(self, lock=None) -> None:
         self._lock = lock or RLock()
@@ -175,7 +208,12 @@ class InMemoryInvestigationRepository:
 
     def list_summaries(self) -> list[InvestigationSummary]:
         with self._lock:
-            return [InvestigationSummary.from_record(record) for record in self.list()]
+            return [
+                InvestigationSummary.from_record(
+                    record, self._coordination_reviews.get(record.id)
+                )
+                for record in self.list()
+            ]
 
     def update_status(
         self,
@@ -272,10 +310,15 @@ class InMemoryInvestigationRepository:
         investigation_id: str,
         executions: list[AgentExecution],
     ) -> list[AgentExecution]:
-        bucket = self._executions.setdefault(investigation_id, {})
-        for execution in executions:
-            bucket[execution.id] = execution
-        return list(executions)
+        with self._lock:
+            validated = [
+                AgentExecution.model_validate(item.model_dump(mode="python"))
+                for item in executions
+            ]
+            bucket = self._executions.setdefault(investigation_id, {})
+            for execution in validated:
+                bucket[execution.id] = execution
+            return validated
 
     def list_executions(self, investigation_id: str) -> list[AgentExecution]:
         return list(self._executions.get(investigation_id, {}).values())
@@ -335,36 +378,39 @@ class InMemoryInvestigationRepository:
         investigation_id: str,
         findings: list[AgentFinding],
     ) -> list[AgentFinding]:
-        validated = [
-            AgentFinding.model_validate(item.model_dump(mode="python"))
-            for item in findings
-        ]
-        if any(item.investigation_id != investigation_id for item in validated):
-            raise ValueError("Agent finding investigation mismatch")
-        bucket = self._agent_findings.setdefault(investigation_id, {})
-        all_findings = {**bucket, **{item.id: item for item in validated}}
-        review = self.get_coordination_review(investigation_id)
-        for finding in validated:
-            if finding.analysis_round == 2 and finding.agent_name != FindingActor.INVESTIGATOR:
-                previous = all_findings.get(finding.revises_finding_id or "")
-                if previous is None or previous.agent_name != finding.agent_name:
-                    raise ValueError("legacy round-two finding must revise the same actor")
-            if finding.agent_name == FindingActor.INVESTIGATOR:
-                tasks = {task.id: task for task in self.list_tasks(investigation_id)}
-                task = tasks.get(finding.task_id or "")
-                if task is None or task.runtime_run_id != finding.runtime_run_id:
-                    raise ValueError("V11 finding task ownership mismatch")
-                if finding.analysis_round == 2:
-                    assessment_ids = {
-                        item.id for item in review.critic_assessments
-                    } if review is not None else set()
-                    if finding.critic_assessment_id not in assessment_ids:
-                        raise ValueError("V11 finding Critic assessment ownership mismatch")
-                if review is not None and review.runtime_run_id != finding.runtime_run_id:
+        with self._lock:
+            validated = [
+                AgentFinding.model_validate(item.model_dump(mode="python"))
+                for item in findings
+            ]
+            if any(item.investigation_id != investigation_id for item in validated):
+                raise ValueError("Agent finding investigation mismatch")
+            bucket = self._agent_findings.setdefault(investigation_id, {})
+            all_findings = {**bucket, **{item.id: item for item in validated}}
+            review = self.get_coordination_review(investigation_id)
+            tasks = {
+                task.id: task for task in self.list_tasks(investigation_id)
+            }
+            for finding in validated:
+                if (
+                    finding.analysis_round == 2
+                    and finding.agent_name != FindingActor.INVESTIGATOR
+                ):
+                    previous = all_findings.get(finding.revises_finding_id or "")
+                    if previous is None or previous.agent_name != finding.agent_name:
+                        raise ValueError(
+                            "legacy round-two finding must revise the same actor"
+                        )
+                _validate_investigator_finding_linkage(finding, tasks, review)
+                if (
+                    finding.agent_name == FindingActor.INVESTIGATOR
+                    and review is not None
+                    and review.runtime_run_id != finding.runtime_run_id
+                ):
                     raise ValueError("V11 finding and review owner mismatch")
-        for finding in validated:
-            bucket[finding.id] = finding
-        return validated
+            for finding in validated:
+                bucket[finding.id] = finding
+            return validated
 
     def list_agent_findings(self, investigation_id: str) -> list[AgentFinding]:
         return list(self._agent_findings.get(investigation_id, {}).values())
@@ -373,8 +419,12 @@ class InMemoryInvestigationRepository:
         self,
         review: CoordinationReview,
     ) -> CoordinationReview:
-        self._coordination_reviews[review.investigation_id] = review
-        return review
+        with self._lock:
+            validated = CoordinationReview.model_validate(
+                review.model_dump(mode="python")
+            )
+            self._coordination_reviews[validated.investigation_id] = validated
+            return validated
 
     def save_multi_agent_result(
         self,
