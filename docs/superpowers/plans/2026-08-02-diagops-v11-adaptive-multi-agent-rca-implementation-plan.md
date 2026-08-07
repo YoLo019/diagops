@@ -298,9 +298,14 @@ MemoryVerificationStatus、ModelProvider.OPENAI_COMPATIBLE）提前落地却无�
 既有 idempotence 语义不变。RR-L2 (low) — CANCELLING 的 V11 run 在 deadline
 到期时 `_fail_if_owned` 仅处理 RUNNING 而滞留 CANCELLING；修复为 deadline
 分支先 `_finish_cancel` 再 `_fail_if_owned`，先 RED（滞留 cancelling）后
-GREEN（收敛 CANCELLED）。两项 low 记录为 open 跟进、M2 前处理：RR-L1
-（`phase_executor._v11_intake` 双激活窗口，已核实可恢复）与 RR-L3
-（`sqlite_store` 跨模块调用 repository 私有 `_get_with_connection`）。
+GREEN（收敛 CANCELLED）。第三轮剩余两项 low（RR-L1/RR-L3）已于 2026-08-07
+当日关闭：RR-L1 —— `_v11_intake` 不再在 handler 内经独立事务提前 activate，
+改为本地构造 owner 已切换投影、激活与清理只发生在 commit_phase 事务内
+（state.record 清空形状复用 `_projection_record` 单一事实来源），先 RED
+（spy 捕获 handler 独立 activate + commit 前持久投影已切换）后 GREEN；
+RR-L3 —— `SQLiteInvestigationRepository` 新增公开 `get_with_connection`，
+`sqlite_store` 两处私有调用改为公开接口。回归：T2 gate 209 passed、T3 gate
+429 passed/3 skipped/1 warning、scoped Ruff 与 diff-check clean。
 Approved 契约与 milestone 范围不变。
 
 ## 5. M2 — Local evidence and model boundaries
@@ -943,12 +948,12 @@ M1 third-round review (migration/runtime, 2026-08-07): conclusion
 | RR-M1 | medium | T4/T5 契约（evidence provenance/scope、memory verification、OPENAI_COMPATIBLE provider）提前落地 M1 且无测试 | Closed on 2026-08-07: `tests/domain/test_evidence_memory_contracts.py` 9 项；未改实现直接通过，确认契约正确仅缺覆盖 |
 | RR-M2 | medium | `_repair_contract_integrity` 不持久化修正后的 execution_contract，读路径重复修复、V11 重复 freeze/reseal、业务投影被反复改写 | Closed on 2026-08-07: 同事务写回 `_safe_contract_projection`；RED（updated_at 漂移 + 契约列仍篡改）→ GREEN；既有 idempotence 测试语义不变 |
 | RR-L2 | low | CANCELLING 的 V11 run 遇 deadline 到期滞留 CANCELLING 直至 lease 过期 | Closed on 2026-08-07: `_RuntimeDeadlineExceeded` 分支先 `_finish_cancel` 后 `_fail_if_owned`；RED（滞留 cancelling）→ GREEN（收敛 CANCELLED） |
-| RR-L1 | low | `phase_executor._v11_intake` 双激活窗口（已核实可恢复） | open，M2 前处理 |
-| RR-L3 | low | `sqlite_store._repair_contract_integrity` 跨模块调用 repository 私有 `_get_with_connection` | open，M2 前处理 |
+| RR-L1 | low | `phase_executor._v11_intake` 双激活窗口（已核实可恢复） | Closed on 2026-08-07: handler 不再独立事务提前 activate，激活只在 commit_phase 事务内发生；`test_v11_intake_activates_projection_only_inside_commit_transaction`（memory+sqlite 参数化）先 RED 后 GREEN |
+| RR-L3 | low | `sqlite_store._repair_contract_integrity` 跨模块调用 repository 私有 `_get_with_connection` | Closed on 2026-08-07: 新增公开 `get_with_connection` 并替换两处调用点；行为不变，全套 T2/T3 gate 回归 green |
 
 ## 11. Approval state
 
 - Specification: approved by the user on 2026-08-02 after L22–L30 reuse review.
 - Implementation Plan: independently reviewed with H1–H3/M1–M2 closed; approved
   by the user on 2026-08-02 with authorization to begin execution.
-- Implementation: M0/T1 complete; M1/T2–T3 implemented and verified on 2026-08-05 in the delegated worktree; third-round independent migration/runtime review concluded `approve_with_followups` on 2026-08-07 with RR-H1/RR-M1/RR-M2/RR-L2 closed and RR-L1/RR-L3 open (low, due before M2); M2 not started.
+- Implementation: M0/T1 complete; M1/T2–T3 implemented and verified on 2026-08-05 in the delegated worktree; third-round independent migration/runtime review concluded `approve_with_followups` on 2026-08-07 with all six findings closed the same day (RR-H1/RR-M1/RR-M2/RR-L2 at commit `336067c`, RR-L1/RR-L3 in the follow-up Light fix); M2 not started.

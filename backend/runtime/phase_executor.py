@@ -340,28 +340,31 @@ class DiagnosisPhaseExecutor:
         mutation = output.business_mutation
         if mutation.investigation is None:
             raise ValueError("V11 intake requires an investigation projection")
-        activated = self._orchestrator.repository.activate_projection(
-            mutation.investigation.id,
-            state.runtime_run_id,
+        # 不在 handler 内提前落库激活：SQLite 的 activate_projection 自带独立
+        # 事务并即时提交，会造成 owner 已切换、latest 投影已清理但无 INTAKE
+        # checkpoint 的崩溃窗口。这里只构造 owner 已切换的本地投影，真正的
+        # 激活与清理由 commit_phase 事务内的 apply_* 原子完成。
+        activated = mutation.investigation.model_copy(
+            update={"active_runtime_run_id": state.runtime_run_id}
         )
-        state.record = activated
-        return replace(
-            output,
-            business_mutation=replace(
-                mutation,
-                investigation=activated,
-                plan=None,
-                tasks=None,
-                context_facts=None,
-                tool_calls=None,
-                findings=(),
-                executions=(),
-                review=None,
-                react_trace=None,
-                replace_multi_agent_result=True,
-                activate_projection=True,
-            ),
+        projected = replace(
+            mutation,
+            investigation=activated,
+            plan=None,
+            tasks=None,
+            context_facts=None,
+            tool_calls=None,
+            findings=(),
+            executions=(),
+            review=None,
+            react_trace=None,
+            replace_multi_agent_result=True,
+            activate_projection=True,
         )
+        # state.record 与提交后的持久投影保持一致（owner 切换 + latest 投影
+        # 清空）；清空字段集合复用 _projection_record 这一单一事实来源。
+        state.record = projected._projection_record()
+        return replace(output, business_mutation=projected)
 
     async def _v11_pass(self, state: _DiagnosisState) -> PhaseOutput:
         return self._output(state)

@@ -45,7 +45,7 @@ Implementation status: `verifying`
 
 Completion commit: `none`
 
-Verification evidence: `M1/T2–T3 third-round review-fix RED→GREEN evidence is green; RR-H1 deadline/budget 覆盖 6 项 + RR-M1 domain 契约 9 项补齐，RR-M2/RR-L2 先 RED 后 GREEN；T2 gate 209 passed，T3 gate 427 passed/3 skipped/1 warning，scoped Ruff 与 diff-check clean；第三轮独立复审 approve_with_followups，RR-L1/RR-L3 low open（M2 前处理）`
+Verification evidence: `M1/T2–T3 third-round review-fix RED→GREEN evidence is green; RR-H1 deadline/budget 覆盖 6 项 + RR-M1 domain 契约 9 项补齐，RR-M2/RR-L2 先 RED 后 GREEN；第三轮独立复审 approve_with_followups 的 6 项发现当日全部关闭（RR-L1 INTAKE 激活原子化、RR-L3 公开事务内读取接口，均先 RED 后 GREEN）；T2 gate 209 passed，T3 gate 429 passed/3 skipped/1 warning，scoped Ruff 与 diff-check clean；M1 已合并 main 336067c`
 
 Blocker: `none`
 
@@ -84,11 +84,11 @@ docs/superpowers/plans/2026-08-02-diagops-v11-adaptive-multi-agent-rca-implement
 
 ## V11 Planning Dashboard
 
-Overall progress: `V11 Spec/Plan approved, execution authorized 2026-08-02; M0/T1 done：真实 RCAEval RE2 全链路完成（byte-verified 双向对账 2700/2700、真实 prepare runtime manifest_hash bb119fc9…/150 cases/26 GB、二次 prepare diff -r 零差异字节等价）；M0 exit review 2026-08-04 approve_with_followups（出口判据满足，M0-I2 措辞 followup 已修复并 closed：28 focused + 142 regression passed, Ruff clean；M0-L1/L2 low open，M5 前处理）；M1/T2–T3 第三轮独立复审 2026-08-07 approve_with_followups（RR-H1/RR-M1/RR-M2/RR-L2 已 RED→GREEN 关闭，RR-L1/RR-L3 low open 待 M2 前处理）；M2 未开始`
+Overall progress: `V11 Spec/Plan approved, execution authorized 2026-08-02; M0/T1 done：真实 RCAEval RE2 全链路完成（byte-verified 双向对账 2700/2700、真实 prepare runtime manifest_hash bb119fc9…/150 cases/26 GB、二次 prepare diff -r 零差异字节等价）；M0 exit review 2026-08-04 approve_with_followups（出口判据满足，M0-I2 措辞 followup 已修复并 closed：28 focused + 142 regression passed, Ruff clean；M0-L1/L2 low open，M5 前处理）；M1/T2–T3 第三轮独立复审 2026-08-07 approve_with_followups，全部 6 项发现当日 RED→GREEN 关闭并已合并 main 336067c；M2 未开始`
 
-Current phase: Full iteration / M1 T2–T3 third-round review fixes verified, low followups open
+Current phase: Full iteration / M1 T2–T3 complete on main, ready for M2
 
-Next action: M2 开始前处理 RR-L1/RR-L3 两项 low 跟进项；随后按 Plan §5 启动 M2。
+Next action: 按 Plan §5 启动 M2（T4–T6，本地证据与模型边界），等待用户指示。
 
 | ID | Phase | Task | Status | Evidence or result | Next action or blocker |
 | --- | --- | --- | --- | --- | --- |
@@ -97,8 +97,8 @@ Next action: M2 开始前处理 RR-L1/RR-L3 两项 low 跟进项；随后按 Pla
 | P3 | Design | Select adaptive evidence investigation over fixed specialists or majority debate | verified | User selected scheme B; independent first pass and Critic retained without majority voting | Preserve decision |
 | P4 | Spec | Write and independently review the V11 contract | verified | Legacy-reuse audit traced runtime, persistence, entry, report/action, tools, API/UI, and benchmarks; L22–L30 closed; user approved the amended R1–R27 Spec on 2026-08-02 | Preserve approved contract |
 | P5 | Plan | Map approved requirements to implementation and verification tasks | approved | Rewritten as T1–T13/M0–M5; independent review found H1–H3/M1–M2, all closed in focused re-review with no remaining blocking/high/medium issue; R1–R27 Plan-task mapping recorded in Spec; user approved and authorized execution on 2026-08-02 | M0/T1 complete; M1/T2–T3 evidence recorded |
-| M1/T2 | Execute | Domain contracts, run ownership, and Schema V7 | implemented / verified | 初始审查问题 H8–H10 已补最小 RED 并 GREEN；第二轮 Medium 1–3 的 domain/memory/SQLite 直接写入回归先 RED 后 GREEN；`uv run pytest tests/domain tests/db/test_migrations.py tests/db/test_runtime_migrations.py tests/db/test_v5_agentic_rca_persistence.py -q` → `199 passed in 6.81s`; T2 Ruff clean；fresh、V3/V4/V5、legacy-V6/current-V6 manifest 一致且仅三列物理变更 | 等待独立迁移复审 |
-| M1/T3 | Execute | Versioned phase profiles, activation, gates, replay, and diff | implemented / verified | 初始审查问题 H1–H7 已补最小 RED 并 GREEN；第二轮 ownerless RESULT_VALIDATION、计划/任务和 Investigation 聚合写入回归先 RED 后 GREEN；`uv run pytest tests/runtime tests/api/test_runtime_runs_api.py -q` → `420 passed, 2 skipped, 1 warning in 117.53s`; `tests/runtime/test_review_fixes.py` → `27 passed, 1 skipped`; T3 Ruff clean；V10/V11 phase、owner、replay/diff、contract-integrity reload、service/API gate 回归通过 | 等待独立运行时复审；M2 未开始 |
+| M1/T2 | Execute | Domain contracts, run ownership, and Schema V7 | implemented / verified | 初始审查问题 H8–H10 已补最小 RED 并 GREEN；第二轮 Medium 1–3 的 domain/memory/SQLite 直接写入回归先 RED 后 GREEN；`uv run pytest tests/domain tests/db/test_migrations.py tests/db/test_runtime_migrations.py tests/db/test_v5_agentic_rca_persistence.py -q` → `199 passed in 6.81s`; T2 Ruff clean；fresh、V3/V4/V5、legacy-V6/current-V6 manifest 一致且仅三列物理变更 | 独立迁移复审通过（第三轮 RR 全关闭） |
+| M1/T3 | Execute | Versioned phase profiles, activation, gates, replay, and diff | implemented / verified | 初始审查问题 H1–H7 已补最小 RED 并 GREEN；第二轮 ownerless RESULT_VALIDATION、计划/任务和 Investigation 聚合写入回归先 RED 后 GREEN；`uv run pytest tests/runtime tests/api/test_runtime_runs_api.py -q` → `420 passed, 2 skipped, 1 warning in 117.53s`; `tests/runtime/test_review_fixes.py` → `27 passed, 1 skipped`; T3 Ruff clean；V10/V11 phase、owner、replay/diff、contract-integrity reload、service/API gate 回归通过 | 独立运行时复审通过（第三轮 RR 全关闭）；M2 未开始 |
 
 M1 review-fix record (2026-08-06): High 1–6 and Medium 7–10 were reproduced
 with focused regressions, fixed at shared profile/ownership/transaction/entry
@@ -120,7 +120,10 @@ monotonicity 测试此前被证据行隐含声称已测、实测零覆盖，现�
 提前落地契约补 9 项 domain 测试（未改实现即通过，契约正确仅缺覆盖）；
 RR-M2 — contract-integrity 修复同事务持久化校正契约，先 RED 后 GREEN；
 RR-L2 — CANCELLING 遇 deadline 收敛 CANCELLED，先 RED 后 GREEN。
-RR-L1/RR-L3 记录为 open/low，M2 前处理；approved 契约与 milestone 范围不变。
+RR-L1/RR-L3 于当日跟进关闭：INTAKE 激活收敛进 commit 事务（spy RED→GREEN）、
+`get_with_connection` 公开化；T2 209 passed、T3 429 passed/3 skipped，
+Ruff 与 diff-check clean；M1 全量合并 main `336067c`；approved 契约与
+milestone 范围不变。
 
 ## Archived V10.1 Planning Dashboard
 

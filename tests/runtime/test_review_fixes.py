@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select, update
@@ -31,6 +32,7 @@ from backend.domain.multi_agent import (
     DiagnosticStatus,
     ExecutionContractVersion,
     ExecutionStepKind,
+    InvestigationStrategy,
     LeadAction,
     ModelProvider,
 )
@@ -40,11 +42,18 @@ from backend.domain.runtime import (
     RuntimeEventType,
     RuntimeFailureCategory,
     RuntimePhase,
+    RuntimeResumeState,
     RuntimeRunStatus,
 )
 from backend.domain.tool_calls import ToolCallRecord, ToolCallStatus
 from backend.runtime.diff import RuntimeDiffService, reseal_frozen_projection
-from backend.runtime.phases import BusinessMutation, ToolCommit
+from backend.runtime.phase_executor import DiagnosisPhaseExecutor
+from backend.runtime.phases import (
+    BusinessMutation,
+    PhaseCommit,
+    PhaseInput,
+    ToolCommit,
+)
 from backend.runtime.replay import ReplayDependencies, ReplayService
 from backend.runtime.store import (
     RuntimeConflict,
@@ -625,3 +634,84 @@ def test_v11_investigation_save_revalidates_nested_action_owner_before_persisten
     restored = runtime_store.investigation_repository.get("inv-1")
     assert restored.active_runtime_run_id is None
     assert restored.actions == []
+
+
+@pytest.mark.anyio
+async def test_v11_intake_activates_projection_only_inside_commit_transaction(
+    runtime_store, monkeypatch
+) -> None:
+    """RR-L1：INTAKE handler 不得在 commit 事务外独立提交 activate。
+
+    SQLite 的 activate_projection 自带独立事务并即时提交，handler 提前调用会
+    造成 owner 已切换、latest 投影已清理但无 INTAKE checkpoint 的崩溃窗口；
+    激活只允许经由 commit_phase 事务内的 activate_projection_with_connection
+    发生。memory 路径在共享锁内无该窗口，仅参数化回归 handler 行为。
+    """
+    repository = runtime_store.investigation_repository
+    is_sqlite = hasattr(runtime_store, "engine")
+    standalone_calls = []
+    original_activate = repository.activate_projection
+
+    def _spy_activate(*args, **kwargs):
+        standalone_calls.append(args)
+        return original_activate(*args, **kwargs)
+
+    monkeypatch.setattr(repository, "activate_projection", _spy_activate)
+
+    run = runtime_store.create_run(_v11_run())
+    leased, attempt = runtime_store.acquire_lease_and_create_attempt(
+        run.id,
+        attempt=RuntimeAttempt(
+            run_id=run.id,
+            attempt_number=1,
+            status=RuntimeAttemptStatus.RUNNING,
+        ),
+        owner="worker-v11",
+        expected_status=RuntimeRunStatus.CREATED,
+    )
+    executor = DiagnosisPhaseExecutor(
+        SimpleNamespace(repository=repository, agents_runtime=None)
+    )
+    executor._is_durable_session = True
+
+    output = await executor.execute_phase(
+        PhaseInput(
+            run_id=run.id,
+            attempt_id=attempt.id,
+            phase=RuntimePhase.INTAKE,
+            resume_state=RuntimeResumeState(
+                remaining_tool_budget=8, remaining_token_budget=1000
+            ),
+            investigation_id="inv-1",
+            strategy=InvestigationStrategy.ADAPTIVE,
+            execution_contract_version=ExecutionContractVersion.V11,
+            tool_budget=8,
+        )
+    )
+
+    if is_sqlite:
+        # handler 返回前不得产生任何独立事务激活；memory 下共享锁内语义等价。
+        assert standalone_calls == []
+        # handler 返回后、commit 前，持久投影必须保持未切换（无窗口副作用）。
+        persisted = repository.get("inv-1")
+        assert persisted.active_runtime_run_id is None
+
+    runtime_store.commit_phase(
+        PhaseCommit(
+            run_id=run.id,
+            attempt_id=attempt.id,
+            lease_owner="worker-v11",
+            lease_version=leased.lease_version,
+            phase=RuntimePhase.INTAKE,
+            business_mutation=output.business_mutation,
+            safe_payload=output.safe_payload,
+            resume_state=RuntimeResumeState(
+                remaining_tool_budget=8, remaining_token_budget=1000
+            ),
+        )
+    )
+
+    restored = repository.get("inv-1")
+    assert restored.active_runtime_run_id == run.id
+    assert restored.evidence == []
+    assert restored.multi_agent_run is None

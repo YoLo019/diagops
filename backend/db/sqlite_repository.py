@@ -185,6 +185,12 @@ class SQLiteInvestigationRepository:
         with self.engine.connect() as connection:
             return self._get_with_connection(connection, investigation_id)
 
+    def get_with_connection(
+        self, connection: Connection, investigation_id: str
+    ) -> InvestigationRecord:
+        """供持有外层事务的调用方（如 RuntimeStore）在同一事务内读取记录。"""
+        return self._get_with_connection(connection, investigation_id)
+
     def list(self) -> list[InvestigationRecord]:
         with self.engine.connect() as connection:
             investigation_ids = [

@@ -909,7 +909,7 @@ class SQLiteRuntimeStore:
                 if run_id is None:
                     raise RuntimeLeaseLost("tool commit rejected by run lease fence")
                 if run_snapshot.is_v11:
-                    record = self.investigation_repository._get_with_connection(
+                    record = self.investigation_repository.get_with_connection(
                         connection, run_snapshot.investigation_id
                     )
                     validate_v11_phase_ownership(run_snapshot, commit, record)
@@ -1685,7 +1685,7 @@ class SQLiteRuntimeStore:
                 )
             except (AttributeError, TypeError, ValueError):
                 values["frozen_business_projection"] = None
-        record = self.investigation_repository._get_with_connection(
+        record = self.investigation_repository.get_with_connection(
             connection, data["investigation_id"]
         )
         if not data.get("execution_contract_version") == "v11" or record.active_runtime_run_id in {
