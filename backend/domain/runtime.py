@@ -527,7 +527,19 @@ for _event_type in (
     RuntimeEventType.MODEL_FAILED,
 ):
     _EVENT_PAYLOAD_KEYS[_event_type] |= frozenset(
-        {"provider", "model", "input_tokens", "output_tokens", "cost"}
+        {
+            "provider",
+            "model",
+            "input_tokens",
+            "output_tokens",
+            "cost",
+            "logical_call_id",
+            "reservation_id",
+            "reservation_status",
+            "reserved_tokens",
+            "input_estimate",
+            "attempt",
+        }
     )
 for _event_type in (
     RuntimeEventType.TOOL_PROPOSED,

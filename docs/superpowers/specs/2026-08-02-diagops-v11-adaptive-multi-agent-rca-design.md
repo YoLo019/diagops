@@ -1625,6 +1625,29 @@ unavailable. The single `M3_REVIEW_FIX2_SHA` commit is isolated to
 `codex/v11-m3`; no merge/push/M4/M5 action was taken and same-thread independent
 review remains pending.
 
+M3 third-round review-fix3 ledger (2026-08-09): independent review verdict
+`BLOCKING` was issued against base
+`b8c08d8a410877ef021cde69be0ec2faac98fb28`. The approved §6 scope and R1–R27
+requirements were unchanged. Each B1/B2/H1/H2 finding first received a minimal
+RED regression and then a shared-boundary GREEN fix:
+
+| Finding | RED → GREEN evidence | Resolution |
+| --- | --- | --- |
+| B1 | `test_v11_started_model_reservation_is_durable_for_resume_reconciliation` (RED collection, GREEN); `test_v11_resume_releases_crash_window_reservation_once`; `test_v11_sdk_reservation_retry_reuses_one_durable_allocation_and_settles_once`; `test_v11_concurrent_model_reservations_cannot_oversell_token_ceiling` | Reused `RuntimeEvent`/`RuntimeWriter` MODEL lifecycle persistence for run/logical-call/reservation/attempt identity. Reservation is durable before SDK send; actual completion settles usage, cancellation/timeout releases, retry reuses the same reservation, resume releases pending reservations deterministically, and duplicate settlement is ignored. |
+| B2 | `test_v11_official_provider_contract_and_client_ignore_ambient_endpoint` (RED, GREEN); `test_v11_official_contract_survives_sqlite_reload_with_ambient_endpoint` | Official V11 uses explicit `OFFICIAL_OPENAI_BASE_URL`, includes its endpoint identity in the sealed admission digest, validates the actual client URL on provider construction, and leaves explicit compatible URLs distinct. |
+| H1 | `test_v11_round_two_required_investigator_failure_terminalizes_before_reconciliation` (RED, GREEN); `test_v11_round_two_completed_partial_batch_is_not_blanket_failed` | Required round-two assessment/task ownership or Investigator failure clears the diagnostic projection and terminalizes before round completion is persisted; phase dispatch stops later reconciliation/Critic/Lead, while valid completed supplemental work remains eligible to continue. |
+| H2 | `test_v11_inconclusive_lead_clears_candidates_before_persist_and_reload` (RED, GREEN) | Lead semantic normalization clears candidates, accepted Critic assessment IDs, and root-cause attributions before persistence for legal `INCONCLUSIVE`; mechanical validation remains read-only and preserves the stop reason through reload. |
+
+Final third-round verification: T7 exact `86 passed`; T8 exact `202 passed`;
+T7/T8 scoped Ruff clean; M2R-2/M2R-3 and isolation focused `84 passed, 3
+skipped`; full `uv run pytest -q` `1990 passed, 3 skipped, 1 warning`; full
+Ruff (`uv run ruff check .` and `uv run ruff check backend tests`) clean. The
+warning is the existing Starlette/httpx TestClient deprecation warning.
+`M2_BASE_SHA=c2245ac` remains the separate M2 snapshot. The third-round fix is
+isolated to `codex/v11-m3` with symbolic `M3_REVIEW_FIX3_SHA` pending the single
+commit and same-thread independent review; no merge, push, M4, or M5 action was
+taken.
+
 ## 16. Approval state
 
 - Requirements Brief: confirmed by user.
@@ -1644,7 +1667,7 @@ review remains pending.
   introduce no new product scope.
 - The implementation Plan was rewritten from this specification, independently
   reviewed, and approved by the user on 2026-08-02 with execution authorization.
-- Implementation: M2 baseline `c2245ac` committed; M3 second-round review-fix2
-base `629bc34e823ff9f5ff163dca5f3924a161baafd3` is RED→GREEN verified in
-isolated branch `codex/v11-m3`, with single commit `M3_REVIEW_FIX2_SHA` handed
-to the same-thread independent review; M4/M5 not started.
+- Implementation: M2 baseline `c2245ac` committed; M3 third-round review-fix3
+base `b8c08d8a410877ef021cde69be0ec2faac98fb28` is RED→GREEN verified in
+isolated branch `codex/v11-m3`, with single commit `M3_REVIEW_FIX3_SHA` pending
+handoff to the same-thread independent review; M4/M5 not started.

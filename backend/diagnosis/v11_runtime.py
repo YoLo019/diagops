@@ -23,6 +23,7 @@ from agents.models.multi_provider import MultiProvider
 from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, Field
 
+from backend.config.settings import canonicalize_endpoint, endpoint_id
 from backend.db.models import InvestigationStatus
 from backend.diagnosis.adaptive_tools import (
     AdaptiveToolSession,
@@ -40,6 +41,7 @@ from backend.diagnosis.diagnostic_skills import (
 from backend.diagnosis.openai_compatible_model import (
     OpenAICompatibleChatCompletionsModel,
 )
+from backend.diagnosis.openai_model import OFFICIAL_OPENAI_BASE_URL
 from backend.diagnosis.result_validation import (
     V11ResultValidationError,
     validate_v11_result,
@@ -161,19 +163,52 @@ class _ModelTurn:
     execution_id: str | None = None
 
 
+@dataclass(slots=True)
+class _ModelReservation:
+    output_cap: int | None
+    input_estimate: int
+    reserved_total: int
+    status: str = "reserved"
+
+
 class _V11BudgetedModel(Model):
     """把 durable token reservation 下沉到 Agents SDK 的每个 request。"""
 
-    def __init__(self, delegate: Model, runtime: V11Runtime) -> None:
+    def __init__(
+        self,
+        delegate: Model,
+        runtime: V11Runtime,
+        *,
+        logical_call_id: str | None = None,
+        execution_id: str | None = None,
+        attempt_number: int = 1,
+        actor: str = "CoordinatorAgent",
+    ) -> None:
         self._delegate = delegate
         self._runtime = runtime
+        self._logical_call_id = logical_call_id
+        self._execution_id = execution_id
+        self._attempt_number = attempt_number
+        self._actor = actor
+        self._request_index = 0
 
     async def get_response(self, *args: Any, **kwargs: Any) -> Any:
         model_settings = kwargs["model_settings"]
+        request_index = self._request_index
+        self._request_index += 1
+        reservation_id = self._runtime._model_reservation_id(
+            self._logical_call_id,
+            request_index,
+        )
         reservation = await self._runtime._reserve_model_budget(
             model_settings.max_tokens,
             kwargs.get("system_instructions") or "",
             {"input": kwargs.get("input")},
+            reservation_id=reservation_id,
+            logical_call_id=self._logical_call_id,
+            execution_id=self._execution_id,
+            attempt=self._attempt_number,
+            actor=self._actor,
         )
         output_cap, input_estimate, reserved_total = reservation
         request_settings = replace(
@@ -199,6 +234,14 @@ class _V11BudgetedModel(Model):
             await self._runtime._settle_model_budget(
                 reserved_total,
                 max(input_estimate, input_tokens) + output_tokens,
+                reservation_id=reservation_id,
+                logical_call_id=self._logical_call_id,
+                execution_id=self._execution_id,
+                attempt=self._attempt_number,
+                actor=self._actor,
+                input_tokens=max(input_estimate, input_tokens),
+                output_tokens=output_tokens,
+                reservation_status="completed",
             )
             return response
         except asyncio.CancelledError:
@@ -206,13 +249,30 @@ class _V11BudgetedModel(Model):
                 await self._runtime._settle_model_budget(
                     reserved_total,
                     input_estimate if request_started else 0,
+                    reservation_id=reservation_id,
+                    logical_call_id=self._logical_call_id,
+                    execution_id=self._execution_id,
+                    attempt=self._attempt_number,
+                    actor=self._actor,
+                    input_tokens=input_estimate if request_started else 0,
+                    reservation_status="released",
                 )
             raise
-        except Exception:
+        except Exception as exc:
             if reserved_total:
                 await self._runtime._settle_model_budget(
                     reserved_total,
                     input_estimate if request_started else 0,
+                    reservation_id=reservation_id,
+                    logical_call_id=self._logical_call_id,
+                    execution_id=self._execution_id,
+                    attempt=self._attempt_number,
+                    actor=self._actor,
+                    input_tokens=input_estimate if request_started else 0,
+                    reservation_status=self._runtime._retry_reservation_status(
+                        exc,
+                        self._attempt_number,
+                    ),
                 )
             raise
 
@@ -228,13 +288,48 @@ class _V11BudgetedModel(Model):
 class _V11ModelProvider(AgentsModelProvider):
     """为 string model name 注入同一 request budget proxy。"""
 
-    def __init__(self, runtime: V11Runtime) -> None:
+    def __init__(
+        self,
+        runtime: V11Runtime,
+        *,
+        logical_call_id: str | None = None,
+        execution_id: str | None = None,
+        attempt_number: int = 1,
+        actor: str = "CoordinatorAgent",
+    ) -> None:
         self._runtime = runtime
-        self._client = AsyncOpenAI(max_retries=0)
+        self._logical_call_id = logical_call_id
+        self._execution_id = execution_id
+        self._attempt_number = attempt_number
+        self._actor = actor
+        self._client = AsyncOpenAI(
+            base_url=OFFICIAL_OPENAI_BASE_URL,
+            max_retries=0,
+        )
+        try:
+            actual_endpoint = canonicalize_endpoint(str(self._client.base_url))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise V11RuntimeContractError(
+                "V11 official client endpoint is unavailable"
+            ) from exc
+        if actual_endpoint != OFFICIAL_OPENAI_BASE_URL:
+            raise V11RuntimeContractError("V11 official client endpoint mismatch")
+        contract = getattr(runtime, "_execution_contract", None)
+        if contract is not None and contract.get("endpoint_id") != endpoint_id(
+            OFFICIAL_OPENAI_BASE_URL
+        ):
+            raise V11RuntimeContractError("V11 official endpoint contract mismatch")
         self._delegate = MultiProvider(openai_client=self._client)
 
     def get_model(self, model_name: str | None) -> Model:
-        return _V11BudgetedModel(self._delegate.get_model(model_name), self._runtime)
+        return _V11BudgetedModel(
+            self._delegate.get_model(model_name),
+            self._runtime,
+            logical_call_id=self._logical_call_id,
+            execution_id=self._execution_id,
+            attempt_number=self._attempt_number,
+            actor=self._actor,
+        )
 
     async def aclose(self) -> None:
         await self._delegate.aclose()
@@ -301,6 +396,8 @@ class V11Runtime:
         self.runtime_run_id: str | None = None
         self._remaining_token_budget = token_budget
         self._token_budget_lock = asyncio.Lock()
+        self._model_reservations: dict[str, _ModelReservation] = {}
+        self._settled_model_reservations: set[str] = set()
         self._commit_lock = asyncio.Lock()
         self._execution_contract: dict[str, Any] | None = None
         self._remaining_deadline_seconds: Callable[[], float] = lambda: float("inf")
@@ -357,6 +454,8 @@ class V11Runtime:
         runtime.model_name = model_name or self.model_name
         runtime._remaining_token_budget = token_budget
         runtime._token_budget_lock = asyncio.Lock()
+        runtime._model_reservations = {}
+        runtime._settled_model_reservations = set()
         runtime._commit_lock = asyncio.Lock()
         runtime._remaining_deadline_seconds = lambda: float("inf")
         runtime.timeout_seconds = (
@@ -767,6 +866,25 @@ class V11Runtime:
             raise V11RuntimeContractError("V11 execution contract provider mismatch")
         if contract["model_name"] != model_name:
             raise V11RuntimeContractError("V11 execution contract model mismatch")
+        if expected_provider == ModelProvider.OPENAI.value:
+            if contract["api_mode"] != "responses" or contract["endpoint_id"] != endpoint_id(
+                OFFICIAL_OPENAI_BASE_URL
+            ):
+                raise V11RuntimeContractError("V11 official endpoint contract mismatch")
+        if (
+            expected_provider == ModelProvider.OPENAI_COMPATIBLE.value
+            and isinstance(self.model, OpenAICompatibleChatCompletionsModel)
+        ):
+            try:
+                actual_endpoint_id = endpoint_id(
+                    canonicalize_endpoint(self.model._base_url)
+                )
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise V11RuntimeContractError(
+                    "V11 compatible client endpoint is unavailable"
+                ) from exc
+            if contract["endpoint_id"] != actual_endpoint_id:
+                raise V11RuntimeContractError("V11 compatible endpoint contract mismatch")
         capability = contract["capability_identity"]
         if (
             capability["provider"],
@@ -988,6 +1106,24 @@ class V11Runtime:
                 continue
             prepared.append((task, assessment))
 
+        selected_task_count = min(len(tasks), self.max_investigators)
+        if len(prepared) != selected_task_count:
+            self._ensure_failed_execution(
+                repository,
+                investigation_id,
+                task_id=f"round-two-contract-{self.runtime_run_id}",
+                actor=ExecutionActor.INVESTIGATOR.value,
+                step_kind=ExecutionStepKind.INVESTIGATOR_ANALYSIS,
+                message="round two task assessment ownership is incomplete",
+                analysis_round=2,
+            )
+            self._mark_terminal_failure(
+                repository,
+                investigation_id,
+                "round two task assessment ownership failed",
+            )
+            return ()
+
         async def run_task(
             task_and_assessment: tuple[DiagnosisTask, CriticAssessment]
         ) -> _InvestigatorResult:
@@ -1029,6 +1165,16 @@ class V11Runtime:
         for result in results:
             findings.extend(result.findings)
             self._persist_investigator_result(repository, investigation_id, result)
+        if any(
+            result.execution.status != AgentExecutionStatus.COMPLETED
+            for result in results
+        ):
+            self._mark_terminal_failure(
+                repository,
+                investigation_id,
+                "round two investigator failed",
+            )
+            return ()
         self._completed_rounds = 2
         self._update_summary(repository, investigation_id)
         return tuple(findings)
@@ -1220,18 +1366,24 @@ class V11Runtime:
             repository.save_coordination_review(review)
             return review
         status = self._diagnostic_status(decision)
+        projection = {
+            "lead_decision": decision,
+            "diagnostic_status": status,
+            "stop_reason": decision.stop_reason,
+            "run_status": (
+                MultiAgentRunStatus.PARTIAL
+                if self._failures
+                else MultiAgentRunStatus.COMPLETED
+            ),
+            "summary": decision.summary,
+        }
+        if decision.action == LeadAction.INCONCLUSIVE:
+            # Lead 的语义归一化必须清掉候选及其 assessment 投影；validator 只能机械校验。
+            projection.update(
+                {"candidates": [], "critic_assessments": [], "root_causes": []}
+            )
         review = review.model_copy(
-            update={
-                "lead_decision": decision,
-                "diagnostic_status": status,
-                "stop_reason": decision.stop_reason,
-                "run_status": (
-                    MultiAgentRunStatus.PARTIAL
-                    if self._failures
-                    else MultiAgentRunStatus.COMPLETED
-                ),
-                "summary": decision.summary,
-            }
+            update=projection
         )
         repository.save_coordination_review(review)
         self._update_summary(repository, investigation_id)
@@ -2200,6 +2352,12 @@ class V11Runtime:
         requested_budget: int | None,
         prompt: str,
         context: dict[str, Any],
+        *,
+        reservation_id: str | None = None,
+        logical_call_id: str | None = None,
+        execution_id: str | None = None,
+        attempt: int = 1,
+        actor: str = "CoordinatorAgent",
     ) -> tuple[int | None, int, int]:
         if self._remaining_token_budget is None and requested_budget is None:
             return None, 0, 0
@@ -2219,6 +2377,37 @@ class V11Runtime:
             // 4,
         )
         async with self._token_budget_lock:
+            existing = (
+                self._model_reservations.get(reservation_id)
+                if reservation_id is not None
+                else None
+            )
+            if existing is not None:
+                if existing.status == "retrying":
+                    await self._emit_model(
+                        execution_id or logical_call_id or reservation_id,
+                        "started",
+                        actor,
+                        safe_payload={
+                            "logical_call_id": logical_call_id,
+                            "reservation_id": reservation_id,
+                            "reservation_status": "reserved",
+                            "reserved_tokens": existing.reserved_total,
+                            "input_estimate": existing.input_estimate,
+                            "attempt": attempt,
+                        },
+                    )
+                    existing.status = "reserved"
+                return (
+                    existing.output_cap,
+                    existing.input_estimate,
+                    existing.reserved_total,
+                )
+            if (
+                reservation_id is not None
+                and reservation_id in self._settled_model_reservations
+            ):
+                raise V11RuntimeContractError("model reservation was already settled")
             current = self._remaining_token_budget
             available = min(
                 requested,
@@ -2231,19 +2420,117 @@ class V11Runtime:
                 self._remaining_token_budget = current - available
             else:
                 self._remaining_token_budget = 0
+            if reservation_id is not None:
+                self._model_reservations[reservation_id] = _ModelReservation(
+                    output_cap=output_cap,
+                    input_estimate=input_estimate,
+                    reserved_total=available,
+                )
+                try:
+                    await self._emit_model(
+                        execution_id or logical_call_id or reservation_id,
+                        "started",
+                        actor,
+                        safe_payload={
+                            "logical_call_id": logical_call_id,
+                            "reservation_id": reservation_id,
+                            "reservation_status": "reserved",
+                            "reserved_tokens": available,
+                            "input_estimate": input_estimate,
+                            "attempt": attempt,
+                        },
+                    )
+                except Exception:
+                    self._model_reservations.pop(reservation_id, None)
+                    if current is not None:
+                        self._remaining_token_budget += available
+                    raise
         return output_cap, input_estimate, available
 
     async def _settle_model_budget(
         self,
         reserved_total: int,
         actual_total: int,
+        *,
+        reservation_id: str | None = None,
+        logical_call_id: str | None = None,
+        execution_id: str | None = None,
+        attempt: int = 1,
+        actor: str = "CoordinatorAgent",
+        input_tokens: int | None = None,
+        output_tokens: int = 0,
+        reservation_status: str = "completed",
     ) -> None:
         if self._remaining_token_budget is None:
             return
         if actual_total > reserved_total:
             raise V11RuntimeContractError("model response exceeded token budget")
         async with self._token_budget_lock:
+            if reservation_id is not None:
+                if reservation_id in self._settled_model_reservations:
+                    return
+                reservation = self._model_reservations.get(reservation_id)
+                if reservation is None:
+                    return
+                if reserved_total != reservation.reserved_total:
+                    raise V11RuntimeContractError("model reservation total mismatch")
+                if reservation_status == "retrying":
+                    await self._emit_model(
+                        execution_id or logical_call_id or reservation_id,
+                        "failed",
+                        actor,
+                        safe_payload={
+                            "logical_call_id": logical_call_id,
+                            "reservation_id": reservation_id,
+                            "reservation_status": "retrying",
+                            "reserved_tokens": reservation.reserved_total,
+                            "input_estimate": reservation.input_estimate,
+                            "attempt": attempt,
+                        },
+                    )
+                    reservation.status = "retrying"
+                    return
+                if input_tokens is None:
+                    input_tokens = actual_total
+                await self._emit_model(
+                    execution_id or logical_call_id or reservation_id,
+                    "completed" if reservation_status == "completed" else "failed",
+                    actor,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    safe_payload={
+                        "logical_call_id": logical_call_id,
+                        "reservation_id": reservation_id,
+                        "reservation_status": reservation_status,
+                        "reserved_tokens": reservation.reserved_total,
+                        "input_estimate": reservation.input_estimate,
+                        "attempt": attempt,
+                    },
+                )
+                self._remaining_token_budget += reserved_total - actual_total
+                self._model_reservations.pop(reservation_id, None)
+                self._settled_model_reservations.add(reservation_id)
+                return
             self._remaining_token_budget += reserved_total - actual_total
+
+    @staticmethod
+    def _model_reservation_id(
+        logical_call_id: str | None,
+        request_index: int,
+    ) -> str | None:
+        if logical_call_id is None:
+            return None
+        return f"{logical_call_id}:request-{request_index + 1}"
+
+    @staticmethod
+    def _retry_reservation_status(exc: BaseException, attempt: int) -> str:
+        category = retryable_failure_category(exc)
+        if attempt < 2 and category in {
+            FailureCategory.TRANSPORT,
+            FailureCategory.RATE_LIMIT,
+        }:
+            return "retrying"
+        return "released"
 
     def _model_timeout(self) -> float:
         remaining = max(0.0, float(self._remaining_deadline_seconds()))
@@ -2275,7 +2562,7 @@ class V11Runtime:
             raise V11RuntimeContractError("model tool budget exhausted")
         self._model_timeout()
         model_event_id = f"v11-model-{uuid4().hex}"
-        manual_lifecycle = self.turn is not None
+        reservation_id = self._model_reservation_id(model_event_id, 0)
         audit_enabled = (
             repository is not None
             and investigation_id is not None
@@ -2336,8 +2623,6 @@ class V11Runtime:
             )
 
         await self._emit_agent(actor, "started")
-        if manual_lifecycle:
-            await self._emit_model(model_event_id, "started", actor)
         try:
             async def invoke_model(attempt: int) -> Any:
                 nonlocal current_execution_id, current_started_at, previous_execution_id
@@ -2354,7 +2639,14 @@ class V11Runtime:
                     timeout_seconds = self._model_timeout()
                     if self.turn is not None:
                         reservation = await self._reserve_model_budget(
-                            remaining_token_budget, prompt, context
+                            remaining_token_budget,
+                            prompt,
+                            context,
+                            reservation_id=reservation_id,
+                            logical_call_id=model_event_id,
+                            execution_id=current_execution_id,
+                            attempt=attempt,
+                            actor=actor,
                         )
                         output_cap, input_estimate, reserved_total = reservation
                         raw_result = await asyncio.wait_for(
@@ -2376,7 +2668,14 @@ class V11Runtime:
                         if self.model is None:
                             raise V11RuntimeUnavailable("V11 model is not configured")
                         sdk_model = (
-                            _V11BudgetedModel(self.model, self)
+                            _V11BudgetedModel(
+                                self.model,
+                                self,
+                                logical_call_id=model_event_id,
+                                execution_id=current_execution_id,
+                                attempt_number=attempt,
+                                actor=actor,
+                            )
                             if isinstance(self.model, Model)
                             else self.model
                         )
@@ -2392,7 +2691,13 @@ class V11Runtime:
                         )
                         agent = Agent(**agent_kwargs)
                         model_provider = (
-                            _V11ModelProvider(self)
+                            _V11ModelProvider(
+                                self,
+                                logical_call_id=model_event_id,
+                                execution_id=current_execution_id,
+                                attempt_number=attempt,
+                                actor=actor,
+                            )
                             if isinstance(self.model, str)
                             else MultiProvider()
                         )
@@ -2405,7 +2710,7 @@ class V11Runtime:
                                         ensure_ascii=False,
                                         sort_keys=True,
                                     ),
-                                    persist_model_event=self._persist_model_event,
+                                    persist_model_event=None,
                                     max_turns=self.max_turns,
                                     run_config=RunConfig(
                                         workflow_name="DiagOps V11 Agent RCA",
@@ -2425,6 +2730,14 @@ class V11Runtime:
                         await self._settle_model_budget(
                             reserved_total,
                             measured.input_tokens + measured.output_tokens,
+                            reservation_id=reservation_id,
+                            logical_call_id=model_event_id,
+                            execution_id=current_execution_id,
+                            attempt=attempt,
+                            actor=actor,
+                            input_tokens=measured.input_tokens,
+                            output_tokens=measured.output_tokens,
+                            reservation_status="completed",
                         )
                     await persist_attempt(
                         status=AgentExecutionStatus.COMPLETED,
@@ -2440,7 +2753,15 @@ class V11Runtime:
                     # 使 retry coordinator 能在同一 frozen budget 内重新预检。
                     if reserved_total:
                         await self._settle_model_budget(
-                            reserved_total, input_estimate
+                            reserved_total,
+                            input_estimate,
+                            reservation_id=reservation_id,
+                            logical_call_id=model_event_id,
+                            execution_id=current_execution_id,
+                            attempt=attempt,
+                            actor=actor,
+                            input_tokens=input_estimate,
+                            reservation_status="released",
                         )
                     await persist_attempt(
                         status=AgentExecutionStatus.CANCELLED,
@@ -2456,8 +2777,19 @@ class V11Runtime:
                     # 失败请求只结算已预扣的 input estimate；未使用 output cap 退回，
                     # 使 retry coordinator 能在同一 frozen budget 内重新预检。
                     if reserved_total:
+                        retry_status = self._retry_reservation_status(exc, attempt)
                         await self._settle_model_budget(
-                            reserved_total, input_estimate
+                            reserved_total,
+                            input_estimate if retry_status == "released" else 0,
+                            reservation_id=reservation_id,
+                            logical_call_id=model_event_id,
+                            execution_id=current_execution_id,
+                            attempt=attempt,
+                            actor=actor,
+                            input_tokens=(
+                                input_estimate if retry_status == "released" else 0
+                            ),
+                            reservation_status=retry_status,
                         )
                     category = retryable_failure_category(exc)
                     if category is None:
@@ -2500,14 +2832,6 @@ class V11Runtime:
                 raise V11RuntimeContractError("model response exceeded token budget")
             self._input_tokens += result.input_tokens
             self._output_tokens += result.output_tokens
-            if manual_lifecycle:
-                await self._emit_model(
-                    model_event_id,
-                    "completed",
-                    actor,
-                    result.input_tokens,
-                    result.output_tokens,
-                )
             await self._emit_agent(actor, "completed")
             return _ModelTurn(
                 result.output,
@@ -2516,13 +2840,9 @@ class V11Runtime:
                 current_execution_id,
             )
         except asyncio.CancelledError:
-            if manual_lifecycle:
-                await self._emit_model(model_event_id, "failed", actor)
             await self._emit_agent(actor, "failed")
             raise
         except Exception:
-            if manual_lifecycle:
-                await self._emit_model(model_event_id, "failed", actor)
             await self._emit_agent(actor, "failed")
             raise
 
@@ -2538,17 +2858,25 @@ class V11Runtime:
         actor: str,
         input_tokens: int = 0,
         output_tokens: int = 0,
+        safe_payload: dict[str, Any] | None = None,
     ) -> None:
         callback = self._persist_model_event
         if callback is None:
             return
-        args = (execution_id, status, input_tokens, output_tokens, actor)
+        args = (
+            execution_id,
+            status,
+            input_tokens,
+            output_tokens,
+            actor,
+            safe_payload,
+        )
         try:
             signature = inspect.signature(callback)
         except (TypeError, ValueError):
             signature = None
         if signature is not None:
-            for size in (5, 4, 3, 2):
+            for size in (6, 5, 4, 3, 2):
                 candidate = args[:size]
                 try:
                     signature.bind(*candidate)

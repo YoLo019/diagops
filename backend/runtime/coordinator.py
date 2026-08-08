@@ -26,6 +26,7 @@ from backend.runtime.phases import (
     PhaseInput,
     ToolCommit,
     checkpoint_digest,
+    durable_model_reservations,
     durable_projection_digest,
     durable_token_usage,
     durable_tool_call_count,
@@ -267,6 +268,12 @@ class RuntimeCoordinator:
                     owner,
                     recovery_checkpoint_id,
                 )
+                await self._reconcile_model_reservations(run, attempt, owner)
+                if recovery_checkpoint_id is not None:
+                    recovery_state = self._effective_resume_state(
+                        run,
+                        self.store.get_checkpoint(recovery_checkpoint_id),
+                    )
             resume_state, start_index = self._resume_position(run)
             if recovery_state is not None:
                 resume_state = recovery_state
@@ -352,6 +359,7 @@ class RuntimeCoordinator:
                         input_tokens=0,
                         output_tokens=0,
                         actor_name="CoordinatorAgent",
+                        safe_payload=None,
                         phase=phase: (
                             self._persist_model_event(
                                 run,
@@ -363,6 +371,7 @@ class RuntimeCoordinator:
                                 input_tokens,
                                 output_tokens,
                                 actor_name,
+                                safe_payload,
                             )
                         ),
                         hit_fault=self.fault_injector.hit,
@@ -624,6 +633,7 @@ class RuntimeCoordinator:
         input_tokens: int = 0,
         output_tokens: int = 0,
         actor_name: str = "CoordinatorAgent",
+        safe_payload: dict[str, object] | None = None,
     ) -> None:
         event_type = {
             "started": RuntimeEventType.MODEL_STARTED,
@@ -660,6 +670,7 @@ class RuntimeCoordinator:
                         "status": status,
                         "input_tokens": input_tokens,
                         "output_tokens": output_tokens,
+                        **(safe_payload or {}),
                     },
                 )
             )
@@ -673,6 +684,44 @@ class RuntimeCoordinator:
                 status,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
+            )
+
+    async def _reconcile_model_reservations(
+        self,
+        run: RuntimeRun,
+        attempt: RuntimeAttempt,
+        owner: str,
+    ) -> None:
+        """恢复时释放崩溃窗口中的未结算 reservation，保证幂等续跑。"""
+        pending = durable_model_reservations(self.store.list_events(run.id), run.id)
+        for reservation_id, details in sorted(pending.items()):
+            self.check_execution(run.id, owner, run.lease_version)
+            logical_call_id = details.get("logical_call_id")
+            reserved_tokens = int(details.get("reserved_tokens", 0))
+            input_estimate = int(details.get("input_estimate", 0))
+            await self.writer.submit_event(
+                RuntimeEventCommand(
+                    run_id=run.id,
+                    attempt_id=attempt.id,
+                    lease_owner=owner,
+                    lease_version=run.lease_version,
+                    event_type=RuntimeEventType.MODEL_FAILED,
+                    actor_type=RuntimeActorType.MODEL,
+                    phase=run.current_phase,
+                    actor_name="CoordinatorAgent",
+                    execution_id=details.get("execution_id"),
+                    safe_payload={
+                        "status": "failed",
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "logical_call_id": logical_call_id,
+                        "reservation_id": reservation_id,
+                        "reservation_status": "released",
+                        "reserved_tokens": reserved_tokens,
+                        "input_estimate": input_estimate,
+                        "attempt": attempt.attempt_number,
+                    },
+                )
             )
 
     async def _persist_agent_event(

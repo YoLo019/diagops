@@ -16,10 +16,18 @@ from openai.types.responses import (
 )
 from pydantic import BaseModel, ConfigDict
 
-from backend.config.settings import AgentsSettings, AppSettings, StorageSettings
+from backend.config.settings import (
+    AgentsSettings,
+    AppSettings,
+    StorageSettings,
+)
+from backend.config.settings import (
+    endpoint_id as endpoint_identity,
+)
 from backend.db.models import InvestigationRecord, InvestigationStatus
 from backend.db.repositories import InMemoryInvestigationRepository
 from backend.diagnosis import v11_runtime as v11_runtime_module
+from backend.diagnosis.adaptive_tools import ClassifiedRetryableError
 from backend.diagnosis.diagnostic_skills import (
     DIAGNOSTIC_SKILLS,
     SKILL_CATALOG_VERSION,
@@ -28,6 +36,7 @@ from backend.diagnosis.diagnostic_skills import (
 from backend.diagnosis.openai_compatible_model import (
     OpenAICompatibleChatCompletionsModel,
 )
+from backend.diagnosis.openai_model import OFFICIAL_OPENAI_BASE_URL
 from backend.diagnosis.v11_runtime import (
     LeadPlanningOutput,
     V11Runtime,
@@ -55,6 +64,7 @@ from backend.domain.multi_agent import (
     CausalCheckStatus,
     CriticVerdict,
     ExecutionStepKind,
+    FailureCategory,
     LeadAction,
     ModelProvider,
 )
@@ -126,6 +136,9 @@ def _complete_contract(
     artifact_hash: str | None = None,
 ) -> dict:
     frozen_manifest = manifest or registry.agent_manifest()
+    frozen_endpoint_id = endpoint_id
+    if model_provider == "openai" and frozen_endpoint_id is None:
+        frozen_endpoint_id = endpoint_identity(OFFICIAL_OPENAI_BASE_URL)
     return seal_v11_execution_contract(
         {
             "execution_contract_version": "v11",
@@ -134,7 +147,7 @@ def _complete_contract(
             "model_name": model_name,
             "prompt_version": "v11-test",
             "api_mode": api_mode,
-            "endpoint_id": endpoint_id,
+            "endpoint_id": frozen_endpoint_id,
             "capability_artifact_hash": artifact_hash,
             "tool_manifest": list(frozen_manifest),
             "tool_manifest_hash": agent_manifest_hash(frozen_manifest),
@@ -149,7 +162,7 @@ def _complete_contract(
                 "provider": model_provider,
                 "model": model_name,
                 "api_mode": api_mode,
-                "endpoint_id": endpoint_id,
+                "endpoint_id": frozen_endpoint_id,
                 "artifact_hash": artifact_hash,
             },
             "limits": {
@@ -504,7 +517,7 @@ def test_v11_clone_disables_compatible_provider_retry_for_durable_run():
         model_name="compat-model",
         model_provider="openai_compatible",
         api_mode="chat_completions",
-        endpoint_id="endpoint-compat",
+        endpoint_id=endpoint_identity("http://127.0.0.1:8000/v1"),
         artifact_hash="a" * 64,
     )
 
@@ -526,6 +539,8 @@ async def test_v11_string_provider_client_disables_sdk_transport_retry(monkeypat
     captured: dict[str, object] = {}
 
     class FakeClient:
+        base_url = OFFICIAL_OPENAI_BASE_URL
+
         async def close(self) -> None:
             captured["closed"] = True
 
@@ -1966,3 +1981,455 @@ async def test_v11_phase_executor_uses_runtime_phases_without_legacy_report_or_a
     assert persisted.lead_decision is not None
     assert repository.get(record.id).report is None
     assert repository.get(record.id).actions == []
+
+
+def test_v11_official_provider_contract_and_client_ignore_ambient_endpoint(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            self.base_url = kwargs["base_url"]
+
+        async def close(self):
+            return None
+
+    class FakeMultiProvider:
+        def __init__(self, *, openai_client):
+            self.openai_client = openai_client
+
+        def get_model(self, _model_name):
+            raise AssertionError("model construction is not part of this contract test")
+
+        async def aclose(self):
+            return None
+
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://env.example/v1")
+    monkeypatch.setattr(v11_runtime_module, "AsyncOpenAI", FakeClient)
+    monkeypatch.setattr(v11_runtime_module, "MultiProvider", FakeMultiProvider)
+    runtime = V11Runtime(model="fake", model_provider=ModelProvider.OPENAI)
+
+    provider = v11_runtime_module._V11ModelProvider(runtime)
+
+    assert captured["base_url"] == OFFICIAL_OPENAI_BASE_URL
+    assert provider._client.base_url == OFFICIAL_OPENAI_BASE_URL
+    container = AppContainer(AppSettings(storage=StorageSettings(url="memory://")))
+    try:
+        assert container._v11_model_identity(ModelProvider.OPENAI, "fake")[0] == endpoint_identity(
+            OFFICIAL_OPENAI_BASE_URL
+        )
+    finally:
+        container.close()
+
+
+def test_v11_official_contract_survives_sqlite_reload_with_ambient_endpoint(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://env.example/v1")
+    settings = AppSettings(
+        storage=StorageSettings(url=f"sqlite:///{tmp_path / 'v11-official.db'}"),
+        agents=AgentsSettings(enabled=True, model="gpt-test"),
+    )
+    first = AppContainer(settings)
+    try:
+        record = first.repository.save(
+            InvestigationRecord(id="inv-official-reload", event=_event())
+        )
+        run = first.create_runtime_run(
+            record.id,
+            strategy="adaptive",
+            run_reason="initial",
+            execution_contract_version="v11",
+        )
+        expected_endpoint = endpoint_identity(OFFICIAL_OPENAI_BASE_URL)
+        assert run.execution_contract["endpoint_id"] == expected_endpoint
+        expected_digest = run.execution_contract["execution_contract_digest"]
+    finally:
+        first.close()
+
+    second = AppContainer(settings)
+    try:
+        reloaded = second.runtime_store.get_run(run.id)
+        assert reloaded.execution_contract["endpoint_id"] == expected_endpoint
+        assert reloaded.execution_contract["execution_contract_digest"] == expected_digest
+    finally:
+        second.close()
+
+
+@pytest.mark.anyio
+async def test_v11_round_two_required_investigator_failure_terminalizes_before_reconciliation():
+    repository, record = _repository()
+    runtime_run_id = "run-round-two-failure"
+    candidate = RootCauseCandidate(
+        id="candidate-round-two",
+        summary="candidate awaiting supplemental evidence",
+        rank=1,
+        confidence=0.5,
+    )
+    assessment = CriticAssessment(
+        id="assessment-round-two",
+        candidate_id=candidate.id,
+        verdict=CriticVerdict.NEEDS_EVIDENCE,
+        checks=[
+            CausalCheck(
+                name=name,
+                status=CausalCheckStatus.UNKNOWN,
+                summary="named gap",
+                gap="supplemental signal is unavailable",
+            )
+            for name in CausalCheckName
+        ],
+        gap="supplemental signal is unavailable",
+        supplemental_task_ids=["task-round-two-failure"],
+        summary="request one supplemental task",
+        runtime_run_id=runtime_run_id,
+    )
+    task = DiagnosisTask(
+        id="task-round-two-failure",
+        title="Collect supplemental signal",
+        description="The supplemental provider fails before returning output.",
+        task_type=DiagnosisTaskType.GENERAL_INVESTIGATION,
+        agent_name="InvestigatorAgent",
+        analysis_round=2,
+        evidence_scope={"entity_ids": [record.event.service]},
+        runtime_run_id=runtime_run_id,
+        critic_assessment_id=assessment.id,
+    )
+    repository.save_coordination_review(
+        CoordinationReview(
+            investigation_id=record.id,
+            runtime_run_id=runtime_run_id,
+            authority_mode="agent",
+            candidates=[candidate],
+            critic_assessments=[assessment],
+        )
+    )
+    repository.save_tasks(record.id, [task])
+
+    calls = 0
+
+    async def turn(**_kwargs):
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("round two model transport failed")
+
+    runtime = V11Runtime(
+        model="fake",
+        model_provider=ModelProvider.OPENAI,
+        model_name="fake",
+        tool_registry=build_provider_tool_registry(build_mock_provider_registry()),
+        turn=turn,
+    )
+    runtime.runtime_run_id = runtime_run_id
+
+    await runtime.investigator_round_2(
+        repository=repository,
+        investigation_id=record.id,
+        event=record.event,
+    )
+
+    assert calls == 1
+    assert repository.get(record.id).status == InvestigationStatus.FAILED
+    assert repository.get(record.id).multi_agent_run is not None
+    assert repository.get(record.id).multi_agent_run.completed_rounds == 0
+    assert repository.get_coordination_review(record.id).candidates == []
+    before = calls
+    await runtime._dispatch_phase(
+        phase="critic_reconciliation",
+        repository=repository,
+        investigation_id=record.id,
+        event=record.event,
+        runtime_run_id=runtime_run_id,
+    )
+    assert calls == before
+
+
+@pytest.mark.anyio
+async def test_v11_round_two_completed_partial_batch_is_not_blanket_failed():
+    repository, record = _repository()
+    runtime_run_id = "run-round-two-partial-success"
+    task_ids = ["task-round-two-a", "task-round-two-b"]
+    assessment = CriticAssessment(
+        id="assessment-round-two-partial",
+        candidate_id="candidate-round-two-partial",
+        verdict=CriticVerdict.NEEDS_EVIDENCE,
+        checks=[
+            CausalCheck(
+                name=name,
+                status=CausalCheckStatus.UNKNOWN,
+                summary="named gap",
+                gap="supplemental signal remains bounded",
+            )
+            for name in CausalCheckName
+        ],
+        gap="supplemental signal remains bounded",
+        supplemental_task_ids=task_ids,
+        summary="request two bounded signals",
+        runtime_run_id=runtime_run_id,
+    )
+    repository.save_coordination_review(
+        CoordinationReview(
+            investigation_id=record.id,
+            runtime_run_id=runtime_run_id,
+            authority_mode="agent",
+            candidates=[
+                RootCauseCandidate(
+                    id=assessment.candidate_id,
+                    summary="candidate",
+                    rank=1,
+                    confidence=0.4,
+                )
+            ],
+            critic_assessments=[assessment],
+        )
+    )
+    repository.save_tasks(
+        record.id,
+        [
+            DiagnosisTask(
+                id=task_id,
+                title=f"Collect signal {task_id[-1]}",
+                description="A valid supplemental task with no new finding.",
+                task_type=DiagnosisTaskType.GENERAL_INVESTIGATION,
+                agent_name="InvestigatorAgent",
+                analysis_round=2,
+                evidence_scope={"entity_ids": [record.event.service]},
+                runtime_run_id=runtime_run_id,
+                critic_assessment_id=assessment.id,
+            )
+            for task_id in task_ids
+        ],
+    )
+
+    async def turn(**_kwargs):
+        return {"findings": [], "candidates": []}
+
+    runtime = V11Runtime(
+        model="fake",
+        model_provider=ModelProvider.OPENAI,
+        model_name="fake",
+        tool_registry=build_provider_tool_registry(build_mock_provider_registry()),
+        turn=turn,
+    )
+    runtime.runtime_run_id = runtime_run_id
+
+    await runtime.investigator_round_2(
+        repository=repository,
+        investigation_id=record.id,
+        event=record.event,
+    )
+
+    assert repository.get(record.id).status != InvestigationStatus.FAILED
+    assert repository.get(record.id).multi_agent_run.completed_rounds == 2
+    assert all(
+        item.status == AgentExecutionStatus.COMPLETED
+        for item in repository.list_executions(record.id)
+    )
+
+
+@pytest.mark.anyio
+async def test_v11_inconclusive_lead_clears_candidates_before_persist_and_reload():
+    repository, record = _repository()
+    runtime_run_id = "run-inconclusive-clears-candidates"
+    candidate = RootCauseCandidate(
+        id="candidate-inconclusive",
+        summary="candidate without enough evidence",
+        rank=1,
+        confidence=0.4,
+    )
+    assessment = CriticAssessment(
+        id="assessment-inconclusive",
+        candidate_id=candidate.id,
+        verdict=CriticVerdict.ACCEPT,
+        checks=[
+            CausalCheck(
+                name=name,
+                status=CausalCheckStatus.UNKNOWN,
+                summary="evidence remains insufficient",
+                gap="the final decision does not rely on this candidate",
+            )
+            for name in CausalCheckName
+        ],
+        summary="candidate was assessed but not concluded",
+        runtime_run_id=runtime_run_id,
+    )
+    repository.save_coordination_review(
+        CoordinationReview(
+            investigation_id=record.id,
+            runtime_run_id=runtime_run_id,
+            authority_mode="agent",
+            candidates=[candidate],
+            critic_assessments=[assessment],
+        )
+    )
+
+    async def turn(**_kwargs):
+        return {
+            "decision": {
+                "action": "inconclusive",
+                "summary": "the evidence gap remains",
+                "stop_reason": "insufficient_evidence",
+            }
+        }
+
+    runtime = V11Runtime(
+        model="fake",
+        model_provider=ModelProvider.OPENAI,
+        model_name="fake",
+        tool_registry=build_provider_tool_registry(build_mock_provider_registry()),
+        turn=turn,
+    )
+    runtime.runtime_run_id = runtime_run_id
+
+    review = await runtime.lead_adjudication(
+        repository=repository,
+        investigation_id=record.id,
+        event=record.event,
+    )
+
+    reloaded = repository.get_coordination_review(record.id)
+    assert review is not None
+    assert reloaded is not None
+    assert review.candidates == []
+    assert reloaded.candidates == []
+    assert reloaded.critic_assessments == []
+    assert reloaded.root_causes == []
+    assert reloaded.lead_decision is not None
+    assert reloaded.lead_decision.stop_reason == "insufficient_evidence"
+    assert reloaded.diagnostic_status.value == "inconclusive"
+    await runtime.result_validation(
+        repository=repository,
+        investigation_id=record.id,
+        event=record.event,
+    )
+    validated = repository.get_coordination_review(record.id)
+    assert validated is not None
+    assert validated.candidates == []
+    assert validated.diagnostic_status.value == "inconclusive"
+
+
+@pytest.mark.anyio
+async def test_v11_sdk_reservation_retry_reuses_one_durable_allocation_and_settles_once():
+    calls = 0
+    events: list[tuple[str, dict[str, object]]] = []
+
+    class Delegate(Model):
+        async def get_response(self, **_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ClassifiedRetryableError(FailureCategory.TRANSPORT)
+            return SimpleNamespace(
+                usage=SimpleNamespace(input_tokens=3, output_tokens=4)
+            )
+
+        async def stream_response(self, **_kwargs):
+            if False:
+                yield None
+
+        async def close(self):
+            return None
+
+    async def persist_model_event(
+        execution_id,
+        status,
+        input_tokens=0,
+        output_tokens=0,
+        actor_name="CoordinatorAgent",
+        safe_payload=None,
+    ):
+        del execution_id, input_tokens, output_tokens, actor_name
+        events.append((status, safe_payload or {}))
+
+    runtime = V11Runtime(model=Delegate(), token_budget=100)
+    runtime._persist_model_event = persist_model_event
+    settings = ModelSettings(max_tokens=90)
+    first = _V11BudgetedModel(
+        runtime.model,
+        runtime,
+        logical_call_id="logical-call-retry",
+        execution_id="execution-1",
+        attempt_number=1,
+        actor="LeadAgent",
+    )
+    with pytest.raises(ClassifiedRetryableError):
+        await first.get_response(
+            input="one request",
+            system_instructions="system",
+            model_settings=settings,
+        )
+
+    assert runtime.remaining_token_budget == 10
+    assert events[-1][0] == "failed"
+    assert events[-1][1]["reservation_status"] == "retrying"
+
+    second = _V11BudgetedModel(
+        runtime.model,
+        runtime,
+        logical_call_id="logical-call-retry",
+        execution_id="execution-2",
+        attempt_number=2,
+        actor="LeadAgent",
+    )
+    await second.get_response(
+        input="one request",
+        system_instructions="system",
+        model_settings=settings,
+    )
+
+    assert calls == 2
+    assert [item[0] for item in events] == [
+        "started",
+        "failed",
+        "started",
+        "completed",
+    ]
+    assert len(
+        {
+            item[1]["reservation_id"]
+            for item in events
+            if item[1].get("reservation_id") is not None
+        }
+    ) == 1
+    remaining_after_settle = runtime.remaining_token_budget
+    await runtime._settle_model_budget(
+        100,
+        7,
+        reservation_id="logical-call-retry:request-1",
+        logical_call_id="logical-call-retry",
+        execution_id="execution-2",
+        input_tokens=3,
+        output_tokens=4,
+        reservation_status="completed",
+    )
+    assert runtime.remaining_token_budget == remaining_after_settle
+
+
+@pytest.mark.anyio
+async def test_v11_concurrent_model_reservations_cannot_oversell_token_ceiling():
+    runtime = V11Runtime(model="fake", token_budget=100)
+
+    async def reserve(index: int):
+        return await runtime._reserve_model_budget(
+            60,
+            f"prompt-{index}",
+            {"index": index},
+            reservation_id=f"logical-{index}:request-1",
+            logical_call_id=f"logical-{index}",
+            execution_id=f"execution-{index}",
+            actor="LeadAgent",
+        )
+
+    results = await asyncio.gather(*(reserve(index) for index in range(2)))
+
+    assert sum(item[2] for item in results) == 100
+    assert runtime.remaining_token_budget == 0
+    for index, (_, input_estimate, reserved_total) in enumerate(results):
+        await runtime._settle_model_budget(
+            reserved_total,
+            input_estimate,
+            reservation_id=f"logical-{index}:request-1",
+            logical_call_id=f"logical-{index}",
+            execution_id=f"execution-{index}",
+            input_tokens=input_estimate,
+            reservation_status="completed",
+        )
+    assert runtime.remaining_token_budget == 90

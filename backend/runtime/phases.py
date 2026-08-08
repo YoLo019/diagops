@@ -469,4 +469,34 @@ def durable_token_usage(events, run_id: str) -> int:
         and event.schema_version == 1
         and isinstance(event.event_type, str)
         and str(event.event_type) in terminal
+        and event.safe_payload.get("reservation_status") != "retrying"
     )
+
+
+def durable_model_reservations(events, run_id: str) -> dict[str, dict[str, object]]:
+    """按事件顺序返回尚未结算的模型 token reservation。"""
+    active: dict[str, dict[str, object]] = {}
+    for event in sorted(events, key=lambda item: item.sequence):
+        if event.run_id != run_id or event.schema_version != 1:
+            continue
+        if str(event.event_type) not in {
+            "model.started",
+            "model.completed",
+            "model.failed",
+        }:
+            continue
+        reservation_id = event.safe_payload.get("reservation_id")
+        if not isinstance(reservation_id, str) or not reservation_id:
+            continue
+        reservation_status = event.safe_payload.get("reservation_status")
+        if reservation_status in {"reserved", "retrying"}:
+            active[reservation_id] = {
+                "logical_call_id": event.safe_payload.get("logical_call_id"),
+                "reserved_tokens": int(event.safe_payload.get("reserved_tokens", 0)),
+                "input_estimate": int(event.safe_payload.get("input_estimate", 0)),
+                "attempt_id": event.attempt_id,
+                "execution_id": event.execution_id,
+            }
+        else:
+            active.pop(reservation_id, None)
+    return active

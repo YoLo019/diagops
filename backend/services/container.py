@@ -22,6 +22,7 @@ from backend.diagnosis.coordinator import DiagnosisCoordinator
 from backend.diagnosis.deepseek_model import create_deepseek_model
 from backend.diagnosis.diagnostic_skills import skill_catalog_identity
 from backend.diagnosis.openai_compatible_model import create_openai_compatible_model
+from backend.diagnosis.openai_model import OFFICIAL_OPENAI_BASE_URL
 from backend.diagnosis.orchestrator import DiagnosisOrchestrator
 from backend.diagnosis.v11_runtime import V11Runtime
 from backend.domain.events import IncidentEvent
@@ -463,11 +464,9 @@ class AppContainer:
         )
 
     def _v11_model_identity(self, provider, model_name: str | None):
-        """openai_compatible 的 V11 run 只接受精确 tuple 已认证的 endpoint。
-
-        返回 (endpoint_id, capability_artifact_hash)；非 generic provider 不携带
-        endpoint 身份（None）。未认证即 RuntimeContractError，run 行不会插入。
-        """
+        """返回 admission 固定的 endpoint/capability 身份。"""
+        if provider == ModelProvider.OPENAI:
+            return endpoint_id(OFFICIAL_OPENAI_BASE_URL), None
         if provider != ModelProvider.OPENAI_COMPATIBLE:
             return None, None
         base_url = self.settings.agents.openai_compatible.base_url
