@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
@@ -9,11 +10,12 @@ from typing import Any
 from uuid import uuid4
 
 from agents import FunctionTool
+from openai import APIConnectionError, RateLimitError
 
 from backend.domain.agent_findings import AgentName
 from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem, JsonValue
-from backend.domain.multi_agent import AdaptiveStopReason
+from backend.domain.multi_agent import AdaptiveStopReason, FailureCategory
 from backend.domain.tool_calls import ToolCallRecord, ToolCallStatus
 from backend.domain.tool_queries import DependencyQuery, QueryWindow
 from backend.providers.results import ProviderResult, ProviderStatus
@@ -30,6 +32,66 @@ TOOLS_BY_AGENT = {
     ),
 }
 AgentIdentity = AgentName | str
+
+
+class ClassifiedRetryableError(RuntimeError):
+    """Provider 已把异常分类为可重试 transport/rate-limit。"""
+
+    def __init__(self, category: FailureCategory) -> None:
+        self.category = category
+        super().__init__(category.value)
+
+
+def retryable_failure_category(exc: BaseException) -> FailureCategory | None:
+    """只把明确的 transport/rate-limit 异常交给统一 retry coordinator。"""
+    if isinstance(exc, RateLimitError):
+        return FailureCategory.RATE_LIMIT
+    if isinstance(exc, APIConnectionError):
+        return FailureCategory.TRANSPORT
+    if isinstance(exc, ClassifiedRetryableError):
+        return exc.category
+    return None
+
+
+class RetryBudgetRejected(RuntimeError):
+    """重试前的 durable budget/deadline/cancel fence 拒绝了下一次尝试。"""
+
+
+class ActionDeadlineExceeded(RuntimeError):
+    """工具 action 在 absolute deadline 前没有可用启动窗口。"""
+
+
+class RetryCoordinator:
+    """为 model/tool provider 调用提供最多一次、分类明确的 retry。"""
+
+    def __init__(self, *, max_retries: int = 1) -> None:
+        if max_retries < 0:
+            raise ValueError("max_retries must be non-negative")
+        self.max_retries = max_retries
+
+    async def run(
+        self,
+        operation: Callable[[int], Any],
+        *,
+        before_retry: Callable[[int, FailureCategory], Awaitable[None] | None]
+        | None = None,
+    ) -> Any:
+        attempt = 1
+        while True:
+            try:
+                result = operation(attempt)
+                if inspect.isawaitable(result):
+                    return await result
+                return result
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                category = retryable_failure_category(exc)
+                if category is None or attempt > self.max_retries:
+                    raise
+                if before_retry is not None:
+                    await _maybe_await(before_retry(attempt, category))
+                attempt += 1
 
 
 class AdaptiveToolSession:
@@ -59,6 +121,7 @@ class AdaptiveToolSession:
         hit_fault: Callable[[str], None] | None = None,
         parallel_limit: RunStepGate | None = None,
         agent_manifest: tuple[str, ...] | None = None,
+        remaining_deadline_seconds: Callable[[], float] | None = None,
     ) -> None:
         if max_parallel_steps_per_run < 1:
             raise ValueError("max_parallel_steps_per_run must be positive")
@@ -69,6 +132,9 @@ class AdaptiveToolSession:
         self.max_tool_calls_per_specialist = max_tool_calls_per_specialist
         self.max_total_tool_calls = max_total_tool_calls
         self.tool_timeout_seconds = tool_timeout_seconds
+        self._remaining_deadline_seconds = remaining_deadline_seconds or (
+            lambda: float("inf")
+        )
         self.runtime_run_id = runtime_run_id
         self._resolve_tool_result = resolve_tool_result or (lambda _key: None)
         self._persist_tool_start = persist_tool_start
@@ -154,6 +220,15 @@ class AdaptiveToolSession:
         round_number: int,
         attempt: int = 1,
     ) -> str:
+        try:
+            self._action_timeout()
+        except ActionDeadlineExceeded:
+            return _response(
+                status=ToolCallStatus.FAILED,
+                evidence=[],
+                warning="tool deadline exhausted before start",
+                stop_reason=AdaptiveStopReason.TIMEOUT,
+            )
         task_id = self.task_id_for(agent_name, round_number, attempt)
         parsed = self._parse_input(raw_input)
         self._attempts[agent_name] = self._attempts.get(agent_name, 0) + 1
@@ -212,6 +287,9 @@ class AdaptiveToolSession:
             key: value for key, value in normalized_input.items() if value is not None
         }
         logical_step = f"{_agent_value(agent_name)}:{round_number}:{attempt}"
+        logical_call_id = (
+            f"{_agent_value(agent_name)}:{round_number}:{attempt}:{fingerprint}"
+        )
         idempotency_key = tool_idempotency_key(
             run_id=self.runtime_run_id,
             agent_name=agent_name,
@@ -269,62 +347,131 @@ class AdaptiveToolSession:
             )
 
         self._fingerprints.add(fingerprint)
-        # idempotency_key 保持旧格式兼容；预算身份额外带 operation 指纹以区分同 turn 多查询。
-        logical_call_id = f"{logical_step}:{fingerprint}"
-        tool_call_id = f"tool-{uuid4().hex}"
-        execution_id = f"tool-exec-{uuid4().hex}"
-        running_call = ToolCallRecord(
-            id=tool_call_id,
-            task_id=task_id,
-            agent_name=_agent_value(agent_name),
-            tool_name=tool_name,
-            input=safe_normalized_input,
-            status=ToolCallStatus.RUNNING,
-            started_at=datetime.now(UTC),
-            runtime_run_id=self.runtime_run_id,
-            logical_call_id=logical_call_id,
-            idempotency_key=idempotency_key,
-            execution_id=execution_id,
-        )
-        if self._persist_tool_start is not None:
-            await self._persist_tool_start(running_call)
-            self._check_execution()
-        try:
-            # asyncio 无法终止已进入线程的同步 Provider；超时后只记录失败，晚到结果不写回 Session。
+        current_call: ToolCallRecord | None = None
+
+        async def invoke_attempt(retry_index: int) -> ToolInvocationResult:
+            nonlocal current_call
+            timeout_seconds = self._action_timeout()
+            attempt_number = attempt + retry_index - 1
+            attempt_task_id = self.task_id_for(
+                agent_name, round_number, attempt_number
+            )
+            attempt_step = f"{_agent_value(agent_name)}:{round_number}:{attempt_number}"
+            attempt_key = tool_idempotency_key(
+                run_id=self.runtime_run_id,
+                agent_name=agent_name,
+                logical_step=attempt_step,
+                tool_name=tool_name,
+                normalized_input=normalized_input,
+            )
+            current_call = ToolCallRecord(
+                id=f"tool-{uuid4().hex}",
+                task_id=attempt_task_id,
+                agent_name=_agent_value(agent_name),
+                tool_name=tool_name,
+                input=safe_normalized_input,
+                status=ToolCallStatus.RUNNING,
+                started_at=datetime.now(UTC),
+                runtime_run_id=self.runtime_run_id,
+                logical_call_id=logical_call_id,
+                idempotency_key=attempt_key,
+                execution_id=f"tool-exec-{uuid4().hex}",
+                attempt=attempt_number,
+            )
+            if self._persist_tool_start is not None:
+                await self._persist_tool_start(current_call)
+                self._check_execution()
+            timeout_seconds = self._action_timeout()
             async with self._parallel_limit.slot():
                 result = await asyncio.wait_for(
                     asyncio.to_thread(
                         self.registry.invoke_detailed,
                         tool_name,
                         event=self.event,
-                        task_id=task_id,
+                        task_id=attempt_task_id,
                         agent_name=_agent_value(agent_name),
                         input=query.model_dump(mode="json"),
                     ),
-                    timeout=self.tool_timeout_seconds,
+                    timeout=timeout_seconds,
                 )
-        except asyncio.CancelledError:
+            self._action_timeout()
+            for provider_result in result.provider_results:
+                if provider_result.failure_category in {
+                    FailureCategory.RATE_LIMIT,
+                    FailureCategory.TRANSPORT,
+                }:
+                    raise ClassifiedRetryableError(provider_result.failure_category)
+            return result
+
+        async def before_retry(
+            _retry_index: int, category: FailureCategory
+        ) -> None:
+            assert current_call is not None
+            # 旧 attempt 先落 durable terminal，再检查下一 attempt 的共享预算。
+            self._check_execution()
+            self._action_timeout()
+            if self.agent_manifest is not None:
+                self.registry.assert_agent_callable(tool_name, self.agent_manifest)
             await self._finish_failed_invocation(
-                running_call,
-                "tool invocation cancelled",
+                current_call,
+                f"retryable provider failure: {category.value}",
                 None,
-                status=ToolCallStatus.INTERRUPTED,
             )
+            if (
+                self._attempts[agent_name] > self.max_tool_calls_per_specialist
+                or self._total_attempts > self.max_total_tool_calls
+            ):
+                raise RetryBudgetRejected("adaptive retry budget exhausted")
+
+        retry_coordinator = RetryCoordinator(max_retries=1)
+        try:
+            result = await retry_coordinator.run(
+                invoke_attempt,
+                before_retry=before_retry,
+            )
+        except asyncio.CancelledError:
+            if current_call is not None and current_call.status == ToolCallStatus.RUNNING:
+                await self._finish_failed_invocation(
+                    current_call,
+                    "tool invocation cancelled",
+                    None,
+                    status=ToolCallStatus.INTERRUPTED,
+                )
             raise
         except TimeoutError:
             return await self._finish_failed_invocation(
-                running_call,
+                current_call,
                 "tool invocation timeout",
                 AdaptiveStopReason.TIMEOUT,
             )
+        except ActionDeadlineExceeded:
+            return await self._finish_failed_invocation(
+                current_call,
+                "tool deadline exhausted",
+                AdaptiveStopReason.TIMEOUT,
+            )
+        except RetryBudgetRejected:
+            self._stop(agent_name, AdaptiveStopReason.BUDGET_EXHAUSTED)
+            return _response(
+                status=ToolCallStatus.FAILED,
+                evidence=[],
+                warning="adaptive retry budget exhausted",
+                stop_reason=AdaptiveStopReason.BUDGET_EXHAUSTED,
+            )
         except Exception:
             return await self._finish_failed_invocation(
-                running_call,
+                current_call,
                 "tool invocation failed",
                 None,
             )
         # 同步 Tool 在线程中完成后必须重新校验 lease/cancel fence，晚到结果不得推进状态。
         self._check_execution()
+        if current_call is None:
+            raise RuntimeError("tool attempt lacks a durable call")
+        tool_call_id = current_call.id
+        logical_call_id = current_call.logical_call_id
+        idempotency_key = current_call.idempotency_key
+        execution_id = current_call.execution_id
         owned_evidence = [
             item.model_copy(update={"runtime_run_id": self.runtime_run_id})
             if self.runtime_run_id is not None and item.runtime_run_id is None
@@ -334,12 +481,13 @@ class AdaptiveToolSession:
         result = ToolInvocationResult(
             call=result.call.model_copy(
                 update={
-                    "id": tool_call_id,
-                    "input": safe_normalized_input,
-                    "runtime_run_id": self.runtime_run_id,
-                    "logical_call_id": logical_call_id,
-                    "idempotency_key": idempotency_key,
-                    "execution_id": execution_id,
+                "id": tool_call_id,
+                "input": safe_normalized_input,
+                "runtime_run_id": self.runtime_run_id,
+                "logical_call_id": logical_call_id,
+                "idempotency_key": idempotency_key,
+                "execution_id": execution_id,
+                "attempt": current_call.attempt,
                 }
             ),
             evidence=owned_evidence,
@@ -380,13 +528,20 @@ class AdaptiveToolSession:
 
     async def _finish_failed_invocation(
         self,
-        running_call: ToolCallRecord,
+        running_call: ToolCallRecord | None,
         message: str,
         stop_reason: AdaptiveStopReason | None,
         *,
         status: ToolCallStatus = ToolCallStatus.FAILED,
     ) -> str:
         """用同一逻辑调用身份收口 running，避免取消或超时后的晚到结果产生第二条记录。"""
+        if running_call is None:
+            return _response(
+                status=status,
+                evidence=[],
+                warning=message,
+                stop_reason=stop_reason,
+            )
         completed_at = datetime.now(UTC)
         started_at = running_call.started_at or completed_at
         failed_call = running_call.model_copy(
@@ -474,6 +629,12 @@ class AdaptiveToolSession:
         if isinstance(query, DependencyQuery):
             if query.target and query.target not in self._allowed_targets:
                 raise ValueError("dependency target outside investigation scope")
+
+    def _action_timeout(self) -> float:
+        remaining = max(0.0, float(self._remaining_deadline_seconds()))
+        if remaining <= 0:
+            raise ActionDeadlineExceeded("tool deadline exhausted")
+        return min(self.tool_timeout_seconds, remaining)
 
     def _reject(
         self,
@@ -598,3 +759,9 @@ def _response(
         },
         ensure_ascii=False,
     )
+
+
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value

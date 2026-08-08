@@ -8,7 +8,11 @@ from backend.domain.agent_findings import (
     CoordinationReview,
     FindingActor,
 )
-from backend.domain.agent_plan import AgentExecution, DiagnosisTask
+from backend.domain.agent_plan import (
+    AgentExecution,
+    AgentExecutionStatus,
+    DiagnosisTask,
+)
 from backend.domain.evidence import EvidenceItem, EvidenceStatus
 from backend.domain.multi_agent import (
     AuthorityMode,
@@ -16,6 +20,8 @@ from backend.domain.multi_agent import (
     CausalCheckStatus,
     CriticVerdict,
     DiagnosticStatus,
+    ExecutionActor,
+    ExecutionStepKind,
     LeadAction,
     ResultValidationCategory,
 )
@@ -74,6 +80,7 @@ def validate_v11_result(
         item.id
         for item in evidence_items
         if item.status in {EvidenceStatus.SUCCESS, EvidenceStatus.PARTIAL}
+        and item.runtime_run_id == runtime_run_id
     }
 
     _validate_safe_texts(finding_items, candidate_items, review, execution_items)
@@ -164,6 +171,11 @@ def validate_v11_result(
         raise V11ResultValidationError("review_authority")
     if review.runtime_run_id != runtime_run_id:
         raise V11ResultValidationError("review_runtime_owner")
+    if (
+        review.diagnostic_status == DiagnosticStatus.INCONCLUSIVE
+        or status == DiagnosticStatus.INCONCLUSIVE
+    ) and review.candidates:
+        raise V11ResultValidationError("inconclusive_review_candidates")
     if {candidate.id for candidate in review.candidates} != set(candidate_ids):
         raise V11ResultValidationError("review_candidate_projection")
     _validate_assessments(review, set(candidate_ids), usable_evidence, runtime_run_id)
@@ -173,6 +185,11 @@ def validate_v11_result(
         return
 
     decision = review.lead_decision
+    _require_committed_refs(
+        decision.evidence_ids,
+        usable_evidence,
+        "lead_evidence_reference",
+    )
     if not set(decision.candidate_ids) <= set(candidate_ids):
         raise V11ResultValidationError("lead_candidate_reference")
     accepted = {
@@ -189,8 +206,64 @@ def validate_v11_result(
             raise V11ResultValidationError("final_critic_required")
         if decision.action != LeadAction.CONCLUDE or not decision.candidate_ids:
             raise V11ResultValidationError("final_conclusion_required")
+        _validate_final_execution_coverage(
+            execution_items,
+            final_round=2
+            if any(
+                task.analysis_round == 2 and task.runtime_run_id == runtime_run_id
+                for task in task_items
+            )
+            or any(item.review_round == 2 for item in review.critic_assessments)
+            else 1,
+        )
+    if status == DiagnosticStatus.PARTIAL:
+        if not usable_evidence:
+            raise V11ResultValidationError("partial_usable_evidence_required")
+        if not any(
+            check.status == CausalCheckStatus.PASS
+            for assessment in review.critic_assessments
+            for check in assessment.checks
+        ):
+            raise V11ResultValidationError("partial_passing_check_required")
+        assessment_ids = {item.id for item in review.critic_assessments}
+        if not any(
+            task.analysis_round == 2
+            and task.runtime_run_id == runtime_run_id
+            and task.critic_assessment_id in assessment_ids
+            for task in task_items
+        ):
+            raise V11ResultValidationError("partial_supplemental_task_linkage")
     if status == DiagnosticStatus.INCONCLUSIVE and decision.candidate_ids:
         raise V11ResultValidationError("inconclusive_candidates")
+
+
+def _validate_final_execution_coverage(
+    executions: tuple[AgentExecution, ...],
+    *,
+    final_round: int,
+) -> None:
+    if not any(
+        item.status == AgentExecutionStatus.COMPLETED
+        and item.agent_name == ExecutionActor.CRITIC.value
+        and item.step_kind == ExecutionStepKind.CRITIC_REVIEW
+        and (
+            item.analysis_round == final_round
+            or (final_round == 1 and item.analysis_round is None)
+        )
+        for item in executions
+    ):
+        raise V11ResultValidationError("final_critic_execution_required")
+    if not any(
+        item.status == AgentExecutionStatus.COMPLETED
+        and item.agent_name == ExecutionActor.LEAD.value
+        and item.step_kind == ExecutionStepKind.LEAD_ADJUDICATION
+        and (
+            item.analysis_round == final_round
+            or (final_round == 1 and item.analysis_round is None)
+        )
+        for item in executions
+    ):
+        raise V11ResultValidationError("final_lead_execution_required")
 
 def _validate_assessments(
     review: CoordinationReview,
@@ -204,22 +277,32 @@ def _validate_assessments(
         raise V11ResultValidationError("duplicate_assessment_id")
     if len(assessments) != len(candidate_ids):
         raise V11ResultValidationError("assessment_candidate_cardinality")
+    assessment_candidate_ids = [item.candidate_id for item in assessments]
+    if set(assessment_candidate_ids) != candidate_ids:
+        raise V11ResultValidationError("assessment_candidate_coverage")
     for assessment in assessments:
         if assessment.runtime_run_id != runtime_run_id:
             raise V11ResultValidationError("assessment_runtime_owner")
         if assessment.candidate_id not in candidate_ids:
             raise V11ResultValidationError("assessment_candidate_reference")
+        _require_committed_refs(
+            [
+                *assessment.supporting_evidence_ids,
+                *assessment.contradicting_evidence_ids,
+            ],
+            usable_evidence,
+            "assessment_evidence_reference",
+        )
         if len(assessment.checks) != 7:
             raise V11ResultValidationError("assessment_check_count")
         if {check.name for check in assessment.checks} != set(CausalCheckName):
             raise V11ResultValidationError("assessment_check_names")
         for check in assessment.checks:
-            if check.status in {CausalCheckStatus.PASS, CausalCheckStatus.FAIL}:
-                _require_committed_refs(
-                    check.evidence_ids,
-                    usable_evidence,
-                    "assessment_evidence_reference",
-                )
+            _require_committed_refs(
+                check.evidence_ids,
+                usable_evidence,
+                "assessment_evidence_reference",
+            )
         if assessment.verdict == CriticVerdict.NEEDS_EVIDENCE:
             if assessment.review_round == 2:
                 raise V11ResultValidationError("reconciliation_requested_evidence")
@@ -283,6 +366,17 @@ def _validate_safe_texts(
         )
     if review is not None:
         values.extend([review.summary, review.uncertainty, review.stop_reason or ""])
+        for assessment in review.critic_assessments:
+            values.extend([assessment.summary, assessment.gap or ""])
+            for check in assessment.checks:
+                values.extend([check.summary, check.gap or ""])
+        if review.lead_decision is not None:
+            values.extend(
+                [
+                    review.lead_decision.summary,
+                    review.lead_decision.stop_reason or "",
+                ]
+            )
     for execution in executions:
         values.extend([execution.summary or "", execution.error_message or ""])
     if any(_CONTROL_CHARACTER.search(value) for value in values):

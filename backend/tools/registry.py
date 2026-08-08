@@ -1,3 +1,5 @@
+import hashlib
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -94,3 +96,11 @@ class ToolRegistry:
         if isinstance(result, ToolCallRecord):
             return ToolInvocationResult(call=result, evidence=[], provider_results=[])
         return result
+
+
+def agent_manifest_hash(manifest: tuple[str, ...]) -> str:
+    """为有序 Agent 工具名单生成无凭据的稳定身份。"""
+    canonical = json.dumps(
+        list(manifest), ensure_ascii=True, separators=(",", ":")
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

@@ -242,6 +242,7 @@ class DiagnosisPhaseExecutor:
                 model_name=phase_input.model_name,
                 token_budget=phase_input.token_budget,
                 timeout_seconds=phase_input.timeout_seconds,
+                execution_contract=phase_input.execution_contract,
             )
             if v11_source is not None
             else None
@@ -405,6 +406,8 @@ class DiagnosisPhaseExecutor:
             event=state.safe_event or state.record.event,
         )
         state.record = self._orchestrator.repository.get(state.record.id)
+        if state.record.status == InvestigationStatus.FAILED:
+            return self._output(state, status="failed")
         status = "completed"
         if state.phase_input.phase in {
             RuntimePhase.INVESTIGATOR_ROUND_2,
@@ -421,6 +424,8 @@ class DiagnosisPhaseExecutor:
 
     async def _v11_finalize(self, state: _DiagnosisState) -> PhaseOutput:
         record, _ = self._required(state)
+        if record.status == InvestigationStatus.FAILED:
+            return self._output(state, status="failed")
         status = (
             record.multi_agent_run.diagnostic_status
             if record.multi_agent_run is not None

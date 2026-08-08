@@ -3,9 +3,12 @@ import logging
 from collections.abc import Callable
 from time import perf_counter
 
+from openai import APIConnectionError, RateLimitError
+
 from backend.config.settings import AppSettings
 from backend.domain.events import IncidentEvent, IncidentSource
 from backend.domain.evidence import EvidenceItem, EvidenceProvider
+from backend.domain.multi_agent import FailureCategory
 from backend.providers.base import EvidenceProviderProtocol
 from backend.providers.file_deployments import FileDeploymentProvider
 from backend.providers.file_logs import FileLogProvider
@@ -102,13 +105,14 @@ class ProviderRegistry:
         started = perf_counter()
         try:
             result = redact_model(provider.collect(event))
-        except Exception:
+        except Exception as exc:
             provider_name = getattr(provider, "provider", EvidenceProvider.LOG)
             result = ProviderResult(
                 provider=provider_name,
                 status=ProviderStatus.FAILED,
                 error_message=safe_failure("provider_failure"),
                 duration_ms=int((perf_counter() - started) * 1000),
+                failure_category=_provider_failure_category(exc),
             )
         logger.info(
             "provider completed provider=%s status=%s duration_ms=%s evidence_count=%s",
@@ -154,12 +158,13 @@ class ProviderRegistry:
             started = perf_counter()
             try:
                 result = redact_model(provider.collect(event, query))
-            except Exception:
+            except Exception as exc:
                 result = ProviderResult(
                     provider=getattr(provider, "provider", _PROVIDER_BY_TOOL[tool_name]),
                     status=ProviderStatus.FAILED,
                     error_message=safe_failure("provider_failure"),
                     duration_ms=int((perf_counter() - started) * 1000),
+                    failure_category=_provider_failure_category(exc),
                 )
             results.append(result)
         return results
@@ -192,6 +197,14 @@ def build_mock_provider_registry() -> ProviderRegistry:
             MockRelatedAlertProvider(),
         ]
     )
+
+
+def _provider_failure_category(exc: BaseException) -> FailureCategory | None:
+    if isinstance(exc, RateLimitError):
+        return FailureCategory.RATE_LIMIT
+    if isinstance(exc, APIConnectionError):
+        return FailureCategory.TRANSPORT
+    return None
 
 
 def build_provider_registry_from_settings(settings: AppSettings) -> ProviderRegistry:

@@ -1569,6 +1569,33 @@ passed. The implementation uses the existing SDK/model lifecycle and keeps
 assignment, legacy report/action path, M4, or M5 was started. Independent M3
 review is pending.
 
+M3 review-fix ledger (2026-08-08): independent review verdict `BLOCKING` was
+issued against base `b17da397807bacf6e155afe71062ad1c6c4fd868`. The approved
+V11 contract and milestone scope were preserved. Minimal RED regressions were
+added before each shared-boundary GREEN fix:
+
+| Finding | Closed behavior and evidence |
+| --- | --- |
+| B1 | Explicit `investigation_id` owner fencing now crosses commit, execution, budget, summary, and resume helpers; a multi-investigation repository regression proves the target run cannot cross-write. |
+| H1 | Run admission persists an ordered immutable nine-tool manifest/hash with skill/capability identity and limits; dispatch, retry, and resume reject a changed or unordered contract. |
+| H2 | One persisted retry coordinator classifies failures; only transport/rate-limit gets at most one retry, with attempts/resume metadata durable and semantic/validation failures non-retryable. |
+| H3 | V11 freezes a non-None token ceiling; input is atomically charged before request, output is capped by remaining budget, usage is checkpointed, and zero budget sends no model request across manual/SDK/provider paths. |
+| H4 | Absolute deadline preflight runs before every model/tool action, timeout is bounded by remaining time, and timeout/cancel/fence loss prevents late commit. |
+| H5 | Model/tool budgets use durable atomic reservations; concurrent Investigator, retry, resume, and cancel paths share the reservation, and transport retry reuses one logical tool action reservation. |
+| H6 | Investigator, required Critic/Lead/validator, and persistence failures terminalize `failed` with no diagnostic fallback; complete/partial require final Critic and Lead. |
+| H7 | Validator mechanically enforces same-run usable evidence, exact assessment coverage, inconclusive/partial contracts, and final actor coverage without mutating Agent-authored fields or invoking CauseType/provider semantics. |
+| M1 | All nested CausalCheck/CriticAssessment/LeadDecision summary/gap/stop text is scanned for control characters only. |
+| M2 | Critic and reconciliation success/failure update one unique durable AgentExecution audit with actor, attempt, deadline, usage, and resume metadata; final actor coverage is validated. |
+
+Final review-fix gates: T7 exact `70 passed`, T8 exact `184 passed`, M2R
+focused `83 passed/2 skipped` plus keyword focused `16 passed/33 deselected`,
+full `uv run pytest -q` `1967 passed/3 skipped/1 warning`, and full
+`uv run ruff check backend tests` clean. Current/Plan task rows now record the
+M2 baseline `c2245ac` as committed and T4/T5 as implemented/verified; T5's
+live Docker execution remains explicitly host-dependent. The fix is isolated
+to `codex/v11-m3`, with no merge/push/M4/M5 action; same-thread independent
+review remains pending.
+
 ## 16. Approval state
 
 - Requirements Brief: confirmed by user.
@@ -1588,6 +1615,7 @@ review is pending.
   introduce no new product scope.
 - The implementation Plan was rewritten from this specification, independently
   reviewed, and approved by the user on 2026-08-02 with execution authorization.
-- Implementation: M2 baseline `c2245ac` committed; M3/T7–T8 implemented and
-  verified in isolated branch `codex/v11-m3`, awaiting independent review; M4/M5
-  not started.
+- Implementation: M2 baseline `c2245ac` committed; M3 review-fix base
+`b17da397807bacf6e155afe71062ad1c6c4fd868` is RED→GREEN verified in isolated
+branch `codex/v11-m3` and handed to the same-thread independent review; M4/M5
+not started.

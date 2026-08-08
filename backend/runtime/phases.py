@@ -4,6 +4,7 @@ import hashlib
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from math import isfinite
 from typing import Any
 from uuid import uuid4
@@ -48,6 +49,8 @@ class PhaseInput:
     tool_budget: int | None = None
     token_budget: int | None = None
     timeout_seconds: float = 60.0
+    deadline_at: datetime | None = None
+    remaining_deadline_seconds: Callable[[], float] | None = None
     check_execution: Callable[[], None] | None = None
     resolve_tool_result: Callable[[str], ToolCallRecord | None] | None = None
     persist_tool_start: Callable[[ToolCallRecord], Any] | None = None

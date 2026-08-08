@@ -3,6 +3,8 @@ import json
 import time
 from datetime import UTC, datetime
 
+import httpx
+import openai
 import pytest
 
 from backend.diagnosis.adaptive_tools import AdaptiveToolSession, project_tool_evidence
@@ -248,6 +250,30 @@ async def test_failed_tool_can_be_corrected_with_remaining_budget():
 
 
 @pytest.mark.anyio
+async def test_session_retries_only_transport_once_and_persists_attempts():
+    provider = RateLimitedOnceProvider()
+    session = _session([provider], total=1)
+
+    response = json.loads(
+        await session.invoke(
+            AgentName.LOG,
+            "read_logs",
+            json.dumps(_query_payload()),
+            1,
+        )
+    )
+
+    assert response["status"] == "success"
+    assert provider.calls == 2
+    assert [call.attempt for call in session.tool_calls] == [1, 2]
+    assert [call.status for call in session.tool_calls] == [
+        ToolCallStatus.FAILED,
+        ToolCallStatus.SUCCESS,
+    ]
+    assert session.tool_calls[0].logical_call_id == session.tool_calls[1].logical_call_id
+
+
+@pytest.mark.anyio
 async def test_session_records_provider_timeout_before_sdk_cancels_tool():
     provider = SlowProvider()
     session = AdaptiveToolSession(
@@ -275,6 +301,31 @@ async def test_session_records_provider_timeout_before_sdk_cancels_tool():
     assert len(session.tool_calls) == 1
     assert session.provider_results == []
     assert session.new_evidence == []
+
+
+@pytest.mark.anyio
+async def test_session_deadline_preflight_blocks_tool_before_provider_start():
+    provider = QueryProvider("read_logs", EvidenceProvider.LOG, "ev-deadline")
+    session = AdaptiveToolSession(
+        event=_event(),
+        seed_evidence=[],
+        registry=build_provider_tool_registry(ProviderRegistry([provider])),
+        task_ids=_task_ids(),
+        remaining_deadline_seconds=lambda: 0.0,
+    )
+
+    response = json.loads(
+        await session.invoke(
+            AgentName.LOG,
+            "read_logs",
+            json.dumps(_query_payload()),
+            1,
+        )
+    )
+
+    assert response["status"] == "failed"
+    assert provider.calls == 0
+    assert session.tool_calls == []
 
 
 @pytest.mark.anyio
@@ -465,6 +516,29 @@ class FailingOnceProvider(QueryProvider):
         self.calls += 1
         if self.calls == 1:
             raise RuntimeError("provider failed")
+        return ProviderResult(
+            provider=self.provider,
+            evidence_items=[
+                _evidence(
+                    self.evidence_id,
+                    self.provider,
+                    EvidenceKind.LOG_PATTERN,
+                    timestamp=query.end_time,
+                )
+            ],
+        )
+
+
+class RateLimitedOnceProvider(QueryProvider):
+    def __init__(self):
+        super().__init__("read_logs", EvidenceProvider.LOG, "ev-retried")
+
+    def collect(self, event, query):
+        self.calls += 1
+        if self.calls == 1:
+            request = httpx.Request("GET", "https://provider.test/logs")
+            response = httpx.Response(429, request=request)
+            raise openai.RateLimitError("limited", response=response, body={})
         return ProviderResult(
             provider=self.provider,
             evidence_items=[

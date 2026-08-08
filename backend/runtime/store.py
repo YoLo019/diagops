@@ -81,6 +81,37 @@ class RuntimeContractError(RuntimeIntegrityError):
     """调用者提供的 Runtime 合同字段与服务端固定配置不一致。"""
 
 
+def ensure_v11_tool_budget_available(
+    run: RuntimeRun,
+    existing_calls: list[ToolCallRecord],
+    incoming: ToolCallRecord,
+) -> None:
+    """在 RUNNING durable commit 内原子保留一次 V11 tool attempt。"""
+    if not run.is_v11 or incoming.status != ToolCallStatus.RUNNING:
+        return
+    if any(call.id == incoming.id for call in existing_calls):
+        return
+    if run.tool_budget is None:
+        raise RuntimeIntegrityError("V11 run lacks frozen tool budget")
+    consumed = {
+        call.logical_call_id or call.id
+        for call in existing_calls
+        if call.runtime_run_id == run.id
+        and call.status
+        in {
+            ToolCallStatus.RUNNING,
+            ToolCallStatus.SUCCESS,
+            ToolCallStatus.FAILED,
+            ToolCallStatus.INTERRUPTED,
+        }
+    }
+    if incoming.logical_call_id is not None and incoming.logical_call_id in consumed:
+        # transport retry 复用同一逻辑动作的 durable reservation，不重复扣预算。
+        return
+    if len(consumed) >= run.tool_budget:
+        raise RuntimeConflict("V11 tool budget exhausted")
+
+
 class RuntimePersistenceError(RuntimeErrorBase):
     pass
 
@@ -800,6 +831,11 @@ class InMemoryRuntimeStore:
                     if call.id == commit.call.id
                 ),
                 None,
+            )
+            ensure_v11_tool_budget_available(
+                run,
+                self.investigation_repository.list_tool_calls(run.investigation_id),
+                commit.call,
             )
             if existing_call is not None and existing_call.status in {
                 ToolCallStatus.SUCCESS,

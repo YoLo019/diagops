@@ -4,25 +4,43 @@ import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
+import httpx
+import openai
 import pytest
 
 from backend.config.settings import AppSettings, StorageSettings
-from backend.db.models import InvestigationRecord
+from backend.db.models import InvestigationRecord, InvestigationStatus
 from backend.db.repositories import InMemoryInvestigationRepository
-from backend.diagnosis.v11_runtime import V11Runtime, V11RuntimeContractError
+from backend.diagnosis.v11_runtime import (
+    LeadPlanningOutput,
+    V11Runtime,
+    V11RuntimeContractError,
+)
 from backend.domain.agent_findings import (
     AgentFindingType,
+    CausalCheck,
     CausalCheckName,
+    CoordinationReview,
+    CriticAssessment,
+    RootCauseCandidate,
+)
+from backend.domain.agent_plan import (
+    AgentExecutionStatus,
+    DiagnosisTask,
+    DiagnosisTaskType,
+    LeadDecision,
 )
 from backend.domain.events import IncidentEvent, IncidentSource, Severity
 from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
 from backend.domain.multi_agent import (
     CausalCheckStatus,
     CriticVerdict,
+    ExecutionStepKind,
     LeadAction,
     ModelProvider,
 )
 from backend.domain.runtime import RuntimeResumeState, RuntimeRunReason
+from backend.domain.tool_calls import ToolSpec
 from backend.providers.registry import build_mock_provider_registry
 from backend.runtime.phase_executor import DiagnosisPhaseExecutor
 from backend.runtime.phases import V11_PHASE_ORDER, PhaseInput
@@ -33,6 +51,7 @@ from backend.tools.provider_tools import (
     current_investigation_id,
     current_investigation_scope,
 )
+from backend.tools.registry import agent_manifest_hash
 
 
 def _event() -> IncidentEvent:
@@ -126,7 +145,58 @@ async def test_lead_planning_persists_bounded_owned_tasks_before_investigation()
         mode="json"
     )
     assert calls[0]["remaining_tool_budget"] == 8
-    assert calls[0]["remaining_token_budget"] == 1000
+    assert 0 < calls[0]["remaining_token_budget"] <= 1000
+
+
+@pytest.mark.anyio
+async def test_v11_run_owner_is_explicit_when_repository_has_multiple_investigations():
+    repository, record = _repository()
+    other = repository.save(
+        InvestigationRecord(id="inv-other", event=_event())
+    )
+
+    async def turn(**_kwargs):
+        return {
+            "decision": {
+                "action": "investigate",
+                "summary": "collect one bounded signal",
+                "task_ids": ["task-target"],
+            },
+            "tasks": [
+                {
+                    "id": "task-target",
+                    "title": "Inspect target",
+                    "description": "Inspect the target investigation only.",
+                    "analysis_round": 1,
+                    "tool_names": ["read_logs"],
+                    "evidence_scope": {"entity_ids": ["checkout-service"]},
+                }
+            ],
+        }
+
+    runtime = V11Runtime(
+        model="fake",
+        model_provider=ModelProvider.OPENAI,
+        model_name="fake",
+        tool_registry=build_provider_tool_registry(build_mock_provider_registry()),
+        turn=turn,
+    )
+
+    await runtime.plan_lead(
+        repository=repository,
+        investigation_id=record.id,
+        event=record.event,
+        runtime_run_id="run-target",
+        remaining_tool_budget=8,
+        remaining_token_budget=1000,
+    )
+
+    assert repository.get_plan(record.id) is not None
+    assert repository.get_plan(other.id) is None
+    assert [item.runtime_run_id for item in repository.list_executions(record.id)] == [
+        "run-target"
+    ]
+    assert repository.list_executions(other.id) == []
 
 
 @pytest.mark.anyio
@@ -236,6 +306,686 @@ async def test_v11_tool_dispatch_rechecks_the_frozen_manifest():
     assert observed == [("read_logs", manifest), ("read_logs", manifest)]
 
 
+def test_v11_frozen_manifest_rejects_same_cardinality_tool_swap():
+    registry = build_provider_tool_registry(build_mock_provider_registry())
+    frozen = registry.agent_manifest()
+    runtime = V11Runtime(
+        model="fake",
+        model_provider=ModelProvider.OPENAI,
+        model_name="fake",
+        tool_registry=registry,
+        turn=lambda **_kwargs: None,
+    )
+    runtime.bind_phase(
+        PhaseInput(
+            run_id="run-v11",
+            attempt_id="attempt-v11",
+            phase="lead_planning",
+            resume_state=RuntimeResumeState(),
+            execution_contract={
+                "tool_manifest": list(frozen),
+                "tool_manifest_hash": agent_manifest_hash(frozen),
+            },
+        )
+    )
+    removed = frozen[0]
+    registry._specs.pop(removed)
+    registry._handlers.pop(removed)
+    registry.register(
+        ToolSpec(
+            name="replacement_tool",
+            description="replacement",
+        ),
+        lambda **_kwargs: None,
+    )
+
+    with pytest.raises(V11RuntimeContractError):
+        runtime._agent_manifest()
+
+
+def test_v11_frozen_manifest_rejects_unordered_contract():
+    registry = build_provider_tool_registry(build_mock_provider_registry())
+    frozen = registry.agent_manifest()
+    runtime = V11Runtime(model="fake", tool_registry=registry)
+    runtime._execution_contract = {
+        "tool_manifest": list(reversed(frozen)),
+        "tool_manifest_hash": agent_manifest_hash(tuple(reversed(frozen))),
+    }
+
+    with pytest.raises(V11RuntimeContractError, match="ordered"):
+        runtime._agent_manifest()
+
+
+@pytest.mark.anyio
+async def test_v11_model_retry_is_one_classified_transport_attempt():
+    repository, record = _repository()
+    calls = 0
+
+    async def turn(**_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            request = httpx.Request("POST", "https://provider.test/model")
+            response = httpx.Response(429, request=request)
+            raise openai.RateLimitError("limited", response=response, body={})
+        return {
+            "decision": {
+                "action": "investigate",
+                "summary": "retry succeeded",
+                "task_ids": ["task-retry"],
+            },
+            "tasks": [
+                {
+                    "id": "task-retry",
+                    "title": "Retry bounded task",
+                    "description": "Inspect the committed signal.",
+                    "analysis_round": 1,
+                    "tool_names": ["read_logs"],
+                    "evidence_scope": {"entity_ids": ["checkout-service"]},
+                }
+            ],
+        }
+
+    runtime = V11Runtime(
+        model="fake",
+        model_provider=ModelProvider.OPENAI,
+        model_name="fake",
+        tool_registry=build_provider_tool_registry(build_mock_provider_registry()),
+        turn=turn,
+    )
+
+    await runtime.plan_lead(
+        repository=repository,
+        investigation_id=record.id,
+        event=record.event,
+        runtime_run_id="run-retry",
+        remaining_tool_budget=8,
+        remaining_token_budget=5000,
+    )
+
+    assert calls == 2
+    executions = repository.list_executions(record.id)
+    planning = [
+        item
+        for item in executions
+        if item.step_kind == ExecutionStepKind.LEAD_PLANNING
+    ]
+    assert len(planning) == 2
+    assert [item.attempt for item in planning] == [1, 2]
+    assert planning[0].status == AgentExecutionStatus.FAILED
+    assert planning[1].status == AgentExecutionStatus.COMPLETED
+    assert planning[1].resume_from_execution_id == planning[0].id
+
+
+@pytest.mark.anyio
+async def test_v11_critic_success_has_one_durable_audit_execution():
+    repository, record = _repository()
+    candidate = RootCauseCandidate(
+        id="candidate-audited-critic",
+        summary="candidate",
+        rank=1,
+        confidence=0.5,
+    )
+    repository.save_coordination_review(
+        CoordinationReview(
+            investigation_id=record.id,
+            runtime_run_id="run-critic-audit",
+            authority_mode="agent",
+            candidates=[candidate],
+        )
+    )
+    checks = [
+        {
+            "name": name.value,
+            "status": CausalCheckStatus.UNKNOWN.value,
+            "summary": "not enough committed evidence",
+            "gap": "collect the missing signal",
+        }
+        for name in CausalCheckName
+    ]
+
+    async def turn(**_kwargs):
+        return (
+            {
+                "summary": "critic audited",
+                "assessments": [
+                    {
+                        "id": "assessment-audited-critic",
+                        "candidate_id": candidate.id,
+                        "verdict": CriticVerdict.INCONCLUSIVE.value,
+                        "checks": checks,
+                        "summary": "not enough committed evidence",
+                    }
+                ],
+            },
+            {"input_tokens": 3, "output_tokens": 5},
+        )
+
+    runtime = V11Runtime(
+        model="fake",
+        model_provider=ModelProvider.OPENAI,
+        model_name="fake",
+        tool_registry=build_provider_tool_registry(build_mock_provider_registry()),
+        turn=turn,
+    )
+    runtime.runtime_run_id = "run-critic-audit"
+
+    await runtime.critic_review(
+        repository=repository,
+        investigation_id=record.id,
+        event=record.event,
+    )
+
+    executions = [
+        item
+        for item in repository.list_executions(record.id)
+        if item.step_kind == ExecutionStepKind.CRITIC_REVIEW
+    ]
+    assert len(executions) == 1
+    assert executions[0].status == AgentExecutionStatus.COMPLETED
+    assert executions[0].runtime_run_id == "run-critic-audit"
+    assert executions[0].input_tokens == 3
+    assert executions[0].output_tokens == 5
+    assert executions[0].deadline_at is not None
+
+
+@pytest.mark.anyio
+async def test_v11_critic_output_failure_updates_one_audit_execution():
+    repository, record = _repository()
+    candidate = RootCauseCandidate(
+        id="candidate-invalid-critic-output",
+        summary="candidate",
+        rank=1,
+        confidence=0.5,
+    )
+    repository.save_coordination_review(
+        CoordinationReview(
+            investigation_id=record.id,
+            runtime_run_id="run-invalid-critic-output",
+            authority_mode="agent",
+            candidates=[candidate],
+        )
+    )
+
+    async def turn(**_kwargs):
+        return {"summary": "missing assessment", "assessments": []}
+
+    runtime = V11Runtime(
+        model="fake",
+        model_provider=ModelProvider.OPENAI,
+        model_name="fake",
+        tool_registry=build_provider_tool_registry(build_mock_provider_registry()),
+        turn=turn,
+    )
+    runtime.runtime_run_id = "run-invalid-critic-output"
+
+    await runtime.critic_review(
+        repository=repository,
+        investigation_id=record.id,
+        event=record.event,
+    )
+
+    executions = [
+        item
+        for item in repository.list_executions(record.id)
+        if item.step_kind == ExecutionStepKind.CRITIC_REVIEW
+    ]
+    assert len(executions) == 1
+    assert executions[0].status == AgentExecutionStatus.FAILED
+
+
+@pytest.mark.anyio
+async def test_v11_reconciliation_has_one_durable_audit_execution():
+    repository, record = _repository()
+    candidate = RootCauseCandidate(
+        id="candidate-reconciliation-audit",
+        summary="candidate",
+        rank=1,
+        confidence=0.5,
+    )
+    checks = [
+        CausalCheck(
+            name=name,
+            status=CausalCheckStatus.UNKNOWN,
+            summary="missing signal",
+            gap="collect the signal",
+        )
+        for name in CausalCheckName
+    ]
+    assessment = CriticAssessment(
+        id="assessment-reconciliation-audit",
+        candidate_id=candidate.id,
+        verdict=CriticVerdict.NEEDS_EVIDENCE,
+        checks=checks,
+        gap="collect the signal",
+        supplemental_task_ids=["task-reconciliation-audit"],
+        summary="needs one bounded signal",
+        runtime_run_id="run-reconciliation-audit",
+    )
+    repository.save_coordination_review(
+        CoordinationReview(
+            investigation_id=record.id,
+            runtime_run_id="run-reconciliation-audit",
+            authority_mode="agent",
+            candidates=[candidate],
+            critic_assessments=[assessment],
+        )
+    )
+    repository.save_tasks(
+        record.id,
+        [
+            DiagnosisTask(
+                id="task-reconciliation-audit",
+                title="Collect the requested signal",
+                description="Close the named evidence gap.",
+                task_type=DiagnosisTaskType.GENERAL_INVESTIGATION,
+                agent_name="InvestigatorAgent",
+                tool_names=[],
+                analysis_round=2,
+                evidence_scope={"entity_ids": [record.event.service]},
+                runtime_run_id="run-reconciliation-audit",
+                critic_assessment_id=assessment.id,
+            )
+        ],
+    )
+
+    reconciled_checks = [
+        {
+            "name": name.value,
+            "status": CausalCheckStatus.UNKNOWN.value,
+            "summary": "still missing signal",
+            "gap": "collect the signal",
+        }
+        for name in CausalCheckName
+    ]
+
+    async def turn(**_kwargs):
+        return (
+            {
+                "summary": "reconciled once",
+                "assessments": [
+                    {
+                        "id": assessment.id,
+                        "candidate_id": candidate.id,
+                        "verdict": CriticVerdict.INCONCLUSIVE.value,
+                        "checks": reconciled_checks,
+                        "summary": "still inconclusive",
+                    }
+                ],
+            },
+            {"input_tokens": 2, "output_tokens": 4},
+        )
+
+    runtime = V11Runtime(
+        model="fake",
+        model_provider=ModelProvider.OPENAI,
+        model_name="fake",
+        tool_registry=build_provider_tool_registry(build_mock_provider_registry()),
+        turn=turn,
+    )
+    runtime.runtime_run_id = "run-reconciliation-audit"
+
+    await runtime.critic_reconciliation(
+        repository=repository,
+        investigation_id=record.id,
+        event=record.event,
+    )
+
+    executions = [
+        item
+        for item in repository.list_executions(record.id)
+        if item.step_kind == ExecutionStepKind.CRITIC_REVIEW
+    ]
+    assert len(executions) == 1
+    assert executions[0].analysis_round == 2
+    assert executions[0].status == AgentExecutionStatus.COMPLETED
+    assert executions[0].deadline_at is not None
+
+
+@pytest.mark.anyio
+async def test_v11_model_precharges_input_before_setting_output_cap():
+    seen: list[dict] = []
+
+    async def turn(**kwargs):
+        seen.append(kwargs)
+        return {"output": "bounded"}
+
+    runtime = V11Runtime(
+        model="fake",
+        model_provider=ModelProvider.OPENAI,
+        model_name="fake",
+        tool_registry=build_provider_tool_registry(build_mock_provider_registry()),
+        turn=turn,
+        token_budget=1000,
+    )
+
+    await runtime._call_model(
+        actor="LeadAgent",
+        prompt="a long bounded prompt that must be charged before request",
+        output_type=LeadPlanningOutput,
+        context={"context": "also charged"},
+        tools=[],
+        remaining_token_budget=1000,
+        remaining_tool_budget=8,
+    )
+
+    assert seen[0]["remaining_token_budget"] < 1000
+    assert seen[0]["max_output_tokens"] == seen[0]["remaining_token_budget"]
+
+
+@pytest.mark.anyio
+async def test_v11_model_deadline_preflight_blocks_request_before_start():
+    calls = 0
+
+    async def turn(**_kwargs):
+        nonlocal calls
+        calls += 1
+        return {"output": "late"}
+
+    runtime = V11Runtime(
+        model="fake",
+        model_provider=ModelProvider.OPENAI,
+        model_name="fake",
+        tool_registry=build_provider_tool_registry(build_mock_provider_registry()),
+        turn=turn,
+    )
+    runtime.bind_phase(
+        PhaseInput(
+            run_id="run-deadline",
+            attempt_id="attempt-deadline",
+            phase="lead_planning",
+            resume_state=RuntimeResumeState(),
+            remaining_deadline_seconds=lambda: 0.0,
+        )
+    )
+
+    with pytest.raises(V11RuntimeContractError, match="deadline"):
+        await runtime._call_model(
+            actor="LeadAgent",
+            prompt="must not start",
+            output_type=LeadPlanningOutput,
+            context={},
+            tools=[],
+            remaining_token_budget=None,
+        )
+
+    assert calls == 0
+
+
+@pytest.mark.anyio
+async def test_v11_zero_tool_budget_does_not_start_model():
+    repository, record = _repository()
+    calls = 0
+
+    async def turn(**_kwargs):
+        nonlocal calls
+        calls += 1
+        return {"output": "late"}
+
+    runtime = V11Runtime(
+        model="fake",
+        model_provider=ModelProvider.OPENAI,
+        tool_registry=build_provider_tool_registry(build_mock_provider_registry()),
+        turn=turn,
+    )
+
+    with pytest.raises(V11RuntimeContractError, match="tool budget"):
+        await runtime.plan_lead(
+            repository=repository,
+            investigation_id=record.id,
+            event=record.event,
+            runtime_run_id="run-zero-tool-budget",
+            remaining_tool_budget=0,
+            remaining_token_budget=None,
+        )
+
+    assert calls == 0
+
+
+@pytest.mark.anyio
+async def test_v11_all_investigator_failure_is_terminal_failed_without_diagnostic():
+    repository, record = _repository()
+    turns = [
+        {
+            "decision": {
+                "action": "investigate",
+                "summary": "plan one task",
+                "task_ids": ["task-fail"],
+            },
+            "tasks": [
+                {
+                    "id": "task-fail",
+                    "title": "Failing investigator",
+                    "description": "The provider will fail before output.",
+                    "analysis_round": 1,
+                    "tool_names": ["read_logs"],
+                    "evidence_scope": {"entity_ids": ["checkout-service"]},
+                }
+            ],
+        },
+        RuntimeError("investigator transport failed"),
+    ]
+
+    async def turn(**_kwargs):
+        value = turns.pop(0)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    runtime = V11Runtime(
+        model="fake",
+        model_provider=ModelProvider.OPENAI,
+        model_name="fake",
+        tool_registry=build_provider_tool_registry(build_mock_provider_registry()),
+        turn=turn,
+    )
+    await runtime.plan_lead(
+        repository=repository,
+        investigation_id=record.id,
+        event=record.event,
+        runtime_run_id="run-investigator-failed",
+        remaining_tool_budget=8,
+        remaining_token_budget=1000,
+    )
+
+    await runtime.investigator_round_1(
+        repository=repository,
+        investigation_id=record.id,
+        event=record.event,
+    )
+
+    assert repository.get(record.id).status == InvestigationStatus.FAILED
+    review = repository.get_coordination_review(record.id)
+    assert review is None or review.diagnostic_status is None
+
+
+@pytest.mark.anyio
+async def test_v11_required_critic_failure_is_failed_without_inconclusive_fallback():
+    repository, record = _repository()
+    candidate = RootCauseCandidate(
+        id="candidate-failed-critic",
+        summary="candidate",
+        rank=1,
+        confidence=0.5,
+    )
+    repository.save_coordination_review(
+        CoordinationReview(
+            investigation_id=record.id,
+            runtime_run_id="run-critic-failed",
+            authority_mode="agent",
+            candidates=[candidate],
+        )
+    )
+
+    async def turn(**_kwargs):
+        raise RuntimeError("critic failed")
+
+    runtime = V11Runtime(
+        model="fake",
+        model_provider=ModelProvider.OPENAI,
+        model_name="fake",
+        tool_registry=build_provider_tool_registry(build_mock_provider_registry()),
+        turn=turn,
+    )
+    runtime.runtime_run_id = "run-critic-failed"
+
+    await runtime.critic_review(
+        repository=repository,
+        investigation_id=record.id,
+        event=record.event,
+    )
+
+    review = repository.get_coordination_review(record.id)
+    assert review is not None
+    assert review.critic_assessments == []
+    assert repository.get(record.id).status == InvestigationStatus.FAILED
+
+
+@pytest.mark.anyio
+async def test_v11_persistence_failure_is_terminal_failed_without_diagnostic():
+    class FailOnceRepository(InMemoryInvestigationRepository):
+        fail_next_review_save = False
+
+        def save_coordination_review(self, review):
+            if self.fail_next_review_save:
+                self.fail_next_review_save = False
+                raise RuntimeError("review persistence failed")
+            return super().save_coordination_review(review)
+
+    repository = FailOnceRepository()
+    record = repository.save(InvestigationRecord(id="inv-persistence-failed", event=_event()))
+    candidate = RootCauseCandidate(
+        id="candidate-persistence-failed",
+        summary="candidate",
+        rank=1,
+        confidence=0.5,
+    )
+    repository.save_coordination_review(
+        CoordinationReview(
+            investigation_id=record.id,
+            runtime_run_id="run-persistence-failed",
+            authority_mode="agent",
+            candidates=[candidate],
+        )
+    )
+    repository.fail_next_review_save = True
+
+    async def turn(**_kwargs):
+        return {"summary": "critic result", "assessments": []}
+
+    runtime = V11Runtime(
+        model="fake",
+        model_provider=ModelProvider.OPENAI,
+        model_name="fake",
+        tool_registry=build_provider_tool_registry(build_mock_provider_registry()),
+        turn=turn,
+    )
+    runtime.runtime_run_id = "run-persistence-failed"
+
+    with pytest.raises(RuntimeError, match="review persistence failed"):
+        await runtime.run_phase(
+            "critic_review",
+            repository=repository,
+            investigation_id=record.id,
+            event=record.event,
+        )
+
+    assert repository.get(record.id).status == InvestigationStatus.FAILED
+    review = repository.get_coordination_review(record.id)
+    assert review is not None
+    assert review.candidates == []
+    assert review.diagnostic_status is None
+    assert review.run_status.value == "failed"
+
+
+@pytest.mark.anyio
+async def test_v11_required_lead_failure_is_failed_without_inconclusive_fallback():
+    repository, record = _repository()
+    repository.save_coordination_review(
+        CoordinationReview(
+            investigation_id=record.id,
+            runtime_run_id="run-lead-failed",
+            authority_mode="agent",
+        )
+    )
+
+    async def turn(**_kwargs):
+        raise RuntimeError("lead failed")
+
+    runtime = V11Runtime(
+        model="fake",
+        model_provider=ModelProvider.OPENAI,
+        model_name="fake",
+        tool_registry=build_provider_tool_registry(build_mock_provider_registry()),
+        turn=turn,
+    )
+    runtime.runtime_run_id = "run-lead-failed"
+
+    await runtime.lead_adjudication(
+        repository=repository,
+        investigation_id=record.id,
+        event=record.event,
+    )
+
+    review = repository.get_coordination_review(record.id)
+    assert review is not None
+    assert review.candidates == []
+    assert review.critic_assessments == []
+    assert review.lead_decision is None
+    assert review.diagnostic_status is None
+    assert repository.get(record.id).status == InvestigationStatus.FAILED
+
+
+@pytest.mark.anyio
+async def test_v11_validator_failure_is_failed_without_inconclusive_fallback():
+    repository, record = _repository()
+    candidate = RootCauseCandidate(
+        id="candidate-validator-failed",
+        summary="candidate",
+        rank=1,
+        confidence=0.5,
+    )
+    repository.save_coordination_review(
+        CoordinationReview(
+            investigation_id=record.id,
+            runtime_run_id="run-validator-failed",
+            authority_mode="agent",
+            candidates=[candidate],
+            lead_decision=LeadDecision(
+                action=LeadAction.INCONCLUSIVE,
+                summary="not enough evidence",
+                stop_reason="insufficient_evidence",
+            ),
+            diagnostic_status="inconclusive",
+        )
+    )
+
+    async def turn(**_kwargs):
+        raise RuntimeError("validator correction lead failed")
+
+    runtime = V11Runtime(
+        model="fake",
+        model_provider=ModelProvider.OPENAI,
+        model_name="fake",
+        tool_registry=build_provider_tool_registry(build_mock_provider_registry()),
+        turn=turn,
+    )
+    runtime.runtime_run_id = "run-validator-failed"
+
+    await runtime.result_validation(
+        repository=repository,
+        investigation_id=record.id,
+        event=record.event,
+    )
+
+    review = repository.get_coordination_review(record.id)
+    assert review is not None
+    assert review.candidates == []
+    assert review.critic_assessments == []
+    assert review.diagnostic_status is None
+    assert repository.get(record.id).status == InvestigationStatus.FAILED
+
+
 @pytest.mark.anyio
 async def test_v11_critic_and_lead_authority_complete_without_semantic_validation():
     repository, record = _seed_repository()
@@ -327,7 +1077,7 @@ async def test_v11_critic_and_lead_authority_complete_without_semantic_validatio
         event=record.event,
         runtime_run_id="run-v11",
         remaining_tool_budget=8,
-        remaining_token_budget=1000,
+        remaining_token_budget=10000,
     )
     await runtime.investigator_round_1(
         repository=repository,
@@ -485,7 +1235,7 @@ async def test_v11_needs_evidence_has_one_round_two_batch_and_one_reconciliation
         event=record.event,
         runtime_run_id="run-v11",
         remaining_tool_budget=8,
-        remaining_token_budget=1000,
+        remaining_token_budget=10000,
     )
     await runtime.investigator_round_1(
         repository=repository,
@@ -623,14 +1373,14 @@ async def test_v11_phase_executor_uses_runtime_phases_without_legacy_report_or_a
                 phase=phase,
                 resume_state=RuntimeResumeState(
                     remaining_tool_budget=8,
-                    remaining_token_budget=1000,
+                    remaining_token_budget=10000,
                 ),
                 investigation_id=record.id,
                 strategy="adaptive",
                 run_reason=RuntimeRunReason.INITIAL,
                 execution_contract_version="v11",
                 tool_budget=8,
-                token_budget=1000,
+                token_budget=10000,
                 timeout_seconds=60,
             )
         )

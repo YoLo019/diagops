@@ -100,6 +100,26 @@ def test_v11_contract_enums_and_runtime_identity_are_bounded() -> None:
     assert _run().status == RuntimeRunStatus.CREATED
 
 
+def test_v11_run_requires_a_frozen_token_ceiling() -> None:
+    with pytest.raises(ValueError, match="token_budget"):
+        RuntimeRun(
+            id="run-v11-no-token-ceiling",
+            investigation_id="inv-1",
+            run_kind=RuntimeRunKind.LIVE,
+            strategy="adaptive",
+            run_reason=RuntimeRunReason.INITIAL,
+            model_provider=ModelProvider.OPENAI,
+            model_name="gpt-test",
+            prompt_version="v11-test",
+            tool_budget=8,
+            token_budget=None,
+            timeout_seconds=120.0,
+            execution_contract_version=ExecutionContractVersion.V11,
+            authority_mode=AuthorityMode.AGENT,
+            execution_contract={**_contract(), "token_budget": None},
+        )
+
+
 def test_v11_lead_decision_rejects_unbounded_or_invalid_action() -> None:
     with pytest.raises(ValidationError):
         LeadDecision(action=LeadAction.INVESTIGATE, summary="x", task_ids=[])

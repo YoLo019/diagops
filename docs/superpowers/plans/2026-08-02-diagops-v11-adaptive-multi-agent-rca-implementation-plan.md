@@ -663,6 +663,35 @@ projection, reload, timeout, and cancellation. Search all callers for legacy
 root assignment, hypothesis and CauseType requirements. Close blocking/high
 authority, race, privacy, or budget findings before product integration.
 
+### M3 review-fix evidence (2026-08-08)
+
+The independent M3 review returned `BLOCKING` against base
+`b17da397807bacf6e155afe71062ad1c6c4fd868`. The review-fix was executed in the
+same `codex/v11-m3` worktree with no reset, merge, push, M4, or M5 action. Each
+finding received a minimal RED regression before the shared-boundary GREEN fix:
+
+| Finding | RED → GREEN evidence | Shared-boundary closure |
+| --- | --- | --- |
+| B1 | `test_v11_run_owner_is_explicit_when_repository_has_multiple_investigations` | Explicit `investigation_id` is threaded through commit, execution, budget, summary, and resume helpers; no repository singleton inference remains. |
+| H1 | `test_v11_frozen_manifest_rejects_same_cardinality_tool_swap`; `test_v11_frozen_manifest_rejects_unordered_contract` | Admission persists the ordered frozen nine-tool manifest/hash plus skill/capability identity and limits; dispatch/retry/resume read only that contract. |
+| H2 | `test_v11_model_retry_is_one_classified_transport_attempt`; `test_session_retries_only_transport_once_and_persists_attempts` | One shared classified retry coordinator allows at most one transport/rate-limit retry, persists attempts, and does not retry semantic/validation errors. |
+| H3 | `test_v11_model_precharges_input_before_setting_output_cap`; `test_v11_zero_tool_budget_does_not_start_model`; `test_container_freezes_effective_agent_configuration_and_budgets` | V11 freezes a non-None token ceiling, atomically charges input, caps output, checkpoints usage, and blocks zero-budget requests across manual/SDK paths. |
+| H4 | `test_session_deadline_preflight_blocks_tool_before_provider_start`; `test_v11_model_deadline_preflight_blocks_request_before_start`; `test_late_tool_result_is_rejected_after_execution_fence_loss` | Absolute deadlines are propagated; every action preflights fit, uses the minimum timeout, and cannot commit a late result after timeout/cancel/fence loss. |
+| H5 | `test_v11_tool_budget_reservation_is_atomic_and_durable`; `test_v11_transport_retry_reuses_one_durable_tool_reservation`; retry assertion in `test_session_retries_only_transport_once_and_persists_attempts` | Durable reservations are exact and shared by logical action retries/resume/cancel; a zero budget cannot call a provider and concurrent investigators cannot oversell. |
+| H6 | `test_v11_all_investigator_failure_is_terminal_failed_without_diagnostic`; `test_v11_required_critic_failure_is_failed_without_inconclusive_fallback`; `test_v11_required_lead_failure_is_failed_without_inconclusive_fallback`; `test_v11_validator_failure_is_failed_without_inconclusive_fallback`; `test_v11_persistence_failure_is_terminal_failed_without_diagnostic` | Required actor, validator, and persistence failures terminalize `failed`, clear diagnostic projections, and never fall back to inconclusive/partial. |
+| H7 | `test_v11_validator_rejects_evidence_from_another_run`; `test_v11_partial_requires_usable_evidence_passing_check_and_round_two_linkage`; `test_v11_partial_requires_final_round_critic_and_lead_audits`; `test_v11_complete_requires_final_critic_and_lead_execution_audit` | Validator mechanically enforces same-run usable evidence, exact assessment coverage, inconclusive/partial contracts, and final actor coverage without rewriting Agent-authored fields or invoking semantic CauseType/provider validation. |
+| M1 | `test_v11_validator_scans_nested_critic_check_text_for_control_characters` | Safe-text validation scans all nested Critic/Lead result text for control characters only. |
+| M2 | `test_v11_critic_success_has_one_durable_audit_execution`; `test_v11_reconciliation_has_one_durable_audit_execution`; `test_v11_critic_output_failure_updates_one_audit_execution` | Critic and reconciliation each retain one unique AgentExecution across success and failure, including actor, attempt, deadline, usage, and resume metadata. |
+
+Final review-fix verification: T7 exact gate `70 passed`; T8 exact gate
+`184 passed`; T7/T8 scoped Ruff clean; M2R broad focused `83 passed, 2
+skipped`; M2R keyword focused `16 passed, 33 deselected`; full
+`uv run pytest -q` `1967 passed, 3 skipped, 1 warning`; full
+`uv run ruff check backend tests` clean. T4 and T5 remain `implemented /
+verified` in the task ledger; T5's live Docker execution is the only explicitly
+host-dependent unavailable check. The review-fix commit is isolated to
+`codex/v11-m3`; the same-thread independent re-review is pending.
+
 ## 7. M4 — Product and compatibility integration
 
 ### T9. Reports, actions, human transitions, API/UI, and OpenRCA
@@ -948,8 +977,8 @@ request only the missing authority.
 | T4 | implemented / verified | R3, R11, R21–R22, R24, R27 | 336 focused passed; offline acceptance rows=80, failed=0; nine-tool/data-only skill evidence recorded; independent M2 review approve_with_followups |
 | T5 | implemented / verified (live Docker blocked) | R21–R23 | 17 focused passed; File/Tempo parity contracts green; Docker gate explicitly blocked by unavailable daemon, retained as a host-dependent follow-up |
 | T6 | implemented / verified | R8, R11–R13, R26–R27 | 110 focused passed including M2R-1 slow-endpoint cancellation/no-late-commit/cleanup evidence; independent M2 review approve_with_followups |
-| T7 | implemented / verified | R1–R3, R5–R6, R11–R13, R24, R27 | RED→GREEN; exact gate 53 passed; scoped Ruff clean; M2R-2 resolver wiring and M2R-3 invocation recheck closed |
-| T8 | implemented / verified | R1, R4–R7, R9, R11–R13, R27 | RED→GREEN; exact gate 164 passed; scoped Ruff clean; seven-check/reconciliation/Lead/validator contracts covered |
+| T7 | implemented / verified | R1–R3, R5–R6, R11–R13, R24, R27 | M3 review-fix RED→GREEN; exact gate 70 passed; scoped Ruff clean; M2R-2 resolver wiring and M2R-3 invocation recheck closed; B1/H1–H5/H6/M2 runtime evidence covered |
+| T8 | implemented / verified | R1, R4–R7, R9, R11–R13, R27 | M3 review-fix RED→GREEN; exact gate 184 passed; scoped Ruff clean; H6–H7/M1/M2 terminal, mechanical-validator, safe-text, and final-actor contracts covered |
 | T9 | pending | R5–R12, R18–R19, R27 | pending |
 | T10 | pending | R8–R13, R16, R18, R21–R23, R26–R27 | pending |
 | T11 | pending | R14–R17, R24–R27 | pending |
@@ -1039,4 +1068,4 @@ M1 third-round review (migration/runtime, 2026-08-07): conclusion
 - Specification: approved by the user on 2026-08-02 after L22–L30 reuse review.
 - Implementation Plan: independently reviewed with H1–H3/M1–M2 closed; approved
   by the user on 2026-08-02 with authorization to begin execution.
-- Implementation: M0/T1 complete; M1/T2–T3 implemented and verified on 2026-08-05 in the delegated worktree; third-round independent migration/runtime review concluded `approve_with_followups` on 2026-08-07 with all six findings closed the same day (RR-H1/RR-M1/RR-M2/RR-L2 at commit `336067c`, RR-L1/RR-L3 in the follow-up Light fix); M2 snapshot committed as `M2_BASE_SHA=c2245ac`; M3/T7–T8 implemented and verified on 2026-08-08 in isolated branch `codex/v11-m3`, with independent M3 review pending; M4/M5 not started.
+- Implementation: M0/T1 complete; M1/T2–T3 implemented and verified on 2026-08-05 in the delegated worktree; third-round independent migration/runtime review concluded `approve_with_followups` on 2026-08-07 with all six findings closed the same day (RR-H1/RR-M1/RR-M2/RR-L2 at commit `336067c`, RR-L1/RR-L3 in the follow-up Light fix); M2 snapshot committed as `M2_BASE_SHA=c2245ac`; M3 review-fix base is `b17da397807bacf6e155afe71062ad1c6c4fd868`, B1/H1–H7/M1/M2 are RED→GREEN verified on isolated branch `codex/v11-m3`, and the review-fix commit is handed to the same-thread independent review; M4/M5 not started.

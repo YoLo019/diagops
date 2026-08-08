@@ -20,6 +20,7 @@ from backend.diagnosis.action_planner import ActionPlanner
 from backend.diagnosis.agents_runtime import AgentsRcaRuntime
 from backend.diagnosis.coordinator import DiagnosisCoordinator
 from backend.diagnosis.deepseek_model import create_deepseek_model
+from backend.diagnosis.diagnostic_skills import skill_catalog_identity
 from backend.diagnosis.openai_compatible_model import create_openai_compatible_model
 from backend.diagnosis.orchestrator import DiagnosisOrchestrator
 from backend.diagnosis.v11_runtime import V11Runtime
@@ -58,6 +59,7 @@ from backend.tools.provider_tools import (
     build_provider_tool_registry,
     current_investigation_id,
 )
+from backend.tools.registry import agent_manifest_hash
 
 logger = logging.getLogger(__name__)
 _TELEMETRY_SHUTDOWN_TIMEOUT_SECONDS = 5.0
@@ -120,6 +122,7 @@ class AppContainer:
                     tool_timeout_seconds=(
                         self.settings.agents.tool_timeout_seconds
                     ),
+                    runtime_token_budget=self.settings.agents.token_budget,
                     prompt_version="v9",
                 )
                 v11_runtime = V11Runtime(
@@ -132,6 +135,7 @@ class AppContainer:
                         120.0, float(self.settings.agents.timeout_seconds)
                     ),
                     max_total_tool_calls=self.settings.agents.max_total_tool_calls,
+                    token_budget=self.settings.agents.token_budget,
                     tool_timeout_seconds=(
                         self.settings.agents.tool_timeout_seconds
                     ),
@@ -369,11 +373,20 @@ class AppContainer:
             if version == ExecutionContractVersion.V11
             else AuthorityMode.LEGACY_DETERMINISTIC
         )
+        run_token_budget = (
+            self.settings.agents.token_budget
+            if version == ExecutionContractVersion.V11
+            else None
+        )
         contract = {}
         if version == ExecutionContractVersion.V11:
             endpoint_identity, capability_hash = self._v11_model_identity(
                 effective_provider, effective_model
             )
+            tool_manifest = self.tool_registry.agent_manifest()
+            if len(tool_manifest) != 9:
+                raise RuntimeContractError("V11 requires exactly nine Agent tools")
+            skill_identity = skill_catalog_identity(self.tool_registry.list_agent_specs())
             contract = {
                 "execution_contract_version": version.value,
                 "authority_mode": authority.value,
@@ -385,8 +398,36 @@ class AppContainer:
                 "api_mode": self._api_mode_for(effective_provider),
                 "endpoint_id": endpoint_identity,
                 "capability_artifact_hash": capability_hash,
+                "tool_manifest": list(tool_manifest),
+                "tool_manifest_hash": agent_manifest_hash(tool_manifest),
+                "skill_catalog": skill_identity,
+                "capability_identity": {
+                    "provider": (
+                        effective_provider.value
+                        if isinstance(effective_provider, ModelProvider)
+                        else effective_provider
+                    ),
+                    "model": effective_model,
+                    "api_mode": self._api_mode_for(effective_provider),
+                    "endpoint_id": endpoint_identity,
+                    "artifact_hash": capability_hash,
+                },
+                "limits": {
+                    "max_turns": self.settings.agents.max_turns,
+                    "max_investigators": 3,
+                    "max_rounds": 2,
+                    "token_budget": self.settings.agents.token_budget,
+                    "max_tool_calls_per_specialist": (
+                        self.settings.agents.max_tool_calls_per_specialist
+                    ),
+                    "tool_timeout_seconds": self.settings.agents.tool_timeout_seconds,
+                },
+                "retry_policy": {
+                    "max_retries": 1,
+                    "retryable_categories": ["transport", "rate_limit"],
+                },
                 "tool_budget": self.settings.agents.max_total_tool_calls,
-                "token_budget": getattr(agents_runtime, "runtime_token_budget", None),
+                "token_budget": self.settings.agents.token_budget,
                 "timeout_seconds": float(self.settings.agents.timeout_seconds),
             }
         run = RuntimeRun(
@@ -399,7 +440,7 @@ class AppContainer:
             model_name=effective_model,
             prompt_version=effective_prompt,
             tool_budget=self.settings.agents.max_total_tool_calls,
-            token_budget=getattr(agents_runtime, "runtime_token_budget", None),
+            token_budget=run_token_budget,
             timeout_seconds=float(self.settings.agents.timeout_seconds),
             execution_contract_version=version,
             authority_mode=authority,

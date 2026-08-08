@@ -13,18 +13,25 @@ import inspect
 import json
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
-from agents import Agent, RunConfig
+from agents import Agent, ModelSettings, RunConfig
 from pydantic import BaseModel, ConfigDict, Field
 
-from backend.diagnosis.adaptive_tools import AdaptiveToolSession
+from backend.db.models import InvestigationStatus
+from backend.diagnosis.adaptive_tools import (
+    AdaptiveToolSession,
+    RetryCoordinator,
+    retryable_failure_category,
+)
 from backend.diagnosis.agents_runtime import _run_with_model_lifecycle
 from backend.diagnosis.diagnostic_skills import (
     DIAGNOSTIC_SKILLS,
+    SKILL_CATALOG_VERSION,
     DiagnosticSkill,
+    skill_catalog_hash,
     validate_skill_catalog,
 )
 from backend.diagnosis.result_validation import (
@@ -35,7 +42,6 @@ from backend.domain.agent_findings import (
     AgentFinding,
     AgentFindingSeverity,
     AgentFindingType,
-    CausalCheck,
     CoordinationReview,
     CriticAssessment,
     FindingActor,
@@ -54,9 +60,6 @@ from backend.domain.evidence import EvidenceItem, EvidenceStatus
 from backend.domain.multi_agent import (
     AgentExecutionLayer,
     AuthorityMode,
-    CausalCheckName,
-    CausalCheckStatus,
-    CriticVerdict,
     DiagnosticStatus,
     ExecutionActor,
     ExecutionStepKind,
@@ -73,7 +76,7 @@ from backend.tools.provider_tools import (
     VerifiedMemoryLookup,
     current_investigation_scope,
 )
-from backend.tools.registry import ToolRegistry
+from backend.tools.registry import ToolRegistry, agent_manifest_hash
 
 
 class V11RuntimeContractError(ValueError):
@@ -149,6 +152,7 @@ class _ModelTurn:
     output: Any
     input_tokens: int = 0
     output_tokens: int = 0
+    execution_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,6 +210,12 @@ class V11Runtime:
         self.skills = skills
         self.runtime_run_id: str | None = None
         self._remaining_token_budget = token_budget
+        self._token_budget_lock = asyncio.Lock()
+        self._execution_contract: dict[str, Any] | None = None
+        self._remaining_deadline_seconds: Callable[[], float] = lambda: float("inf")
+        self._deadline_at: datetime | None = datetime.now(UTC) + timedelta(
+            seconds=timeout_seconds
+        )
         self._phase_tool_budget: int | None = None
         self._parallel_limit = parallel_limit or RunStepGate(max_investigators)
         self._check_execution: Callable[[], None] = lambda: None
@@ -217,6 +227,8 @@ class V11Runtime:
         self._hit_fault: Callable[[str], None] = lambda _point: None
         self._active_sessions: set[AdaptiveToolSession] = set()
         self._failures: list[str] = []
+        self._terminal_failure = False
+        self._terminal_failure_reason: str | None = None
         self._input_tokens = 0
         self._output_tokens = 0
         self._completed_rounds = 0
@@ -245,6 +257,7 @@ class V11Runtime:
         model_name: str | None,
         token_budget: int | None,
         timeout_seconds: float | None = None,
+        execution_contract: dict[str, Any] | None = None,
     ) -> V11Runtime:
         """为 durable Run 复制模型边界和预算，不共享运行期状态。"""
         runtime = copy.copy(self)
@@ -252,8 +265,27 @@ class V11Runtime:
         runtime.model_provider = ModelProvider(model_provider or self.model_provider)
         runtime.model_name = model_name or self.model_name
         runtime._remaining_token_budget = token_budget
+        runtime._token_budget_lock = asyncio.Lock()
+        runtime._remaining_deadline_seconds = lambda: float("inf")
         runtime.timeout_seconds = (
             timeout_seconds if timeout_seconds is not None else self.timeout_seconds
+        )
+        runtime._execution_contract = copy.deepcopy(execution_contract)
+        limits = (
+            runtime._execution_contract.get("limits", {})
+            if runtime._execution_contract is not None
+            else {}
+        )
+        if limits:
+            runtime.max_turns = int(limits["max_turns"])
+            runtime.max_investigators = int(limits["max_investigators"])
+            runtime.max_rounds = int(limits["max_rounds"])
+            runtime.max_total_tool_calls = int(
+                runtime._execution_contract["tool_budget"]
+            )
+            runtime.tool_timeout_seconds = float(limits["tool_timeout_seconds"])
+        runtime._deadline_at = datetime.now(UTC) + timedelta(
+            seconds=runtime.timeout_seconds
         )
         runtime._phase_tool_budget = None
         runtime._check_execution = lambda: None
@@ -262,9 +294,11 @@ class V11Runtime:
         runtime._resolve_tool_result = None
         runtime._persist_agent_event = None
         runtime._persist_model_event = None
-        runtime._parallel_limit = RunStepGate(self.max_investigators)
+        runtime._parallel_limit = RunStepGate(runtime.max_investigators)
         runtime._active_sessions = set()
         runtime._failures = []
+        runtime._terminal_failure = False
+        runtime._terminal_failure_reason = None
         runtime._input_tokens = 0
         runtime._output_tokens = 0
         runtime._completed_rounds = 0
@@ -281,6 +315,13 @@ class V11Runtime:
         self._persist_model_event = phase_input.persist_model_event
         self._hit_fault = phase_input.hit_fault or (lambda _point: None)
         self._phase_tool_budget = phase_input.tool_budget
+        self._execution_contract = copy.deepcopy(phase_input.execution_contract)
+        self._deadline_at = phase_input.deadline_at or (
+            datetime.now(UTC) + timedelta(seconds=self.timeout_seconds)
+        )
+        self._remaining_deadline_seconds = (
+            phase_input.remaining_deadline_seconds or (lambda: float("inf"))
+        )
         if phase_input.token_budget is not None:
             if self._remaining_token_budget is None:
                 self._remaining_token_budget = phase_input.token_budget
@@ -309,60 +350,85 @@ class V11Runtime:
         run_id = self.runtime_run_id
         if not run_id:
             raise V11RuntimeContractError("V11 phase lacks runtime owner")
-        with current_investigation_scope(investigation_id):
-            if phase == RuntimePhase.LEAD_PLANNING:
-                return await self.plan_lead(
+        try:
+            with current_investigation_scope(investigation_id):
+                return await self._dispatch_phase(
+                    phase=phase,
                     repository=repository,
                     investigation_id=investigation_id,
                     event=current,
                     runtime_run_id=run_id,
-                    remaining_tool_budget=self._remaining_tool_budget_for(repository),
-                    remaining_token_budget=self._remaining_token_budget,
                 )
-            if phase == RuntimePhase.INVESTIGATOR_ROUND_1:
-                return await self.investigator_round_1(
-                    repository=repository,
-                    investigation_id=investigation_id,
-                    event=current,
-                )
-            if phase == RuntimePhase.CRITIC_REVIEW:
-                return await self.critic_review(
-                    repository=repository,
-                    investigation_id=investigation_id,
-                    event=current,
-                )
-            if phase == RuntimePhase.INVESTIGATOR_ROUND_2:
-                return await self.investigator_round_2(
-                    repository=repository,
-                    investigation_id=investigation_id,
-                    event=current,
-                )
-            if phase == RuntimePhase.CRITIC_RECONCILIATION:
-                return await self.critic_reconciliation(
-                    repository=repository,
-                    investigation_id=investigation_id,
-                    event=current,
-                )
-            if phase == RuntimePhase.LEAD_ADJUDICATION:
-                return await self.lead_adjudication(
-                    repository=repository,
-                    investigation_id=investigation_id,
-                    event=current,
-                )
-            if phase == RuntimePhase.RESULT_VALIDATION:
-                return await self.result_validation(
-                    repository=repository,
-                    investigation_id=investigation_id,
-                    event=current,
-                )
-            if phase in {
-                RuntimePhase.INTAKE,
-                RuntimePhase.EVIDENCE_COLLECTION,
-                RuntimePhase.REPORT_GENERATION,
-            }:
-                return None
-            if phase == RuntimePhase.FINALIZE:
-                return self.finalize(repository, investigation_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._terminalize_unexpected_failure(repository, investigation_id)
+            raise
+
+    async def _dispatch_phase(
+        self,
+        *,
+        phase: RuntimePhase,
+        repository,
+        investigation_id: str,
+        event: IncidentEvent,
+        runtime_run_id: str,
+    ) -> Any:
+        if phase == RuntimePhase.LEAD_PLANNING:
+            return await self.plan_lead(
+                repository=repository,
+                investigation_id=investigation_id,
+                event=event,
+                runtime_run_id=runtime_run_id,
+                remaining_tool_budget=self._remaining_tool_budget_for(
+                    repository, investigation_id
+                ),
+                remaining_token_budget=self._remaining_token_budget,
+            )
+        if phase == RuntimePhase.INVESTIGATOR_ROUND_1:
+            return await self.investigator_round_1(
+                repository=repository,
+                investigation_id=investigation_id,
+                event=event,
+            )
+        if phase == RuntimePhase.CRITIC_REVIEW:
+            return await self.critic_review(
+                repository=repository,
+                investigation_id=investigation_id,
+                event=event,
+            )
+        if phase == RuntimePhase.INVESTIGATOR_ROUND_2:
+            return await self.investigator_round_2(
+                repository=repository,
+                investigation_id=investigation_id,
+                event=event,
+            )
+        if phase == RuntimePhase.CRITIC_RECONCILIATION:
+            return await self.critic_reconciliation(
+                repository=repository,
+                investigation_id=investigation_id,
+                event=event,
+            )
+        if phase == RuntimePhase.LEAD_ADJUDICATION:
+            return await self.lead_adjudication(
+                repository=repository,
+                investigation_id=investigation_id,
+                event=event,
+            )
+        if phase == RuntimePhase.RESULT_VALIDATION:
+            return await self.result_validation(
+                repository=repository,
+                investigation_id=investigation_id,
+                event=event,
+            )
+        if phase in {
+            RuntimePhase.INTAKE,
+            RuntimePhase.EVIDENCE_COLLECTION,
+            RuntimePhase.REPORT_GENERATION,
+        }:
+            return None
+        if phase == RuntimePhase.FINALIZE:
+            return self.finalize(repository, investigation_id)
         raise V11RuntimeContractError(f"unsupported V11 phase: {phase.value}")
 
     async def plan_lead(
@@ -397,6 +463,11 @@ class V11Runtime:
             tools=[],
             remaining_token_budget=remaining_token_budget,
             remaining_tool_budget=remaining_tool_budget,
+            repository=repository,
+            investigation_id=investigation_id,
+            task_id=f"lead-planning-{runtime_run_id}",
+            step_kind=ExecutionStepKind.LEAD_PLANNING,
+            analysis_round=1,
         )
         parsed = self._parse_output(turn.output, LeadPlanningOutput)
         plan = self._build_plan(
@@ -407,21 +478,6 @@ class V11Runtime:
         )
         # 计划是 Investigator 工作的唯一入口，必须先于任何工作持久化。
         repository.save_plan(plan)
-        self._record_execution(
-            repository,
-            AgentExecution(
-                task_id=f"lead-planning-{runtime_run_id}",
-                agent_name=ExecutionActor.LEAD.value,
-                runtime_run_id=runtime_run_id,
-                status=AgentExecutionStatus.COMPLETED,
-                execution_layer=AgentExecutionLayer.OPENAI_AGENTS_SDK,
-                step_kind=ExecutionStepKind.LEAD_PLANNING,
-                analysis_round=1,
-                model_provider=self.model_provider,
-                model_name=self.model_name,
-                summary=parsed.decision.summary,
-            ),
-        )
         self._update_summary(repository, investigation_id)
         return plan
 
@@ -510,6 +566,86 @@ class V11Runtime:
     def _agent_manifest(self) -> tuple[str, ...]:
         if self.tool_registry is None:
             raise V11RuntimeContractError("V11 tool registry is not configured")
+        contract = getattr(self, "_execution_contract", None)
+        if contract is not None:
+            raw_manifest = contract.get("tool_manifest")
+            if not isinstance(raw_manifest, (list, tuple)):
+                raise V11RuntimeContractError("V11 contract lacks frozen tool manifest")
+            manifest = tuple(raw_manifest)
+            if len(manifest) != 9 or len(set(manifest)) != len(manifest):
+                raise V11RuntimeContractError(
+                    "V11 requires exactly nine frozen Agent tools"
+                )
+            if manifest != tuple(sorted(manifest)):
+                raise V11RuntimeContractError("V11 frozen tool manifest is not ordered")
+            if contract.get("tool_manifest_hash") != agent_manifest_hash(manifest):
+                raise V11RuntimeContractError("V11 frozen tool manifest hash mismatch")
+            skill_identity = contract.get("skill_catalog")
+            if skill_identity is not None:
+                expected_skill_identity = {
+                    "catalog_version": SKILL_CATALOG_VERSION,
+                    "catalog_hash": skill_catalog_hash(self.skills),
+                    "skill_names": ",".join(
+                        f"{skill.name}@{skill.version}" for skill in self.skills
+                    ),
+                }
+                if skill_identity != expected_skill_identity:
+                    raise V11RuntimeContractError(
+                        "V11 frozen skill catalog identity mismatch"
+                    )
+            capability_identity = contract.get("capability_identity")
+            limits = contract.get("limits")
+            retry_policy = contract.get("retry_policy")
+            if any(
+                key in contract
+                for key in ("skill_catalog", "capability_identity", "limits", "retry_policy")
+            ):
+                if not isinstance(skill_identity, dict) or not isinstance(
+                    capability_identity, dict
+                ) or not isinstance(limits, dict) or not isinstance(
+                    retry_policy, dict
+                ):
+                    raise V11RuntimeContractError(
+                        "V11 contract lacks frozen capability or limits"
+                    )
+                if not {
+                    "provider",
+                    "model",
+                    "api_mode",
+                    "endpoint_id",
+                    "artifact_hash",
+                } <= capability_identity.keys():
+                    raise V11RuntimeContractError(
+                        "V11 contract lacks capability identity"
+                    )
+                if not {
+                    "max_turns",
+                    "max_investigators",
+                    "max_rounds",
+                    "token_budget",
+                    "max_tool_calls_per_specialist",
+                    "tool_timeout_seconds",
+                } <= limits.keys():
+                    raise V11RuntimeContractError("V11 contract lacks frozen limits")
+                if (
+                    contract.get("token_budget") is None
+                    or limits.get("token_budget") is None
+                ):
+                    raise V11RuntimeContractError(
+                        "V11 contract lacks frozen token ceiling"
+                    )
+                if retry_policy.get("max_retries") != 1 or set(
+                    retry_policy.get("retryable_categories", [])
+                ) != {"transport", "rate_limit"}:
+                    raise V11RuntimeContractError("V11 retry policy is not frozen")
+            try:
+                for tool_name in manifest:
+                    self.tool_registry.assert_agent_callable(tool_name, manifest)
+            except (TypeError, ValueError) as exc:
+                raise V11RuntimeContractError(
+                    "V11 frozen tool manifest is not callable"
+                ) from exc
+            return manifest
         manifest = self.tool_registry.agent_manifest()
         if len(manifest) != 9:
             raise V11RuntimeContractError("V11 requires exactly nine Agent tools")
@@ -535,6 +671,7 @@ class V11Runtime:
             try:
                 result = await self._run_investigator(
                     repository=repository,
+                    investigation_id=investigation_id,
                     event=event,
                     task=task,
                     round_number=1,
@@ -545,10 +682,35 @@ class V11Runtime:
                 raise
             except Exception as exc:
                 self._failures.append(type(exc).__name__)
+                self._persist_investigator_result(
+                    repository,
+                    investigation_id,
+                    _InvestigatorResult(
+                        (),
+                        (),
+                        self._failed_execution(
+                            task_id=task.id,
+                            actor=ExecutionActor.INVESTIGATOR.value,
+                            step_kind=ExecutionStepKind.INVESTIGATOR_ANALYSIS,
+                            message="investigator failed",
+                            analysis_round=1,
+                        ),
+                    ),
+                )
                 continue
             results.append(result)
             candidates.extend(result.candidates)
             self._persist_investigator_result(repository, investigation_id, result)
+        if tasks and not any(
+            result.execution.status == AgentExecutionStatus.COMPLETED
+            for result in results
+        ):
+            self._mark_terminal_failure(
+                repository,
+                investigation_id,
+                "all investigators failed",
+            )
+            return ()
         self._completed_rounds = max(self._completed_rounds, 1)
         self._persist_candidate_projection(repository, investigation_id, candidates)
         self._update_summary(repository, investigation_id)
@@ -568,12 +730,23 @@ class V11Runtime:
         try:
             turn = await self._call_model(
                 actor=ExecutionActor.CRITIC.value,
-                prompt=self._critic_prompt(repository, event, review, round_number=1),
+                prompt=self._critic_prompt(
+                    repository, investigation_id, event, review, round_number=1
+                ),
                 output_type=CriticOutput,
-                context=self._critic_context(repository, review, round_number=1),
+                context=self._critic_context(
+                    repository, investigation_id, review, round_number=1
+                ),
                 tools=[],
                 remaining_token_budget=self._remaining_token_budget,
-                remaining_tool_budget=self._remaining_tool_budget_for(repository),
+                remaining_tool_budget=self._remaining_tool_budget_for(
+                    repository, investigation_id
+                ),
+                repository=repository,
+                investigation_id=investigation_id,
+                task_id=f"critic-review-{self.runtime_run_id}",
+                step_kind=ExecutionStepKind.CRITIC_REVIEW,
+                analysis_round=1,
             )
             output = self._parse_output(turn.output, CriticOutput)
             assessments = self._normalize_assessments(
@@ -599,21 +772,32 @@ class V11Runtime:
             raise
         except Exception as exc:
             self._failures.append(type(exc).__name__)
+            self._ensure_failed_execution(
+                repository,
+                investigation_id,
+                task_id=f"critic-review-{self.runtime_run_id}",
+                actor=ExecutionActor.CRITIC.value,
+                step_kind=ExecutionStepKind.CRITIC_REVIEW,
+                message="critic review failed",
+            )
             review = review.model_copy(
                 update={
-                    "critic_assessments": self._fallback_assessments(review),
+                    "candidates": [],
+                    "critic_assessments": [],
+                    "lead_decision": None,
+                    "diagnostic_status": None,
+                    "run_status": MultiAgentRunStatus.FAILED,
+                    "stop_reason": "critic_review_failed",
                     "summary": "Critic review failed.",
                 }
             )
-            self._record_execution(
+            repository.save_coordination_review(review)
+            self._mark_terminal_failure(
                 repository,
-                self._failed_execution(
-                    task_id=f"critic-review-{self.runtime_run_id}",
-                    actor=ExecutionActor.CRITIC.value,
-                    step_kind=ExecutionStepKind.CRITIC_REVIEW,
-                    message="critic review failed",
-                ),
+                investigation_id,
+                "critic review failed",
             )
+            return review
         repository.save_coordination_review(review)
         self._update_summary(repository, investigation_id)
         return review
@@ -647,6 +831,7 @@ class V11Runtime:
             try:
                 result = await self._run_investigator(
                     repository=repository,
+                    investigation_id=investigation_id,
                     event=event,
                     task=task,
                     round_number=2,
@@ -684,12 +869,23 @@ class V11Runtime:
         try:
             turn = await self._call_model(
                 actor=ExecutionActor.CRITIC.value,
-                prompt=self._critic_prompt(repository, event, review, round_number=2),
+                prompt=self._critic_prompt(
+                    repository, investigation_id, event, review, round_number=2
+                ),
                 output_type=CriticOutput,
-                context=self._critic_context(repository, review, round_number=2),
+                context=self._critic_context(
+                    repository, investigation_id, review, round_number=2
+                ),
                 tools=[],
                 remaining_token_budget=self._remaining_token_budget,
-                remaining_tool_budget=self._remaining_tool_budget_for(repository),
+                remaining_tool_budget=self._remaining_tool_budget_for(
+                    repository, investigation_id
+                ),
+                repository=repository,
+                investigation_id=investigation_id,
+                task_id=f"critic-reconciliation-{self.runtime_run_id}",
+                step_kind=ExecutionStepKind.CRITIC_REVIEW,
+                analysis_round=2,
             )
             output = self._parse_output(turn.output, CriticOutput)
             assessments = self._normalize_assessments(
@@ -717,6 +913,33 @@ class V11Runtime:
             raise
         except Exception as exc:
             self._failures.append(type(exc).__name__)
+            self._ensure_failed_execution(
+                repository,
+                investigation_id,
+                task_id=f"critic-reconciliation-{self.runtime_run_id}",
+                actor=ExecutionActor.CRITIC.value,
+                step_kind=ExecutionStepKind.CRITIC_REVIEW,
+                message="critic reconciliation failed",
+                analysis_round=2,
+            )
+            review = review.model_copy(
+                update={
+                    "candidates": [],
+                    "critic_assessments": [],
+                    "lead_decision": None,
+                    "diagnostic_status": None,
+                    "run_status": MultiAgentRunStatus.FAILED,
+                    "stop_reason": "critic_reconciliation_failed",
+                    "summary": "Critic reconciliation failed.",
+                }
+            )
+            repository.save_coordination_review(review)
+            self._mark_terminal_failure(
+                repository,
+                investigation_id,
+                "critic reconciliation failed",
+            )
+            return review
         repository.save_coordination_review(review)
         self._update_summary(repository, investigation_id)
         return review
@@ -737,7 +960,14 @@ class V11Runtime:
                 context=self._lead_adjudication_context(repository, review),
                 tools=[],
                 remaining_token_budget=self._remaining_token_budget,
-                remaining_tool_budget=self._remaining_tool_budget_for(repository),
+                remaining_tool_budget=self._remaining_tool_budget_for(
+                    repository, investigation_id
+                ),
+                repository=repository,
+                investigation_id=investigation_id,
+                task_id=f"lead-adjudication-{self.runtime_run_id}",
+                step_kind=ExecutionStepKind.LEAD_ADJUDICATION,
+                analysis_round=2 if self._completed_rounds == 2 else 1,
             )
             decision = self._parse_output(
                 turn.output, LeadAdjudicationOutput
@@ -765,7 +995,14 @@ class V11Runtime:
                     },
                     tools=[],
                     remaining_token_budget=self._remaining_token_budget,
-                    remaining_tool_budget=self._remaining_tool_budget_for(repository),
+                    remaining_tool_budget=self._remaining_tool_budget_for(
+                        repository, investigation_id
+                    ),
+                    repository=repository,
+                    investigation_id=investigation_id,
+                    task_id=f"lead-adjudication-{self.runtime_run_id}-correction",
+                    step_kind=ExecutionStepKind.LEAD_ADJUDICATION,
+                    analysis_round=2 if self._completed_rounds == 2 else 1,
                 )
                 decision = self._parse_output(
                     turn.output, LeadAdjudicationOutput
@@ -775,8 +1012,34 @@ class V11Runtime:
                 raise
             except Exception as second_error:
                 self._failures.append(type(second_error).__name__)
+                self._ensure_failed_execution(
+                    repository,
+                    investigation_id,
+                    task_id=f"lead-adjudication-{self.runtime_run_id}-correction",
+                    actor=ExecutionActor.LEAD.value,
+                    step_kind=ExecutionStepKind.LEAD_ADJUDICATION,
+                    message="lead correction failed",
+                    analysis_round=2 if self._completed_rounds == 2 else 1,
+                )
         if decision is None:
-            decision = self._inconclusive_decision("Lead could not establish a valid conclusion.")
+            self._mark_terminal_failure(
+                repository,
+                investigation_id,
+                "lead adjudication failed",
+            )
+            review = review.model_copy(
+                update={
+                    "candidates": [],
+                    "critic_assessments": [],
+                    "lead_decision": None,
+                    "diagnostic_status": None,
+                    "run_status": MultiAgentRunStatus.FAILED,
+                    "stop_reason": "lead_adjudication_failed",
+                    "summary": "Lead adjudication failed.",
+                }
+            )
+            repository.save_coordination_review(review)
+            return review
         status = self._diagnostic_status(decision)
         review = review.model_copy(
             update={
@@ -790,21 +1053,6 @@ class V11Runtime:
                 ),
                 "summary": decision.summary,
             }
-        )
-        self._record_execution(
-            repository,
-            AgentExecution(
-                task_id=f"lead-adjudication-{self.runtime_run_id}",
-                agent_name=ExecutionActor.LEAD.value,
-                runtime_run_id=self.runtime_run_id,
-                status=AgentExecutionStatus.COMPLETED,
-                execution_layer=AgentExecutionLayer.OPENAI_AGENTS_SDK,
-                step_kind=ExecutionStepKind.LEAD_ADJUDICATION,
-                analysis_round=2 if self._completed_rounds == 2 else 1,
-                model_provider=self.model_provider,
-                model_name=self.model_name,
-                summary=decision.summary,
-            ),
         )
         repository.save_coordination_review(review)
         self._update_summary(repository, investigation_id)
@@ -855,7 +1103,14 @@ class V11Runtime:
                     context={"correction_attempt": 1, "reason": first_error.code},
                     tools=[],
                     remaining_token_budget=self._remaining_token_budget,
-                    remaining_tool_budget=self._remaining_tool_budget_for(repository),
+                    remaining_tool_budget=self._remaining_tool_budget_for(
+                        repository, investigation_id
+                    ),
+                    repository=repository,
+                    investigation_id=investigation_id,
+                    task_id=f"lead-result-validation-{self.runtime_run_id}",
+                    step_kind=ExecutionStepKind.LEAD_ADJUDICATION,
+                    analysis_round=2 if self._completed_rounds == 2 else 1,
                 )
                 corrected = self._parse_output(
                     turn.output, LeadAdjudicationOutput
@@ -887,13 +1142,30 @@ class V11Runtime:
                 raise
             except Exception as second_error:
                 self._failures.append(type(second_error).__name__)
+                self._record_execution(
+                    repository,
+                    investigation_id,
+                    self._failed_execution(
+                        task_id=f"result-validation-{self.runtime_run_id}",
+                        actor="ValidatorAgent",
+                        step_kind=ExecutionStepKind.RESULT_VALIDATION,
+                        message="result validation correction failed",
+                    ),
+                )
+                self._mark_terminal_failure(
+                    repository,
+                    investigation_id,
+                    "result validation failed",
+                )
                 review = review.model_copy(
                     update={
-                        "lead_decision": self._inconclusive_decision(
-                            "V11 result contract could not be repaired."
-                        ),
-                        "diagnostic_status": DiagnosticStatus.INCONCLUSIVE,
+                        "candidates": [],
+                        "critic_assessments": [],
+                        "lead_decision": None,
+                        "diagnostic_status": None,
+                        "run_status": MultiAgentRunStatus.FAILED,
                         "stop_reason": "result_validation_failed",
+                        "summary": "Result validation failed.",
                     }
                 )
                 repository.save_coordination_review(review)
@@ -912,6 +1184,7 @@ class V11Runtime:
         self,
         *,
         repository,
+        investigation_id: str,
         event: IncidentEvent,
         task: DiagnosisTask,
         round_number: int,
@@ -923,19 +1196,18 @@ class V11Runtime:
             (
                 item
                 for item in repository.list_agent_findings(
-                    task_id_investigation(repository, task.id)
+                    investigation_id
                 )
                 if item.task_id == task.id and item.analysis_round == round_number
             ),
             None,
         )
-        # 上面按 task 反查在不同 repository 实现中不可用时由调用方的任务记录兜底。
         if existing is not None:
             execution = next(
                 (
                     item
                     for item in repository.list_executions(
-                        task_id_investigation(repository, task.id)
+                        investigation_id
                     )
                     if item.task_id == task.id and item.analysis_round == round_number
                 ),
@@ -954,7 +1226,7 @@ class V11Runtime:
             (
                 item
                 for item in repository.list_executions(
-                    task_id_investigation(repository, task.id)
+                    investigation_id
                 )
                 if item.task_id == task.id and item.analysis_round == round_number
             ),
@@ -973,8 +1245,8 @@ class V11Runtime:
             registry=self.tool_registry,
             task_ids={instance_id: task.id},
             max_tool_calls_per_specialist=3,
-            max_total_tool_calls=max(
-                1, self._remaining_tool_budget_for(repository)
+            max_total_tool_calls=self._remaining_tool_budget_for(
+                repository, investigation_id
             ),
             tool_timeout_seconds=self.tool_timeout_seconds,
             runtime_run_id=self.runtime_run_id,
@@ -986,6 +1258,7 @@ class V11Runtime:
             hit_fault=self._hit_fault,
             parallel_limit=self._parallel_limit,
             agent_manifest=manifest,
+            remaining_deadline_seconds=self._remaining_deadline_seconds,
         )
         self._active_sessions.add(session)
         try:
@@ -1011,41 +1284,67 @@ class V11Runtime:
                     "own_committed_evidence_ids": [item.id for item in seed_evidence],
                     "own_committed_finding_ids": [item.id for item in own_findings],
                     "assessment_id": assessment.id if assessment is not None else None,
-                    "remaining_tool_budget": self._remaining_tool_budget_for(repository),
+                    "remaining_tool_budget": self._remaining_tool_budget_for(
+                        repository, investigation_id
+                    ),
                 },
                 tools=session.tools_for(instance_id, round_number),
                 remaining_token_budget=self._remaining_token_budget,
-                remaining_tool_budget=self._remaining_tool_budget_for(repository),
+                remaining_tool_budget=self._remaining_tool_budget_for(
+                    repository, investigation_id
+                ),
+                repository=repository,
+                investigation_id=investigation_id,
+                task_id=task.id,
+                step_kind=ExecutionStepKind.INVESTIGATOR_ANALYSIS,
+                analysis_round=round_number,
             )
             # 任何 finding 引用前，先收口 tool/evidence 的 durable 投影。
-            self._commit_session(repository, session)
+            self._commit_session(repository, investigation_id, session)
             output = self._parse_output(turn.output, InvestigatorOutput)
             findings = tuple(
                 self._finding_from_draft(
                     draft,
-                    investigation_id=task_id_investigation(repository, task.id),
+                    investigation_id=investigation_id,
                     task=task,
                     instance_id=instance_id,
                     round_number=round_number,
                     assessment=assessment,
-                    evidence=repository.get(task_id_investigation(repository, task.id)).evidence,
+                    evidence=repository.get(investigation_id).evidence,
                 )
                 for draft in output.findings
             )
             candidates = tuple(output.candidates) if round_number == 1 else ()
-            execution = AgentExecution(
-                task_id=task.id,
-                agent_name=instance_id,
-                runtime_run_id=self.runtime_run_id,
-                status=AgentExecutionStatus.COMPLETED,
-                execution_layer=AgentExecutionLayer.OPENAI_AGENTS_SDK,
-                analysis_round=round_number,
-                step_kind=ExecutionStepKind.INVESTIGATOR_ANALYSIS,
-                model_provider=self.model_provider,
-                model_name=self.model_name,
-                tool_call_ids=[call.id for call in session.tool_calls],
-                evidence_ids=sorted(session.evidence_ids_for(instance_id, round_number)),
-                summary=output.summary or "Investigator completed.",
+            execution = next(
+                (
+                    item
+                    for item in repository.list_executions(investigation_id)
+                    if item.id == turn.execution_id
+                ),
+                None,
+            )
+            if execution is None:
+                execution = AgentExecution(
+                    task_id=task.id,
+                    agent_name=instance_id,
+                    runtime_run_id=self.runtime_run_id,
+                    status=AgentExecutionStatus.COMPLETED,
+                    execution_layer=AgentExecutionLayer.OPENAI_AGENTS_SDK,
+                    analysis_round=round_number,
+                    step_kind=ExecutionStepKind.INVESTIGATOR_ANALYSIS,
+                    model_provider=self.model_provider,
+                    model_name=self.model_name,
+                )
+            execution = execution.model_copy(
+                update={
+                    "task_id": task.id,
+                    "agent_name": instance_id,
+                    "tool_call_ids": [call.id for call in session.tool_calls],
+                    "evidence_ids": sorted(
+                        session.evidence_ids_for(instance_id, round_number)
+                    ),
+                    "summary": output.summary or "Investigator completed.",
+                }
             )
             return _InvestigatorResult(findings, candidates, execution)
         except asyncio.CancelledError:
@@ -1104,10 +1403,11 @@ class V11Runtime:
         ).model_copy(update={"candidates": list(by_id.values())})
         repository.save_coordination_review(review)
 
-    def _commit_session(self, repository, session: AdaptiveToolSession) -> None:
+    def _commit_session(
+        self, repository, investigation_id: str, session: AdaptiveToolSession
+    ) -> None:
         if self.runtime_run_id is None:
             raise V11RuntimeContractError("tool session lacks runtime owner")
-        investigation_id = _session_investigation_id(repository)
         record = repository.get(investigation_id)
         evidence_by_id = {item.id: item for item in record.evidence}
         for item in session.new_evidence:
@@ -1208,30 +1508,6 @@ class V11Runtime:
             raise V11RuntimeContractError("reconciliation cannot request evidence")
         return values
 
-    def _fallback_assessments(
-        self, review: CoordinationReview
-    ) -> list[CriticAssessment]:
-        """模型失败时仍保留完整七项 Critic 记录，Lead 只能判 inconclusive。"""
-        return [
-            CriticAssessment(
-                candidate_id=candidate.id,
-                verdict=CriticVerdict.INCONCLUSIVE,
-                checks=[
-                    CausalCheck(
-                        name=name,
-                        status=CausalCheckStatus.UNKNOWN,
-                        summary="Critic output unavailable.",
-                        gap="critic output unavailable",
-                    )
-                    for name in CausalCheckName
-                ],
-                summary="Critic output unavailable.",
-                runtime_run_id=self.runtime_run_id,
-                review_round=1,
-            )
-            for candidate in review.candidates
-        ]
-
     def _supplemental_tasks(
         self,
         output: CriticOutput,
@@ -1296,14 +1572,17 @@ class V11Runtime:
             model_name=self.model_name,
         )
 
-    def _record_execution(self, repository, execution: AgentExecution) -> None:
-        investigation_id = _session_investigation_id(repository)
-        existing = {
-            item.id for item in repository.list_executions(investigation_id)
-        }
-        stored = repository.list_executions(investigation_id)
-        if execution.id not in existing:
-            stored.append(execution)
+    def _record_execution(
+        self, repository, investigation_id: str, execution: AgentExecution
+    ) -> None:
+        if execution.runtime_run_id != self.runtime_run_id:
+            raise V11RuntimeContractError("execution owner does not match the run")
+        stored = [
+            item
+            for item in repository.list_executions(investigation_id)
+            if item.id != execution.id
+        ]
+        stored.append(execution)
         repository.save_executions(investigation_id, stored)
 
     def _failed_execution(
@@ -1315,6 +1594,7 @@ class V11Runtime:
         message: str,
         analysis_round: int = 1,
     ) -> AgentExecution:
+        now = datetime.now(UTC)
         return AgentExecution(
             task_id=task_id,
             agent_name=actor,
@@ -1323,11 +1603,141 @@ class V11Runtime:
             execution_layer=AgentExecutionLayer.OPENAI_AGENTS_SDK,
             analysis_round=analysis_round,
             step_kind=step_kind,
+            runtime_attempt_id=f"manual-{uuid4().hex}",
             failure_category=FailureCategory.UNKNOWN,
             model_provider=self.model_provider,
             model_name=self.model_name,
             error_message=message,
+            started_at=now,
+            completed_at=now,
+            deadline_at=self._deadline_at,
         )
+
+    def _ensure_failed_execution(
+        self,
+        repository,
+        investigation_id: str,
+        *,
+        task_id: str,
+        actor: str,
+        step_kind: ExecutionStepKind,
+        message: str,
+        analysis_round: int = 1,
+    ) -> None:
+        """保留一次 actor action 的失败审计，避免模型 audit 后重复造记录。"""
+        matches = [
+            item
+            for item in repository.list_executions(investigation_id)
+            if item.task_id == task_id and item.step_kind == step_kind
+        ]
+        if any(item.status == AgentExecutionStatus.FAILED for item in matches):
+            return
+        existing = next(
+            (
+                item
+                for item in reversed(matches)
+                if item.status
+                in {
+                    AgentExecutionStatus.RUNNING,
+                    AgentExecutionStatus.COMPLETED,
+                    AgentExecutionStatus.CANCELLED,
+                }
+            ),
+            None,
+        )
+        if existing is not None:
+            now = datetime.now(UTC)
+            self._record_execution(
+                repository,
+                investigation_id,
+                existing.model_copy(
+                    update={
+                        "status": AgentExecutionStatus.FAILED,
+                        "failure_category": FailureCategory.INVALID_OUTPUT,
+                        "error_message": message,
+                        "completed_at": now,
+                        "deadline_at": existing.deadline_at or self._deadline_at,
+                        "runtime_attempt_id": existing.runtime_attempt_id
+                        or f"manual-{uuid4().hex}",
+                        "duration_ms": max(
+                            0,
+                            int(
+                                (
+                                    now
+                                    - (existing.started_at or now)
+                                ).total_seconds()
+                                * 1000
+                            ),
+                        ),
+                    }
+                ),
+            )
+            return
+        self._record_execution(
+            repository,
+            investigation_id,
+            self._failed_execution(
+                task_id=task_id,
+                actor=actor,
+                step_kind=step_kind,
+                message=message,
+                analysis_round=analysis_round,
+            ),
+        )
+
+    def _terminalize_unexpected_failure(self, repository, investigation_id: str) -> None:
+        """Phase 边界异常时清空诊断投影并保留 failed 终态。"""
+        reason = "v11 phase persistence or execution failed"
+        self._terminal_failure = True
+        self._terminal_failure_reason = reason
+        self._failures.append(reason)
+        try:
+            repository.update_status(
+                investigation_id,
+                InvestigationStatus.FAILED,
+                failure_reason=reason,
+            )
+        except Exception:
+            return
+        try:
+            review = repository.get_coordination_review(investigation_id)
+            if review is not None:
+                repository.save_coordination_review(
+                    review.model_copy(
+                        update={
+                            "candidates": [],
+                            "critic_assessments": [],
+                            "lead_decision": None,
+                            "diagnostic_status": None,
+                            "run_status": MultiAgentRunStatus.FAILED,
+                            "stop_reason": "v11_phase_failed",
+                            "summary": "V11 phase failed.",
+                        }
+                    )
+                )
+        except Exception:
+            pass
+        try:
+            self._update_summary(repository, investigation_id)
+        except Exception:
+            pass
+
+    def _mark_terminal_failure(
+        self,
+        repository,
+        investigation_id: str,
+        reason: str,
+    ) -> None:
+        """统一收敛必需 actor 失败，避免用 inconclusive 掩盖运行失败。"""
+        self._terminal_failure = True
+        self._terminal_failure_reason = reason
+        self._failures.append(reason)
+        repository.update_status(
+            investigation_id,
+            InvestigationStatus.FAILED,
+            failure_reason=reason,
+        )
+        self._update_summary(repository, investigation_id)
 
     def _update_summary(self, repository, investigation_id: str) -> None:
         from backend.domain.multi_agent import MultiAgentRunSummary
@@ -1342,8 +1752,20 @@ class V11Runtime:
             and item.status in {AgentExecutionStatus.FAILED, AgentExecutionStatus.CANCELLED}
         ]
         summary = MultiAgentRunSummary(
-            status=(MultiAgentRunStatus.PARTIAL if failures else MultiAgentRunStatus.COMPLETED),
-            failure_reason="V11 partial execution" if failures else None,
+            status=(
+                MultiAgentRunStatus.FAILED
+                if self._terminal_failure
+                else MultiAgentRunStatus.PARTIAL
+                if failures
+                else MultiAgentRunStatus.COMPLETED
+            ),
+            failure_reason=(
+                self._terminal_failure_reason
+                if self._terminal_failure
+                else "V11 partial execution"
+                if failures
+                else None
+            ),
             model_provider=self.model_provider,
             model_name=self.model_name,
             strategy=InvestigationStrategy.ADAPTIVE,
@@ -1356,7 +1778,11 @@ class V11Runtime:
                 }
             ),
             max_tool_calls_per_specialist=3,
-            max_total_tool_calls=self._phase_tool_budget or self.max_total_tool_calls,
+            max_total_tool_calls=(
+                self._phase_tool_budget
+                if self._phase_tool_budget is not None
+                else self.max_total_tool_calls
+            ),
             total_input_tokens=self._input_tokens,
             total_output_tokens=self._output_tokens,
             completed_rounds=self._completed_rounds,
@@ -1376,12 +1802,16 @@ class V11Runtime:
         )
         repository.save(record)
 
-    def _remaining_tool_budget_for(self, repository) -> int:
-        limit = self._phase_tool_budget or self.max_total_tool_calls
+    def _remaining_tool_budget_for(self, repository, investigation_id: str) -> int:
+        limit = (
+            self._phase_tool_budget
+            if self._phase_tool_budget is not None
+            else self.max_total_tool_calls
+        )
         used = len(
             {
                 call.logical_call_id or call.id
-                for call in repository.list_tool_calls(_session_investigation_id(repository))
+                for call in repository.list_tool_calls(investigation_id)
                 if call.runtime_run_id == self.runtime_run_id
                 and call.status.value != "pending"
             }
@@ -1411,6 +1841,8 @@ class V11Runtime:
             raise V11RuntimeContractError("Lead references an unknown candidate")
 
     def _diagnostic_status(self, decision: LeadDecision) -> DiagnosticStatus:
+        if self._terminal_failure:
+            return DiagnosticStatus.INCONCLUSIVE
         if decision.action == LeadAction.CONCLUDE and decision.candidate_ids:
             return DiagnosticStatus.PARTIAL if self._failures else DiagnosticStatus.COMPLETE
         return DiagnosticStatus.INCONCLUSIVE
@@ -1457,6 +1889,7 @@ class V11Runtime:
     def _critic_prompt(
         self,
         repository,
+        investigation_id: str,
         event: IncidentEvent,
         review: CoordinationReview,
         *,
@@ -1469,11 +1902,11 @@ class V11Runtime:
             "candidates": [item.model_dump(mode="json") for item in review.candidates],
             "findings": [
                 item.model_dump(mode="json")
-                for item in repository.list_agent_findings(_session_investigation_id(repository))
+                for item in repository.list_agent_findings(investigation_id)
             ],
             "evidence": [
                 _evidence_projection(item)
-                for item in repository.get(_session_investigation_id(repository)).evidence
+                for item in repository.get(investigation_id).evidence
             ],
             "prior_assessments": [
                 item.model_dump(mode="json") for item in review.critic_assessments
@@ -1485,13 +1918,14 @@ class V11Runtime:
     def _critic_context(
         self,
         repository,
+        investigation_id: str,
         review: CoordinationReview,
         *,
         round_number: int,
     ) -> dict[str, Any]:
         evidence_ids = [
             item.id
-            for item in repository.get(_session_investigation_id(repository)).evidence
+            for item in repository.get(investigation_id).evidence
         ]
         return {
             "round": round_number,
@@ -1549,6 +1983,62 @@ class V11Runtime:
         }
         return json.dumps(redact_value(payload), ensure_ascii=False, sort_keys=True)
 
+    async def _reserve_model_budget(
+        self,
+        requested_budget: int | None,
+        prompt: str,
+        context: dict[str, Any],
+    ) -> tuple[int | None, int, int]:
+        if self._remaining_token_budget is None and requested_budget is None:
+            return None, 0, 0
+        requested = (
+            requested_budget
+            if requested_budget is not None
+            else self._remaining_token_budget
+        )
+        assert requested is not None
+        input_estimate = max(
+            1,
+            (
+                len(prompt)
+                + len(json.dumps(context, ensure_ascii=False, sort_keys=True))
+                + 3
+            )
+            // 4,
+        )
+        async with self._token_budget_lock:
+            current = self._remaining_token_budget
+            available = min(
+                requested,
+                current if current is not None else requested,
+            )
+            output_cap = available - input_estimate
+            if output_cap <= 0:
+                raise V11RuntimeContractError("model token budget exhausted")
+            if current is not None:
+                self._remaining_token_budget = current - available
+            else:
+                self._remaining_token_budget = 0
+        return output_cap, input_estimate, available
+
+    async def _settle_model_budget(
+        self,
+        reserved_total: int,
+        actual_total: int,
+    ) -> None:
+        if self._remaining_token_budget is None:
+            return
+        if actual_total > reserved_total:
+            raise V11RuntimeContractError("model response exceeded token budget")
+        async with self._token_budget_lock:
+            self._remaining_token_budget += reserved_total - actual_total
+
+    def _model_timeout(self) -> float:
+        remaining = max(0.0, float(self._remaining_deadline_seconds()))
+        if remaining <= 0:
+            raise V11RuntimeContractError("V11 model deadline exhausted")
+        return min(self.timeout_seconds, remaining)
+
     async def _call_model(
         self,
         *,
@@ -1559,86 +2049,247 @@ class V11Runtime:
         tools: list[Any],
         remaining_token_budget: int | None,
         remaining_tool_budget: int | None = None,
+        repository=None,
+        investigation_id: str | None = None,
+        task_id: str | None = None,
+        step_kind: ExecutionStepKind | None = None,
+        analysis_round: int | None = None,
     ) -> _ModelTurn:
         self._check_execution()
         if remaining_token_budget is not None and remaining_token_budget <= 0:
             raise V11RuntimeContractError("model token budget exhausted")
-        execution_id = f"v11-model-{uuid4().hex}"
+        if remaining_tool_budget is not None and remaining_tool_budget <= 0:
+            raise V11RuntimeContractError("model tool budget exhausted")
+        self._model_timeout()
+        model_event_id = f"v11-model-{uuid4().hex}"
         manual_lifecycle = self.turn is not None
+        audit_enabled = (
+            repository is not None
+            and investigation_id is not None
+            and task_id is not None
+            and step_kind is not None
+            and self.runtime_run_id is not None
+        )
+        previous_execution_id: str | None = None
+        current_execution_id: str | None = None
+        current_started_at: datetime | None = None
+
+        async def persist_attempt(
+            *,
+            status: AgentExecutionStatus,
+            attempt: int,
+            started_at: datetime,
+            failure_category: FailureCategory = FailureCategory.NONE,
+            summary: str | None = None,
+            error_message: str | None = None,
+            input_tokens: int = 0,
+            output_tokens: int = 0,
+        ) -> None:
+            if not audit_enabled or current_execution_id is None:
+                return
+            completed_at = datetime.now(UTC)
+            self._record_execution(
+                repository,
+                investigation_id,
+                AgentExecution(
+                    id=current_execution_id,
+                    task_id=task_id,
+                    agent_name=actor,
+                    runtime_run_id=self.runtime_run_id,
+                    status=status,
+                    execution_layer=AgentExecutionLayer.OPENAI_AGENTS_SDK,
+                    analysis_round=analysis_round,
+                    step_kind=step_kind,
+                    attempt=attempt,
+                    runtime_attempt_id=current_execution_id,
+                    resume_from_execution_id=previous_execution_id,
+                    failure_category=failure_category,
+                    model_provider=self.model_provider,
+                    model_name=self.model_name,
+                    summary=summary,
+                    error_message=error_message,
+                    started_at=started_at,
+                    completed_at=completed_at if status != AgentExecutionStatus.RUNNING else None,
+                    deadline_at=self._deadline_at,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    duration_ms=max(
+                        0,
+                        int((completed_at - started_at).total_seconds() * 1000),
+                    )
+                    if status != AgentExecutionStatus.RUNNING
+                    else 0,
+                ),
+            )
+
         await self._emit_agent(actor, "started")
         if manual_lifecycle:
-            await self._emit_model(execution_id, "started", actor)
+            await self._emit_model(model_event_id, "started", actor)
         try:
-            if self.turn is not None:
-                raw = await asyncio.wait_for(
-                    _maybe_await(
-                        self.turn(
-                            actor=actor,
-                            prompt=prompt,
-                            output_type=output_type,
-                            tools=tools,
-                            context=context,
-                            remaining_token_budget=remaining_token_budget,
-                            max_output_tokens=remaining_token_budget,
-                            remaining_tool_budget=remaining_tool_budget,
+            async def invoke_model(attempt: int) -> Any:
+                nonlocal current_execution_id, current_started_at, previous_execution_id
+                current_execution_id = f"exec-{uuid4().hex}"
+                current_started_at = datetime.now(UTC)
+                await persist_attempt(
+                    status=AgentExecutionStatus.RUNNING,
+                    attempt=attempt,
+                    started_at=current_started_at,
+                )
+                output_cap: int | None = None
+                input_estimate = reserved_total = 0
+                try:
+                    reservation = await self._reserve_model_budget(
+                        remaining_token_budget, prompt, context
+                    )
+                    output_cap, input_estimate, reserved_total = reservation
+                    timeout_seconds = self._model_timeout()
+                    if self.turn is not None:
+                        raw_result = await asyncio.wait_for(
+                            _maybe_await(
+                                self.turn(
+                                    actor=actor,
+                                    prompt=prompt,
+                                    output_type=output_type,
+                                    tools=tools,
+                                    context=context,
+                                    remaining_token_budget=output_cap,
+                                    max_output_tokens=output_cap,
+                                    remaining_tool_budget=remaining_tool_budget,
+                                )
+                            ),
+                            timeout=timeout_seconds,
                         )
-                    ),
-                    timeout=self.timeout_seconds,
-                )
-            else:
-                if self.model is None:
-                    raise V11RuntimeUnavailable("V11 model is not configured")
-                agent = Agent(
-                    name=actor,
-                    instructions=prompt,
-                    model=self.model,
-                    tools=tools,
-                    output_type=output_type,
-                )
-                raw = await asyncio.wait_for(
-                    _run_with_model_lifecycle(
-                        agent,
-                        json.dumps(context, ensure_ascii=False, sort_keys=True),
-                        persist_model_event=self._persist_model_event,
-                        max_turns=self.max_turns,
-                        run_config=RunConfig(
-                            workflow_name="DiagOps V11 Agent RCA",
-                            tracing_disabled=True,
-                            trace_include_sensitive_data=False,
-                        ),
-                    ),
-                    timeout=self.timeout_seconds,
-                )
+                    else:
+                        if self.model is None:
+                            raise V11RuntimeUnavailable("V11 model is not configured")
+                        agent_kwargs: dict[str, Any] = {
+                            "name": actor,
+                            "instructions": prompt,
+                            "model": self.model,
+                            "tools": tools,
+                            "output_type": output_type,
+                        }
+                        if output_cap is not None:
+                            agent_kwargs["model_settings"] = ModelSettings(
+                                max_tokens=output_cap
+                            )
+                        agent = Agent(**agent_kwargs)
+                        raw_result = await asyncio.wait_for(
+                            _run_with_model_lifecycle(
+                                agent,
+                                json.dumps(context, ensure_ascii=False, sort_keys=True),
+                                persist_model_event=self._persist_model_event,
+                                max_turns=self.max_turns,
+                                run_config=RunConfig(
+                                    workflow_name="DiagOps V11 Agent RCA",
+                                    tracing_disabled=True,
+                                    trace_include_sensitive_data=False,
+                                ),
+                            ),
+                            timeout=timeout_seconds,
+                        )
+                    measured = _coerce_turn(raw_result)
+                    self._model_timeout()
+                    await self._settle_model_budget(
+                        reserved_total,
+                        measured.input_tokens + measured.output_tokens,
+                    )
+                    await persist_attempt(
+                        status=AgentExecutionStatus.COMPLETED,
+                        attempt=attempt,
+                        started_at=current_started_at,
+                        summary="model attempt completed",
+                        input_tokens=measured.input_tokens,
+                        output_tokens=measured.output_tokens,
+                    )
+                    return measured
+                except asyncio.CancelledError:
+                    # 失败请求只结算已预扣的 input estimate；未使用 output cap 退回，
+                    # 使 retry coordinator 能在同一 frozen budget 内重新预检。
+                    if reserved_total:
+                        await self._settle_model_budget(
+                            reserved_total, input_estimate
+                        )
+                    await persist_attempt(
+                        status=AgentExecutionStatus.CANCELLED,
+                        attempt=attempt,
+                        started_at=current_started_at,
+                        failure_category=FailureCategory.CANCELLED,
+                        error_message="model attempt cancelled",
+                        input_tokens=input_estimate,
+                    )
+                    previous_execution_id = current_execution_id
+                    raise
+                except Exception as exc:
+                    # 失败请求只结算已预扣的 input estimate；未使用 output cap 退回，
+                    # 使 retry coordinator 能在同一 frozen budget 内重新预检。
+                    if reserved_total:
+                        await self._settle_model_budget(
+                            reserved_total, input_estimate
+                        )
+                    category = retryable_failure_category(exc)
+                    if category is None:
+                        category = (
+                            FailureCategory.TIMEOUT
+                            if isinstance(exc, TimeoutError)
+                            else FailureCategory.UNKNOWN
+                        )
+                    await persist_attempt(
+                        status=AgentExecutionStatus.FAILED,
+                        attempt=attempt,
+                        started_at=current_started_at,
+                        failure_category=category,
+                        error_message="model attempt failed",
+                        input_tokens=input_estimate,
+                    )
+                    previous_execution_id = current_execution_id
+                    raise
+
+            async def before_retry(_attempt: int, _category) -> None:
+                self._check_execution()
+                self._model_timeout()
+                if remaining_token_budget is not None and remaining_token_budget <= 0:
+                    raise V11RuntimeContractError("model token budget exhausted")
+                if remaining_tool_budget is not None and remaining_tool_budget <= 0:
+                    raise V11RuntimeContractError("model tool budget exhausted")
+                if self.tool_registry is not None:
+                    self._agent_manifest()
+
+            raw = await RetryCoordinator(max_retries=1).run(
+                invoke_model,
+                before_retry=before_retry,
+            )
             self._hit_fault("model_after_send")
             self._check_execution()
             result = _coerce_turn(raw)
             usage = result.input_tokens + result.output_tokens
             if remaining_token_budget is not None and usage > remaining_token_budget:
                 raise V11RuntimeContractError("model response exceeded token budget")
-            if self._remaining_token_budget is not None:
-                if usage > self._remaining_token_budget:
-                    raise V11RuntimeContractError("model response exceeded token budget")
-                self._remaining_token_budget -= usage
             self._input_tokens += result.input_tokens
             self._output_tokens += result.output_tokens
             if manual_lifecycle:
                 await self._emit_model(
-                    execution_id,
+                    model_event_id,
                     "completed",
                     actor,
                     result.input_tokens,
                     result.output_tokens,
                 )
             await self._emit_agent(actor, "completed")
-            return result
+            return _ModelTurn(
+                result.output,
+                result.input_tokens,
+                result.output_tokens,
+                current_execution_id,
+            )
         except asyncio.CancelledError:
             if manual_lifecycle:
-                await self._emit_model(execution_id, "failed", actor)
+                await self._emit_model(model_event_id, "failed", actor)
             await self._emit_agent(actor, "failed")
             raise
         except Exception:
             if manual_lifecycle:
-                await self._emit_model(execution_id, "failed", actor)
+                await self._emit_model(model_event_id, "failed", actor)
             await self._emit_agent(actor, "failed")
             raise
 
@@ -1684,21 +2335,6 @@ class V11Runtime:
     def _cleanup_session(self, session: AdaptiveToolSession) -> None:
         session._stopped_agents.update(session.task_ids)
         self._active_sessions.discard(session)
-
-
-def task_id_investigation(repository, task_id: str) -> str:
-    """从任务 bucket 找到 investigation owner；用于跨 repository 的最小适配。"""
-    for record in repository.list():
-        if any(task.id == task_id for task in repository.list_tasks(record.id)):
-            return record.id
-    raise V11RuntimeContractError("task is not attached to an investigation")
-
-
-def _session_investigation_id(repository) -> str:
-    records = repository.list()
-    if len(records) != 1:
-        raise V11RuntimeContractError("V11 phase repository must have one investigation")
-    return records[0].id
 
 
 async def _maybe_await(value: Any) -> Any:

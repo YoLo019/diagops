@@ -5,7 +5,7 @@ import logging
 import sys
 import time
 from contextlib import suppress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from backend.domain.runtime import (
     RuntimeActorType,
@@ -327,6 +327,11 @@ class RuntimeCoordinator:
                         tool_budget=available_tool_budget,
                         token_budget=available_token_budget,
                         timeout_seconds=run.timeout_seconds,
+                        deadline_at=(run.started_at or run.created_at)
+                        + timedelta(seconds=run.timeout_seconds),
+                        remaining_deadline_seconds=(
+                            lambda run_id=run.id: self._remaining_deadline_seconds(run_id)
+                        ),
                         check_execution=lambda: self.check_execution(
                             run.id, owner, run.lease_version
                         ),
@@ -520,6 +525,7 @@ class RuntimeCoordinator:
         )
         self._tool_spans[(attempt.id, call.id)] = span
         try:
+            self.check_execution(run.id, owner, run.lease_version)
             return await self.writer.submit_tool(
                 ToolCommit(
                     run_id=run.id,
@@ -564,6 +570,7 @@ class RuntimeCoordinator:
         )
         span = self._tool_spans.pop((attempt.id, result.call.id), None)
         try:
+            self.check_execution(run.id, owner, run.lease_version)
             persisted = await self.writer.submit_tool(
                 ToolCommit(
                     run_id=run.id,
@@ -962,6 +969,13 @@ class RuntimeCoordinator:
         started = run.started_at or run.created_at
         elapsed = max(0.0, (datetime.now(UTC) - started).total_seconds())
         return time.monotonic() + max(0.0, run.timeout_seconds - elapsed)
+
+    def _remaining_deadline_seconds(self, run_id: str) -> float:
+        deadline = self._deadlines.get(run_id)
+        if deadline is None:
+            deadline = self._deadline_for(self.store.get_run(run_id))
+            self._deadlines[run_id] = deadline
+        return max(0.0, deadline - time.monotonic())
 
     async def _renew_loop(
         self,

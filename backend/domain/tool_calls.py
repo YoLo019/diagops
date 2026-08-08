@@ -2,7 +2,7 @@ from datetime import datetime
 from enum import StrEnum
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_serializer
 
 from backend.domain.evidence import EvidenceProvider, JsonValue
 
@@ -48,3 +48,19 @@ class ToolCallRecord(BaseModel):
     logical_call_id: str | None = None
     idempotency_key: str | None = None
     execution_id: str | None = None
+    attempt: int = Field(default=1, ge=1)
+
+    @model_serializer(mode="wrap")
+    def serialize_legacy_payload(self, handler):
+        data = handler(self)
+        if self.runtime_run_id is None:
+            for field_name in (
+                "runtime_run_id",
+                "logical_call_id",
+                "idempotency_key",
+                "execution_id",
+                "attempt",
+            ):
+                if field_name not in self.model_fields_set:
+                    data.pop(field_name, None)
+        return data

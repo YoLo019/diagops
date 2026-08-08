@@ -308,6 +308,8 @@ class RuntimeRun(RuntimeModel):
         if self.execution_contract_version == ExecutionContractVersion.V11:
             if self.authority_mode != AuthorityMode.AGENT:
                 raise ValueError("V11 runs require agent authority")
+            if self.token_budget is None or self.execution_contract.get("token_budget") is None:
+                raise ValueError("V11 runs require a non-None token_budget")
             required = {
                 "model_provider",
                 "model_name",
