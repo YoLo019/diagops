@@ -1,4 +1,25 @@
-from backend.domain.multi_agent import ResultValidationCategory
+from __future__ import annotations
+
+import re
+from collections.abc import Iterable
+
+from backend.domain.agent_findings import (
+    AgentFinding,
+    CoordinationReview,
+    FindingActor,
+)
+from backend.domain.agent_plan import AgentExecution, DiagnosisTask
+from backend.domain.evidence import EvidenceItem, EvidenceStatus
+from backend.domain.multi_agent import (
+    AuthorityMode,
+    CausalCheckName,
+    CausalCheckStatus,
+    CriticVerdict,
+    DiagnosticStatus,
+    LeadAction,
+    ResultValidationCategory,
+)
+from backend.domain.tool_calls import ToolCallRecord
 
 
 class AgentResultValidationError(ValueError):
@@ -7,3 +28,262 @@ class AgentResultValidationError(ValueError):
     def __init__(self, category: ResultValidationCategory) -> None:
         self.category = category
         super().__init__(category.value)
+
+
+class V11ResultValidationError(ValueError):
+    """V11 结果的机械引用/归属合同错误。"""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
+_CONTROL_CHARACTER = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def validate_v11_result(
+    *,
+    investigation_id: str,
+    runtime_run_id: str,
+    findings: Iterable[AgentFinding],
+    candidates,
+    review: CoordinationReview | None,
+    executions: Iterable[AgentExecution] = (),
+    evidence: Iterable[EvidenceItem] = (),
+    tasks: Iterable[DiagnosisTask] = (),
+    tool_calls: Iterable[ToolCallRecord] = (),
+    tool_registry=None,
+    agent_manifest: tuple[str, ...] | None = None,
+    status: DiagnosticStatus | None = None,
+) -> None:
+    """只校验 V11 的机械契约，不解释因果语义。
+
+    这个校验器只读取 Agent 输出。它不会排序或改写 rank、entity、mechanism、
+    evidence、counterevidence、onset，也不会调用 V10 的 CauseType/provider 语义校验。
+    """
+    finding_items = tuple(findings)
+    candidate_items = tuple(candidates)
+    execution_items = tuple(executions)
+    evidence_items = tuple(evidence)
+    task_items = tuple(tasks)
+    tool_call_items = tuple(tool_calls)
+    evidence_by_id = {item.id: item for item in evidence_items}
+    if len(evidence_by_id) != len(evidence_items):
+        raise V11ResultValidationError("duplicate_evidence_id")
+    usable_evidence = {
+        item.id
+        for item in evidence_items
+        if item.status in {EvidenceStatus.SUCCESS, EvidenceStatus.PARTIAL}
+    }
+
+    _validate_safe_texts(finding_items, candidate_items, review, execution_items)
+    finding_ids = {item.id for item in finding_items}
+    if len(finding_ids) != len(finding_items):
+        raise V11ResultValidationError("duplicate_finding_id")
+    for finding in finding_items:
+        if finding.investigation_id != investigation_id:
+            raise V11ResultValidationError("finding_investigation_owner")
+        if finding.agent_name == FindingActor.INVESTIGATOR and (
+            finding.runtime_run_id != runtime_run_id
+            or finding.task_id is None
+            or finding.agent_instance_id is None
+        ):
+            raise V11ResultValidationError("finding_runtime_owner")
+        if finding.runtime_run_id not in {None, runtime_run_id}:
+            raise V11ResultValidationError("finding_runtime_owner")
+        _require_committed_refs(
+            [*finding.evidence_ids, *finding.contradicting_evidence_ids],
+            usable_evidence,
+            "finding_evidence_reference",
+        )
+        if finding.analysis_round == 2 and (
+            finding.agent_name == FindingActor.INVESTIGATOR
+            and finding.critic_assessment_id is None
+        ):
+            raise V11ResultValidationError("round_two_assessment_reference")
+        if finding.agent_name == FindingActor.INVESTIGATOR:
+            task = next((item for item in task_items if item.id == finding.task_id), None)
+            if task is not None and (
+                task.runtime_run_id != runtime_run_id
+                or task.analysis_round != finding.analysis_round
+            ):
+                raise V11ResultValidationError("finding_task_contract")
+            if task is not None and finding.analysis_round == 2:
+                if task.critic_assessment_id != finding.critic_assessment_id:
+                    raise V11ResultValidationError("finding_assessment_contract")
+        _validate_scope_consistency(finding.affected_entity, finding.evidence_ids, evidence_by_id)
+
+    candidate_ids = [candidate.id for candidate in candidate_items]
+    if len(set(candidate_ids)) != len(candidate_ids):
+        raise V11ResultValidationError("duplicate_candidate_id")
+    ranks = [candidate.rank for candidate in candidate_items]
+    if len(set(ranks)) != len(ranks) or sorted(ranks) != list(
+        range(1, len(ranks) + 1)
+    ):
+        raise V11ResultValidationError("candidate_rank")
+    for candidate in candidate_items:
+        _require_committed_refs(
+            [
+                *candidate.supporting_evidence_ids,
+                *candidate.contradicting_evidence_ids,
+            ],
+            usable_evidence,
+            "candidate_evidence_reference",
+        )
+        if not set(candidate.supporting_finding_ids) <= finding_ids:
+            raise V11ResultValidationError("candidate_finding_reference")
+        if not set(candidate.contradicting_finding_ids) <= finding_ids:
+            raise V11ResultValidationError("candidate_finding_reference")
+        _validate_scope_consistency(
+            candidate.affected_entity,
+            candidate.supporting_evidence_ids,
+            evidence_by_id,
+        )
+
+    for execution in execution_items:
+        if execution.runtime_run_id != runtime_run_id:
+            raise V11ResultValidationError("execution_runtime_owner")
+    for call in tool_call_items:
+        if call.runtime_run_id != runtime_run_id:
+            raise V11ResultValidationError("tool_runtime_owner")
+        if agent_manifest is not None and call.tool_name not in agent_manifest:
+            raise V11ResultValidationError("tool_manifest_reference")
+        if tool_registry is not None and agent_manifest is not None:
+            try:
+                tool_registry.assert_agent_callable(call.tool_name, agent_manifest)
+            except ValueError as exc:
+                raise V11ResultValidationError("tool_permission") from exc
+
+    if review is None:
+        if status in {DiagnosticStatus.COMPLETE, DiagnosticStatus.PARTIAL}:
+            raise V11ResultValidationError("final_review_required")
+        return
+    if review.investigation_id != investigation_id:
+        raise V11ResultValidationError("review_investigation_owner")
+    if review.authority_mode != AuthorityMode.AGENT:
+        raise V11ResultValidationError("review_authority")
+    if review.runtime_run_id != runtime_run_id:
+        raise V11ResultValidationError("review_runtime_owner")
+    if {candidate.id for candidate in review.candidates} != set(candidate_ids):
+        raise V11ResultValidationError("review_candidate_projection")
+    _validate_assessments(review, set(candidate_ids), usable_evidence, runtime_run_id)
+    if review.lead_decision is None:
+        if status in {DiagnosticStatus.COMPLETE, DiagnosticStatus.PARTIAL}:
+            raise V11ResultValidationError("final_lead_required")
+        return
+
+    decision = review.lead_decision
+    if not set(decision.candidate_ids) <= set(candidate_ids):
+        raise V11ResultValidationError("lead_candidate_reference")
+    accepted = {
+        item.candidate_id
+        for item in review.critic_assessments
+        if item.verdict == CriticVerdict.ACCEPT
+    }
+    if decision.action == LeadAction.CONCLUDE and not set(decision.candidate_ids) <= accepted:
+        raise V11ResultValidationError("lead_accepted_candidate_reference")
+    if decision.action == LeadAction.INCONCLUSIVE and decision.candidate_ids:
+        raise V11ResultValidationError("inconclusive_candidates")
+    if status in {DiagnosticStatus.COMPLETE, DiagnosticStatus.PARTIAL}:
+        if not review.critic_assessments:
+            raise V11ResultValidationError("final_critic_required")
+        if decision.action != LeadAction.CONCLUDE or not decision.candidate_ids:
+            raise V11ResultValidationError("final_conclusion_required")
+    if status == DiagnosticStatus.INCONCLUSIVE and decision.candidate_ids:
+        raise V11ResultValidationError("inconclusive_candidates")
+
+def _validate_assessments(
+    review: CoordinationReview,
+    candidate_ids: set[str],
+    usable_evidence: set[str],
+    runtime_run_id: str,
+) -> None:
+    assessments = review.critic_assessments
+    assessment_ids = [item.id for item in assessments]
+    if len(set(assessment_ids)) != len(assessment_ids):
+        raise V11ResultValidationError("duplicate_assessment_id")
+    if len(assessments) != len(candidate_ids):
+        raise V11ResultValidationError("assessment_candidate_cardinality")
+    for assessment in assessments:
+        if assessment.runtime_run_id != runtime_run_id:
+            raise V11ResultValidationError("assessment_runtime_owner")
+        if assessment.candidate_id not in candidate_ids:
+            raise V11ResultValidationError("assessment_candidate_reference")
+        if len(assessment.checks) != 7:
+            raise V11ResultValidationError("assessment_check_count")
+        if {check.name for check in assessment.checks} != set(CausalCheckName):
+            raise V11ResultValidationError("assessment_check_names")
+        for check in assessment.checks:
+            if check.status in {CausalCheckStatus.PASS, CausalCheckStatus.FAIL}:
+                _require_committed_refs(
+                    check.evidence_ids,
+                    usable_evidence,
+                    "assessment_evidence_reference",
+                )
+        if assessment.verdict == CriticVerdict.NEEDS_EVIDENCE:
+            if assessment.review_round == 2:
+                raise V11ResultValidationError("reconciliation_requested_evidence")
+            if not assessment.supplemental_task_ids:
+                raise V11ResultValidationError("missing_supplemental_task")
+        elif assessment.supplemental_task_ids:
+            raise V11ResultValidationError("unexpected_supplemental_task")
+
+
+def _require_committed_refs(
+    references: Iterable[str], usable_ids: set[str], code: str
+) -> None:
+    if not set(references) <= usable_ids:
+        raise V11ResultValidationError(code)
+
+
+def _validate_scope_consistency(
+    entity: str | None,
+    evidence_ids: Iterable[str],
+    evidence_by_id: dict[str, EvidenceItem],
+) -> None:
+    if entity is None:
+        return
+    scoped_entities = {
+        scoped_entity
+        for evidence_id in evidence_ids
+        for scoped_entity in (
+            evidence_by_id[evidence_id].scope.entity_ids
+            if evidence_by_id[evidence_id].scope is not None
+            else []
+        )
+    }
+    if scoped_entities and entity not in scoped_entities:
+        raise V11ResultValidationError("scope_entity_mismatch")
+
+
+def _validate_safe_texts(
+    findings: Iterable[AgentFinding],
+    candidates,
+    review: CoordinationReview | None,
+    executions: Iterable[AgentExecution],
+) -> None:
+    values: list[str] = []
+    for finding in findings:
+        values.extend([finding.summary, finding.rationale, *finding.gaps])
+    for candidate in candidates:
+        values.extend(
+            [
+                candidate.summary,
+                candidate.rationale,
+                candidate.uncertainty,
+                *(
+                    item
+                    for item in (
+                        candidate.affected_entity,
+                        candidate.failure_mechanism,
+                    )
+                    if item
+                ),
+            ]
+        )
+    if review is not None:
+        values.extend([review.summary, review.uncertainty, review.stop_reason or ""])
+    for execution in executions:
+        values.extend([execution.summary or "", execution.error_message or ""])
+    if any(_CONTROL_CHARACTER.search(value) for value in values):
+        raise V11ResultValidationError("unsafe_text")

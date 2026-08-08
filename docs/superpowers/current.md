@@ -43,11 +43,22 @@ Plan status: `approved`
 
 Implementation status: `verifying`
 
-Completion commit: `none`
+Completion commit: `none` (M3 implementation is verifying; the iteration is not
+complete)
+
+M2 baseline commit: `c2245ac` (`chore(v11): checkpoint M2 T4-T6`), committed
+in the isolated M3 worktree; dirty `main` was not modified.
 
 Verification evidence: `M1/T2–T3 third-round review-fix RED→GREEN evidence is green; RR-H1 deadline/budget 覆盖 6 项 + RR-M1 domain 契约 9 项补齐，RR-M2/RR-L2 先 RED 后 GREEN；第三轮独立复审 approve_with_followups 的 6 项发现当日全部关闭（RR-L1 INTAKE 激活原子化、RR-L3 公开事务内读取接口，均先 RED 后 GREEN）；T2 gate 209 passed，T3 gate 429 passed/3 skipped/1 warning，scoped Ruff 与 diff-check clean；M1 已合并 main 336067c`
 
-Verification evidence (M2, 2026-08-08): `M2/T4–T6 独立复审 approve_with_followups 且无未关闭 blocking/high：评审独立重跑 T4 336 passed + 离线验收 rows=80 failed=0、T5 17 passed + Docker gate blocked（daemon 不可用，按 plan 记录）、T6 106 passed、全量 1927 passed/3 skipped、Ruff clean、runtime acceptance exit=0；M2R-1（high，§7.8 取消/no-late-commit 证据）当日补 4 条 slow-endpoint 测试经针对性复审 closed；T5 digest 环境注入裁定等价安全机制、schema 断言 6→7 确认为 M1 遗留（a40942a 复现 2 failed）；M2R-2/3 列入 T7 强制前置，M2R-4 跟踪；M2 改动未提交，等待用户授权`
+Verification evidence (M2, 2026-08-08): `M2/T4–T6 独立复审 approve_with_followups 且无未关闭 blocking/high：评审独立重跑 T4 336 passed + 离线验收 rows=80 failed=0、T5 17 passed + Docker gate blocked（daemon 不可用，按 plan 记录）、T6 106 passed、全量 1927 passed/3 skipped、Ruff clean、runtime acceptance exit=0；M2R-1（high，§7.8 取消/no-late-commit 证据）当日补 4 条 slow-endpoint 测试经针对性复审 closed；T5 digest 环境注入裁定等价安全机制、schema 断言 6→7 确认为 M1 遗留（a40942a 复现 2 failed）；M2 基线已以 `c2245ac` 单独提交；M2R-2/3 在 M3 T7 中关闭，M2R-4 跟踪。`
+
+Verification evidence (M3 T7–T8, 2026-08-08): `T7 exact gate 53 passed，T8
+exact gate 164 passed；M2R-2/3 focused 27 passed（含生产 resolver wiring 与
+真实 dispatch/retry/resume 的 assert_agent_callable recheck）；T7/T8 scoped
+Ruff clean；全量 pytest 1940 passed/3 skipped/1 warning；全仓 backend/tests
+Ruff clean。实现保留 V10 legacy runtime 边界，V11 phase executor 仅消费
+persisted V11 phases；M3 已提交于隔离分支，当前等待独立复审，未开始 M4/M5。`
 
 Blocker: `none`
 
@@ -86,11 +97,13 @@ docs/superpowers/plans/2026-08-02-diagops-v11-adaptive-multi-agent-rca-implement
 
 ## V11 Planning Dashboard
 
-Overall progress: `V11 Spec/Plan approved, execution authorized 2026-08-02; M0/T1 done：真实 RCAEval RE2 全链路完成（byte-verified 双向对账 2700/2700、真实 prepare runtime manifest_hash bb119fc9…/150 cases/26 GB、二次 prepare diff -r 零差异字节等价）；M0 exit review 2026-08-04 approve_with_followups（出口判据满足，M0-I2 措辞 followup 已修复并 closed：28 focused + 142 regression passed, Ruff clean；M0-L1/L2 low open，M5 前处理）；M1/T2–T3 第三轮独立复审 2026-08-07 approve_with_followups，全部 6 项发现当日 RED→GREEN 关闭并已合并 main 336067c；M2/T4–T6 2026-08-08 独立复审 approve_with_followups 且无未关闭 blocking/high，M2R-1 当日关闭，改动未提交等待授权`
+Overall progress: `V11 Spec/Plan approved, execution authorized 2026-08-02; M0/T1 done：真实 RCAEval RE2 全链路完成（byte-verified 双向对账 2700/2700、真实 prepare runtime manifest_hash bb119fc9…/150 cases/26 GB、二次 prepare diff -r 零差异字节等价）；M0 exit review 2026-08-04 approve_with_followups（出口判据满足，M0-I2 措辞 followup 已修复并 closed：28 focused + 142 regression passed, Ruff clean；M0-L1/L2 low open，M5 前处理）；M1/T2–T3 第三轮独立复审 2026-08-07 approve_with_followups，全部 6 项发现当日 RED→GREEN 关闭并已合并 main 336067c；M2/T4–T6 2026-08-08 独立复审 approve_with_followups，M2 基线 `c2245ac` 已提交；M3/T7–T8 实现验证完成，等待独立复审`
 
-Current phase: Full iteration / M2 T4–T6 reviewed and passed (uncommitted), ready for M3
+Current phase: Full iteration / M3 T7–T8 implemented and verified in isolated
+worktree; awaiting independent review
 
-Next action: 请求用户授权提交 M2 改动；随后按 Plan §6 启动 M3（T7 起，Agent 编排，含 M2R-2/M2R-3 强制前置），等待用户指示。
+Next action: 独立复审 M3；保持当前 worktree/branch，不 merge、push 或进入
+M4/M5。
 
 | ID | Phase | Task | Status | Evidence or result | Next action or blocker |
 | --- | --- | --- | --- | --- | --- |
@@ -101,7 +114,8 @@ Next action: 请求用户授权提交 M2 改动；随后按 Plan §6 启动 M3�
 | P5 | Plan | Map approved requirements to implementation and verification tasks | approved | Rewritten as T1–T13/M0–M5; independent review found H1–H3/M1–M2, all closed in focused re-review with no remaining blocking/high/medium issue; R1–R27 Plan-task mapping recorded in Spec; user approved and authorized execution on 2026-08-02 | M0/T1 complete; M1/T2–T3 evidence recorded |
 | M1/T2 | Execute | Domain contracts, run ownership, and Schema V7 | implemented / verified | 初始审查问题 H8–H10 已补最小 RED 并 GREEN；第二轮 Medium 1–3 的 domain/memory/SQLite 直接写入回归先 RED 后 GREEN；`uv run pytest tests/domain tests/db/test_migrations.py tests/db/test_runtime_migrations.py tests/db/test_v5_agentic_rca_persistence.py -q` → `199 passed in 6.81s`; T2 Ruff clean；fresh、V3/V4/V5、legacy-V6/current-V6 manifest 一致且仅三列物理变更 | 独立迁移复审通过（第三轮 RR 全关闭） |
 | M1/T3 | Execute | Versioned phase profiles, activation, gates, replay, and diff | implemented / verified | 初始审查问题 H1–H7 已补最小 RED 并 GREEN；第二轮 ownerless RESULT_VALIDATION、计划/任务和 Investigation 聚合写入回归先 RED 后 GREEN；`uv run pytest tests/runtime tests/api/test_runtime_runs_api.py -q` → `420 passed, 2 skipped, 1 warning in 117.53s`; `tests/runtime/test_review_fixes.py` → `27 passed, 1 skipped`; T3 Ruff clean；V10/V11 phase、owner、replay/diff、contract-integrity reload、service/API gate 回归通过 | 独立运行时复审通过（第三轮 RR 全关闭）；M2 未开始 |
-| M2/T4–T6 | Execute | 九工具离线事件包与 data-only skills、File/Tempo trace 平价、模型边界与能力认证 | implemented / verified | 独立复审重跑：T4 336 passed + 离线验收 rows=80 failed=0；T5 17 passed + Docker gate blocked（daemon 不可用）；T6 106→110 passed（M2R-1 补 4 条 slow-endpoint 测试）；全量 1927 passed/3 skipped、Ruff clean、runtime acceptance exit=0；复审 approve_with_followups，M2R-1 closed，M2R-2/3 列入 T7 强制前置，M2R-4 跟踪 | 改动未提交，等待用户授权；M3 未开始 |
+| M2/T4–T6 | Execute | 九工具离线事件包与 data-only skills、File/Tempo trace 平价、模型边界与能力认证 | implemented / verified | 独立复审重跑：T4 336 passed + 离线验收 rows=80 failed=0；T5 17 passed + Docker gate blocked（daemon 不可用）；T6 106→110 passed（M2R-1 补 4 条 slow-endpoint 测试）；全量 1927 passed/3 skipped、Ruff clean、runtime acceptance exit=0；复审 approve_with_followups，M2R-1 closed；M2 基线 `c2245ac` 已单独提交，M2R-2/3 在 M3 T7 中关闭，M2R-4 跟踪 | 保持基线提交，不修改 dirty main |
+| M3/T7–T8 | Execute / Verify | Lead/Investigators/Critic/Lead V11 authority runtime | implemented / verified | T7 53 passed、T8 164 passed；M2R focused 27 passed；全量 1940 passed/3 skipped/1 warning；全仓 Ruff clean；RED→GREEN 证据与 V10/V11 隔离、九工具 manifest、7-check Critic/reconciliation、机械 validator 已记录于 Plan §6 | 等待独立复审；不进入 M4/M5 |
 
 M1 review-fix record (2026-08-06): High 1–6 and Medium 7–10 were reproduced
 with focused regressions, fixed at shared profile/ownership/transaction/entry

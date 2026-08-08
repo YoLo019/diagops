@@ -532,8 +532,10 @@ and focused re-review; M2R-2 (verified-memory resolver wiring) and M2R-3
 (`assert_agent_callable` call site) are mandatory T7 prerequisites; M2R-4
 (span-attribute redaction row) is optional hardening. The T5 live Docker
 parity run remains owed on a host with a daemon. The approved contract and
-milestone scope are unchanged; M2 changes are uncommitted pending user
-authorization.
+milestone scope are unchanged; the M2 snapshot is committed as
+`M2_BASE_SHA=c2245ac` in the isolated M3 worktree. M2R-2 and M2R-3 are closed
+by the T7 implementation and focused evidence below; M2R-4 remains optional
+hardening.
 
 ## 6. M3 — Make Agents authoritative
 
@@ -628,6 +630,31 @@ Acceptance:
 - Invalid or insufficient results reject/fail/become inconclusive per contract;
   no deterministic result is substituted.
 - A complete/partial V11 diagnosis always has final Critic and Lead decisions.
+
+### M3 execution evidence (2026-08-08)
+
+The M2 snapshot was committed before M3 implementation as
+`M2_BASE_SHA=c2245ac` (`chore(v11): checkpoint M2 T4-T6`). M3 was implemented
+on branch `codex/v11-m3` in the isolated worktree
+`D:\agent\worktrees\sre-agent-v11-m3`; dirty `main` was not modified.
+
+T7 followed RED→GREEN test-first coverage for Lead persistence and bounded
+planning, the shared nine-tool manifest, production verified-memory resolver
+wiring, invocation-time `assert_agent_callable`, isolated Investigator
+contexts, committed evidence ordering, retry/resume, budget/timeout,
+cancellation, late results, cleanup, and partial failure. The exact T7 gate
+passed `53 passed`; its scoped Ruff gate passed.
+
+T8 followed RED→GREEN coverage for exactly seven Critic checks per candidate,
+one bounded evidence round, same-assessment reconciliation, accepted-only Lead
+conclusion, inconclusive-without-candidates, mechanical non-mutating validation,
+and final Critic+Lead requirements for complete/partial results. The exact T8
+gate passed `164 passed`; its scoped Ruff gate passed.
+
+M2R-2/M2R-3 focused evidence passed `27 passed`. The full repository gate passed
+`1940 passed, 3 skipped, 1 warning`; `uv run ruff check backend tests` passed.
+The M3 commit is intentionally handed off for independent review; M4/M5 were
+not started and no merge or push was performed.
 
 ### M3 review
 
@@ -918,11 +945,11 @@ request only the missing authority.
 | T1 | done | R15, R17, R25 | 代码侧：M0 review 三轮后 approve（全部 findings closed）；修正案 TDD red→green 落地，55 focused + 142 benchmarks regression passed + ruff clean。真实 artifact 全链路（2026-08-04）：归一化 270 cases + custodian pin（SHA `b064b858…`，archive hash `10863f25…`）；`verify_against_raw.py`（SHA `88fa5ab2…`）双向逐文件对账 2700/2700 全匹配（provenance 升级为 byte-verified）；真实 prepare 产出 `D:\data\RCAEval\prepared-v11-m0`——runtime manifest_hash `bb119fc9fe338f7cf2d6f03a82f87a0038a1a589fde0c96ad99b02504a5f3d73`（150 cases：OB30+SS30+TT90，1560 telemetry files，26 GB），label manifest_hash `06413003c877177e01d907106ad1181631d16a568b26a4dea86e52d73108a05d`，产物内 SHA256SUMS 1561 行全 OK；taxonomy 词 grep 对 manifest/文件名 0 命中（遥测正文合法包含服务名，见 M0-I2）；二次独立 prepare `diff -r` 零差异 + manifest_hash 逐字符一致（真实数据字节等价确定性，此前仅合成 fixture 覆盖）；M0-R1/R2 closed、M0-R3 closed（用户追认 256 MiB）、M0-I3 closed、M0-I4 recorded、M0-I2 closed（测试断言范围修正，28 focused + 142 regression passed）。剩余 open：M0-L1/L2（low，M5 freeze 前处理）；M0 exit review 2026-08-04 `approve_with_followups`，出口判据满足（见 §10 评审记录） |
 | T2 | implemented / verified | R2, R4–R6, R9–R10, R20, R27 | RED→GREEN domain/migration/persistence tests; `198 passed in 8.07s`; scoped Ruff clean; full requirement acceptance remains subject to later M3–M5 tasks and M1 independent review |
 | T3 | implemented / verified | R7–R10, R13, R18, R20, R27 | RED→GREEN runtime isolation/recovery tests; `391 passed, 1 skipped, 1 warning in 160.40s`; scoped Ruff clean; full requirement acceptance remains subject to later M3–M5 tasks and M1 independent review |
-| T4 | pending | R3, R11, R21–R22, R24, R27 | pending |
-| T5 | pending | R21–R23 | pending |
-| T6 | pending | R8, R11–R13, R26–R27 | pending |
-| T7 | pending | R1–R3, R5–R6, R11–R13, R24, R27 | pending |
-| T8 | pending | R1, R4–R7, R9, R11–R13, R27 | pending |
+| T4 | implemented / verified | R3, R11, R21–R22, R24, R27 | 336 focused passed; offline acceptance rows=80, failed=0; nine-tool/data-only skill evidence recorded; independent M2 review approve_with_followups |
+| T5 | implemented / verified (live Docker blocked) | R21–R23 | 17 focused passed; File/Tempo parity contracts green; Docker gate explicitly blocked by unavailable daemon, retained as a host-dependent follow-up |
+| T6 | implemented / verified | R8, R11–R13, R26–R27 | 110 focused passed including M2R-1 slow-endpoint cancellation/no-late-commit/cleanup evidence; independent M2 review approve_with_followups |
+| T7 | implemented / verified | R1–R3, R5–R6, R11–R13, R24, R27 | RED→GREEN; exact gate 53 passed; scoped Ruff clean; M2R-2 resolver wiring and M2R-3 invocation recheck closed |
+| T8 | implemented / verified | R1, R4–R7, R9, R11–R13, R27 | RED→GREEN; exact gate 164 passed; scoped Ruff clean; seven-check/reconciliation/Lead/validator contracts covered |
 | T9 | pending | R5–R12, R18–R19, R27 | pending |
 | T10 | pending | R8–R13, R16, R18, R21–R23, R26–R27 | pending |
 | T11 | pending | R14–R17, R24–R27 | pending |
@@ -1012,4 +1039,4 @@ M1 third-round review (migration/runtime, 2026-08-07): conclusion
 - Specification: approved by the user on 2026-08-02 after L22–L30 reuse review.
 - Implementation Plan: independently reviewed with H1–H3/M1–M2 closed; approved
   by the user on 2026-08-02 with authorization to begin execution.
-- Implementation: M0/T1 complete; M1/T2–T3 implemented and verified on 2026-08-05 in the delegated worktree; third-round independent migration/runtime review concluded `approve_with_followups` on 2026-08-07 with all six findings closed the same day (RR-H1/RR-M1/RR-M2/RR-L2 at commit `336067c`, RR-L1/RR-L3 in the follow-up Light fix); M2 not started.
+- Implementation: M0/T1 complete; M1/T2–T3 implemented and verified on 2026-08-05 in the delegated worktree; third-round independent migration/runtime review concluded `approve_with_followups` on 2026-08-07 with all six findings closed the same day (RR-H1/RR-M1/RR-M2/RR-L2 at commit `336067c`, RR-L1/RR-L3 in the follow-up Light fix); M2 snapshot committed as `M2_BASE_SHA=c2245ac`; M3/T7–T8 implemented and verified on 2026-08-08 in isolated branch `codex/v11-m3`, with independent M3 review pending; M4/M5 not started.

@@ -116,6 +116,7 @@ class DiagnosisOrchestrator:
         task_planner: DiagnosisTaskPlanner | None = None,
         execution_engine: DiagnosisExecutionEngine | None = None,
         agents_runtime: AgentsRcaRuntime | None = None,
+        v11_runtime=None,
         default_strategy: InvestigationStrategy | None = None,
         max_tool_calls_per_specialist: int = 3,
         max_total_tool_calls: int = 8,
@@ -132,6 +133,7 @@ class DiagnosisOrchestrator:
             tool_registry=build_provider_tool_registry(providers),
         )
         self.agents_runtime = agents_runtime
+        self.v11_runtime = v11_runtime
         self.default_strategy = InvestigationStrategy(
             default_strategy
             or getattr(agents_runtime, "strategy", InvestigationStrategy.FIXED)

@@ -55,6 +55,7 @@ class _DiagnosisState:
     preexisting_terminal_tool_ids: frozenset[str] = frozenset()
     check_execution: Callable[[], None] = field(default=lambda: None)
     hit_fault: Callable[[str], None] = field(default=lambda _point: None)
+    phase_input: object | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,13 +105,13 @@ class DiagnosisPhaseExecutor:
         ] = {
             RuntimePhase.INTAKE: self._v11_intake,
             RuntimePhase.EVIDENCE_COLLECTION: self._v11_pass,
-            RuntimePhase.LEAD_PLANNING: self._v11_pass,
-            RuntimePhase.INVESTIGATOR_ROUND_1: self._v11_pass,
-            RuntimePhase.CRITIC_REVIEW: self._v11_pass,
-            RuntimePhase.INVESTIGATOR_ROUND_2: self._v11_skip,
-            RuntimePhase.CRITIC_RECONCILIATION: self._v11_skip,
-            RuntimePhase.LEAD_ADJUDICATION: self._v11_pass,
-            RuntimePhase.RESULT_VALIDATION: self._v11_pass,
+            RuntimePhase.LEAD_PLANNING: self._v11_runtime_phase,
+            RuntimePhase.INVESTIGATOR_ROUND_1: self._v11_runtime_phase,
+            RuntimePhase.CRITIC_REVIEW: self._v11_runtime_phase,
+            RuntimePhase.INVESTIGATOR_ROUND_2: self._v11_runtime_phase,
+            RuntimePhase.CRITIC_RECONCILIATION: self._v11_runtime_phase,
+            RuntimePhase.LEAD_ADJUDICATION: self._v11_runtime_phase,
+            RuntimePhase.RESULT_VALIDATION: self._v11_runtime_phase,
             RuntimePhase.REPORT_GENERATION: self._v11_pass,
             RuntimePhase.FINALIZE: self._v11_finalize,
         }
@@ -138,6 +139,7 @@ class DiagnosisPhaseExecutor:
         if state is None:
             state = self._rehydrate_runtime_state(phase_input)
             self._runtime_states[phase_input.run_id] = state
+        state.phase_input = phase_input
         if phase_input.execution_contract_version == ExecutionContractVersion.V11:
             output = await self._v11_handlers[phase_input.phase](state)
         elif phase_input.phase == RuntimePhase.INTAKE:
@@ -166,8 +168,12 @@ class DiagnosisPhaseExecutor:
             agents_runtime._persist_agent_event = phase_input.persist_agent_event
             agents_runtime._persist_model_event = phase_input.persist_model_event
             agents_runtime._hit_fault = phase_input.hit_fault or (lambda _point: None)
+        v11_runtime = getattr(self._orchestrator, "v11_runtime", None)
+        if v11_runtime is not None:
+            v11_runtime.bind_phase(phase_input)
         state = self._runtime_states.get(phase_input.run_id)
         if state is not None:
+            state.phase_input = phase_input
             state.check_execution = phase_input.check_execution or (lambda: None)
             state.hit_fault = phase_input.hit_fault or (lambda _point: None)
 
@@ -228,6 +234,18 @@ class DiagnosisPhaseExecutor:
             agents_runtime._hit_fault = phase_input.hit_fault or (lambda _point: None)
             if phase_input.tool_budget is not None:
                 agents_runtime.max_total_tool_calls = phase_input.tool_budget
+        v11_source = getattr(self._orchestrator, "v11_runtime", None)
+        v11_runtime = (
+            v11_source.clone_for_run(
+                runtime_run_id=phase_input.run_id,
+                model_provider=phase_input.model_provider,
+                model_name=phase_input.model_name,
+                token_budget=phase_input.token_budget,
+                timeout_seconds=phase_input.timeout_seconds,
+            )
+            if v11_source is not None
+            else None
+        )
         sandbox = DiagnosisOrchestrator(
             repository=repository,
             providers=self._orchestrator.providers,
@@ -237,6 +255,7 @@ class DiagnosisPhaseExecutor:
             action_planner=self._orchestrator.action_planner,
             task_planner=self._orchestrator.task_planner,
             agents_runtime=agents_runtime,
+            v11_runtime=v11_runtime,
             default_strategy=self._orchestrator.default_strategy,
             max_tool_calls_per_specialist=(
                 self._orchestrator.max_tool_calls_per_specialist
@@ -368,6 +387,34 @@ class DiagnosisPhaseExecutor:
 
     async def _v11_pass(self, state: _DiagnosisState) -> PhaseOutput:
         return self._output(state)
+
+    async def _v11_runtime_phase(self, state: _DiagnosisState) -> PhaseOutput:
+        """将 V11 phase 交给持久化 Runtime；兼容旧的隔离哨兵。"""
+        if not hasattr(self._orchestrator, "v11_runtime"):
+            return self._output(state)
+        runtime = self._orchestrator.v11_runtime
+        if runtime is None:
+            raise RuntimeError("V11 Runtime is not configured")
+        if state.phase_input is None or state.record is None:
+            raise RuntimeError("V11 phase lacks persisted input")
+        runtime.bind_phase(state.phase_input)
+        await runtime.run_phase(
+            state.phase_input.phase,
+            repository=self._orchestrator.repository,
+            investigation_id=state.record.id,
+            event=state.safe_event or state.record.event,
+        )
+        state.record = self._orchestrator.repository.get(state.record.id)
+        status = "completed"
+        if state.phase_input.phase in {
+            RuntimePhase.INVESTIGATOR_ROUND_2,
+            RuntimePhase.CRITIC_RECONCILIATION,
+        } and not any(
+            task.analysis_round == 2
+            for task in self._orchestrator.repository.list_tasks(state.record.id)
+        ):
+            status = "skipped"
+        return self._output(state, status=status)
 
     async def _v11_skip(self, state: _DiagnosisState) -> PhaseOutput:
         return self._output(state, status="skipped")
@@ -695,11 +742,12 @@ class DiagnosisPhaseExecutor:
         findings = self._orchestrator.repository.list_agent_findings(record.id)
         review = self._orchestrator.repository.get_coordination_review(record.id)
         tool_calls = self._orchestrator.repository.list_tool_calls(record.id)
-        runtime_run_id = getattr(
-            self._orchestrator.agents_runtime,
-            "runtime_run_id",
-            None,
+        runtime_owner = (
+            getattr(self._orchestrator, "v11_runtime", None)
+            if self._execution_contract_version == ExecutionContractVersion.V11
+            else self._orchestrator.agents_runtime
         )
+        runtime_run_id = getattr(runtime_owner, "runtime_run_id", None)
         terminal_tool_ids = {
             call.logical_call_id or call.id
             for call in tool_calls
@@ -743,12 +791,16 @@ class DiagnosisPhaseExecutor:
                 ),
             ),
             remaining_token_budget=(
-                state.session_token_budget
-                if state.session_token_budget is not None
-                else getattr(
-                    self._orchestrator.agents_runtime,
-                    "runtime_token_budget",
-                    None,
+                getattr(runtime_owner, "remaining_token_budget", None)
+                if self._execution_contract_version == ExecutionContractVersion.V11
+                else (
+                    state.session_token_budget
+                    if state.session_token_budget is not None
+                    else getattr(
+                        self._orchestrator.agents_runtime,
+                        "runtime_token_budget",
+                        None,
+                    )
                 )
             ),
             successful_tool_keys=sorted(
@@ -762,11 +814,22 @@ class DiagnosisPhaseExecutor:
                 }
             ),
         )
+        plan = self._orchestrator.repository.get_plan(record.id)
+        if plan is not None and plan.runtime_run_id is not None:
+            plan = plan.model_copy(
+                update={
+                    "tasks": [
+                        task
+                        for task in plan.tasks
+                        if task.analysis_round == 1
+                    ]
+                }
+            )
         return PhaseOutput(
             business_mutation=BusinessMutation(
                 investigation_id=record.id,
                 investigation=record.model_copy(deep=True),
-                plan=self._orchestrator.repository.get_plan(record.id),
+                plan=plan,
                 tasks=tuple(self._orchestrator.repository.list_tasks(record.id)),
                 context_facts=tuple(
                     self._orchestrator.repository.list_context_facts(record.id)
@@ -815,6 +878,7 @@ class DiagnosisPhaseExecutor:
             preexisting_terminal_tool_ids=preexisting_terminal_tool_ids,
             check_execution=phase_input.check_execution or (lambda: None),
             hit_fault=phase_input.hit_fault or (lambda _point: None),
+            phase_input=phase_input,
         )
         if record.multi_agent_run is not None:
             state.v7_result = AgentsRcaRuntimeResult(

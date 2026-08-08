@@ -22,6 +22,7 @@ from backend.diagnosis.coordinator import DiagnosisCoordinator
 from backend.diagnosis.deepseek_model import create_deepseek_model
 from backend.diagnosis.openai_compatible_model import create_openai_compatible_model
 from backend.diagnosis.orchestrator import DiagnosisOrchestrator
+from backend.diagnosis.v11_runtime import V11Runtime
 from backend.domain.events import IncidentEvent
 from backend.domain.multi_agent import (
     AuthorityMode,
@@ -52,7 +53,11 @@ from backend.runtime.telemetry import RuntimeTelemetry
 from backend.runtime.writer import RuntimeWriter
 from backend.safety.redaction import redact_model
 from backend.services.model_capability import latest_capability_artifact
-from backend.tools.provider_tools import VerifiedMemoryLookup, build_provider_tool_registry
+from backend.tools.provider_tools import (
+    VerifiedMemoryLookup,
+    build_provider_tool_registry,
+    current_investigation_id,
+)
 
 logger = logging.getLogger(__name__)
 _TELEMETRY_SHUTDOWN_TIMEOUT_SECONDS = 5.0
@@ -68,33 +73,38 @@ class AppContainer:
         providers = build_provider_registry_from_settings(self.settings)
         # verified memory 只读当前 repository 的受 guard 记录；tool registry 与
         # Provider registry 同源构造，保证九个 Agent 工具单一事实来源。
+        self.verified_memory_lookup = VerifiedMemoryLookup(
+            self.repository,
+            current_investigation_id=current_investigation_id,
+        )
         self.tool_registry = build_provider_tool_registry(
             providers,
-            VerifiedMemoryLookup(self.repository),
+            self.verified_memory_lookup,
         )
         agents_runtime = None
+        v11_runtime = None
         if self.settings.agents.enabled:
             try:
                 provider = self.settings.agents.provider
-                model = self.settings.agents.model
+                agent_model = self.settings.agents.model
                 if provider == ModelProvider.DEEPSEEK:
-                    model = create_deepseek_model(
-                        model,
+                    agent_model = create_deepseek_model(
+                        agent_model,
                         os.getenv("DEEPSEEK_API_KEY"),
                     )
                 elif provider == ModelProvider.OPENAI_COMPATIBLE:
                     compatible = self.settings.agents.openai_compatible
                     # generic endpoint 的凭证只允许 DIAGOPS_AGENTS_API_KEY，
                     # 绝不回退到官方 provider 的环境变量。
-                    model = create_openai_compatible_model(
-                        model,
+                    agent_model = create_openai_compatible_model(
+                        agent_model,
                         os.getenv("DIAGOPS_AGENTS_API_KEY"),
                         compatible.base_url,
                         timeout_seconds=float(compatible.timeout_seconds),
                         max_retries=compatible.max_retries,
                     )
                 agents_runtime = AgentsRcaRuntime(
-                    model=model,
+                    model=agent_model,
                     max_turns=self.settings.agents.max_turns,
                     timeout_seconds=self.settings.agents.timeout_seconds,
                     model_provider=provider,
@@ -112,6 +122,20 @@ class AppContainer:
                     ),
                     prompt_version="v9",
                 )
+                v11_runtime = V11Runtime(
+                    model=agent_model,
+                    model_provider=provider,
+                    model_name=self.settings.agents.model,
+                    tool_registry=self.tool_registry,
+                    max_turns=self.settings.agents.max_turns,
+                    timeout_seconds=min(
+                        120.0, float(self.settings.agents.timeout_seconds)
+                    ),
+                    max_total_tool_calls=self.settings.agents.max_total_tool_calls,
+                    tool_timeout_seconds=(
+                        self.settings.agents.tool_timeout_seconds
+                    ),
+                )
             except Exception as exc:
                 logger.warning(
                     "agents runtime construction failed error_type=%s",
@@ -125,6 +149,7 @@ class AppContainer:
             coordinator=DiagnosisCoordinator(providers),
             action_planner=ActionPlanner(),
             agents_runtime=agents_runtime,
+            v11_runtime=v11_runtime,
             default_strategy=self.settings.agents.strategy,
             max_tool_calls_per_specialist=(
                 self.settings.agents.max_tool_calls_per_specialist
