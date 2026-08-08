@@ -171,6 +171,12 @@ class _ModelReservation:
     status: str = "reserved"
 
 
+@dataclass(frozen=True, slots=True)
+class _ModelRequestEvent:
+    reservation_id: str
+    reservation_status: str | None
+
+
 class _V11BudgetedModel(Model):
     """把 durable token reservation 下沉到 Agents SDK 的每个 request。"""
 
@@ -196,7 +202,7 @@ class _V11BudgetedModel(Model):
         model_settings = kwargs["model_settings"]
         request_index = self._request_index
         self._request_index += 1
-        reservation_id = self._runtime._model_reservation_id(
+        reservation_id = self._runtime._model_request_reservation_id(
             self._logical_call_id,
             request_index,
         )
@@ -209,6 +215,7 @@ class _V11BudgetedModel(Model):
             execution_id=self._execution_id,
             attempt=self._attempt_number,
             actor=self._actor,
+            request_index=request_index,
         )
         output_cap, input_estimate, reserved_total = reservation
         request_settings = replace(
@@ -239,6 +246,7 @@ class _V11BudgetedModel(Model):
                 execution_id=self._execution_id,
                 attempt=self._attempt_number,
                 actor=self._actor,
+                request_index=request_index,
                 input_tokens=max(input_estimate, input_tokens),
                 output_tokens=output_tokens,
                 reservation_status="completed",
@@ -254,6 +262,7 @@ class _V11BudgetedModel(Model):
                     execution_id=self._execution_id,
                     attempt=self._attempt_number,
                     actor=self._actor,
+                    request_index=request_index,
                     input_tokens=input_estimate if request_started else 0,
                     reservation_status="released",
                 )
@@ -268,6 +277,7 @@ class _V11BudgetedModel(Model):
                     execution_id=self._execution_id,
                     attempt=self._attempt_number,
                     actor=self._actor,
+                    request_index=request_index,
                     input_tokens=input_estimate if request_started else 0,
                     reservation_status=self._runtime._retry_reservation_status(
                         exc,
@@ -398,6 +408,9 @@ class V11Runtime:
         self._token_budget_lock = asyncio.Lock()
         self._model_reservations: dict[str, _ModelReservation] = {}
         self._settled_model_reservations: set[str] = set()
+        self._model_request_history: dict[
+            tuple[str, int], list[_ModelRequestEvent]
+        ] = {}
         self._commit_lock = asyncio.Lock()
         self._execution_contract: dict[str, Any] | None = None
         self._remaining_deadline_seconds: Callable[[], float] = lambda: float("inf")
@@ -456,6 +469,7 @@ class V11Runtime:
         runtime._token_budget_lock = asyncio.Lock()
         runtime._model_reservations = {}
         runtime._settled_model_reservations = set()
+        runtime._model_request_history = {}
         runtime._commit_lock = asyncio.Lock()
         runtime._remaining_deadline_seconds = lambda: float("inf")
         runtime.timeout_seconds = (
@@ -519,6 +533,9 @@ class V11Runtime:
         self._persist_tool_result = phase_input.persist_tool_result
         self._persist_agent_event = phase_input.persist_agent_event
         self._persist_model_event = phase_input.persist_model_event
+        self._model_request_history = self._load_model_request_history(
+            getattr(phase_input, "model_events", ())
+        )
         self._hit_fault = phase_input.hit_fault or (lambda _point: None)
         self._phase_tool_budget = phase_input.tool_budget
         self._execution_contract = copy.deepcopy(phase_input.execution_contract)
@@ -2347,6 +2364,166 @@ class V11Runtime:
         }
         return json.dumps(redact_value(payload), ensure_ascii=False, sort_keys=True)
 
+    @staticmethod
+    def _request_index_from_reservation_id(reservation_id: str) -> int | None:
+        marker = ":request-"
+        if marker not in reservation_id:
+            return None
+        suffix = reservation_id.rsplit(marker, 1)[1]
+        if not suffix.isdigit():
+            return None
+        index = int(suffix) - 1
+        return index if index >= 0 else None
+
+    @classmethod
+    def _load_model_request_history(
+        cls, events: Iterable[Any]
+    ) -> dict[tuple[str, int], list[_ModelRequestEvent]]:
+        history: dict[tuple[str, int], list[_ModelRequestEvent]] = {}
+        model_event_types = {"model.started", "model.completed", "model.failed"}
+        for event in sorted(events, key=lambda item: getattr(item, "sequence", 0)):
+            event_type = str(getattr(event, "event_type", ""))
+            if event_type not in model_event_types:
+                continue
+            payload = getattr(event, "safe_payload", {})
+            if not isinstance(payload, dict):
+                continue
+            logical_call_id = payload.get("logical_call_id")
+            reservation_id = payload.get("reservation_id")
+            if not isinstance(logical_call_id, str) or not isinstance(
+                reservation_id, str
+            ):
+                continue
+            request_index = payload.get("request_index")
+            if isinstance(request_index, bool) or not isinstance(request_index, int):
+                request_index = cls._request_index_from_reservation_id(reservation_id)
+            if request_index is None or request_index < 0:
+                continue
+            reservation_status = payload.get("reservation_status")
+            if not isinstance(reservation_status, str):
+                reservation_status = {
+                    "model.started": "reserved",
+                    "model.completed": "completed",
+                    "model.failed": "released",
+                }[event_type]
+            history.setdefault((logical_call_id, request_index), []).append(
+                _ModelRequestEvent(reservation_id, reservation_status)
+            )
+        return history
+
+    def _record_model_request_event(
+        self, status: str, safe_payload: dict[str, Any] | None
+    ) -> None:
+        if not safe_payload:
+            return
+        logical_call_id = safe_payload.get("logical_call_id")
+        reservation_id = safe_payload.get("reservation_id")
+        if not isinstance(logical_call_id, str) or not isinstance(
+            reservation_id, str
+        ):
+            return
+        request_index = safe_payload.get("request_index")
+        if isinstance(request_index, bool) or not isinstance(request_index, int):
+            request_index = self._request_index_from_reservation_id(reservation_id)
+        if request_index is None or request_index < 0:
+            return
+        reservation_status = safe_payload.get("reservation_status")
+        if not isinstance(reservation_status, str):
+            reservation_status = {
+                "started": "reserved",
+                "completed": "completed",
+                "failed": "released",
+            }.get(status)
+        self._model_request_history.setdefault(
+            (logical_call_id, request_index), []
+        ).append(_ModelRequestEvent(reservation_id, reservation_status))
+
+    def _model_request_reservation_id(
+        self, logical_call_id: str | None, request_index: int
+    ) -> str | None:
+        base_id = self._model_reservation_id(logical_call_id, request_index)
+        if logical_call_id is None or base_id is None:
+            return None
+        history = self._model_request_history.get((logical_call_id, request_index), [])
+        for event in reversed(history):
+            if event.reservation_status not in {"retrying", "deferred"}:
+                continue
+            reservation = self._model_reservations.get(event.reservation_id)
+            if event.reservation_status == "deferred" and reservation is None:
+                return event.reservation_id
+            if reservation is not None and reservation.status == "retrying":
+                return event.reservation_id
+            break
+        used_ids = {event.reservation_id for event in history}
+        if (
+            base_id not in used_ids
+            and base_id not in self._model_reservations
+            and base_id not in self._settled_model_reservations
+        ):
+            return base_id
+        replay_index = 1
+        while True:
+            candidate = (
+                f"{logical_call_id}:replay-{replay_index}:request-{request_index + 1}"
+            )
+            if (
+                candidate not in used_ids
+                and candidate not in self._model_reservations
+                and candidate not in self._settled_model_reservations
+            ):
+                return candidate
+            replay_index += 1
+
+    @staticmethod
+    def _request_index_payload(request_index: int | None) -> dict[str, int]:
+        return {"request_index": request_index} if request_index is not None else {}
+
+    async def _defer_later_model_retries(
+        self,
+        logical_call_id: str,
+        request_index: int,
+        *,
+        execution_id: str | None,
+        attempt: int,
+        actor: str,
+    ) -> None:
+        """暂时释放后续 retry 的 allocation，保持其 reservation identity。"""
+        candidates: list[tuple[int, str, _ModelReservation]] = []
+        for (call_id, later_index), history in self._model_request_history.items():
+            if call_id != logical_call_id or later_index <= request_index or not history:
+                continue
+            latest = history[-1]
+            reservation = self._model_reservations.get(latest.reservation_id)
+            if (
+                latest.reservation_status == "retrying"
+                and reservation is not None
+                and reservation.status == "retrying"
+            ):
+                candidates.append((later_index, latest.reservation_id, reservation))
+        for later_index, reservation_id, reservation in sorted(candidates):
+            released_tokens = reservation.reserved_total
+            self._remaining_token_budget += released_tokens
+            self._model_reservations.pop(reservation_id, None)
+            try:
+                await self._emit_model(
+                    execution_id or reservation_id,
+                    "failed",
+                    actor,
+                    safe_payload={
+                        "logical_call_id": logical_call_id,
+                        "reservation_id": reservation_id,
+                        "reservation_status": "deferred",
+                        "reserved_tokens": released_tokens,
+                        "input_estimate": reservation.input_estimate,
+                        "attempt": attempt,
+                        **self._request_index_payload(later_index),
+                    },
+                )
+            except Exception:
+                self._remaining_token_budget -= released_tokens
+                self._model_reservations[reservation_id] = reservation
+                raise
+
     async def _reserve_model_budget(
         self,
         requested_budget: int | None,
@@ -2358,6 +2535,7 @@ class V11Runtime:
         execution_id: str | None = None,
         attempt: int = 1,
         actor: str = "CoordinatorAgent",
+        request_index: int | None = None,
     ) -> tuple[int | None, int, int]:
         if self._remaining_token_budget is None and requested_budget is None:
             return None, 0, 0
@@ -2395,6 +2573,7 @@ class V11Runtime:
                             "reserved_tokens": existing.reserved_total,
                             "input_estimate": existing.input_estimate,
                             "attempt": attempt,
+                            **self._request_index_payload(request_index),
                         },
                     )
                     existing.status = "reserved"
@@ -2409,6 +2588,23 @@ class V11Runtime:
             ):
                 raise V11RuntimeContractError("model reservation was already settled")
             current = self._remaining_token_budget
+            if (
+                current is not None
+                and current <= input_estimate
+                and logical_call_id is not None
+                and request_index is not None
+            ):
+                await self._defer_later_model_retries(
+                    logical_call_id,
+                    request_index,
+                    execution_id=execution_id,
+                    attempt=attempt,
+                    actor=actor,
+                )
+                current = self._remaining_token_budget
+                if requested_budget is None:
+                    requested = current
+            assert requested is not None
             available = min(
                 requested,
                 current if current is not None else requested,
@@ -2438,6 +2634,7 @@ class V11Runtime:
                             "reserved_tokens": available,
                             "input_estimate": input_estimate,
                             "attempt": attempt,
+                            **self._request_index_payload(request_index),
                         },
                     )
                 except Exception:
@@ -2457,6 +2654,7 @@ class V11Runtime:
         execution_id: str | None = None,
         attempt: int = 1,
         actor: str = "CoordinatorAgent",
+        request_index: int | None = None,
         input_tokens: int | None = None,
         output_tokens: int = 0,
         reservation_status: str = "completed",
@@ -2486,6 +2684,7 @@ class V11Runtime:
                             "reserved_tokens": reservation.reserved_total,
                             "input_estimate": reservation.input_estimate,
                             "attempt": attempt,
+                            **self._request_index_payload(request_index),
                         },
                     )
                     reservation.status = "retrying"
@@ -2505,6 +2704,7 @@ class V11Runtime:
                         "reserved_tokens": reservation.reserved_total,
                         "input_estimate": reservation.input_estimate,
                         "attempt": attempt,
+                        **self._request_index_payload(request_index),
                     },
                 )
                 self._remaining_token_budget += reserved_total - actual_total
@@ -2862,6 +3062,7 @@ class V11Runtime:
     ) -> None:
         callback = self._persist_model_event
         if callback is None:
+            self._record_model_request_event(status, safe_payload)
             return
         args = (
             execution_id,
@@ -2883,8 +3084,10 @@ class V11Runtime:
                 except TypeError:
                     continue
                 await _maybe_await(callback(*candidate))
+                self._record_model_request_event(status, safe_payload)
                 return
         await _maybe_await(callback(*args))
+        self._record_model_request_event(status, safe_payload)
 
     @staticmethod
     def _parse_output(value: Any, output_type: type[BaseModel]) -> BaseModel:

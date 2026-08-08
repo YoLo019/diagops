@@ -746,6 +746,30 @@ third-round fix is isolated to `codex/v11-m3`; symbolic
 `M3_REVIEW_FIX3_SHA` is pending the single commit and same-thread independent
 review. No merge, push, M4, or M5 action was taken.
 
+### M3 fourth-round review-fix4 evidence (2026-08-09)
+
+The fourth independent M3 review returned `BLOCKING` against base
+`9a7bf4a43efd313e5dcb528361dfbfbfec1c37f0`; the sole remaining finding was
+multi-request SDK retry reservation identity. The approved §6 scope, V10
+legacy boundary, and all previously closed review findings were preserved.
+The production reproduction first received a minimal RED: after request one
+settled and request two failed with a transport retry, the outer retry replayed
+request one with the settled reservation and raised
+`V11RuntimeContractError("model reservation was already settled")` before the
+provider retry request.
+
+| Finding | RED → GREEN evidence | Shared-boundary closure |
+| --- | --- | --- |
+| B1 | `test_v11_sdk_outer_retry_replays_success_with_new_reservation_and_reuses_failed_request` (RED, GREEN); `test_v11_sdk_replay_cursor_rehydrates_and_repeated_replay_is_idempotent` (RED, GREEN) | Existing durable `RuntimeEvent`/`RuntimeWriter` MODEL lifecycle events now persist `request_index`. PhaseInput rehydrates ordered per-logical-call request history; completed requests receive deterministic fresh `replay-N` reservations, an active failed request reuses its original identity, and later retry allocations can be durably deferred and restored. The production regression proves four provider calls, a new request-one reservation, request-two reuse, actual usage/remaining budget, and zero active reservations; the recovery regression proves released-reservation non-reuse and repeated replay idempotence. |
+
+Final fourth-round verification: T7 exact `88 passed`; T8 exact `204 passed`;
+M2R-2/M2R-3 and isolation focused `84 passed, 3 skipped`; changed/runtime
+focused `102 passed, 2 skipped`; full `uv run pytest -q` `1992 passed, 3
+skipped, 1 warning`; both `uv run ruff check .` and `uv run ruff check backend
+tests` clean; diff-check clean. The warning is the existing Starlette/httpx
+TestClient deprecation warning. The single `M3_REVIEW_FIX4_SHA` commit remains
+isolated to `codex/v11-m3`; no merge, push, M4, or M5 action was taken.
+
 ## 7. M4 — Product and compatibility integration
 
 ### T9. Reports, actions, human transitions, API/UI, and OpenRCA
@@ -1031,8 +1055,8 @@ request only the missing authority.
 | T4 | implemented / verified | R3, R11, R21–R22, R24, R27 | 336 focused passed; offline acceptance rows=80, failed=0; nine-tool/data-only skill evidence recorded; independent M2 review approve_with_followups |
 | T5 | implemented / verified (live Docker blocked) | R21–R23 | 17 focused passed; File/Tempo parity contracts green; Docker gate explicitly blocked by unavailable daemon, retained as a host-dependent follow-up |
 | T6 | implemented / verified | R8, R11–R13, R26–R27 | 110 focused passed including M2R-1 slow-endpoint cancellation/no-late-commit/cleanup evidence; independent M2 review approve_with_followups |
-| T7 | implemented / verifying | R1–R3, R5–R6, R11–R13, R24, R27 | M3 third-round review-fix3 RED→GREEN; exact gate 86 passed; scoped Ruff clean; M2R-2 resolver wiring and M2R-3 invocation recheck closed; B1 durable request reservation/recovery/retry/concurrency and B2 official endpoint contract evidence covered |
-| T8 | implemented / verifying | R1, R4–R7, R9, R11–R13, R27 | M3 third-round review-fix3 RED→GREEN; exact gate 202 passed; scoped Ruff clean; H1 round-two terminalization, H2 inconclusive normalization, and existing H6–H7/M1/M2 terminal, mechanical-validator, safe-text, supplemental-linkage, and final-actor contracts covered |
+| T7 | implemented / verifying | R1–R3, R5–R6, R11–R13, R24, R27 | M3 fourth-round review-fix4 RED→GREEN; exact gate and scoped Ruff counts recorded in the fourth-round ledger; M2R-2 resolver wiring and M2R-3 invocation recheck remain closed; multi-request SDK outer-retry reservation replay preserves durable request identity and budget accounting |
+| T8 | implemented / verifying | R1, R4–R7, R9, R11–R13, R27 | M3 fourth-round review-fix4 preserves the already-green exact T8, validator, terminal, safe-text, supplemental-linkage, and final-actor contracts; final gate count recorded in the fourth-round ledger |
 | T9 | pending | R5–R12, R18–R19, R27 | pending |
 | T10 | pending | R8–R13, R16, R18, R21–R23, R26–R27 | pending |
 | T11 | pending | R14–R17, R24–R27 | pending |
@@ -1122,4 +1146,4 @@ M1 third-round review (migration/runtime, 2026-08-07): conclusion
 - Specification: approved by the user on 2026-08-02 after L22–L30 reuse review.
 - Implementation Plan: independently reviewed with H1–H3/M1–M2 closed; approved
   by the user on 2026-08-02 with authorization to begin execution.
-- Implementation: M0/T1 complete; M1/T2–T3 implemented and verified on 2026-08-05 in the delegated worktree; third-round independent migration/runtime review concluded `approve_with_followups` on 2026-08-07 with all six findings closed the same day (RR-H1/RR-M1/RR-M2/RR-L2 at commit `336067c`, RR-L1/RR-L3 in the follow-up Light fix); M2 snapshot committed as `M2_BASE_SHA=c2245ac`; M3 third-round review-fix3 base is `b8c08d8a410877ef021cde69be0ec2faac98fb28`, B1/B2/H1/H2 are RED→GREEN verified on isolated branch `codex/v11-m3`, and the single `M3_REVIEW_FIX3_SHA` commit is pending handoff to the same-thread independent review; M4/M5 not started.
+- Implementation: M0/T1 complete; M1/T2–T3 implemented and verified on 2026-08-05 in the delegated worktree; third-round independent migration/runtime review concluded `approve_with_followups` on 2026-08-07 with all six findings closed the same day (RR-H1/RR-M1/RR-M2/RR-L2 at commit `336067c`, RR-L1/RR-L3 in the follow-up Light fix); M2 snapshot committed as `M2_BASE_SHA=c2245ac`; M3 fourth-round review-fix4 base is `9a7bf4a43efd313e5dcb528361dfbfbfec1c37f0`, the multi-request SDK reservation replay finding is RED→GREEN verified on isolated branch `codex/v11-m3`, and the single `M3_REVIEW_FIX4_SHA` commit is pending handoff to the same-thread independent review; M4/M5 not started.

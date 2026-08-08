@@ -57,6 +57,7 @@ class PhaseInput:
     persist_tool_result: Callable[[ToolInvocationResult], Any] | None = None
     persist_agent_event: Callable[[str, str], Any] | None = None
     persist_model_event: Callable[[str, str, int, int, str], Any] | None = None
+    model_events: tuple[Any, ...] = ()
     hit_fault: Callable[[str], None] | None = None
 
     def __post_init__(self) -> None:

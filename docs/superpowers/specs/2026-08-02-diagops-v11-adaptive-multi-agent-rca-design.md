@@ -1648,6 +1648,30 @@ isolated to `codex/v11-m3` with symbolic `M3_REVIEW_FIX3_SHA` pending the single
 commit and same-thread independent review; no merge, push, M4, or M5 action was
 taken.
 
+M3 fourth-round review-fix4 ledger (2026-08-09): independent review verdict
+`BLOCKING` was issued against base
+`9a7bf4a43efd313e5dcb528361dfbfbfec1c37f0`; the sole remaining finding was
+multi-request SDK retry reservation identity. The approved §6 contract, V10
+legacy boundary, and all previously closed findings remain unchanged. The
+production reproduction first went RED: after request one settled and request
+two failed with a transport retry, the outer retry replayed request one with
+the settled reservation and raised
+`V11RuntimeContractError("model reservation was already settled")` before the
+provider retry request.
+
+| Finding | RED → GREEN evidence | Contract-preserving resolution |
+| --- | --- | --- |
+| B1 | `test_v11_sdk_outer_retry_replays_success_with_new_reservation_and_reuses_failed_request` (RED, GREEN); `test_v11_sdk_replay_cursor_rehydrates_and_repeated_replay_is_idempotent` (RED, GREEN) | Reuse the existing durable MODEL `RuntimeEvent` lifecycle: persist `request_index`, rehydrate ordered request history through `PhaseInput`, assign deterministic fresh `replay-N` reservations to completed requests, and reuse the original identity only for the active failed request. If a later retry reservation holds the remaining budget, it is durably deferred and restored when its request index is reached. Production coverage proves four provider calls, new request-one identity, request-two reuse, settled usage/remaining budget, zero active reservations, released-reservation non-reuse, and repeated replay idempotence. |
+
+Final fourth-round verification: T7 exact `88 passed`; T8 exact `204 passed`;
+M2R-2/M2R-3 and isolation focused `84 passed, 3 skipped`; changed/runtime
+focused `102 passed, 2 skipped`; full `uv run pytest -q` `1992 passed, 3
+skipped, 1 warning`; both `uv run ruff check .` and `uv run ruff check backend
+tests` clean; diff-check clean. The warning is the existing Starlette/httpx
+TestClient deprecation warning. The single `M3_REVIEW_FIX4_SHA` commit remains
+isolated to `codex/v11-m3`; no approved requirement changed; no merge, push, M4,
+or M5 action was taken.
+
 ## 16. Approval state
 
 - Requirements Brief: confirmed by user.
@@ -1667,7 +1691,7 @@ taken.
   introduce no new product scope.
 - The implementation Plan was rewritten from this specification, independently
   reviewed, and approved by the user on 2026-08-02 with execution authorization.
-- Implementation: M2 baseline `c2245ac` committed; M3 third-round review-fix3
-base `b8c08d8a410877ef021cde69be0ec2faac98fb28` is RED→GREEN verified in
-isolated branch `codex/v11-m3`, with single commit `M3_REVIEW_FIX3_SHA` pending
+- Implementation: M2 baseline `c2245ac` committed; M3 fourth-round review-fix4
+base `9a7bf4a43efd313e5dcb528361dfbfbfec1c37f0` is RED→GREEN verified in
+isolated branch `codex/v11-m3`, with single commit `M3_REVIEW_FIX4_SHA` pending
 handoff to the same-thread independent review; M4/M5 not started.

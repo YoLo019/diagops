@@ -374,6 +374,9 @@ class RuntimeCoordinator:
                                 safe_payload,
                             )
                         ),
+                        model_events=tuple(
+                            self.store.list_events(run.id, limit=10_000)
+                        ),
                         hit_fault=self.fault_injector.hit,
                     )
                 )

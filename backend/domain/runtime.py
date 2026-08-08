@@ -539,6 +539,7 @@ for _event_type in (
             "reserved_tokens",
             "input_estimate",
             "attempt",
+            "request_index",
         }
     )
 for _event_type in (

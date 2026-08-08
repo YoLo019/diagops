@@ -69,6 +69,10 @@ from backend.domain.multi_agent import (
     ModelProvider,
 )
 from backend.domain.runtime import (
+    RuntimeActorType,
+    RuntimeEvent,
+    RuntimeEventType,
+    RuntimePhase,
     RuntimeResumeState,
     RuntimeRunReason,
     seal_v11_execution_contract,
@@ -714,6 +718,335 @@ async def test_v11_sdk_model_requests_reserve_decreasing_output_caps():
 
     assert model.calls == 2
     assert model.output_caps[1] < model.output_caps[0]
+
+
+@pytest.mark.anyio
+async def test_v11_sdk_outer_retry_replays_success_with_new_reservation_and_reuses_failed_request():
+    class StrictOutput(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+        value: str
+
+    class ReplayModel(Model):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def get_response(
+            self,
+            system_instructions,
+            input,
+            model_settings,
+            tools,
+            output_schema,
+            handoffs,
+            tracing,
+            *,
+            previous_response_id,
+            conversation_id,
+            prompt,
+        ):
+            del (
+                system_instructions,
+                input,
+                model_settings,
+                tools,
+                output_schema,
+                handoffs,
+                tracing,
+                previous_response_id,
+                conversation_id,
+                prompt,
+            )
+            self.calls += 1
+            if self.calls in {1, 3}:
+                output = [
+                    ResponseFunctionToolCall(
+                        arguments="{}",
+                        call_id=f"probe-call-{self.calls}",
+                        name="probe",
+                        type="function_call",
+                    )
+                ]
+            elif self.calls == 2:
+                raise ClassifiedRetryableError(FailureCategory.TRANSPORT)
+            else:
+                output = [
+                    ResponseOutputMessage(
+                        id="final-message",
+                        content=[
+                            ResponseOutputText(
+                                annotations=[],
+                                text='{"value":"ok"}',
+                                type="output_text",
+                            )
+                        ],
+                        role="assistant",
+                        status="completed",
+                        type="message",
+                    )
+                ]
+            return ModelResponse(
+                output=output,
+                usage=Usage(input_tokens=20, output_tokens=5),
+                response_id=f"response-{self.calls}",
+            )
+
+        async def stream_response(self, *_args, **_kwargs):
+            if False:
+                yield None
+
+    events: list[tuple[str, dict[str, object]]] = []
+
+    async def persist_model_event(
+        execution_id,
+        status,
+        input_tokens=0,
+        output_tokens=0,
+        actor_name="CoordinatorAgent",
+        safe_payload=None,
+    ):
+        del execution_id, actor_name
+        payload = dict(safe_payload or {})
+        payload["input_tokens"] = input_tokens
+        payload["output_tokens"] = output_tokens
+        events.append((status, payload))
+
+    async def probe(_context, _raw_input):
+        return "probe result"
+
+    tool = FunctionTool(
+        name="probe",
+        description="bounded probe",
+        params_json_schema={
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+        },
+        on_invoke_tool=probe,
+    )
+    model = ReplayModel()
+    runtime = V11Runtime(model=model, token_budget=1000)
+    runtime._persist_model_event = persist_model_event
+
+    await runtime._call_model(
+        actor="LeadAgent",
+        prompt="bounded replay request",
+        output_type=StrictOutput,
+        context={"request": "two provider requests"},
+        tools=[tool],
+        remaining_token_budget=1000,
+        remaining_tool_budget=8,
+    )
+
+    assert model.calls == 4
+    started = [payload for status, payload in events if status == "started"]
+    completed = [payload for status, payload in events if status == "completed"]
+    retrying = [
+        payload
+        for status, payload in events
+        if status == "failed" and payload.get("reservation_status") == "retrying"
+    ]
+    assert len(started) == 4
+    assert len(completed) == 3
+    assert len(retrying) == 1
+    first_request = started[0]["reservation_id"]
+    failed_request = retrying[0]["reservation_id"]
+    assert started[2]["reservation_id"] != first_request
+    assert started[3]["reservation_id"] == failed_request
+    assert failed_request != first_request
+    assert runtime._model_reservations == {}
+    assert runtime.remaining_token_budget == 1000 - sum(
+        int(payload["input_tokens"]) + int(payload["output_tokens"])
+        for payload in completed
+    )
+
+
+@pytest.mark.anyio
+async def test_v11_sdk_replay_cursor_rehydrates_and_repeated_replay_is_idempotent():
+    logical_call_id = "logical-replay-history"
+    original_request = f"{logical_call_id}:request-1"
+    failed_request = f"{logical_call_id}:request-2"
+    common = {
+        "run_id": "run-replay-history",
+        "attempt_id": "attempt-1",
+        "phase": RuntimePhase.LEAD_PLANNING,
+        "actor_type": RuntimeActorType.MODEL,
+        "actor_name": "LeadAgent",
+    }
+    model_events = (
+        RuntimeEvent(
+            **common,
+            sequence=1,
+            event_type=RuntimeEventType.MODEL_STARTED,
+            execution_id="execution-1",
+            safe_payload={
+                "status": "started",
+                "logical_call_id": logical_call_id,
+                "reservation_id": original_request,
+                "reservation_status": "reserved",
+                "reserved_tokens": 100,
+                "input_estimate": 10,
+                "attempt": 1,
+                "request_index": 0,
+            },
+        ),
+        RuntimeEvent(
+            **common,
+            sequence=2,
+            event_type=RuntimeEventType.MODEL_COMPLETED,
+            execution_id="execution-1",
+            safe_payload={
+                "status": "completed",
+                "input_tokens": 20,
+                "output_tokens": 5,
+                "logical_call_id": logical_call_id,
+                "reservation_id": original_request,
+                "reservation_status": "completed",
+                "reserved_tokens": 100,
+                "input_estimate": 10,
+                "attempt": 1,
+                "request_index": 0,
+            },
+        ),
+        RuntimeEvent(
+            **common,
+            sequence=3,
+            event_type=RuntimeEventType.MODEL_STARTED,
+            execution_id="execution-1",
+            safe_payload={
+                "status": "started",
+                "logical_call_id": logical_call_id,
+                "reservation_id": failed_request,
+                "reservation_status": "reserved",
+                "reserved_tokens": 100,
+                "input_estimate": 10,
+                "attempt": 1,
+                "request_index": 1,
+            },
+        ),
+        RuntimeEvent(
+            **common,
+            sequence=4,
+            event_type=RuntimeEventType.MODEL_FAILED,
+            execution_id="execution-1",
+            safe_payload={
+                "status": "failed",
+                "logical_call_id": logical_call_id,
+                "reservation_id": failed_request,
+                "reservation_status": "retrying",
+                "reserved_tokens": 100,
+                "input_estimate": 10,
+                "attempt": 1,
+                "request_index": 1,
+            },
+        ),
+        RuntimeEvent(
+            **common,
+            sequence=5,
+            event_type=RuntimeEventType.MODEL_FAILED,
+            execution_id="execution-recovery",
+            safe_payload={
+                "status": "failed",
+                "logical_call_id": logical_call_id,
+                "reservation_id": failed_request,
+                "reservation_status": "released",
+                "reserved_tokens": 100,
+                "input_estimate": 10,
+                "attempt": 2,
+                "request_index": 1,
+            },
+        ),
+    )
+
+    class ReplayDelegate(Model):
+        async def get_response(self, **_kwargs):
+            return SimpleNamespace(
+                usage=SimpleNamespace(input_tokens=3, output_tokens=4)
+            )
+
+        async def stream_response(self, *_args, **_kwargs):
+            if False:
+                yield None
+
+    persisted: list[tuple[str, dict[str, object]]] = []
+
+    async def persist_model_event(
+        execution_id,
+        status,
+        input_tokens=0,
+        output_tokens=0,
+        actor_name="CoordinatorAgent",
+        safe_payload=None,
+    ):
+        del execution_id, actor_name
+        payload = dict(safe_payload or {})
+        payload["input_tokens"] = input_tokens
+        payload["output_tokens"] = output_tokens
+        persisted.append((status, payload))
+
+    runtime = V11Runtime(model=ReplayDelegate(), token_budget=975)
+    runtime.bind_phase(
+        PhaseInput(
+            run_id="run-replay-history",
+            attempt_id="attempt-2",
+            phase=RuntimePhase.LEAD_PLANNING,
+            resume_state=RuntimeResumeState(remaining_token_budget=975),
+            token_budget=975,
+            model_events=model_events,
+        )
+    )
+    runtime._persist_model_event = persist_model_event
+    settings = ModelSettings(max_tokens=100)
+    first = _V11BudgetedModel(
+        runtime.model,
+        runtime,
+        logical_call_id=logical_call_id,
+        execution_id="execution-2",
+        attempt_number=1,
+        actor="LeadAgent",
+    )
+    await first.get_response(
+        input="replay request one",
+        system_instructions="system",
+        model_settings=settings,
+    )
+    await first.get_response(
+        input="replay request two",
+        system_instructions="system",
+        model_settings=settings,
+    )
+
+    repeated = _V11BudgetedModel(
+        runtime.model,
+        runtime,
+        logical_call_id=logical_call_id,
+        execution_id="execution-3",
+        attempt_number=1,
+        actor="LeadAgent",
+    )
+    await repeated.get_response(
+        input="repeated replay request one",
+        system_instructions="system",
+        model_settings=settings,
+    )
+
+    started = [payload for status, payload in persisted if status == "started"]
+    assert started[0]["reservation_id"] == (
+        f"{logical_call_id}:replay-1:request-1"
+    )
+    assert started[1]["reservation_id"] == (
+        f"{logical_call_id}:replay-1:request-2"
+    )
+    assert started[1]["reservation_id"] != failed_request
+    assert started[2]["reservation_id"] == f"{logical_call_id}:replay-2:request-1"
+    assert all(payload.get("request_index") is not None for payload in started)
+    assert runtime._model_reservations == {}
+    completed = [payload for status, payload in persisted if status == "completed"]
+    assert runtime.remaining_token_budget == 975 - sum(
+        int(payload.get("input_tokens", 0)) + int(payload.get("output_tokens", 0))
+        for payload in completed
+    )
 
 
 @pytest.mark.anyio
