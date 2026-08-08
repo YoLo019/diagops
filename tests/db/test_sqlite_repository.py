@@ -109,7 +109,7 @@ def test_schema_initialization_creates_schema_version(tmp_path):
         version = connection.execute(select(schema_version.c.version)).scalar_one()
 
     assert "schema_version" in tables
-    assert version == 6
+    assert version == 7
 
 
 def test_save_with_connection_uses_caller_owned_transaction(tmp_path):

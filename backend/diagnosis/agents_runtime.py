@@ -32,6 +32,9 @@ from backend.diagnosis.deepseek_model import (
     create_deepseek_model,
 )
 from backend.diagnosis.evidence_validation import root_cause_claims
+from backend.diagnosis.openai_compatible_model import (
+    OpenAICompatibleChatCompletionsModel,
+)
 from backend.diagnosis.openai_model import openai_responses_model
 from backend.domain.agent_findings import (
     AgentFinding,
@@ -101,6 +104,13 @@ SPECIALIST_FINDING_CONTRACT = (
     "invent a cause or evidence ID. Set blocking only when a gap prevents any "
     "evidence-supported final root-cause decision."
 )
+_CREDENTIAL_ENV_BY_PROVIDER = {
+    ModelProvider.OPENAI: "OPENAI_API_KEY",
+    ModelProvider.DEEPSEEK: "DEEPSEEK_API_KEY",
+    ModelProvider.OPENAI_COMPATIBLE: "DIAGOPS_AGENTS_API_KEY",
+}
+
+
 _DEEPSEEK_SPECIALIST_CAUSE_GUIDANCE = (
     " CauseType semantics: "
     "deployment_regression=a deployment directly introduces the observed failure; "
@@ -485,6 +495,13 @@ class AgentsRcaRuntime:
                     name,
                     os.getenv("DEEPSEEK_API_KEY"),
                 )
+        elif provider == ModelProvider.OPENAI_COMPATIBLE:
+            # generic endpoint 在 runtime 启动前已解析为具体 adapter；此处只克隆，
+            # 绝不从凭证或 provider 名推断 endpoint。
+            if isinstance(self.model, OpenAICompatibleChatCompletionsModel):
+                adapter = self.model.clone_for_model(name)
+            else:
+                adapter = None
         else:
             adapter = name or None
         runtime.model = adapter
@@ -551,11 +568,7 @@ class AgentsRcaRuntime:
         configured_model = (
             self.model.strip() if isinstance(self.model, str) else self.model
         )
-        credential_name = (
-            "OPENAI_API_KEY"
-            if self.model_provider == ModelProvider.OPENAI
-            else "DEEPSEEK_API_KEY"
-        )
+        credential_name = _CREDENTIAL_ENV_BY_PROVIDER[self.model_provider]
         if (
             not configured_model
             or not os.getenv(credential_name, "").strip()
@@ -938,11 +951,7 @@ class AgentsRcaRuntime:
         configured_model = (
             self.model.strip() if isinstance(self.model, str) else self.model
         )
-        credential_name = (
-            "OPENAI_API_KEY"
-            if self.model_provider == ModelProvider.OPENAI
-            else "DEEPSEEK_API_KEY"
-        )
+        credential_name = _CREDENTIAL_ENV_BY_PROVIDER[self.model_provider]
         if not configured_model or not os.getenv(credential_name, "").strip():
             return None
         async def invoke() -> _SdkTurnResult:
@@ -1699,7 +1708,7 @@ async def _run_sdk_turn(
             require_tool=bool(specialist_names),
         )
     )
-    tracing_disabled = _is_deepseek(model)
+    tracing_disabled = _disables_sdk_tracing(model)
 
     def tool_for(name: AgentName):
         specialist_options = (
@@ -1867,6 +1876,11 @@ def _is_deepseek(model: str | Model) -> bool:
     return isinstance(model, DeepSeekChatCompletionsModel)
 
 
+def _disables_sdk_tracing(model: str | Model) -> bool:
+    """DeepSeek 与 generic compatible endpoint 都不开启 SDK 云 tracing。"""
+    return isinstance(model, OpenAICompatibleChatCompletionsModel)
+
+
 def _output_contract(
     model: str | Model,
     schema: type[BaseModel],
@@ -1977,7 +1991,7 @@ async def _run_sdk_turn_parallel(
     | None = None,
 ) -> _SdkTurnResult:
     """V9 显式并行 specialist；单个失败不取消同组其他只读分析。"""
-    tracing_disabled = _is_deepseek(model)
+    tracing_disabled = _disables_sdk_tracing(model)
     specialist_output_type, specialist_settings, specialist_validator, specialist_suffix = (
         _output_contract(model, _SpecialistDraft)
     )

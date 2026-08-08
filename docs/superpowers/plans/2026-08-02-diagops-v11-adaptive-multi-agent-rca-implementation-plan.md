@@ -312,6 +312,14 @@ Approved 契约与 milestone 范围不变。
 
 ### T4. Nine-tool offline incident-package profile and data-only skills
 
+Status (2026-08-07): 九工具 manifest（list_agent_specs 单一来源，query_prometheus
+internal）、scoped trace/runtime-state/related-alert/memory 查询与有界 payload
+契约、local package 八 Provider（状态矩阵 success/empty/skipped/partial/failed/
+timeout，绝不回退 mock）、verified-memory guarded lookup（cutoff/self/ancestor/
+foreign 拒绝）、四条 data-only skill + catalog hash、离线验收 80 行全绿；
+focused gate 336 passed（含 T5 归入 tests/providers 的 10 条，最终 2026-08-08 复跑）、
+offline_tool_acceptance rows=80 failed=0、scoped Ruff clean。
+
 Requirements: R3, R11, R21–R22, R24, R27.
 
 Primary files:
@@ -374,6 +382,16 @@ Acceptance:
 
 ### T5. File/Tempo trace parity and Docker-local gate
 
+Status (2026-08-07): FileTraceProvider/TempoTraceProvider 共用 canonical span
+投影与 select_trace_spans 语义；replay 恒定偏移 + 可逆 ID 映射持久化；
+preflight（daemon/pinned digest/端口/磁盘）+ 唯一 Compose project + scoped
+cleanup 实现。本机 Docker daemon 不可用，live gate 按 plan 记录 blocked
+（reason: docker daemon unavailable，exit=2，report 已写
+output/tempo_acceptance/tempo-gate-report.json），离线 parity 由 fake-HTTP
+测试证明（file vs tempo 归一化结果完全一致）。image digest 真实值离线无法
+解析，机制实现为 DIAGOPS_TEMPO_GATE_IMAGE_DIGEST 显式配置 + daemon 实测校验，
+未配置即 blocked——与 plan 的偏差见最终报告。focused gate 17 passed、Ruff clean。
+
 Requirements: R21–R23.
 
 Primary files:
@@ -413,6 +431,25 @@ Acceptance:
   observability readiness.
 
 ### T6. Official OpenAI, DeepSeek preset, and generic compatible adapter
+
+Status (2026-08-08): canonicalize_endpoint 唯一算法（含 spec 全部 accept/reject
+向量，cleartext 仅限本机）；官方 OpenAI 钉死 https://api.openai.com/v1 且不继承
+环境 base URL；DeepSeek 重构为共享 compatible adapter 预设（序列化身份不变，
+既有 6 项测试原样通过）；OpenAICompatibleChatCompletionsModel 请求级 client、
+超时/重试有界、稳定失败分类；model-capability-v1 工件（endpoint_id 绑定、
+自排除 canonical hash、无 URL/凭证/正文）+ live 认证 CLI（仅实现未运行）；
+V11 run-create 对 openai_compatible 要求精确 tuple 的 passed 工件（未认证 422
+且不插行），请求端 server-owned 字段 extra=forbid 拒绝；config API 新增
+capability_certification_status + credential-free endpoint_id。focused gate
+106 passed、scoped Ruff clean、全量 1927 passed/3 skipped。
+
+Status (2026-08-08): M2R-1 关闭——补 spec 7.8/T6 step 3-4 要求的 local
+slow-endpoint 取消语义证据 4 条（取消传播到在途 HTTP 请求且 handler 观测到
+CancelledError、wait_for deadline 0.5s 截断 30s 慢响应、取消后晚到响应零提交
+no-late-commit、取消路径 transport 在创建 loop 上关闭；真实 SDK+MockTransport
+与 adapter 层各覆盖）。实况：4 条新测试首轮即全绿，未改实现——每请求 client +
+finally close 结构已满足契约，仅缺覆盖（同 M1 RR-M1 先例，不伪造 RED）。
+focused gate 110 passed、指定两文件 22 passed、scoped Ruff clean。
 
 Requirements: R8, R11–R13, R26–R27.
 
@@ -478,6 +515,25 @@ Review the nine-tool single source, offline source coverage, trace parity,
 self-memory exclusion, injection/redaction, Docker cleanup, endpoint
 canonicalization, official pinning, capability hashing, and run-create trust
 boundary. Close blocking/high findings before Agent orchestration.
+
+M2 review record (2026-08-08): independent review concluded
+`approve_with_followups` with no blocking finding and reran every focused gate
+independently (T4 336 passed + offline acceptance rows=80 failed=0; T5 17
+passed + Docker gate `blocked` with preflight reason, daemon unavailable; T6
+106 passed; full suite 1927 passed/3 skipped; Ruff clean). Three implementer
+claims were verified: the unreported `.gitignore` change is benign (three
+acceptance-output ignore rules); the two schema-version assertion fixes (6→7)
+are an M1 leftover confirmed failing on merge commit `a40942a` (M1's scoped
+gates never covered those two files); the T5 digest-via-environment deviation
+is an equivalent safety mechanism and the plan stays approved (write the
+mechanism into T5's body on the next plan touch). M2R-1 (high, §7.8
+slow-endpoint cancellation evidence) was closed the same day with four tests
+and focused re-review; M2R-2 (verified-memory resolver wiring) and M2R-3
+(`assert_agent_callable` call site) are mandatory T7 prerequisites; M2R-4
+(span-attribute redaction row) is optional hardening. The T5 live Docker
+parity run remains owed on a host with a daemon. The approved contract and
+milestone scope are unchanged; M2 changes are uncommitted pending user
+authorization.
 
 ## 6. M3 — Make Agents authoritative
 

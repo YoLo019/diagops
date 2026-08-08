@@ -6,7 +6,12 @@ from functools import partial
 from pathlib import Path
 
 from backend.benchmarks.openrca.evaluator import evaluate_persisted_prediction
-from backend.config.settings import AppSettings, StorageSettings, load_settings
+from backend.config.settings import (
+    AppSettings,
+    StorageSettings,
+    endpoint_id,
+    load_settings,
+)
 from backend.db.models import InvestigationRecord, InvestigationStatus
 from backend.db.repositories import InMemoryInvestigationRepository
 from backend.db.session import create_db_engine, initialize_database
@@ -15,6 +20,7 @@ from backend.diagnosis.action_planner import ActionPlanner
 from backend.diagnosis.agents_runtime import AgentsRcaRuntime
 from backend.diagnosis.coordinator import DiagnosisCoordinator
 from backend.diagnosis.deepseek_model import create_deepseek_model
+from backend.diagnosis.openai_compatible_model import create_openai_compatible_model
 from backend.diagnosis.orchestrator import DiagnosisOrchestrator
 from backend.domain.events import IncidentEvent
 from backend.domain.multi_agent import (
@@ -45,7 +51,8 @@ from backend.runtime.store import (
 from backend.runtime.telemetry import RuntimeTelemetry
 from backend.runtime.writer import RuntimeWriter
 from backend.safety.redaction import redact_model
-from backend.tools.provider_tools import build_provider_tool_registry
+from backend.services.model_capability import latest_capability_artifact
+from backend.tools.provider_tools import VerifiedMemoryLookup, build_provider_tool_registry
 
 logger = logging.getLogger(__name__)
 _TELEMETRY_SHUTDOWN_TIMEOUT_SECONDS = 5.0
@@ -59,6 +66,12 @@ class AppContainer:
         self.engine = None
         self.repository = self._build_repository()
         providers = build_provider_registry_from_settings(self.settings)
+        # verified memory 只读当前 repository 的受 guard 记录；tool registry 与
+        # Provider registry 同源构造，保证九个 Agent 工具单一事实来源。
+        self.tool_registry = build_provider_tool_registry(
+            providers,
+            VerifiedMemoryLookup(self.repository),
+        )
         agents_runtime = None
         if self.settings.agents.enabled:
             try:
@@ -69,6 +82,17 @@ class AppContainer:
                         model,
                         os.getenv("DEEPSEEK_API_KEY"),
                     )
+                elif provider == ModelProvider.OPENAI_COMPATIBLE:
+                    compatible = self.settings.agents.openai_compatible
+                    # generic endpoint 的凭证只允许 DIAGOPS_AGENTS_API_KEY，
+                    # 绝不回退到官方 provider 的环境变量。
+                    model = create_openai_compatible_model(
+                        model,
+                        os.getenv("DIAGOPS_AGENTS_API_KEY"),
+                        compatible.base_url,
+                        timeout_seconds=float(compatible.timeout_seconds),
+                        max_retries=compatible.max_retries,
+                    )
                 agents_runtime = AgentsRcaRuntime(
                     model=model,
                     max_turns=self.settings.agents.max_turns,
@@ -76,7 +100,7 @@ class AppContainer:
                     model_provider=provider,
                     model_name=self.settings.agents.model,
                     strategy=self.settings.agents.strategy,
-                    tool_registry=build_provider_tool_registry(providers),
+                    tool_registry=self.tool_registry,
                     max_tool_calls_per_specialist=(
                         self.settings.agents.max_tool_calls_per_specialist
                     ),
@@ -322,6 +346,9 @@ class AppContainer:
         )
         contract = {}
         if version == ExecutionContractVersion.V11:
+            endpoint_identity, capability_hash = self._v11_model_identity(
+                effective_provider, effective_model
+            )
             contract = {
                 "execution_contract_version": version.value,
                 "authority_mode": authority.value,
@@ -330,6 +357,9 @@ class AppContainer:
                 else effective_provider,
                 "model_name": effective_model,
                 "prompt_version": effective_prompt,
+                "api_mode": self._api_mode_for(effective_provider),
+                "endpoint_id": endpoint_identity,
+                "capability_artifact_hash": capability_hash,
                 "tool_budget": self.settings.agents.max_total_tool_calls,
                 "token_budget": getattr(agents_runtime, "runtime_token_budget", None),
                 "timeout_seconds": float(self.settings.agents.timeout_seconds),
@@ -351,6 +381,43 @@ class AppContainer:
             execution_contract=contract,
         )
         return self.runtime_store.create_run(run)
+
+    def _api_mode_for(self, provider) -> str:
+        return (
+            "responses"
+            if provider == ModelProvider.OPENAI
+            else "chat_completions"
+        )
+
+    def _v11_model_identity(self, provider, model_name: str | None):
+        """openai_compatible 的 V11 run 只接受精确 tuple 已认证的 endpoint。
+
+        返回 (endpoint_id, capability_artifact_hash)；非 generic provider 不携带
+        endpoint 身份（None）。未认证即 RuntimeContractError，run 行不会插入。
+        """
+        if provider != ModelProvider.OPENAI_COMPATIBLE:
+            return None, None
+        base_url = self.settings.agents.openai_compatible.base_url
+        if not base_url or not model_name:
+            raise RuntimeContractError(
+                "V11 openai_compatible requires configured base_url and model"
+            )
+        identity = endpoint_id(base_url)
+        artifact = latest_capability_artifact(
+            self._capability_directory(),
+            provider=ModelProvider.OPENAI_COMPATIBLE.value,
+            model=model_name,
+            endpoint_id_value=identity,
+        )
+        if artifact is None or artifact.result != "passed":
+            raise RuntimeContractError(
+                "V11 openai_compatible endpoint lacks a passed capability artifact"
+            )
+        return identity, artifact.artifact_hash
+
+    @staticmethod
+    def _capability_directory() -> Path:
+        return Path("output/model_capability")
 
     def _v11_investigation_id(self, source: InvestigationRecord, *, strategy) -> str:
         """为 legacy 历史投影创建隔离的 V11 investigation，保留源记录不变。"""
