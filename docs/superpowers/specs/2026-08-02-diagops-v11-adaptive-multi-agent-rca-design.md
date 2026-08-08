@@ -1396,8 +1396,8 @@ historical replay—not because the old benchmark score is unchanged.
 | --- | --- | --- | --- | --- | --- |
 | R1 | Agent adjudication is authoritative | Orchestrator currently replaces Agent roots | Authority-invariant unit/integration tests | T7, T8, T13 | M3/T7–T8: Lead-authored plan/adjudication and Critic outputs are persisted and projected without deterministic root assignment; exact T7/T8 gates green; product-path authority remains in T9/T13 |
 | R2 | Lead plans adaptive information gaps with frozen structured actions/tasks | Fixed modality task map today | Lead action/task/phase contract tests | T2, T7, T13 | M1/T2: bounded Lead/task/phase contracts and ownership tests; full authority behavior remains in T7/T13 |
-| R3 | Up to three isolated Investigators use the same bounded nine-tool read-only manifest | Parallel fixed specialists and adaptive session exist; current allowlists drift | Isolation, registry-manifest, concurrency, and budget tests | T4, T7, T13 | M3/T7: bounded generic Investigator instances, unique IDs, isolated round-one contexts, frozen nine-tool manifest, budget/timeout/cancel/cleanup and retry evidence; exact T7 gate 53 passed; final concurrency/acceptance remains in T10/T13 |
-| R4 | Critic emits the frozen seven-check contract and may request one round | Current review only revisits deterministic conflicts | Critic verdict/reference/supplemental-round tests | T2, T8, T13 | M1/T2: bounded Critic verdict and seven-check validation with same-run owner plus supplemental-task linkage checks; M3/T8 exact gate 164 passed with exactly seven checks/candidate, one reconciliation, and no third round; final product path remains in T13 |
+| R3 | Up to three isolated Investigators use the same bounded nine-tool read-only manifest | Parallel fixed specialists and adaptive session exist; current allowlists drift | Isolation, registry-manifest, concurrency, and budget tests | T4, T7, T13 | M3/T7: bounded generic Investigator instances, unique IDs, isolated round-one contexts, frozen nine-tool manifest, budget/timeout/cancel/cleanup, per-request reservations, and retry evidence; second-round exact T7 gate 79 passed; final concurrency/acceptance remains in T10/T13 |
+| R4 | Critic emits the frozen seven-check contract and may request one round | Current review only revisits deterministic conflicts | Critic verdict/reference/supplemental-round tests | T2, T8, T13 | M1/T2: bounded Critic verdict and seven-check validation with same-run owner plus supplemental-task linkage checks; second-round M3/T8 exact gate 195 passed with exactly seven checks/candidate, one reconciliation, no third round, and mechanical safe-text validation; final product path remains in T13 |
 | R5 | Hypotheses are optional | Report and coordination currently require hypotheses | Empty-hypothesis complete/inconclusive tests | T2, T7, T9, T13 | M1/T2–T3: optional V11 candidate fields and status-aware finalize/frozen projection; complete flow remains in T7/T9/T13 |
 | R6 | Findings support free-text entity/mechanism and evidence/counterevidence | Current output is `CauseType`-centered | Domain validation and persistence round-trip | T2, T7, T8, T13 | M1/T2: bounded entity/mechanism, onset, counterevidence, and memory/SQLite round-trip coverage; M3/T7–T8 produces and preserves Agent-authored fields with committed evidence/counterevidence; exact T7/T8 gates green |
 | R7 | Validator rejects but never rewrites conclusions | Current authoritative root copy violates this | Mutation-sentinel tests | T3, T8, T13 | M1/T3: versioned V11 handlers and frozen projection preserve authoritative Lead/Critic fields; M3/T8 mutation sentinel proves mechanical validator does not rewrite rank/entity/mechanism/evidence/counterevidence/onset; final product validation remains in T13 |
@@ -1406,7 +1406,7 @@ historical replay—not because the old benchmark score is unchanged.
 | R10 | Historical records and all hypothesis/cause downstream projections remain readable | Reports, actions, human transitions, summaries, and diff are CauseType-centered | V3–V7 migration, legacy fixture, API/report/action/diff compatibility tests | T2, T3, T9, T10, T13 | M1/T2–T3: V3–V7/current-V6 migration manifests, legacy payload serializers, V10 golden/replay/diff compatibility, and additive Lead/Critic summary/API projection green; product projections remain in T9/T10 |
 | R11 | No production writes or unsafe tool escalation | Current read-only allowlist exists | Safety and injection suites | T4, T6–T10, T13 | M3/T7–T8: all model tool calls use the frozen registry manifest with invocation-time callable/read-only checks; no report/action/fixed specialist path is entered; full safety/privacy suite remains in T10/T13 |
 | R12 | No private reasoning or secrets are persisted/exposed | Current ReAct trace can store assistant text | Payload privacy scans | T6–T10, T13 | M3/T7–T8: only bounded structured outputs/summaries and committed evidence references are persisted; full payload privacy scan remains in T10/T13 |
-| R13 | Production run is bounded to 3 Investigators, 2 rounds, and 120s | Current parallel/budget primitives exist | Boundary, timeout, and race tests | T3, T6–T8, T10, T13 | M1/T3: V11 absolute deadline/phase budget monotonicity and timeout ownership checks; M3/T7–T8 covers 1–3 Investigators, two rounds, model/tool/turn budgets, timeout, cancellation, late results, and cleanup; final acceptance remains in T10 |
+| R13 | Production run is bounded to 3 Investigators, 2 rounds, and 120s | Current parallel/budget primitives exist | Boundary, timeout, and race tests | T3, T6–T8, T10, T13 | M1/T3: V11 absolute deadline/phase budget monotonicity and timeout ownership checks; second-round M3/T7–T8 covers 1–3 bounded concurrent Investigators, two rounds, per-request model/tool/turn reservations, timeout, cancellation, late results, and cleanup; final acceptance remains in T10 |
 | R14 | Frozen V11 single-Agent control is reproducible and Multi-Agent tokens are ≤3x in primary evaluation | No current paired V11 single-Agent path | Control-contract tests and artifact/hash verifier | T11–T13 | pending |
 | R15 | Primary locally held-out exact score meets frozen formula and gains ≥10pp | V10.1 OpenRCA delta was zero; no independent external custodian is available | One frozen RCAEval final paired gate with prediction/label process isolation | T1, T11–T13 | pending |
 | R16 | Reference integrity 100%, single-reviewer evidence-support rubric pass rate ≥95%, P95 ≤120s, read-only/leakage zero | Existing acceptance measures only reference existence | Runtime integrity tests plus frozen label-input-isolated support/latency/safety gate | T10–T13 | pending |
@@ -1596,6 +1596,35 @@ live Docker execution remains explicitly host-dependent. The fix is isolated
 to `codex/v11-m3`, with no merge/push/M4/M5 action; same-thread independent
 review remains pending.
 
+M3 second-round review-fix2 ledger (2026-08-09): independent review verdict
+`BLOCKING` was issued against base
+`629bc34e823ff9f5ff163dca5f3924a161baafd3`. The existing §6 scope and approved
+R1–R27 requirements were not changed. Every finding first received a minimal
+RED regression and then a shared-boundary GREEN fix:
+
+| Finding | RED → GREEN evidence | Resolution |
+| --- | --- | --- |
+| B1 | `test_v11_run_owner_is_explicit_when_repository_has_multiple_investigations`; `test_v11_nested_execution_contract_digest_fences_capability_and_limits` | Server-owned canonical nested execution contract/digest is created at admission; explicit investigation ownership and full contract validation cross clone, bind, dispatch, retry, resume, and persistence helpers. |
+| H1 | `test_v11_frozen_manifest_rejects_same_cardinality_tool_swap`; `test_v11_frozen_manifest_rejects_unordered_contract` | Ordered immutable nine-tool manifest/hash plus skill/capability identity and limits are the only dispatch/retry/resume contract; same-cardinality tool or nested identity/limit mutations fail closed. |
+| B2/H2 | `test_v11_sdk_provider_retry_is_only_the_persisted_outer_retry`; `test_v11_model_retry_is_one_classified_transport_attempt`; `test_v11_parse_failure_marks_latest_retry_attempt_invalid_output` | V11 SDK/provider clients use retry zero; one persisted coordinator owns at most one transport/rate-limit retry, persists attempts, and updates the latest malformed attempt. |
+| H3 | `test_v11_sdk_model_requests_reserve_decreasing_output_caps`; `test_v11_model_precharges_input_before_setting_output_cap`; `test_v11_zero_tool_budget_does_not_start_model`; `test_v11_sdk_budget_reservation_is_released_when_preflight_rejects` | Every SDK request atomically charges input and derives a descending output cap from the durable reservation; zero budget sends no request and preflight rejection releases an unstarted reservation. |
+| H4 | `test_v11_model_deadline_preflight_blocks_request_before_start`; `test_session_deadline_preflight_blocks_tool_before_provider_start`; `test_late_tool_result_is_rejected_after_execution_fence_loss` | Absolute deadline/cancel preflight runs before each model/tool action, timeout fits remaining time, and late results cannot commit. |
+| H5 | `test_v11_tool_budget_reservation_is_atomic_and_durable`; `test_v11_transport_retry_reuses_one_durable_tool_reservation`; `test_v11_investigators_share_a_bounded_concurrent_gate` | One durable reservation belongs to one logical tool action and is reused by retry/resume/cancel; concurrent Investigators share a bounded gate and cannot oversell. |
+| H6 | `test_v11_all_investigator_failure_is_terminal_failed_without_diagnostic`; `test_v11_required_critic_failure_is_failed_without_inconclusive_fallback`; `test_v11_required_lead_failure_is_failed_without_inconclusive_fallback`; `test_v11_validator_failure_is_failed_without_inconclusive_fallback`; `test_v11_required_investigator_failure_stops_before_critic_or_lead` | Required actor or persistence failure terminalizes `failed`, clears diagnostic projection, and stops later V11 phases; no pseudo-inconclusive fallback is generated. |
+| H7/M1 | `test_v11_validator_rejects_orphan_supplemental_task_ids`; `test_v11_partial_requires_usable_evidence_passing_check_and_round_two_linkage`; `test_v11_validator_scans_nested_critic_check_text_for_control_characters`; `test_v11_validator_rejects_whitespace_controls_in_nested_assessment_text` | Mechanical validation requires exact same-run round-two task linkage, enforces partial/inconclusive contracts, and scans nested result text for controls without semantic CauseType/provider validation. |
+| M2 | `test_v11_critic_success_has_one_durable_audit_execution`; `test_v11_reconciliation_has_one_durable_audit_execution`; `test_v11_critic_output_failure_updates_one_audit_execution`; `test_v11_parse_failure_marks_latest_retry_attempt_invalid_output` | Critic/reconciliation success and failure retain one unique durable execution audit, and parse failure updates the latest retry attempt with actor, attempt, deadline, usage, and resume metadata. |
+
+Final second-round gates: T7 exact `79 passed`; T8 exact `195 passed`; scoped
+T7/T8 Ruff clean; explicit M2R-2/M2R-3 and isolation focused `84 passed/3
+skipped`; full `uv run pytest -q` `1981 passed/3 skipped/1 warning`; full
+`uv run ruff check .` and `uv run ruff check backend tests` clean;
+`git diff --check 629bc34..HEAD` clean. The sole warning is the existing
+Starlette/httpx TestClient deprecation warning. T4/T5 remain
+`implemented / verified`, with only live Docker execution host-dependent and
+unavailable. The single `M3_REVIEW_FIX2_SHA` commit is isolated to
+`codex/v11-m3`; no merge/push/M4/M5 action was taken and same-thread independent
+review remains pending.
+
 ## 16. Approval state
 
 - Requirements Brief: confirmed by user.
@@ -1615,7 +1644,7 @@ review remains pending.
   introduce no new product scope.
 - The implementation Plan was rewritten from this specification, independently
   reviewed, and approved by the user on 2026-08-02 with execution authorization.
-- Implementation: M2 baseline `c2245ac` committed; M3 review-fix base
-`b17da397807bacf6e155afe71062ad1c6c4fd868` is RED→GREEN verified in isolated
-branch `codex/v11-m3` and handed to the same-thread independent review; M4/M5
-not started.
+- Implementation: M2 baseline `c2245ac` committed; M3 second-round review-fix2
+base `629bc34e823ff9f5ff163dca5f3924a161baafd3` is RED→GREEN verified in
+isolated branch `codex/v11-m3`, with single commit `M3_REVIEW_FIX2_SHA` handed
+to the same-thread independent review; M4/M5 not started.

@@ -67,6 +67,22 @@ def test_adapter_does_not_read_official_provider_env(monkeypatch):
     }
 
 
+def test_v11_model_clone_explicitly_disables_provider_retry(monkeypatch):
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(compatible_model, "AsyncOpenAI", FakeClient)
+    model = _create(max_retries=2)
+    v11_model = model.clone_for_model("compat-model", max_retries=0)
+
+    v11_model._create_client()
+
+    assert captured["max_retries"] == 0
+
+
 @pytest.mark.anyio
 async def test_get_response_closes_request_client_on_success_and_error(monkeypatch):
     clients = []

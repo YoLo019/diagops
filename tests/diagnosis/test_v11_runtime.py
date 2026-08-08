@@ -1,5 +1,6 @@
 """V11 Agent authority runtime 的 RED→GREEN 契约测试。"""
 
+import asyncio
 import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -7,14 +8,31 @@ from types import SimpleNamespace
 import httpx
 import openai
 import pytest
+from agents import FunctionTool, Model, ModelResponse, ModelSettings, Usage
+from openai.types.responses import (
+    ResponseFunctionToolCall,
+    ResponseOutputMessage,
+    ResponseOutputText,
+)
+from pydantic import BaseModel, ConfigDict
 
-from backend.config.settings import AppSettings, StorageSettings
+from backend.config.settings import AgentsSettings, AppSettings, StorageSettings
 from backend.db.models import InvestigationRecord, InvestigationStatus
 from backend.db.repositories import InMemoryInvestigationRepository
+from backend.diagnosis import v11_runtime as v11_runtime_module
+from backend.diagnosis.diagnostic_skills import (
+    DIAGNOSTIC_SKILLS,
+    SKILL_CATALOG_VERSION,
+    skill_catalog_hash,
+)
+from backend.diagnosis.openai_compatible_model import (
+    OpenAICompatibleChatCompletionsModel,
+)
 from backend.diagnosis.v11_runtime import (
     LeadPlanningOutput,
     V11Runtime,
     V11RuntimeContractError,
+    _V11BudgetedModel,
 )
 from backend.domain.agent_findings import (
     AgentFindingType,
@@ -26,6 +44,7 @@ from backend.domain.agent_findings import (
 )
 from backend.domain.agent_plan import (
     AgentExecutionStatus,
+    DiagnosisPlan,
     DiagnosisTask,
     DiagnosisTaskType,
     LeadDecision,
@@ -39,7 +58,11 @@ from backend.domain.multi_agent import (
     LeadAction,
     ModelProvider,
 )
-from backend.domain.runtime import RuntimeResumeState, RuntimeRunReason
+from backend.domain.runtime import (
+    RuntimeResumeState,
+    RuntimeRunReason,
+    seal_v11_execution_contract,
+)
 from backend.domain.tool_calls import ToolSpec
 from backend.providers.registry import build_mock_provider_registry
 from backend.runtime.phase_executor import DiagnosisPhaseExecutor
@@ -89,6 +112,64 @@ def _seed_repository() -> tuple[InMemoryInvestigationRepository, InvestigationRe
                 ]
             }
         )
+    )
+
+
+def _complete_contract(
+    registry,
+    *,
+    manifest: tuple[str, ...] | None = None,
+    model_name: str = "fake",
+    model_provider: str = "openai",
+    api_mode: str = "responses",
+    endpoint_id: str | None = None,
+    artifact_hash: str | None = None,
+) -> dict:
+    frozen_manifest = manifest or registry.agent_manifest()
+    return seal_v11_execution_contract(
+        {
+            "execution_contract_version": "v11",
+            "authority_mode": "agent",
+            "model_provider": model_provider,
+            "model_name": model_name,
+            "prompt_version": "v11-test",
+            "api_mode": api_mode,
+            "endpoint_id": endpoint_id,
+            "capability_artifact_hash": artifact_hash,
+            "tool_manifest": list(frozen_manifest),
+            "tool_manifest_hash": agent_manifest_hash(frozen_manifest),
+            "skill_catalog": {
+                "catalog_version": SKILL_CATALOG_VERSION,
+                "catalog_hash": skill_catalog_hash(DIAGNOSTIC_SKILLS),
+                "skill_names": ",".join(
+                    f"{skill.name}@{skill.version}" for skill in DIAGNOSTIC_SKILLS
+                ),
+            },
+            "capability_identity": {
+                "provider": model_provider,
+                "model": model_name,
+                "api_mode": api_mode,
+                "endpoint_id": endpoint_id,
+                "artifact_hash": artifact_hash,
+            },
+            "limits": {
+                "max_turns": 8,
+                "max_investigators": 3,
+                "max_rounds": 2,
+                "token_budget": 10000,
+                "max_tool_calls_per_specialist": 3,
+                "tool_timeout_seconds": 10,
+            },
+            "retry_policy": {
+                "max_retries": 1,
+                "retryable_categories": ["transport", "rate_limit"],
+                "provider_max_retries": 0,
+                "sdk_max_retries": 0,
+            },
+            "tool_budget": 8,
+            "token_budget": 10000,
+            "timeout_seconds": 60.0,
+        }
     )
 
 
@@ -322,10 +403,9 @@ def test_v11_frozen_manifest_rejects_same_cardinality_tool_swap():
             attempt_id="attempt-v11",
             phase="lead_planning",
             resume_state=RuntimeResumeState(),
-            execution_contract={
-                "tool_manifest": list(frozen),
-                "tool_manifest_hash": agent_manifest_hash(frozen),
-            },
+            execution_contract=_complete_contract(registry, manifest=frozen),
+            model_provider=ModelProvider.OPENAI,
+            model_name="fake",
         )
     )
     removed = frozen[0]
@@ -346,14 +426,450 @@ def test_v11_frozen_manifest_rejects_same_cardinality_tool_swap():
 def test_v11_frozen_manifest_rejects_unordered_contract():
     registry = build_provider_tool_registry(build_mock_provider_registry())
     frozen = registry.agent_manifest()
-    runtime = V11Runtime(model="fake", tool_registry=registry)
-    runtime._execution_contract = {
-        "tool_manifest": list(reversed(frozen)),
-        "tool_manifest_hash": agent_manifest_hash(tuple(reversed(frozen))),
-    }
+    runtime = V11Runtime(
+        model="fake", model_provider=ModelProvider.OPENAI, model_name="fake", tool_registry=registry
+    )
+    runtime._execution_contract = _complete_contract(
+        registry, manifest=tuple(reversed(frozen))
+    )
 
     with pytest.raises(V11RuntimeContractError, match="ordered"):
         runtime._agent_manifest()
+
+
+def test_v11_nested_execution_contract_digest_fences_capability_and_limits():
+    container = AppContainer(
+        AppSettings(
+            storage=StorageSettings(url="memory://"),
+            agents=AgentsSettings(enabled=True, model="gpt-test"),
+        )
+    )
+    record = container.repository.save(
+        InvestigationRecord(id="inv-contract-fence", event=_event())
+    )
+    run = container.create_runtime_run(
+        record.id,
+        strategy="adaptive",
+        run_reason="initial",
+        execution_contract_version="v11",
+    )
+    contract = json.loads(json.dumps(run.execution_contract))
+    contract["capability_identity"]["artifact_hash"] = "f" * 64
+    contract["limits"]["max_turns"] = 1
+
+    with pytest.raises(V11RuntimeContractError, match="execution contract"):
+        container.orchestrator.v11_runtime.clone_for_run(
+            runtime_run_id=run.id,
+            model_provider=run.model_provider,
+            model_name=run.model_name,
+            token_budget=run.token_budget,
+            timeout_seconds=run.timeout_seconds,
+            execution_contract=contract,
+        )
+    contract = json.loads(json.dumps(run.execution_contract))
+    contract["limits"]["max_tool_calls_per_specialist"] = 5
+    contract = seal_v11_execution_contract(contract)
+    cloned = container.orchestrator.v11_runtime.clone_for_run(
+        runtime_run_id=run.id,
+        model_provider=run.model_provider,
+        model_name=run.model_name,
+        token_budget=run.token_budget,
+        timeout_seconds=run.timeout_seconds,
+        execution_contract=contract,
+    )
+    assert cloned.max_tool_calls_per_specialist == 5
+    cloned._update_summary(container.repository, record.id)
+    assert (
+        container.repository.get(record.id).multi_agent_run.max_tool_calls_per_specialist
+        == 5
+    )
+    container.close()
+
+
+def test_v11_clone_disables_compatible_provider_retry_for_durable_run():
+    registry = build_provider_tool_registry(build_mock_provider_registry())
+    source_model = OpenAICompatibleChatCompletionsModel(
+        model="compat-model",
+        api_key="local-secret",
+        base_url="http://127.0.0.1:8000/v1",
+    )
+    runtime = V11Runtime(
+        model=source_model,
+        model_provider=ModelProvider.OPENAI_COMPATIBLE,
+        model_name="compat-model",
+        tool_registry=registry,
+    )
+    contract = _complete_contract(
+        registry,
+        model_name="compat-model",
+        model_provider="openai_compatible",
+        api_mode="chat_completions",
+        endpoint_id="endpoint-compat",
+        artifact_hash="a" * 64,
+    )
+
+    cloned = runtime.clone_for_run(
+        runtime_run_id="run-provider-retry-fence",
+        model_provider=ModelProvider.OPENAI_COMPATIBLE,
+        model_name="compat-model",
+        token_budget=10000,
+        timeout_seconds=60,
+        execution_contract=contract,
+    )
+
+    assert isinstance(cloned.model, OpenAICompatibleChatCompletionsModel)
+    assert cloned.model._max_retries == 0
+
+
+@pytest.mark.anyio
+async def test_v11_string_provider_client_disables_sdk_transport_retry(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        async def close(self) -> None:
+            captured["closed"] = True
+
+    def build_client(**kwargs):
+        captured.update(kwargs)
+        return FakeClient()
+
+    monkeypatch.setattr(v11_runtime_module, "AsyncOpenAI", build_client)
+    provider = v11_runtime_module._V11ModelProvider(
+        V11Runtime(model="gpt-test")
+    )
+
+    assert captured["max_retries"] == 0
+    await provider.aclose()
+    assert captured["closed"] is True
+
+
+@pytest.mark.anyio
+async def test_v11_sdk_provider_retry_is_only_the_persisted_outer_retry(monkeypatch):
+    class StrictOutput(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+        value: str
+
+    request_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        return httpx.Response(
+            429,
+            request=request,
+            json={"error": {"message": "rate limited", "type": "rate_limit"}},
+        )
+
+    def build_client(**kwargs):
+        return openai.AsyncOpenAI(
+            **kwargs,
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+
+    monkeypatch.setattr(
+        "backend.diagnosis.openai_compatible_model.AsyncOpenAI", build_client
+    )
+    runtime = V11Runtime(
+        model=OpenAICompatibleChatCompletionsModel(
+            model="compat-model",
+            api_key="local-secret",
+            base_url="http://127.0.0.1:8000/v1",
+        ),
+        model_provider=ModelProvider.OPENAI_COMPATIBLE,
+        model_name="compat-model",
+        token_budget=1000,
+    )
+
+    with pytest.raises(openai.RateLimitError):
+        await runtime._call_model(
+            actor="LeadAgent",
+            prompt="bounded request",
+            output_type=StrictOutput,
+            context={"request": "bounded"},
+            tools=[],
+            remaining_token_budget=1000,
+            remaining_tool_budget=8,
+        )
+
+    assert request_count == 2
+
+
+@pytest.mark.anyio
+async def test_v11_sdk_model_requests_reserve_decreasing_output_caps():
+    class StrictOutput(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+        value: str
+
+    class TwoRequestModel(Model):
+        def __init__(self) -> None:
+            self.calls = 0
+            self.output_caps: list[int | None] = []
+
+        async def get_response(
+            self,
+            system_instructions,
+            input,
+            model_settings,
+            tools,
+            output_schema,
+            handoffs,
+            tracing,
+            *,
+            previous_response_id,
+            conversation_id,
+            prompt,
+        ):
+            del (
+                system_instructions,
+                input,
+                tools,
+                output_schema,
+                handoffs,
+                tracing,
+                previous_response_id,
+                conversation_id,
+                prompt,
+            )
+            self.calls += 1
+            self.output_caps.append(model_settings.max_tokens)
+            if self.calls == 1:
+                output = [
+                    ResponseFunctionToolCall(
+                        arguments="{}",
+                        call_id="probe-call",
+                        name="probe",
+                        type="function_call",
+                    )
+                ]
+            else:
+                output = [
+                    ResponseOutputMessage(
+                        id="final-message",
+                        content=[
+                            ResponseOutputText(
+                                annotations=[],
+                                text='{"value":"ok"}',
+                                type="output_text",
+                            )
+                        ],
+                        role="assistant",
+                        status="completed",
+                        type="message",
+                    )
+                ]
+            return ModelResponse(
+                output=output,
+                usage=Usage(input_tokens=20, output_tokens=5),
+                response_id=f"response-{self.calls}",
+            )
+
+        async def stream_response(self, *_args, **_kwargs):
+            if False:
+                yield None
+
+    model = TwoRequestModel()
+
+    async def probe(_context, _raw_input):
+        return "probe result"
+
+    tool = FunctionTool(
+        name="probe",
+        description="bounded probe",
+        params_json_schema={
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+        },
+        on_invoke_tool=probe,
+    )
+    runtime = V11Runtime(model=model, token_budget=1000)
+
+    await runtime._call_model(
+        actor="LeadAgent",
+        prompt="bounded request",
+        output_type=StrictOutput,
+        context={"request": "bounded"},
+        tools=[tool],
+        remaining_token_budget=1000,
+        remaining_tool_budget=8,
+    )
+
+    assert model.calls == 2
+    assert model.output_caps[1] < model.output_caps[0]
+
+
+@pytest.mark.anyio
+async def test_v11_sdk_budget_reservation_is_released_when_preflight_rejects():
+    class NoRequestModel(Model):
+        async def get_response(self, *_args, **_kwargs):
+            raise AssertionError("preflight must reject before provider request")
+
+        async def stream_response(self, *_args, **_kwargs):
+            if False:
+                yield None
+
+    runtime = V11Runtime(model=NoRequestModel(), token_budget=100)
+    proxy = _V11BudgetedModel(runtime.model, runtime)
+
+    def reject_execution() -> None:
+        raise V11RuntimeContractError("cancelled")
+
+    runtime._check_execution = reject_execution
+    with pytest.raises(V11RuntimeContractError, match="cancelled"):
+        await proxy.get_response(
+            system_instructions="inspect",
+            input="one bounded request",
+            model_settings=ModelSettings(max_tokens=80),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=SimpleNamespace(is_disabled=lambda: True),
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        )
+
+    assert runtime.remaining_token_budget == 100
+
+
+@pytest.mark.anyio
+async def test_v11_investigators_share_a_bounded_concurrent_gate():
+    repository, record = _repository()
+    runtime_run_id = "run-investigator-concurrency"
+    tasks = [
+        DiagnosisTask(
+            id=f"task-concurrent-{index}",
+            title="bounded investigation",
+            description="inspect one isolated signal",
+            task_type=DiagnosisTaskType.GENERAL_INVESTIGATION,
+            agent_name="InvestigatorAgent",
+            analysis_round=1,
+            evidence_scope={"entity_ids": [record.event.service]},
+            runtime_run_id=runtime_run_id,
+        )
+        for index in range(3)
+    ]
+    repository.save_plan(
+        DiagnosisPlan(
+            investigation_id=record.id,
+            runtime_run_id=runtime_run_id,
+            tasks=tasks,
+            lead_decision=LeadDecision(
+                action=LeadAction.INVESTIGATE,
+                summary="run bounded investigators",
+                task_ids=[task.id for task in tasks],
+            ),
+        )
+    )
+    active = 0
+    peak = 0
+
+    async def turn(**_kwargs):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        try:
+            await asyncio.sleep(0.03)
+            return {"summary": "completed", "findings": [], "candidates": []}
+        finally:
+            active -= 1
+
+    runtime = V11Runtime(
+        model="fake",
+        model_provider=ModelProvider.OPENAI,
+        model_name="fake",
+        tool_registry=build_provider_tool_registry(build_mock_provider_registry()),
+        turn=turn,
+        max_investigators=3,
+    )
+    runtime.runtime_run_id = runtime_run_id
+
+    await runtime.investigator_round_1(
+        repository=repository,
+        investigation_id=record.id,
+        event=record.event,
+    )
+
+    assert peak == 3
+    assert active == 0
+
+
+@pytest.mark.anyio
+async def test_v11_all_investigator_failure_clears_prior_diagnostic_projection():
+    repository, record = _repository()
+    runtime_run_id = "run-investigator-terminal-projection"
+    task = DiagnosisTask(
+        id="task-terminal-projection",
+        title="bounded investigation",
+        description="inspect one isolated signal",
+        task_type=DiagnosisTaskType.GENERAL_INVESTIGATION,
+        agent_name="InvestigatorAgent",
+        analysis_round=1,
+        evidence_scope={"entity_ids": [record.event.service]},
+        runtime_run_id=runtime_run_id,
+    )
+    repository.save_plan(
+        DiagnosisPlan(
+            investigation_id=record.id,
+            runtime_run_id=runtime_run_id,
+            tasks=[task],
+            lead_decision=LeadDecision(
+                action=LeadAction.INVESTIGATE,
+                summary="run investigator",
+                task_ids=[task.id],
+            ),
+        )
+    )
+    repository.save_coordination_review(
+        CoordinationReview(
+            investigation_id=record.id,
+            runtime_run_id=runtime_run_id,
+            authority_mode="agent",
+            candidates=[
+                RootCauseCandidate(
+                    id="candidate-stale",
+                    summary="stale projection",
+                    rank=1,
+                    confidence=0.5,
+                )
+            ],
+            lead_decision=LeadDecision(
+                action=LeadAction.INCONCLUSIVE,
+                summary="stale decision",
+                stop_reason="insufficient_evidence",
+            ),
+            diagnostic_status="inconclusive",
+        )
+    )
+
+    async def turn(**_kwargs):
+        raise RuntimeError("all investigators unavailable")
+
+    runtime = V11Runtime(
+        model="fake",
+        model_provider=ModelProvider.OPENAI,
+        model_name="fake",
+        tool_registry=build_provider_tool_registry(build_mock_provider_registry()),
+        turn=turn,
+    )
+    runtime.runtime_run_id = runtime_run_id
+
+    await runtime.investigator_round_1(
+        repository=repository,
+        investigation_id=record.id,
+        event=record.event,
+    )
+
+    review = repository.get_coordination_review(record.id)
+    assert review is not None
+    assert review.candidates == []
+    assert review.critic_assessments == []
+    assert review.lead_decision is None
+    assert review.diagnostic_status is None
+    assert repository.get(record.id).multi_agent_run.diagnostic_status is None
 
 
 @pytest.mark.anyio
@@ -415,6 +931,60 @@ async def test_v11_model_retry_is_one_classified_transport_attempt():
     assert planning[0].status == AgentExecutionStatus.FAILED
     assert planning[1].status == AgentExecutionStatus.COMPLETED
     assert planning[1].resume_from_execution_id == planning[0].id
+
+
+@pytest.mark.anyio
+async def test_v11_parse_failure_marks_latest_retry_attempt_invalid_output():
+    repository, record = _repository()
+    candidate = RootCauseCandidate(
+        id="candidate-parse-retry",
+        summary="candidate",
+        rank=1,
+        confidence=0.5,
+    )
+    repository.save_coordination_review(
+        CoordinationReview(
+            investigation_id=record.id,
+            runtime_run_id="run-parse-retry",
+            authority_mode="agent",
+            candidates=[candidate],
+        )
+    )
+    calls = 0
+
+    async def turn(**_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            request = httpx.Request("POST", "https://provider.test/model")
+            response = httpx.Response(429, request=request)
+            raise openai.RateLimitError("limited", response=response, body={})
+        return {"malformed": True}
+
+    runtime = V11Runtime(
+        model="fake",
+        model_provider=ModelProvider.OPENAI,
+        model_name="fake",
+        turn=turn,
+        token_budget=1000,
+    )
+    runtime.runtime_run_id = "run-parse-retry"
+
+    await runtime.critic_review(
+        repository=repository,
+        investigation_id=record.id,
+        event=record.event,
+    )
+
+    executions = [
+        item
+        for item in repository.list_executions(record.id)
+        if item.step_kind == ExecutionStepKind.CRITIC_REVIEW
+    ]
+    assert calls == 2
+    assert [item.attempt for item in executions] == [1, 2]
+    assert executions[0].status == AgentExecutionStatus.FAILED
+    assert executions[1].status == AgentExecutionStatus.FAILED
 
 
 @pytest.mark.anyio
@@ -1378,8 +1948,13 @@ async def test_v11_phase_executor_uses_runtime_phases_without_legacy_report_or_a
                 investigation_id=record.id,
                 strategy="adaptive",
                 run_reason=RuntimeRunReason.INITIAL,
-                execution_contract_version="v11",
-                tool_budget=8,
+                    execution_contract_version="v11",
+                    execution_contract=_complete_contract(
+                        runtime.tool_registry, model_name="fake"
+                    ),
+                    model_provider=ModelProvider.OPENAI,
+                    model_name="fake",
+                    tool_budget=8,
                 token_budget=10000,
                 timeout_seconds=60,
             )

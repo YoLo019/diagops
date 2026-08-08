@@ -82,6 +82,31 @@ class BlockingV11PhaseExecutor(V11PhaseExecutor):
         return await super().execute_phase(phase_input)
 
 
+class InvestigatorFailureV11PhaseExecutor(V11PhaseExecutor):
+    async def execute_phase(self, phase_input) -> PhaseOutput:
+        if phase_input.phase == RuntimePhase.INVESTIGATOR_ROUND_1:
+            self.phases.append(phase_input.phase)
+            record = self.repository.get("inv-1")
+            mutation = BusinessMutation(
+                investigation_id="inv-1",
+                investigation=record.model_copy(
+                    update={
+                        "status": InvestigationStatus.FAILED,
+                        "failure_reason": "all investigators failed",
+                    }
+                ),
+            )
+            return PhaseOutput(
+                business_mutation=mutation,
+                status="completed",
+                safe_payload={"status": "failed"},
+                resume_state=phase_input.resume_state.model_copy(
+                    update={"remaining_tool_budget": 8, "remaining_token_budget": 1000}
+                ),
+            )
+        return await super().execute_phase(phase_input)
+
+
 class DeadlineRecordingExecutor(V11PhaseExecutor):
     """在 INTAKE 提交前快照协调器缓存的绝对 deadline（finally 会弹出该缓存）。"""
 
@@ -249,6 +274,29 @@ async def test_v11_failed_investigation_after_phase_loop_fails_run_with_output_v
         if event.safe_payload.get("failure_category") == "output_validation"
     ]
     assert failure_events
+    await coordinator.shutdown()
+
+
+@pytest.mark.anyio
+async def test_v11_required_investigator_failure_stops_before_critic_or_lead() -> None:
+    repository, store, run, executor, coordinator = _v11_services(
+        run_id="run-v11-investigator-terminal"
+    )
+    failing = InvestigatorFailureV11PhaseExecutor(repository, run.id)
+    coordinator.phase_executor = failing
+
+    result = await coordinator.execute(run.id, owner="worker-a")
+
+    assert result.status == RuntimeRunStatus.FAILED
+    assert failing.phases == [
+        RuntimePhase.INTAKE,
+        RuntimePhase.EVIDENCE_COLLECTION,
+        RuntimePhase.LEAD_PLANNING,
+        RuntimePhase.INVESTIGATOR_ROUND_1,
+    ]
+    assert RuntimePhase.CRITIC_REVIEW not in failing.phases
+    assert RuntimePhase.LEAD_ADJUDICATION not in failing.phases
+    assert repository.get("inv-1").multi_agent_run is None
     await coordinator.shutdown()
 
 

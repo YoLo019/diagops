@@ -34,6 +34,7 @@ from backend.domain.runtime import (
     RuntimeRun,
     RuntimeRunKind,
     RuntimeRunReason,
+    seal_v11_execution_contract,
 )
 from backend.providers.registry import build_provider_registry_from_settings
 from backend.rca.analyzer import RcaAnalyzer
@@ -135,6 +136,9 @@ class AppContainer:
                         120.0, float(self.settings.agents.timeout_seconds)
                     ),
                     max_total_tool_calls=self.settings.agents.max_total_tool_calls,
+                    max_tool_calls_per_specialist=(
+                        self.settings.agents.max_tool_calls_per_specialist
+                    ),
                     token_budget=self.settings.agents.token_budget,
                     tool_timeout_seconds=(
                         self.settings.agents.tool_timeout_seconds
@@ -425,11 +429,14 @@ class AppContainer:
                 "retry_policy": {
                     "max_retries": 1,
                     "retryable_categories": ["transport", "rate_limit"],
+                    "provider_max_retries": 0,
+                    "sdk_max_retries": 0,
                 },
                 "tool_budget": self.settings.agents.max_total_tool_calls,
                 "token_budget": self.settings.agents.token_budget,
                 "timeout_seconds": float(self.settings.agents.timeout_seconds),
             }
+            contract = seal_v11_execution_contract(contract)
         run = RuntimeRun(
             investigation_id=investigation_id,
             run_kind=RuntimeRunKind.LIVE,

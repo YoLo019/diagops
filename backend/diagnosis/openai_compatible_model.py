@@ -85,14 +85,21 @@ class OpenAICompatibleChatCompletionsModel(OpenAIChatCompletionsModel):
         # Agents SDK 的默认 cache key 仅针对官方 OpenAI endpoint。
         return False
 
-    def clone_for_model(self, model_name: str) -> OpenAICompatibleChatCompletionsModel:
+    def clone_for_model(
+        self,
+        model_name: str,
+        *,
+        max_retries: int | None = None,
+    ) -> OpenAICompatibleChatCompletionsModel:
         """为冻结 Run 创建不共享传输状态的同凭据 adapter。"""
         return type(self)(
             model=model_name,
             api_key=self._api_key.get_secret_value(),
             base_url=self._base_url,
             timeout_seconds=self._timeout_seconds,
-            max_retries=self._max_retries,
+            max_retries=(
+                self._max_retries if max_retries is None else max_retries
+            ),
             strict_feature_validation=self._strict_feature_validation,
         )
 

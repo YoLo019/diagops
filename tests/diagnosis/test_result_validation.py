@@ -161,7 +161,7 @@ def _validation_checks(evidence_id: str = "ev-log", unsafe: bool = False):
 
 
 def _validation_execution(
-    *, actor: str, step_kind: ExecutionStepKind
+    *, actor: str, step_kind: ExecutionStepKind, analysis_round: int | None = None
 ) -> AgentExecution:
     return AgentExecution(
         task_id=f"task-{step_kind.value}",
@@ -169,6 +169,7 @@ def _validation_execution(
         runtime_run_id="run-v11",
         status=AgentExecutionStatus.COMPLETED,
         execution_layer=AgentExecutionLayer.OPENAI_AGENTS_SDK,
+        analysis_round=analysis_round,
         step_kind=step_kind,
         summary="completed",
     )
@@ -200,6 +201,49 @@ def test_v11_validator_rejects_evidence_from_another_run():
             candidates=[candidate],
             review=review,
             evidence=[evidence],
+        )
+
+
+def test_v11_validator_rejects_orphan_supplemental_task_ids():
+    evidence = _validation_evidence()
+    candidate = _validation_candidate()
+    assessment = CriticAssessment(
+        candidate_id=candidate.id,
+        verdict=CriticVerdict.NEEDS_EVIDENCE,
+        checks=_validation_checks(),
+        gap="need a round two signal",
+        supplemental_task_ids=["ghost-task"],
+        summary="needs more evidence",
+        runtime_run_id="run-v11",
+    )
+    review = CoordinationReview(
+        investigation_id="inv-1",
+        runtime_run_id="run-v11",
+        authority_mode=AuthorityMode.AGENT,
+        candidates=[candidate],
+        critic_assessments=[assessment],
+    )
+    persisted_task = DiagnosisTask(
+        id="real-round-two-task",
+        title="collect the requested signal",
+        description="collect the requested signal",
+        task_type=DiagnosisTaskType.GENERAL_INVESTIGATION,
+        agent_name=ExecutionActor.INVESTIGATOR.value,
+        analysis_round=2,
+        evidence_scope={"entity_ids": ["checkout-service"]},
+        runtime_run_id="run-v11",
+        critic_assessment_id=assessment.id,
+    )
+
+    with pytest.raises(Exception, match="supplemental"):
+        validate_v11_result(
+            investigation_id="inv-1",
+            runtime_run_id="run-v11",
+            findings=[],
+            candidates=[candidate],
+            review=review,
+            evidence=[evidence],
+            tasks=[persisted_task],
         )
 
 
@@ -318,6 +362,35 @@ def test_v11_validator_scans_nested_critic_check_text_for_control_characters():
         verdict=CriticVerdict.ACCEPT,
         checks=_validation_checks(unsafe=True),
         summary="assessed",
+        runtime_run_id="run-v11",
+    )
+    review = CoordinationReview(
+        investigation_id="inv-1",
+        runtime_run_id="run-v11",
+        authority_mode=AuthorityMode.AGENT,
+        candidates=[candidate],
+        critic_assessments=[assessment],
+    )
+
+    with pytest.raises(Exception, match="unsafe_text"):
+        validate_v11_result(
+            investigation_id="inv-1",
+            runtime_run_id="run-v11",
+            findings=[],
+            candidates=[candidate],
+            review=review,
+            evidence=[evidence],
+        )
+
+
+def test_v11_validator_rejects_whitespace_controls_in_nested_assessment_text():
+    evidence = _validation_evidence()
+    candidate = _validation_candidate()
+    assessment = CriticAssessment(
+        candidate_id=candidate.id,
+        verdict=CriticVerdict.ACCEPT,
+        checks=_validation_checks(),
+        summary="assessment\twith control",
         runtime_run_id="run-v11",
     )
     review = CoordinationReview(

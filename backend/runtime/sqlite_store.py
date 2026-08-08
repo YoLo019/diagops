@@ -34,6 +34,7 @@ from backend.domain.runtime import (
     RuntimeRunStatus,
     ensure_attempt_transition,
     ensure_run_transition,
+    validate_v11_execution_contract,
 )
 from backend.domain.tool_calls import ToolCallRecord, ToolCallStatus
 from backend.runtime.diff import freeze_business_projection
@@ -1757,6 +1758,11 @@ class SQLiteRuntimeStore:
             "timeout_seconds",
         } <= contract.keys():
             return True
+        if version == "v11" and "execution_contract_digest" in contract:
+            try:
+                validate_v11_execution_contract(contract)
+            except ValueError:
+                return True
         return False
 
     @staticmethod

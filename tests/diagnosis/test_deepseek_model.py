@@ -149,6 +149,22 @@ def test_deepseek_model_supports_sequential_event_loops(monkeypatch):
     assert all(client.closed for client in clients)
 
 
+def test_v11_deepseek_clone_explicitly_disables_provider_retry(monkeypatch):
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(deepseek_model, "AsyncOpenAI", FakeClient)
+    model = deepseek_model.create_deepseek_model("deepseek-v4-pro", "local-secret")
+    v11_model = model.clone_for_model("deepseek-v4-pro", max_retries=0)
+
+    v11_model._create_client()
+
+    assert captured["max_retries"] == 0
+
+
 def test_unsupported_capability_profile_constructs_no_client(monkeypatch):
     unsupported = replace(deepseek_model.DEEPSEEK_CAPABILITIES, json_object=False)
     monkeypatch.setattr(deepseek_model, "DEEPSEEK_CAPABILITIES", unsupported)

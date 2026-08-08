@@ -397,6 +397,22 @@ class RuntimeCoordinator:
                 self._phase_spans.pop(attempt.id, None)
                 active_phase_scope = None
                 active_phase = None
+                if (
+                    run.is_v11
+                    and self.store.investigation_repository.get(
+                        run.investigation_id
+                    ).status.value
+                    == "failed"
+                ):
+                    await self._fail_if_owned(
+                        run.id,
+                        attempt,
+                        owner,
+                        run.lease_version,
+                        phase=phase,
+                        failure_category=RuntimeFailureCategory.OUTPUT_VALIDATION,
+                    )
+                    return self.store.get_run(run.id)
             if (
                 run.is_v11
                 and self.store.investigation_repository.get(run.investigation_id).status.value

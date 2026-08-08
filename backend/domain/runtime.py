@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from copy import deepcopy
 from datetime import UTC, datetime
 from enum import StrEnum
 from math import isfinite
@@ -159,16 +160,104 @@ class RunOwnership(BaseModel):
     runtime_run_id: str = Field(min_length=1)
 
 
+_EXECUTION_CONTRACT_DIGEST = "execution_contract_digest"
+_V11_CONTRACT_REQUIRED_KEYS = {
+    "execution_contract_version",
+    "authority_mode",
+    "model_provider",
+    "model_name",
+    "prompt_version",
+    "api_mode",
+    "endpoint_id",
+    "capability_artifact_hash",
+    "tool_manifest",
+    "tool_manifest_hash",
+    "skill_catalog",
+    "capability_identity",
+    "limits",
+    "retry_policy",
+    "tool_budget",
+    "token_budget",
+    "timeout_seconds",
+    _EXECUTION_CONTRACT_DIGEST,
+}
+_V11_CAPABILITY_KEYS = {
+    "provider",
+    "model",
+    "api_mode",
+    "endpoint_id",
+    "artifact_hash",
+}
+_V11_LIMIT_KEYS = {
+    "max_turns",
+    "max_investigators",
+    "max_rounds",
+    "token_budget",
+    "max_tool_calls_per_specialist",
+    "tool_timeout_seconds",
+}
+
+
 def execution_contract_digest(contract: dict[str, Any]) -> str:
-    """返回不含凭据的 execution contract 稳定摘要。"""
+    """返回不含凭据且排除自身字段的 execution contract 稳定摘要。"""
+    payload = {
+        key: value
+        for key, value in contract.items()
+        if key != _EXECUTION_CONTRACT_DIGEST
+    }
     encoded = json.dumps(
-        contract,
+        payload,
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def seal_v11_execution_contract(contract: dict[str, Any]) -> dict[str, Any]:
+    """由服务端为 V11 admission 生成带摘要的不可变契约快照。"""
+    sealed = deepcopy(contract)
+    sealed[_EXECUTION_CONTRACT_DIGEST] = execution_contract_digest(sealed)
+    return sealed
+
+
+def validate_v11_execution_contract(contract: dict[str, Any]) -> None:
+    """校验 V11 nested contract 的完整性、摘要和可执行边界。"""
+    if not isinstance(contract, dict) or not _V11_CONTRACT_REQUIRED_KEYS <= contract.keys():
+        raise ValueError("V11 execution contract is incomplete")
+    if contract.get(_EXECUTION_CONTRACT_DIGEST) != execution_contract_digest(contract):
+        raise ValueError("V11 execution contract digest mismatch")
+    if contract.get("execution_contract_version") != ExecutionContractVersion.V11.value:
+        raise ValueError("V11 execution contract version mismatch")
+    if contract.get("authority_mode") != AuthorityMode.AGENT.value:
+        raise ValueError("V11 execution contract authority mismatch")
+    capability = contract.get("capability_identity")
+    limits = contract.get("limits")
+    retry_policy = contract.get("retry_policy")
+    skill_catalog = contract.get("skill_catalog")
+    if not isinstance(capability, dict) or not _V11_CAPABILITY_KEYS <= capability.keys():
+        raise ValueError("V11 execution contract capability identity is incomplete")
+    if not isinstance(limits, dict) or not _V11_LIMIT_KEYS <= limits.keys():
+        raise ValueError("V11 execution contract limits are incomplete")
+    if not isinstance(skill_catalog, dict):
+        raise ValueError("V11 execution contract skill catalog is incomplete")
+    if not isinstance(retry_policy, dict):
+        raise ValueError("V11 execution contract retry policy is incomplete")
+    if contract.get("token_budget") is None or limits.get("token_budget") is None:
+        raise ValueError("V11 execution contract token ceiling is missing")
+    if limits["token_budget"] != contract["token_budget"]:
+        raise ValueError("V11 execution contract token ceiling mismatch")
+    if contract.get("max_tool_calls_per_specialist") is not None:
+        raise ValueError("V11 specialist limit must be nested under limits")
+    if retry_policy.get("max_retries") != 1:
+        raise ValueError("V11 retry policy max_retries must be one")
+    if set(retry_policy.get("retryable_categories", ())) != {"transport", "rate_limit"}:
+        raise ValueError("V11 retry policy categories are not frozen")
+    if retry_policy.get("provider_max_retries") != 0:
+        raise ValueError("V11 provider retries must be disabled")
+    if retry_policy.get("sdk_max_retries") != 0:
+        raise ValueError("V11 SDK retries must be disabled")
 
 
 def _validate_contract_value(value: Any, path: str = "execution_contract") -> None:
@@ -322,6 +411,11 @@ class RuntimeRun(RuntimeModel):
                 raise ValueError("V11 execution contract is incomplete")
             if self.timeout_seconds > 120:
                 raise ValueError("V11 timeout_seconds exceeds the hard deadline")
+            if _EXECUTION_CONTRACT_DIGEST in self.execution_contract:
+                try:
+                    validate_v11_execution_contract(self.execution_contract)
+                except ValueError as exc:
+                    raise ValueError(str(exc)) from exc
         elif self.authority_mode != AuthorityMode.LEGACY_DETERMINISTIC:
             raise ValueError("legacy execution contracts require legacy authority")
         contract_version = self.execution_contract.get("execution_contract_version")

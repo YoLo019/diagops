@@ -12,12 +12,15 @@ import copy
 import inspect
 import json
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
-from agents import Agent, ModelSettings, RunConfig
+from agents import Agent, Model, ModelRetrySettings, ModelSettings, RunConfig
+from agents.models.interface import ModelProvider as AgentsModelProvider
+from agents.models.multi_provider import MultiProvider
+from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.db.models import InvestigationStatus
@@ -33,6 +36,9 @@ from backend.diagnosis.diagnostic_skills import (
     DiagnosticSkill,
     skill_catalog_hash,
     validate_skill_catalog,
+)
+from backend.diagnosis.openai_compatible_model import (
+    OpenAICompatibleChatCompletionsModel,
 )
 from backend.diagnosis.result_validation import (
     V11ResultValidationError,
@@ -69,7 +75,7 @@ from backend.domain.multi_agent import (
     ModelProvider,
     MultiAgentRunStatus,
 )
-from backend.domain.runtime import RuntimePhase
+from backend.domain.runtime import RuntimePhase, validate_v11_execution_contract
 from backend.runtime.concurrency import RunStepGate
 from backend.safety.redaction import redact_value
 from backend.tools.provider_tools import (
@@ -155,6 +161,86 @@ class _ModelTurn:
     execution_id: str | None = None
 
 
+class _V11BudgetedModel(Model):
+    """把 durable token reservation 下沉到 Agents SDK 的每个 request。"""
+
+    def __init__(self, delegate: Model, runtime: V11Runtime) -> None:
+        self._delegate = delegate
+        self._runtime = runtime
+
+    async def get_response(self, *args: Any, **kwargs: Any) -> Any:
+        model_settings = kwargs["model_settings"]
+        reservation = await self._runtime._reserve_model_budget(
+            model_settings.max_tokens,
+            kwargs.get("system_instructions") or "",
+            {"input": kwargs.get("input")},
+        )
+        output_cap, input_estimate, reserved_total = reservation
+        request_settings = replace(
+            model_settings,
+            max_tokens=output_cap,
+            retry=ModelRetrySettings(max_retries=0),
+        )
+        request_args = dict(kwargs)
+        request_args["model_settings"] = request_settings
+        request_started = False
+        try:
+            self._runtime._check_execution()
+            timeout_seconds = self._runtime._model_timeout()
+            request_started = True
+            response = await asyncio.wait_for(
+                self._delegate.get_response(*args, **request_args),
+                timeout=timeout_seconds,
+            )
+            self._runtime._check_execution()
+            input_tokens, output_tokens = _usage_values(
+                getattr(response, "usage", None)
+            )
+            await self._runtime._settle_model_budget(
+                reserved_total,
+                max(input_estimate, input_tokens) + output_tokens,
+            )
+            return response
+        except asyncio.CancelledError:
+            if reserved_total:
+                await self._runtime._settle_model_budget(
+                    reserved_total,
+                    input_estimate if request_started else 0,
+                )
+            raise
+        except Exception:
+            if reserved_total:
+                await self._runtime._settle_model_budget(
+                    reserved_total,
+                    input_estimate if request_started else 0,
+                )
+            raise
+
+    async def stream_response(self, *args: Any, **kwargs: Any):
+        # V11 使用非流式结构化响应；保留 SDK Model 接口以便 provider adapter 正常解析。
+        async for event in self._delegate.stream_response(*args, **kwargs):
+            yield event
+
+    async def close(self) -> None:
+        await self._delegate.close()
+
+
+class _V11ModelProvider(AgentsModelProvider):
+    """为 string model name 注入同一 request budget proxy。"""
+
+    def __init__(self, runtime: V11Runtime) -> None:
+        self._runtime = runtime
+        self._client = AsyncOpenAI(max_retries=0)
+        self._delegate = MultiProvider(openai_client=self._client)
+
+    def get_model(self, model_name: str | None) -> Model:
+        return _V11BudgetedModel(self._delegate.get_model(model_name), self._runtime)
+
+    async def aclose(self) -> None:
+        await self._delegate.aclose()
+        await self._client.close()
+
+
 @dataclass(frozen=True, slots=True)
 class _InvestigatorResult:
     findings: tuple[AgentFinding, ...]
@@ -181,6 +267,7 @@ class V11Runtime:
         max_investigators: int = 3,
         max_rounds: int = 2,
         max_total_tool_calls: int = 8,
+        max_tool_calls_per_specialist: int = 3,
         token_budget: int | None = None,
         tool_timeout_seconds: float = 10.0,
         parallel_limit: RunStepGate | None = None,
@@ -192,6 +279,8 @@ class V11Runtime:
             raise ValueError("max_rounds must be one or two")
         if max_total_tool_calls < 1:
             raise ValueError("max_total_tool_calls must be positive")
+        if max_tool_calls_per_specialist < 1:
+            raise ValueError("max_tool_calls_per_specialist must be positive")
         if max_turns < 1:
             raise ValueError("max_turns must be positive")
         if timeout_seconds < 1 or timeout_seconds > 120:
@@ -206,11 +295,13 @@ class V11Runtime:
         self.max_investigators = max_investigators
         self.max_rounds = max_rounds
         self.max_total_tool_calls = max_total_tool_calls
+        self.max_tool_calls_per_specialist = max_tool_calls_per_specialist
         self.tool_timeout_seconds = tool_timeout_seconds
         self.skills = skills
         self.runtime_run_id: str | None = None
         self._remaining_token_budget = token_budget
         self._token_budget_lock = asyncio.Lock()
+        self._commit_lock = asyncio.Lock()
         self._execution_contract: dict[str, Any] | None = None
         self._remaining_deadline_seconds: Callable[[], float] = lambda: float("inf")
         self._deadline_at: datetime | None = datetime.now(UTC) + timedelta(
@@ -266,24 +357,36 @@ class V11Runtime:
         runtime.model_name = model_name or self.model_name
         runtime._remaining_token_budget = token_budget
         runtime._token_budget_lock = asyncio.Lock()
+        runtime._commit_lock = asyncio.Lock()
         runtime._remaining_deadline_seconds = lambda: float("inf")
         runtime.timeout_seconds = (
             timeout_seconds if timeout_seconds is not None else self.timeout_seconds
         )
         runtime._execution_contract = copy.deepcopy(execution_contract)
-        limits = (
-            runtime._execution_contract.get("limits", {})
-            if runtime._execution_contract is not None
-            else {}
+        if runtime._execution_contract is None:
+            raise V11RuntimeContractError("V11 clone lacks execution contract")
+        runtime._validate_execution_contract(
+            runtime._execution_contract,
+            model_provider=runtime.model_provider,
+            model_name=runtime.model_name,
         )
-        if limits:
-            runtime.max_turns = int(limits["max_turns"])
-            runtime.max_investigators = int(limits["max_investigators"])
-            runtime.max_rounds = int(limits["max_rounds"])
-            runtime.max_total_tool_calls = int(
-                runtime._execution_contract["tool_budget"]
+        if (
+            isinstance(runtime.model, OpenAICompatibleChatCompletionsModel)
+            and runtime.model_name is not None
+        ):
+            runtime.model = runtime.model.clone_for_model(
+                runtime.model_name,
+                max_retries=0,
             )
-            runtime.tool_timeout_seconds = float(limits["tool_timeout_seconds"])
+        limits = runtime._execution_contract["limits"]
+        runtime.max_turns = int(limits["max_turns"])
+        runtime.max_investigators = int(limits["max_investigators"])
+        runtime.max_rounds = int(limits["max_rounds"])
+        runtime.max_total_tool_calls = int(runtime._execution_contract["tool_budget"])
+        runtime.max_tool_calls_per_specialist = int(
+            limits["max_tool_calls_per_specialist"]
+        )
+        runtime.tool_timeout_seconds = float(limits["tool_timeout_seconds"])
         runtime._deadline_at = datetime.now(UTC) + timedelta(
             seconds=runtime.timeout_seconds
         )
@@ -307,6 +410,10 @@ class V11Runtime:
     def bind_phase(self, phase_input: Any) -> None:
         """绑定当前 phase 的 Runtime fence、写入回调与冻结预算。"""
         self.runtime_run_id = phase_input.run_id
+        if phase_input.model_provider is not None:
+            self.model_provider = ModelProvider(phase_input.model_provider)
+        if phase_input.model_name is not None:
+            self.model_name = phase_input.model_name
         self._check_execution = phase_input.check_execution or (lambda: None)
         self._resolve_tool_result = phase_input.resolve_tool_result
         self._persist_tool_start = phase_input.persist_tool_start
@@ -316,6 +423,23 @@ class V11Runtime:
         self._hit_fault = phase_input.hit_fault or (lambda _point: None)
         self._phase_tool_budget = phase_input.tool_budget
         self._execution_contract = copy.deepcopy(phase_input.execution_contract)
+        if getattr(phase_input, "execution_contract_version", None) == "v11":
+            if self._execution_contract is None:
+                raise V11RuntimeContractError("V11 phase lacks execution contract")
+            self._validate_execution_contract(
+                self._execution_contract,
+                model_provider=phase_input.model_provider,
+                model_name=phase_input.model_name,
+            )
+            limits = self._execution_contract["limits"]
+            self.max_turns = int(limits["max_turns"])
+            self.max_investigators = int(limits["max_investigators"])
+            self.max_rounds = int(limits["max_rounds"])
+            self.max_total_tool_calls = int(self._execution_contract["tool_budget"])
+            self.max_tool_calls_per_specialist = int(
+                limits["max_tool_calls_per_specialist"]
+            )
+            self.tool_timeout_seconds = float(limits["tool_timeout_seconds"])
         self._deadline_at = phase_input.deadline_at or (
             datetime.now(UTC) + timedelta(seconds=self.timeout_seconds)
         )
@@ -350,6 +474,7 @@ class V11Runtime:
         run_id = self.runtime_run_id
         if not run_id:
             raise V11RuntimeContractError("V11 phase lacks runtime owner")
+        self._validate_bound_execution_contract()
         try:
             with current_investigation_scope(investigation_id):
                 return await self._dispatch_phase(
@@ -374,6 +499,8 @@ class V11Runtime:
         event: IncidentEvent,
         runtime_run_id: str,
     ) -> Any:
+        if repository.get(investigation_id).status == InvestigationStatus.FAILED:
+            return repository.get(investigation_id)
         if phase == RuntimePhase.LEAD_PLANNING:
             return await self.plan_lead(
                 repository=repository,
@@ -568,6 +695,11 @@ class V11Runtime:
             raise V11RuntimeContractError("V11 tool registry is not configured")
         contract = getattr(self, "_execution_contract", None)
         if contract is not None:
+            self._validate_execution_contract(
+                contract,
+                model_provider=self.model_provider,
+                model_name=self.model_name,
+            )
             raw_manifest = contract.get("tool_manifest")
             if not isinstance(raw_manifest, (list, tuple)):
                 raise V11RuntimeContractError("V11 contract lacks frozen tool manifest")
@@ -593,51 +725,6 @@ class V11Runtime:
                     raise V11RuntimeContractError(
                         "V11 frozen skill catalog identity mismatch"
                     )
-            capability_identity = contract.get("capability_identity")
-            limits = contract.get("limits")
-            retry_policy = contract.get("retry_policy")
-            if any(
-                key in contract
-                for key in ("skill_catalog", "capability_identity", "limits", "retry_policy")
-            ):
-                if not isinstance(skill_identity, dict) or not isinstance(
-                    capability_identity, dict
-                ) or not isinstance(limits, dict) or not isinstance(
-                    retry_policy, dict
-                ):
-                    raise V11RuntimeContractError(
-                        "V11 contract lacks frozen capability or limits"
-                    )
-                if not {
-                    "provider",
-                    "model",
-                    "api_mode",
-                    "endpoint_id",
-                    "artifact_hash",
-                } <= capability_identity.keys():
-                    raise V11RuntimeContractError(
-                        "V11 contract lacks capability identity"
-                    )
-                if not {
-                    "max_turns",
-                    "max_investigators",
-                    "max_rounds",
-                    "token_budget",
-                    "max_tool_calls_per_specialist",
-                    "tool_timeout_seconds",
-                } <= limits.keys():
-                    raise V11RuntimeContractError("V11 contract lacks frozen limits")
-                if (
-                    contract.get("token_budget") is None
-                    or limits.get("token_budget") is None
-                ):
-                    raise V11RuntimeContractError(
-                        "V11 contract lacks frozen token ceiling"
-                    )
-                if retry_policy.get("max_retries") != 1 or set(
-                    retry_policy.get("retryable_categories", [])
-                ) != {"transport", "rate_limit"}:
-                    raise V11RuntimeContractError("V11 retry policy is not frozen")
             try:
                 for tool_name in manifest:
                     self.tool_registry.assert_agent_callable(tool_name, manifest)
@@ -650,6 +737,77 @@ class V11Runtime:
         if len(manifest) != 9:
             raise V11RuntimeContractError("V11 requires exactly nine Agent tools")
         return manifest
+
+    def _validate_bound_execution_contract(self) -> None:
+        contract = getattr(self, "_execution_contract", None)
+        if contract is not None:
+            self._validate_execution_contract(
+                contract,
+                model_provider=self.model_provider,
+                model_name=self.model_name,
+            )
+
+    def _validate_execution_contract(
+        self,
+        contract: dict[str, Any],
+        *,
+        model_provider: ModelProvider | None,
+        model_name: str | None,
+    ) -> None:
+        try:
+            validate_v11_execution_contract(contract)
+        except ValueError as exc:
+            raise V11RuntimeContractError(str(exc)) from exc
+        expected_provider = (
+            model_provider.value
+            if isinstance(model_provider, ModelProvider)
+            else model_provider
+        )
+        if contract["model_provider"] != expected_provider:
+            raise V11RuntimeContractError("V11 execution contract provider mismatch")
+        if contract["model_name"] != model_name:
+            raise V11RuntimeContractError("V11 execution contract model mismatch")
+        capability = contract["capability_identity"]
+        if (
+            capability["provider"],
+            capability["model"],
+            capability["api_mode"],
+            capability["endpoint_id"],
+            capability["artifact_hash"],
+        ) != (
+            contract["model_provider"],
+            contract["model_name"],
+            contract["api_mode"],
+            contract["endpoint_id"],
+            contract["capability_artifact_hash"],
+        ):
+            raise V11RuntimeContractError("V11 capability identity projection mismatch")
+        limits = contract["limits"]
+        if not 1 <= int(limits["max_investigators"]) <= 3:
+            raise V11RuntimeContractError("V11 investigator limit is out of bounds")
+        if int(limits["max_rounds"]) not in {1, 2}:
+            raise V11RuntimeContractError("V11 round limit is out of bounds")
+        if int(limits["max_turns"]) < 1 or int(limits["max_tool_calls_per_specialist"]) < 1:
+            raise V11RuntimeContractError("V11 actor limit is out of bounds")
+        try:
+            manifest = tuple(contract["tool_manifest"])
+            if len(manifest) != 9 or len(set(manifest)) != len(manifest):
+                raise ValueError("V11 requires exactly nine frozen Agent tools")
+            if manifest != tuple(sorted(manifest)):
+                raise ValueError("V11 frozen tool manifest is not ordered")
+            if contract["tool_manifest_hash"] != agent_manifest_hash(manifest):
+                raise ValueError("V11 frozen tool manifest hash mismatch")
+            expected_skill = {
+                "catalog_version": SKILL_CATALOG_VERSION,
+                "catalog_hash": skill_catalog_hash(self.skills),
+                "skill_names": ",".join(
+                    f"{skill.name}@{skill.version}" for skill in self.skills
+                ),
+            }
+            if contract["skill_catalog"] != expected_skill:
+                raise ValueError("skill catalog")
+        except (KeyError, TypeError, ValueError) as exc:
+            raise V11RuntimeContractError(str(exc)) from exc
 
     async def investigator_round_1(
         self, *, repository, investigation_id: str, event: IncidentEvent
@@ -665,40 +823,39 @@ class V11Runtime:
         ]
         base_evidence = list(repository.get(investigation_id).evidence)
         candidates: list[RootCauseCandidate] = []
-        results: list[_InvestigatorResult] = []
-        for task in tasks[: self.max_investigators]:
-            self._check_execution()
+        selected_tasks = tasks[: self.max_investigators]
+
+        async def run_task(task: DiagnosisTask) -> _InvestigatorResult:
             try:
-                result = await self._run_investigator(
-                    repository=repository,
-                    investigation_id=investigation_id,
-                    event=event,
-                    task=task,
-                    round_number=1,
-                    seed_evidence=base_evidence,
-                    own_findings=(),
-                )
+                self._check_execution()
+                async with self._parallel_limit.slot():
+                    return await self._run_investigator(
+                        repository=repository,
+                        investigation_id=investigation_id,
+                        event=event,
+                        task=task,
+                        round_number=1,
+                        seed_evidence=base_evidence,
+                        own_findings=(),
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 self._failures.append(type(exc).__name__)
-                self._persist_investigator_result(
-                    repository,
-                    investigation_id,
-                    _InvestigatorResult(
-                        (),
-                        (),
-                        self._failed_execution(
-                            task_id=task.id,
-                            actor=ExecutionActor.INVESTIGATOR.value,
-                            step_kind=ExecutionStepKind.INVESTIGATOR_ANALYSIS,
-                            message="investigator failed",
-                            analysis_round=1,
-                        ),
+                return _InvestigatorResult(
+                    (),
+                    (),
+                    self._failed_execution(
+                        task_id=task.id,
+                        actor=ExecutionActor.INVESTIGATOR.value,
+                        step_kind=ExecutionStepKind.INVESTIGATOR_ANALYSIS,
+                        message="investigator failed",
+                        analysis_round=1,
                     ),
                 )
-                continue
-            results.append(result)
+
+        results = await asyncio.gather(*(run_task(task) for task in selected_tasks))
+        for result in results:
             candidates.extend(result.candidates)
             self._persist_investigator_result(repository, investigation_id, result)
         if tasks and not any(
@@ -815,7 +972,8 @@ class V11Runtime:
             return ()
         evidence = list(repository.get(investigation_id).evidence)
         findings: list[AgentFinding] = []
-        for task in tasks[:3]:
+        prepared: list[tuple[DiagnosisTask, CriticAssessment]] = []
+        for task in tasks[: self.max_investigators]:
             review = repository.get_coordination_review(investigation_id)
             assessment = next(
                 (
@@ -828,26 +986,47 @@ class V11Runtime:
             if assessment is None:
                 self._failures.append("missing_assessment")
                 continue
+            prepared.append((task, assessment))
+
+        async def run_task(
+            task_and_assessment: tuple[DiagnosisTask, CriticAssessment]
+        ) -> _InvestigatorResult:
+            task, assessment = task_and_assessment
             try:
-                result = await self._run_investigator(
-                    repository=repository,
-                    investigation_id=investigation_id,
-                    event=event,
-                    task=task,
-                    round_number=2,
-                    seed_evidence=evidence,
-                    own_findings=tuple(
-                        item
-                        for item in repository.list_agent_findings(investigation_id)
-                        if item.task_id == task.id
-                    ),
-                    assessment=assessment,
-                )
+                self._check_execution()
+                async with self._parallel_limit.slot():
+                    return await self._run_investigator(
+                        repository=repository,
+                        investigation_id=investigation_id,
+                        event=event,
+                        task=task,
+                        round_number=2,
+                        seed_evidence=evidence,
+                        own_findings=tuple(
+                            item
+                            for item in repository.list_agent_findings(investigation_id)
+                            if item.task_id == task.id
+                        ),
+                        assessment=assessment,
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 self._failures.append(type(exc).__name__)
-                continue
+                return _InvestigatorResult(
+                    (),
+                    (),
+                    self._failed_execution(
+                        task_id=task.id,
+                        actor=ExecutionActor.INVESTIGATOR.value,
+                        step_kind=ExecutionStepKind.INVESTIGATOR_ANALYSIS,
+                        message="investigator failed",
+                        analysis_round=2,
+                    ),
+                )
+
+        results = await asyncio.gather(*(run_task(item) for item in prepared))
+        for result in results:
             findings.extend(result.findings)
             self._persist_investigator_result(repository, investigation_id, result)
         self._completed_rounds = 2
@@ -1244,7 +1423,7 @@ class V11Runtime:
             seed_evidence=seed_evidence,
             registry=self.tool_registry,
             task_ids={instance_id: task.id},
-            max_tool_calls_per_specialist=3,
+            max_tool_calls_per_specialist=self.max_tool_calls_per_specialist,
             max_total_tool_calls=self._remaining_tool_budget_for(
                 repository, investigation_id
             ),
@@ -1300,7 +1479,7 @@ class V11Runtime:
                 analysis_round=round_number,
             )
             # 任何 finding 引用前，先收口 tool/evidence 的 durable 投影。
-            self._commit_session(repository, investigation_id, session)
+            await self._commit_session(repository, investigation_id, session)
             output = self._parse_output(turn.output, InvestigatorOutput)
             findings = tuple(
                 self._finding_from_draft(
@@ -1403,40 +1582,54 @@ class V11Runtime:
         ).model_copy(update={"candidates": list(by_id.values())})
         repository.save_coordination_review(review)
 
-    def _commit_session(
+    async def _commit_session(
         self, repository, investigation_id: str, session: AdaptiveToolSession
     ) -> None:
         if self.runtime_run_id is None:
             raise V11RuntimeContractError("tool session lacks runtime owner")
-        record = repository.get(investigation_id)
-        evidence_by_id = {item.id: item for item in record.evidence}
-        for item in session.new_evidence:
-            owned = item
-            if item.runtime_run_id is None:
-                owned = item.model_copy(update={"runtime_run_id": self.runtime_run_id})
-            previous = evidence_by_id.get(owned.id)
-            if previous is not None and previous != owned:
-                raise V11RuntimeContractError("duplicate evidence has different content")
-            evidence_by_id[owned.id] = owned
-        provider_results = {item.model_dump_json(): item for item in record.provider_results}
-        provider_results.update(
-            {item.model_dump_json(): item for item in session.provider_results}
-        )
-        record = record.model_copy(
-            update={
-                "evidence": list(evidence_by_id.values()),
-                "provider_results": list(provider_results.values()),
-                "updated_at": datetime.now(UTC),
+        async with self._commit_lock:
+            record = repository.get(investigation_id)
+            evidence_by_id = {item.id: item for item in record.evidence}
+            for item in session.new_evidence:
+                owned = item
+                if item.runtime_run_id is None:
+                    owned = item.model_copy(
+                        update={"runtime_run_id": self.runtime_run_id}
+                    )
+                previous = evidence_by_id.get(owned.id)
+                if previous is not None and previous != owned:
+                    raise V11RuntimeContractError(
+                        "duplicate evidence has different content"
+                    )
+                evidence_by_id[owned.id] = owned
+            provider_results = {
+                item.model_dump_json(): item for item in record.provider_results
             }
-        )
-        repository.save(record)
-        existing_calls = {item.id: item for item in repository.list_tool_calls(investigation_id)}
-        for call in session.tool_calls:
-            owned_call = call
-            if call.runtime_run_id is None:
-                owned_call = call.model_copy(update={"runtime_run_id": self.runtime_run_id})
-            existing_calls[owned_call.id] = owned_call
-        repository.save_tool_calls(investigation_id, list(existing_calls.values()))
+            provider_results.update(
+                {item.model_dump_json(): item for item in session.provider_results}
+            )
+            record = record.model_copy(
+                update={
+                    "evidence": list(evidence_by_id.values()),
+                    "provider_results": list(provider_results.values()),
+                    "updated_at": datetime.now(UTC),
+                }
+            )
+            repository.save(record)
+            existing_calls = {
+                item.id: item
+                for item in repository.list_tool_calls(investigation_id)
+            }
+            for call in session.tool_calls:
+                owned_call = call
+                if call.runtime_run_id is None:
+                    owned_call = call.model_copy(
+                        update={"runtime_run_id": self.runtime_run_id}
+                    )
+                existing_calls[owned_call.id] = owned_call
+            repository.save_tool_calls(
+                investigation_id, list(existing_calls.values())
+            )
 
     def _finding_from_draft(
         self,
@@ -1523,22 +1716,27 @@ class V11Runtime:
         if len(output.tasks) > 3:
             raise V11RuntimeContractError("round two task batch is out of bounds")
         task_by_id = {item.id: item for item in output.tasks}
+        declared_ids = [
+            task_id
+            for assessment in needs
+            for task_id in assessment.supplemental_task_ids
+        ]
+        if len(set(declared_ids)) != len(declared_ids):
+            raise V11RuntimeContractError("round two task IDs must be unique")
+        if set(task_by_id) != set(declared_ids):
+            raise V11RuntimeContractError(
+                "round two task IDs must match Critic supplemental IDs"
+            )
         tasks: list[DiagnosisTask] = []
-        for index, assessment in enumerate(needs):
+        for assessment in needs:
             ids = list(assessment.supplemental_task_ids)
             if not ids:
-                if index >= len(output.tasks):
-                    raise V11RuntimeContractError("needs_evidence lacks a round two task")
-                ids = [output.tasks[index].id]
+                raise V11RuntimeContractError("needs_evidence lacks a round two task")
             for task_id in ids:
                 draft = task_by_id.get(task_id)
                 if draft is None:
-                    draft = LeadTaskDraft(
-                        id=task_id,
-                        title="Collect Critic-requested evidence",
-                        description=assessment.gap or "Close the named evidence gap.",
-                        evidence_scope={"entity_ids": []},
-                        information_gap=assessment.gap,
+                    raise V11RuntimeContractError(
+                        "round two task is not declared by Critic"
                     )
                 tasks.append(
                     DiagnosisTask(
@@ -1630,21 +1828,20 @@ class V11Runtime:
             for item in repository.list_executions(investigation_id)
             if item.task_id == task_id and item.step_kind == step_kind
         ]
-        if any(item.status == AgentExecutionStatus.FAILED for item in matches):
-            return
-        existing = next(
-            (
-                item
-                for item in reversed(matches)
-                if item.status
-                in {
-                    AgentExecutionStatus.RUNNING,
-                    AgentExecutionStatus.COMPLETED,
-                    AgentExecutionStatus.CANCELLED,
-                }
-            ),
-            None,
+        existing = (
+            max(
+                matches,
+                key=lambda item: (
+                    item.attempt,
+                    item.started_at or datetime.min.replace(tzinfo=UTC),
+                    item.id,
+                ),
+            )
+            if matches
+            else None
         )
+        if existing is not None and existing.status == AgentExecutionStatus.FAILED:
+            return
         if existing is not None:
             now = datetime.now(UTC)
             self._record_execution(
@@ -1737,6 +1934,21 @@ class V11Runtime:
             InvestigationStatus.FAILED,
             failure_reason=reason,
         )
+        review = repository.get_coordination_review(investigation_id)
+        if review is not None:
+            repository.save_coordination_review(
+                review.model_copy(
+                    update={
+                        "candidates": [],
+                        "critic_assessments": [],
+                        "lead_decision": None,
+                        "diagnostic_status": None,
+                        "run_status": MultiAgentRunStatus.FAILED,
+                        "stop_reason": "v11_required_actor_failed",
+                        "summary": "V11 required actor failed.",
+                    }
+                )
+            )
         self._update_summary(repository, investigation_id)
 
     def _update_summary(self, repository, investigation_id: str) -> None:
@@ -1777,7 +1989,7 @@ class V11Runtime:
                     and call.status.value != "pending"
                 }
             ),
-            max_tool_calls_per_specialist=3,
+            max_tool_calls_per_specialist=self.max_tool_calls_per_specialist,
             max_total_tool_calls=(
                 self._phase_tool_budget
                 if self._phase_tool_budget is not None
@@ -2056,6 +2268,7 @@ class V11Runtime:
         analysis_round: int | None = None,
     ) -> _ModelTurn:
         self._check_execution()
+        self._validate_bound_execution_contract()
         if remaining_token_budget is not None and remaining_token_budget <= 0:
             raise V11RuntimeContractError("model token budget exhausted")
         if remaining_tool_budget is not None and remaining_tool_budget <= 0:
@@ -2138,12 +2351,12 @@ class V11Runtime:
                 output_cap: int | None = None
                 input_estimate = reserved_total = 0
                 try:
-                    reservation = await self._reserve_model_budget(
-                        remaining_token_budget, prompt, context
-                    )
-                    output_cap, input_estimate, reserved_total = reservation
                     timeout_seconds = self._model_timeout()
                     if self.turn is not None:
+                        reservation = await self._reserve_model_budget(
+                            remaining_token_budget, prompt, context
+                        )
+                        output_cap, input_estimate, reserved_total = reservation
                         raw_result = await asyncio.wait_for(
                             _maybe_await(
                                 self.turn(
@@ -2162,38 +2375,57 @@ class V11Runtime:
                     else:
                         if self.model is None:
                             raise V11RuntimeUnavailable("V11 model is not configured")
+                        sdk_model = (
+                            _V11BudgetedModel(self.model, self)
+                            if isinstance(self.model, Model)
+                            else self.model
+                        )
                         agent_kwargs: dict[str, Any] = {
                             "name": actor,
                             "instructions": prompt,
-                            "model": self.model,
+                            "model": sdk_model,
                             "tools": tools,
                             "output_type": output_type,
                         }
-                        if output_cap is not None:
-                            agent_kwargs["model_settings"] = ModelSettings(
-                                max_tokens=output_cap
-                            )
-                        agent = Agent(**agent_kwargs)
-                        raw_result = await asyncio.wait_for(
-                            _run_with_model_lifecycle(
-                                agent,
-                                json.dumps(context, ensure_ascii=False, sort_keys=True),
-                                persist_model_event=self._persist_model_event,
-                                max_turns=self.max_turns,
-                                run_config=RunConfig(
-                                    workflow_name="DiagOps V11 Agent RCA",
-                                    tracing_disabled=True,
-                                    trace_include_sensitive_data=False,
-                                ),
-                            ),
-                            timeout=timeout_seconds,
+                        agent_kwargs["model_settings"] = ModelSettings(
+                            retry=ModelRetrySettings(max_retries=0),
                         )
+                        agent = Agent(**agent_kwargs)
+                        model_provider = (
+                            _V11ModelProvider(self)
+                            if isinstance(self.model, str)
+                            else MultiProvider()
+                        )
+                        try:
+                            raw_result = await asyncio.wait_for(
+                                _run_with_model_lifecycle(
+                                    agent,
+                                    json.dumps(
+                                        context,
+                                        ensure_ascii=False,
+                                        sort_keys=True,
+                                    ),
+                                    persist_model_event=self._persist_model_event,
+                                    max_turns=self.max_turns,
+                                    run_config=RunConfig(
+                                        workflow_name="DiagOps V11 Agent RCA",
+                                        tracing_disabled=True,
+                                        trace_include_sensitive_data=False,
+                                        model_provider=model_provider,
+                                    ),
+                                ),
+                                timeout=timeout_seconds,
+                            )
+                        finally:
+                            if isinstance(model_provider, _V11ModelProvider):
+                                await model_provider.aclose()
                     measured = _coerce_turn(raw_result)
                     self._model_timeout()
-                    await self._settle_model_budget(
-                        reserved_total,
-                        measured.input_tokens + measured.output_tokens,
-                    )
+                    if self.turn is not None:
+                        await self._settle_model_budget(
+                            reserved_total,
+                            measured.input_tokens + measured.output_tokens,
+                        )
                     await persist_attempt(
                         status=AgentExecutionStatus.COMPLETED,
                         attempt=attempt,
@@ -2247,6 +2479,7 @@ class V11Runtime:
 
             async def before_retry(_attempt: int, _category) -> None:
                 self._check_execution()
+                self._validate_bound_execution_contract()
                 self._model_timeout()
                 if remaining_token_budget is not None and remaining_token_budget <= 0:
                     raise V11RuntimeContractError("model token budget exhausted")

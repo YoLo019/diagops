@@ -692,6 +692,36 @@ verified` in the task ledger; T5's live Docker execution is the only explicitly
 host-dependent unavailable check. The review-fix commit is isolated to
 `codex/v11-m3`; the same-thread independent re-review is pending.
 
+### M3 second-round review-fix2 evidence (2026-08-09)
+
+The second independent M3 review returned `BLOCKING` against base
+`629bc34e823ff9f5ff163dca5f3924a161baafd3`. The existing V11 contract and
+milestone scope were preserved. Each finding first received a minimal failing
+regression, then a shared-boundary GREEN fix:
+
+| Finding | RED → GREEN evidence | Shared-boundary closure |
+| --- | --- | --- |
+| B1 | `test_v11_run_owner_is_explicit_when_repository_has_multiple_investigations`; `test_v11_nested_execution_contract_digest_fences_capability_and_limits` | Admission creates a server-owned canonical nested contract/digest; explicit `investigation_id` and the complete contract are validated through clone, bind, dispatch, retry, resume, and every persistence helper. |
+| H1 | `test_v11_nested_execution_contract_digest_fences_capability_and_limits`; `test_v11_frozen_manifest_rejects_same_cardinality_tool_swap`; `test_v11_frozen_manifest_rejects_unordered_contract` | Dispatch/retry/resume read the immutable ordered nine-tool manifest/hash, skill/capability identity, and validated limits; a same-cardinality tool or capability/limit mutation fails closed. |
+| B2/H2 | `test_v11_sdk_provider_retry_is_only_the_persisted_outer_retry`; `test_v11_model_retry_is_one_classified_transport_attempt`; `test_v11_parse_failure_marks_latest_retry_attempt_invalid_output` | SDK/provider retry is explicitly zero; the persisted coordinator owns at most one transport/rate-limit retry, persists attempts, and marks a malformed second attempt invalid rather than retaining the old failure. |
+| H3 | `test_v11_sdk_model_requests_reserve_decreasing_output_caps`; `test_v11_model_precharges_input_before_setting_output_cap`; `test_v11_zero_tool_budget_does_not_start_model`; `test_v11_sdk_budget_reservation_is_released_when_preflight_rejects` | Each SDK request atomically charges input, derives a descending remaining output cap, and performs no request at zero budget; the same durable reservation applies across manual/provider paths. |
+| H4 | `test_v11_model_deadline_preflight_blocks_request_before_start`; `test_session_deadline_preflight_blocks_tool_before_provider_start`; `test_late_tool_result_is_rejected_after_execution_fence_loss` | Absolute deadline and cancellation preflight every model/tool action, bound timeout by remaining time, and reject late commits. |
+| H5 | `test_v11_tool_budget_reservation_is_atomic_and_durable`; `test_v11_transport_retry_reuses_one_durable_tool_reservation`; `test_v11_investigators_share_a_bounded_concurrent_gate` | One durable reservation belongs to one logical tool action and is reused by transport retry/resume/cancel; concurrent Investigators share one bounded gate and cannot oversell budget. |
+| H6 | `test_v11_all_investigator_failure_is_terminal_failed_without_diagnostic`; `test_v11_required_critic_failure_is_failed_without_inconclusive_fallback`; `test_v11_required_lead_failure_is_failed_without_inconclusive_fallback`; `test_v11_validator_failure_is_failed_without_inconclusive_fallback`; `test_v11_required_investigator_failure_stops_before_critic_or_lead` | Required actor or persistence failure terminalizes `failed`, clears diagnostic projection, and stops later V11 phases; no pseudo-`inconclusive` fallback is emitted. |
+| H7/M1 | `test_v11_validator_rejects_orphan_supplemental_task_ids`; `test_v11_partial_requires_usable_evidence_passing_check_and_round_two_linkage`; `test_v11_validator_scans_nested_critic_check_text_for_control_characters`; `test_v11_validator_rejects_whitespace_controls_in_nested_assessment_text` | Validator mechanically requires persisted same-run round-two task IDs to match the requesting assessment, enforces partial/inconclusive contracts, and scans nested result text for controls without semantic CauseType/provider validation. |
+| M2 | `test_v11_critic_success_has_one_durable_audit_execution`; `test_v11_reconciliation_has_one_durable_audit_execution`; `test_v11_critic_output_failure_updates_one_audit_execution`; `test_v11_parse_failure_marks_latest_retry_attempt_invalid_output` | Critic/reconciliation success and failure retain one unique durable execution audit, and parse failure updates the latest retry attempt with actor, attempt, deadline, usage, and resume metadata. |
+
+Final second-round verification: T7 exact gate `79 passed`; T8 exact gate
+`195 passed`; T7/T8 scoped Ruff clean; explicit M2R-2/M2R-3 and isolation
+focused gate `84 passed, 3 skipped`; full `uv run pytest -q` `1981 passed,
+3 skipped, 1 warning`; `uv run ruff check .` and `uv run ruff check backend tests`
+clean; `git diff --check 629bc34..HEAD` clean. The one warning is the existing
+Starlette/httpx TestClient deprecation warning. T4 and T5 remain
+`implemented / verified`; T5's live Docker execution remains the only
+host-dependent unavailable check. The single `M3_REVIEW_FIX2_SHA` commit is
+isolated to `codex/v11-m3`; no merge, push, M4, or M5 action was taken, and the
+same-thread independent re-review is pending.
+
 ## 7. M4 — Product and compatibility integration
 
 ### T9. Reports, actions, human transitions, API/UI, and OpenRCA
@@ -977,8 +1007,8 @@ request only the missing authority.
 | T4 | implemented / verified | R3, R11, R21–R22, R24, R27 | 336 focused passed; offline acceptance rows=80, failed=0; nine-tool/data-only skill evidence recorded; independent M2 review approve_with_followups |
 | T5 | implemented / verified (live Docker blocked) | R21–R23 | 17 focused passed; File/Tempo parity contracts green; Docker gate explicitly blocked by unavailable daemon, retained as a host-dependent follow-up |
 | T6 | implemented / verified | R8, R11–R13, R26–R27 | 110 focused passed including M2R-1 slow-endpoint cancellation/no-late-commit/cleanup evidence; independent M2 review approve_with_followups |
-| T7 | implemented / verified | R1–R3, R5–R6, R11–R13, R24, R27 | M3 review-fix RED→GREEN; exact gate 70 passed; scoped Ruff clean; M2R-2 resolver wiring and M2R-3 invocation recheck closed; B1/H1–H5/H6/M2 runtime evidence covered |
-| T8 | implemented / verified | R1, R4–R7, R9, R11–R13, R27 | M3 review-fix RED→GREEN; exact gate 184 passed; scoped Ruff clean; H6–H7/M1/M2 terminal, mechanical-validator, safe-text, and final-actor contracts covered |
+| T7 | implemented / verifying | R1–R3, R5–R6, R11–R13, R24, R27 | M3 second-round review-fix2 RED→GREEN; exact gate 79 passed; scoped Ruff clean; M2R-2 resolver wiring and M2R-3 invocation recheck closed; B1/H1–H5/H6/M2 runtime evidence covered |
+| T8 | implemented / verifying | R1, R4–R7, R9, R11–R13, R27 | M3 second-round review-fix2 RED→GREEN; exact gate 195 passed; scoped Ruff clean; H6–H7/M1/M2 terminal, mechanical-validator, safe-text, supplemental-linkage, and final-actor contracts covered |
 | T9 | pending | R5–R12, R18–R19, R27 | pending |
 | T10 | pending | R8–R13, R16, R18, R21–R23, R26–R27 | pending |
 | T11 | pending | R14–R17, R24–R27 | pending |
@@ -1068,4 +1098,4 @@ M1 third-round review (migration/runtime, 2026-08-07): conclusion
 - Specification: approved by the user on 2026-08-02 after L22–L30 reuse review.
 - Implementation Plan: independently reviewed with H1–H3/M1–M2 closed; approved
   by the user on 2026-08-02 with authorization to begin execution.
-- Implementation: M0/T1 complete; M1/T2–T3 implemented and verified on 2026-08-05 in the delegated worktree; third-round independent migration/runtime review concluded `approve_with_followups` on 2026-08-07 with all six findings closed the same day (RR-H1/RR-M1/RR-M2/RR-L2 at commit `336067c`, RR-L1/RR-L3 in the follow-up Light fix); M2 snapshot committed as `M2_BASE_SHA=c2245ac`; M3 review-fix base is `b17da397807bacf6e155afe71062ad1c6c4fd868`, B1/H1–H7/M1/M2 are RED→GREEN verified on isolated branch `codex/v11-m3`, and the review-fix commit is handed to the same-thread independent review; M4/M5 not started.
+- Implementation: M0/T1 complete; M1/T2–T3 implemented and verified on 2026-08-05 in the delegated worktree; third-round independent migration/runtime review concluded `approve_with_followups` on 2026-08-07 with all six findings closed the same day (RR-H1/RR-M1/RR-M2/RR-L2 at commit `336067c`, RR-L1/RR-L3 in the follow-up Light fix); M2 snapshot committed as `M2_BASE_SHA=c2245ac`; M3 second-round review-fix2 base is `629bc34e823ff9f5ff163dca5f3924a161baafd3`, B1/H1–H7/M1/M2 are RED→GREEN verified on isolated branch `codex/v11-m3`, and the single `M3_REVIEW_FIX2_SHA` commit is handed to the same-thread independent review; M4/M5 not started.

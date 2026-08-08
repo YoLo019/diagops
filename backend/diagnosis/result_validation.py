@@ -44,7 +44,7 @@ class V11ResultValidationError(ValueError):
         super().__init__(code)
 
 
-_CONTROL_CHARACTER = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def validate_v11_result(
@@ -179,6 +179,7 @@ def validate_v11_result(
     if {candidate.id for candidate in review.candidates} != set(candidate_ids):
         raise V11ResultValidationError("review_candidate_projection")
     _validate_assessments(review, set(candidate_ids), usable_evidence, runtime_run_id)
+    _validate_supplemental_tasks(review, task_items, runtime_run_id)
     if review.lead_decision is None:
         if status in {DiagnosticStatus.COMPLETE, DiagnosticStatus.PARTIAL}:
             raise V11ResultValidationError("final_lead_required")
@@ -309,6 +310,30 @@ def _validate_assessments(
             if not assessment.supplemental_task_ids:
                 raise V11ResultValidationError("missing_supplemental_task")
         elif assessment.supplemental_task_ids:
+            raise V11ResultValidationError("unexpected_supplemental_task")
+
+
+def _validate_supplemental_tasks(
+    review: CoordinationReview,
+    tasks: tuple[DiagnosisTask, ...],
+    runtime_run_id: str,
+) -> None:
+    """把 Critic 声明与同一 assessment 的持久化 round2 task 精确对齐。"""
+    assessment_ids = {assessment.id for assessment in review.critic_assessments}
+    linked: dict[str, set[str]] = {assessment_id: set() for assessment_id in assessment_ids}
+    for task in tasks:
+        if task.runtime_run_id != runtime_run_id or task.analysis_round != 2:
+            continue
+        if task.critic_assessment_id not in assessment_ids:
+            raise V11ResultValidationError("orphan_supplemental_task")
+        linked[task.critic_assessment_id].add(task.id)
+    for assessment in review.critic_assessments:
+        declared = set(assessment.supplemental_task_ids)
+        persisted = linked[assessment.id]
+        if assessment.verdict == CriticVerdict.NEEDS_EVIDENCE:
+            if declared != persisted:
+                raise V11ResultValidationError("supplemental_task_linkage")
+        elif persisted and assessment.review_round != 2:
             raise V11ResultValidationError("unexpected_supplemental_task")
 
 
