@@ -818,6 +818,7 @@ Critic checks, evidence, alternatives, gaps, usage, failures, and
 `not_activated` without raw prompt/private reasoning. OpenRCA `v11-agent`
 uses the generic candidate projection and retains the deterministic projector;
 the existing OpenAI-compatible adapter and capability gate remain required.
+Implementation commit: `3e1c20b` (`feat(v11): integrate product and OpenRCA paths`).
 
 Verification completed locally:
 

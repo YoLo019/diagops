@@ -43,8 +43,8 @@ Plan status: `approved`
 
 Implementation status: `verifying`
 
-Completion commit: pending local M4 handoff commit on `codex/v11-m4` (no merge
-or push)
+Completion commit: `3e1c20b` local M4 implementation handoff on
+`codex/v11-m4` (no merge or push)
 
 M2 baseline commit: `c2245ac` (`chore(v11): checkpoint M2 T4-T6`), committed
 in the isolated M3 worktree; dirty `main` was not modified.
@@ -75,8 +75,8 @@ clean; frontend production build passed; git diff --check clean`. M4 adds
 candidate-led report/action paths, run/candidate/evidence ownership checks,
 V11 public projection guards, privacy-safe report rendering, and generic
 OpenRCA `v11-agent` projection while preserving deterministic history and the
-existing OpenAI-compatible adapter/capability gate. The local M4 commit is
-pending final handoff; independent M4 review remains the next gate.
+existing OpenAI-compatible adapter/capability gate. Implementation is in
+local commit `3e1c20b`; independent M4 review remains the next gate.
 
 Blocker: `none`
 
