@@ -869,6 +869,32 @@ and `uv run ruff check backend tests`, frontend production build, and
 Starlette/httpx TestClient deprecation; Vite emits only its existing `use
 client` bundle notices. No merge or push was performed.
 
+### M4 third-round residual review-fix (2026-08-09)
+
+The third independent review reproduced four residual V11 publication defects
+and required RED regressions before implementation. `validate_v11_final_status`
+now freezes the approved semantic matrix: complete↔completed,
+partial↔partial, and inconclusive↔completed. Action planning, report
+generation, and the public projection guard use the same contract; invalid
+combinations cannot publish an action or diagnosis and V10 legacy paths are
+unchanged.
+
+The public guard also requires the durable `RuntimeRun.status` to be exactly
+`completed`, treating created/failed/cancelled and lease-expired
+`interrupted` runs as non-publishable. A shared report projection validator
+binds diagnosis and alternative IDs to the final Lead candidate references,
+including empty outputs for inconclusive reviews. API report/workbench/graph
+routes, memory/SQLite reloads, and direct report projection tests cover stale
+and foreign references. The frontend second guard now requires a non-empty
+active owner and mirrors the status matrix.
+
+Verification: M4 focused `75 passed/1 warning`; T9 exact `280 passed/1
+warning`; T10 exact `855 passed/3 skipped/1 warning`; full pytest `2071
+passed/3 skipped/1 warning`; offline acceptance `80/80`; runtime acceptance
+`14/14`; both Ruff commands, frontend production build, and diff-check passed.
+The post-commit runtime artifact and `git_dirty=false` binding are recorded in
+the final implementation handoff. No merge or push was performed.
+
 ### T9. Reports, actions, human transitions, API/UI, and OpenRCA
 
 Requirements: R5–R12, R18–R19, R27.
@@ -1154,8 +1180,8 @@ request only the missing authority.
 | T6 | implemented / verified | R8, R11–R13, R26–R27 | 110 focused passed including M2R-1 slow-endpoint cancellation/no-late-commit/cleanup evidence; independent M2 review approve_with_followups |
 | T7 | implemented / verifying | R1–R3, R5–R6, R11–R13, R24, R27 | M3 fifth-round review-fix5 H1 usage/audit RED→GREEN; exact gate 91 passed; scoped Ruff clean; M2R-2 resolver wiring and M2R-3 invocation recheck remain closed; reservation replay and actual-vs-billed request usage are covered |
 | T8 | implemented / verifying | R1, R4–R7, R9, R11–R13, R27 | M3 fifth-round review-fix5 preserves the already-green exact T8 validator, terminal, safe-text, supplemental-linkage, and final-actor contracts; exact gate 207 passed and scoped Ruff clean |
-| T9 | implemented / verifying | R5–R12, R18–R19, R27 | M4 review-fix reproduced and closed all ten findings with focused RED→GREEN regressions; exact gate 276 passed/1 warning; candidate-led V11 reports/actions, active-owner/rerun fencing, additive API/UI, shared privacy-safe public projection, usable-evidence validation, actual Markdown actors/tasks/rounds, and generic OpenRCA `v11-agent` projection verified |
-| T10 | implemented / verifying | R8–R13, R16, R18, R21–R23, R26–R27 | Exact gate 812 passed/3 skipped/1 warning; full pytest 2025 passed/3 skipped/1 warning; offline rows=80 failed=0; runtime acceptance exit=0; Ruff/build/diff-check clean |
+| T9 | implemented / verified | R5–R12, R18–R19, R27 | M4 first/second/third-round review fixes reproduced and closed with focused RED→GREEN regressions; exact gate 280 passed/1 warning; candidate-led V11 reports/actions, active-owner/rerun fencing, additive API/UI, shared privacy-safe public projection, usable-evidence validation, actual Markdown actors/tasks/rounds, generic OpenRCA `v11-agent` projection, semantic status matrix, durable lifecycle guard, and Lead-bound report references verified |
+| T10 | implemented / verified | R8–R13, R16, R18, R21–R23, R26–R27 | Exact gate 855 passed/3 skipped/1 warning; full pytest 2071 passed/3 skipped/1 warning; offline rows=80 failed=0; runtime acceptance exit=0; Ruff/build/diff-check clean |
 | T11 | pending | R14–R17, R24–R27 | pending |
 | T12 | pending | R14–R17, R25–R26 | pending |
 | T13 | pending | R1–R27 | pending |

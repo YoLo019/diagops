@@ -1756,6 +1756,27 @@ acceptance `14/14`, Ruff, frontend build, and `git diff --check` all passed.
 V10 legacy behavior, the OpenAI-compatible URL adapter, capability gates, and
 local-only/offline boundary were not changed; no merge or push was performed.
 
+M4 third-round residual review-fix ledger (2026-08-09): the independent
+review reproduced four remaining V11 publication defects. The approved final
+status matrix is now explicit and shared: complete↔completed,
+partial↔partial, and inconclusive↔completed. Action planning, report
+generation, and the public guard reject both crossed combinations before
+publishing actions or diagnoses; V10 legacy behavior remains outside this
+guard.
+
+The public guard additionally requires the durable RuntimeRun to be exactly
+`completed`; created, failed, cancelled, and lease-expired `interrupted` runs
+are fail-closed. A shared report projection validator requires diagnosis IDs
+to equal the final Lead candidate IDs, alternatives to match the remaining
+review candidates, and inconclusive reports to emit neither collection. API
+report/workbench/graph publication, memory/SQLite reloads, direct report
+projection, and frontend omitted/null/stale active-owner cases are covered by
+RED→GREEN regressions. Final verification is T9 `280 passed/1 warning`, T10
+`855 passed/3 skipped/1 warning`, full pytest `2071 passed/3 skipped/1
+warning`, offline `80/80`, runtime acceptance `14/14`, Ruff/build/diff-check
+green; the post-commit runtime artifact is bound with `git_dirty=false` in the
+implementation handoff.
+
 ## 16. Approval state
 
 - Requirements Brief: confirmed by user.

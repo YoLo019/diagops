@@ -215,6 +215,7 @@ def test_v11_review_visibility_is_run_owned_and_candidate_led() -> None:
     results = _run_app_exports(
         [
             {"name": "isUsableV11Review", "args": [review, run]},
+            {"name": "isUsableV11Review", "args": [review, run, None]},
             {
                 "name": "isUsableV11Review",
                 "args": [review, {**run, "runtime_run_id": "prior-run"}],
@@ -229,21 +230,52 @@ def test_v11_review_visibility_is_run_owned_and_candidate_led() -> None:
             },
             {
                 "name": "isUsableV11Review",
+                "args": [
+                    {**review, "run_status": "partial"},
+                    run | {"status": "partial"},
+                    "run-v11",
+                ],
+            },
+            {
+                "name": "isUsableV11Review",
+                "args": [
+                    {**review, "diagnostic_status": "partial"},
+                    run | {"diagnostic_status": "partial"},
+                    "run-v11",
+                ],
+            },
+            {
+                "name": "isUsableV11Review",
+                "args": [review, run, "run-v11"],
+            },
+            {
+                "name": "isUsableV11Review",
                 "args": [review, run, "prior-run"],
             },
-            {"name": "selectVisibleCandidates", "args": [review, run, []]},
             {
                 "name": "selectVisibleCandidates",
-                "args": [{**review, "diagnostic_status": "inconclusive"}, run, []],
+                "args": [review, run, [], "run-v11"],
+            },
+            {
+                "name": "selectVisibleCandidates",
+                "args": [
+                    {**review, "diagnostic_status": "inconclusive"},
+                    run,
+                    [],
+                    "run-v11",
+                ],
             },
         ]
     )
 
-    assert results[0] is True
+    assert results[0] is False
     assert results[1] is False
     assert results[2:5] == [False, False, False]
-    assert [item["id"] for item in results[5]] == ["candidate-accepted"]
-    assert results[6] == []
+    assert results[5:7] == [False, False]
+    assert results[7] is True
+    assert results[8] is False
+    assert [item["id"] for item in results[9]] == ["candidate-accepted"]
+    assert results[10] == []
 
 
 def test_v7_review_guard_and_candidate_visibility_execute_against_payloads() -> None:

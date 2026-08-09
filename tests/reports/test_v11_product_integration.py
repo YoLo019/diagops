@@ -36,6 +36,7 @@ from backend.domain.multi_agent import (
 )
 from backend.domain.reports import IncidentReport
 from backend.domain.runtime import RuntimePhase, RuntimeResumeState
+from backend.domain.v11_contracts import validate_v11_report_projection
 from backend.providers.registry import ProviderRegistry
 from backend.rca.analyzer import RcaAnalyzer
 from backend.reports.generator import ReportGenerator
@@ -168,6 +169,27 @@ def test_v11_report_projects_candidate_led_diagnoses_without_hypotheses():
     assert "deployment introduced incompatible request handling" in report.markdown
     assert "private chain of thought" not in report.markdown
     assert "private chain of thought" not in report.model_dump_json()
+
+
+def test_v11_report_projection_rejects_tampered_lead_candidate_reference():
+    candidate = _candidate()
+    review = _review(candidate)
+    report = ReportGenerator().generate(
+        "inv-v11-product",
+        _event(),
+        [_evidence()],
+        [],
+        coordination_review=review,
+        multi_agent_run=_run_summary(DiagnosticStatus.COMPLETE),
+    )
+    tampered = report.model_copy(
+        update={
+            "diagnoses": [candidate.model_copy(update={"id": "candidate-foreign"})]
+        }
+    )
+
+    with pytest.raises(ValueError, match="Lead candidate references"):
+        validate_v11_report_projection(review, tampered)
 
 
 @pytest.mark.parametrize(

@@ -17,7 +17,10 @@ from backend.domain.multi_agent import (
     MultiAgentRunSummary,
 )
 from backend.domain.reports import IncidentReport
-from backend.domain.v11_contracts import validate_v11_final_status
+from backend.domain.v11_contracts import (
+    validate_v11_final_status,
+    validate_v11_report_projection,
+)
 from backend.safety.redaction import (
     escape_markdown,
     escape_markdown_code,
@@ -286,7 +289,7 @@ class ReportGenerator:
                 if assessment.gap
             )
         )[:32]
-        return IncidentReport(
+        report = IncidentReport(
             investigation_id=investigation_id,
             summary=summary,
             timeline=[
@@ -311,6 +314,8 @@ class ReportGenerator:
             elapsed_time_ms=multi_agent_run.elapsed_time_ms,
             runtime_run_id=multi_agent_run.runtime_run_id,
         )
+        validate_v11_report_projection(coordination_review, report)
+        return report
 
     def _render_v11_markdown(
         self,

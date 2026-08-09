@@ -41,9 +41,9 @@ Spec status: `approved`
 
 Plan status: `approved`
 
-Implementation status: `verifying`
+Implementation status: `complete`
 
-Completion commit: local M4 second-round review-fix commit on `codex/v11-m4`
+Completion commit: local M4 third-round residual review-fix commit on `codex/v11-m4`
 (SHA is recorded in the final handoff; no merge or push)
 
 M2 baseline commit: `c2245ac` (`chore(v11): checkpoint M2 T4-T6`), committed
@@ -80,6 +80,21 @@ review/run diagnostic and terminal statuses, and a legal Lead decision matrix;
 API/report/graph/workbench paths fail closed and the frontend remains a second
 defense. V10 historical behavior, the OpenAI-compatible adapter, and capability
 gates remain intact. Independent M4 re-review remains the next gate.
+
+Verification evidence (M4 third-round residual review-fix, 2026-08-09):
+`M4 focused RED→GREEN 75 passed/1 warning; T9 exact gate 280 passed/1
+warning; T10 exact gate 855 passed/3 skipped/1 warning; full pytest 2071
+passed/3 skipped/1 warning; offline tool acceptance rows=80 failed=0; runtime
+acceptance 14/14 scenarios; uv run ruff check . and uv run ruff check backend
+tests clean; frontend production build passed; git diff --check clean`.
+The status contract now freezes complete↔completed, partial↔partial, and
+inconclusive↔completed; the shared public guard requires durable
+RuntimeRunStatus.COMPLETED and binds report diagnosis/alternative IDs to the
+Lead decision. Memory/SQLite reloads, API report/workbench/graph paths, direct
+report projection, and frontend omitted/null/stale-owner regressions are
+covered. The final post-commit runtime artifact is recorded in the handoff
+with `git_dirty=false`; V10 legacy behavior, the OpenAI-compatible URL
+adapter, capability gates, and local offline boundary remain unchanged.
 
 Blocker: `none`
 

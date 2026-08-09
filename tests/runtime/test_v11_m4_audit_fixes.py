@@ -28,6 +28,7 @@ from backend.domain.multi_agent import (
     ModelProvider,
     MultiAgentRunStatus,
 )
+from backend.domain.reports import IncidentReport
 from backend.domain.runtime import (
     RuntimeAttempt,
     RuntimeAttemptStatus,
@@ -125,6 +126,16 @@ def _persisted_v11_run(run_id: str, investigation_id: str):
         token_budget=execution_contract["token_budget"],
         timeout_seconds=execution_contract["timeout_seconds"],
         execution_contract=execution_contract,
+    )
+
+
+def _completed_v11_runtime_run(
+    container: AppContainer, run_id: str, investigation_id: str
+):
+    return container.runtime_store.create_run(
+        _persisted_v11_run(run_id, investigation_id).model_copy(
+            update={"status": RuntimeRunStatus.COMPLETED}
+        )
     )
 
 
@@ -229,6 +240,44 @@ async def test_v11_report_generation_is_atomic_for_memory_and_sqlite(runtime_sto
     assert persisted_after_failure.report is None
     assert persisted_after_failure.actions == []
     assert store.get_run(run.id).latest_checkpoint_id is None
+
+
+@pytest.mark.parametrize(
+    ("diagnostic_status", "run_status"),
+    [
+        (DiagnosticStatus.COMPLETE, MultiAgentRunStatus.PARTIAL),
+        (DiagnosticStatus.PARTIAL, MultiAgentRunStatus.COMPLETED),
+    ],
+)
+def test_v11_status_matrix_rejects_crossed_diagnostic_and_run_status(
+    diagnostic_status, run_status
+):
+    """相互一致但语义交叉的最终状态不得激活动作或诊断。"""
+    candidate = _candidate()
+    review = _owned_review(
+        "inv-v11-product",
+        "run-v11-status-matrix",
+        candidate,
+        diagnostic_status=diagnostic_status,
+        run_status=run_status,
+    )
+    run = _owned_run_summary(
+        "run-v11-status-matrix",
+        diagnostic_status,
+        status=run_status,
+    )
+
+    with pytest.raises(ValueError, match="status"):
+        ActionPlanner().plan_v11(_event(), [_evidence()], review, run)
+    with pytest.raises(ValueError, match="status"):
+        ReportGenerator().generate(
+            "inv-v11-product",
+            _event(),
+            [_evidence().model_copy(update={"runtime_run_id": run.runtime_run_id})],
+            [],
+            coordination_review=review,
+            multi_agent_run=run,
+        )
 
 
 def test_runtime_api_rejects_v10_run_on_active_v11_projection():
@@ -394,12 +443,7 @@ def test_v11_product_entry_summary_preserves_safe_lead_and_critic(
         prompt_version="v11",
     )
     container.orchestrator.v11_runtime = SimpleNamespace()
-    run = container.create_runtime_run(
-        record_id,
-        strategy=InvestigationStrategy.ADAPTIVE,
-        run_reason="initial",
-        execution_contract_version=ExecutionContractVersion.V11,
-    )
+    run = _completed_v11_runtime_run(container, f"run-summary-{record_id}", record_id)
     candidate = _candidate()
     review = _review(candidate).model_copy(
         update={
@@ -452,12 +496,7 @@ def test_v11_workbench_uses_private_safe_public_projection():
         prompt_version="v11",
     )
     container.orchestrator.v11_runtime = SimpleNamespace()
-    run = container.create_runtime_run(
-        record_id,
-        strategy=InvestigationStrategy.ADAPTIVE,
-        run_reason="initial",
-        execution_contract_version=ExecutionContractVersion.V11,
-    )
+    run = _completed_v11_runtime_run(container, "run-v11-public-projection", record_id)
     evidence = _evidence().model_copy(update={"runtime_run_id": run.id})
     candidate = _candidate().model_copy(
         update={
@@ -653,6 +692,8 @@ def test_v11_projection_rejects_ownerless_business_artifacts(artifact):
     [
         "diagnostic_status",
         "run_status",
+        "crossed_complete_partial",
+        "crossed_partial_complete",
         "inconclusive_lead",
         "missing_active_owner",
         "missing_latest_run",
@@ -667,7 +708,7 @@ def test_v11_projection_guard_rejects_invalid_reloaded_payload(
         _persisted_v11_run(
             f"run-invalid-projection-{type(runtime_store).__name__}-{invalid_case}",
             "inv-1",
-        )
+        ).model_copy(update={"status": RuntimeRunStatus.COMPLETED})
     )
     candidate = _candidate()
     review = _owned_review("inv-1", run.id, candidate)
@@ -681,6 +722,32 @@ def test_v11_projection_guard_rejects_invalid_reloaded_payload(
             run.id,
             DiagnosticStatus.COMPLETE,
             status=MultiAgentRunStatus.PARTIAL,
+        )
+    elif invalid_case == "crossed_complete_partial":
+        review = _owned_review(
+            "inv-1",
+            run.id,
+            candidate,
+            diagnostic_status=DiagnosticStatus.COMPLETE,
+            run_status=MultiAgentRunStatus.PARTIAL,
+        )
+        run_summary = _owned_run_summary(
+            run.id,
+            DiagnosticStatus.COMPLETE,
+            status=MultiAgentRunStatus.PARTIAL,
+        )
+    elif invalid_case == "crossed_partial_complete":
+        review = _owned_review(
+            "inv-1",
+            run.id,
+            candidate,
+            diagnostic_status=DiagnosticStatus.PARTIAL,
+            run_status=MultiAgentRunStatus.COMPLETED,
+        )
+        run_summary = _owned_run_summary(
+            run.id,
+            DiagnosticStatus.PARTIAL,
+            status=MultiAgentRunStatus.COMPLETED,
         )
     elif invalid_case == "inconclusive_lead":
         review = _owned_review(
@@ -711,6 +778,104 @@ def test_v11_projection_guard_rejects_invalid_reloaded_payload(
 
 
 @pytest.mark.parametrize(
+    "durable_status",
+    [
+        RuntimeRunStatus.CREATED,
+        RuntimeRunStatus.FAILED,
+        RuntimeRunStatus.CANCELLED,
+        # lease 过期在 durable 状态中收敛为 interrupted。
+        RuntimeRunStatus.INTERRUPTED,
+    ],
+)
+def test_v11_projection_guard_rejects_nonterminal_durable_run_after_reload(
+    runtime_store, durable_status
+):
+    """非 COMPLETED 的 durable RuntimeRun 不得公开已收敛的 Agent 投影。"""
+    repository = runtime_store.investigation_repository
+    run = runtime_store.create_run(
+        _persisted_v11_run(
+            f"run-nonterminal-{type(runtime_store).__name__}-{durable_status}",
+            "inv-1",
+        ).model_copy(update={"status": durable_status})
+    )
+    candidate = _candidate()
+    review = _owned_review("inv-1", run.id, candidate)
+    run_summary = _owned_run_summary(run.id, DiagnosticStatus.COMPLETE)
+    repository.save(
+        repository.get("inv-1").model_copy(
+            update={
+                "active_runtime_run_id": run.id,
+                "status": InvestigationStatus.COMPLETED,
+                "multi_agent_run": run_summary,
+            }
+        )
+    )
+    repository.save_coordination_review(review)
+
+    with pytest.raises(V11ProjectionIntegrityError, match="final status contract"):
+        ensure_v11_projection_owner(repository, runtime_store, repository.get("inv-1"))
+
+
+@pytest.mark.parametrize(
+    "report_shape",
+    ["foreign_diagnosis", "foreign_alternative", "inconclusive_diagnosis"],
+)
+def test_v11_projection_guard_rejects_report_candidate_refs_not_led(
+    runtime_store, report_shape
+):
+    """公开报告的候选引用必须与 Lead 的最终裁决保持同一投影。"""
+    repository = runtime_store.investigation_repository
+    run = runtime_store.create_run(
+        _persisted_v11_run(
+            f"run-report-refs-{type(runtime_store).__name__}-{report_shape}",
+            "inv-1",
+        ).model_copy(update={"status": RuntimeRunStatus.COMPLETED})
+    )
+    candidate = _candidate()
+    inconclusive = report_shape == "inconclusive_diagnosis"
+    review = _owned_review(
+        "inv-1",
+        run.id,
+        candidate,
+        diagnostic_status=(
+            DiagnosticStatus.INCONCLUSIVE
+            if inconclusive
+            else DiagnosticStatus.COMPLETE
+        ),
+        inconclusive=inconclusive,
+    )
+    diagnostic_status = (
+        DiagnosticStatus.INCONCLUSIVE if inconclusive else DiagnosticStatus.COMPLETE
+    )
+    run_summary = _owned_run_summary(run.id, diagnostic_status)
+    foreign = candidate.model_copy(update={"id": "candidate-foreign"})
+    report = IncidentReport(
+        investigation_id="inv-1",
+        summary="safe report",
+        markdown="safe report",
+        diagnoses=[foreign] if report_shape != "foreign_alternative" else [candidate],
+        alternatives=[foreign] if report_shape == "foreign_alternative" else [],
+        diagnostic_status=diagnostic_status,
+        authority_mode="agent",
+        runtime_run_id=run.id,
+    )
+    repository.save(
+        repository.get("inv-1").model_copy(
+            update={
+                "active_runtime_run_id": run.id,
+                "status": InvestigationStatus.COMPLETED,
+                "multi_agent_run": run_summary,
+                "report": report,
+            }
+        )
+    )
+    repository.save_coordination_review(review)
+
+    with pytest.raises(V11ProjectionIntegrityError, match="report"):
+        ensure_v11_projection_owner(repository, runtime_store, repository.get("inv-1"))
+
+
+@pytest.mark.parametrize(
     ("diagnostic_status", "run_status", "inconclusive"),
     [
         (DiagnosticStatus.COMPLETE, MultiAgentRunStatus.COMPLETED, False),
@@ -729,7 +894,7 @@ def test_v11_projection_guard_accepts_legal_final_status_matrix(
         _persisted_v11_run(
             f"run-valid-projection-{type(runtime_store).__name__}-{diagnostic_status}",
             "inv-1",
-        )
+        ).model_copy(update={"status": RuntimeRunStatus.COMPLETED})
     )
     candidate = _candidate()
     review = _owned_review(
@@ -803,6 +968,89 @@ def test_v11_api_guard_rejects_inconsistent_review_run_and_missing_active_owner(
             response = client.get(f"/investigations/inv-api-invalid-{suffix}/rca-workbench")
             assert response.status_code == 409, response.text
 
+    container.close()
+
+
+@pytest.mark.parametrize(
+    "durable_status",
+    [
+        RuntimeRunStatus.CREATED,
+        RuntimeRunStatus.FAILED,
+        RuntimeRunStatus.CANCELLED,
+        RuntimeRunStatus.INTERRUPTED,
+    ],
+)
+def test_v11_api_rejects_nonterminal_durable_run_for_report_and_workbench(
+    durable_status,
+):
+    """报告、工作台和 graph seed 共用 durable lifecycle guard。"""
+    container = reset_container()
+    investigation_id = f"inv-api-nonterminal-{durable_status}"
+    container.repository.save(InvestigationRecord(id=investigation_id, event=_event()))
+    run = container.runtime_store.create_run(
+        _persisted_v11_run(
+            f"run-api-nonterminal-{durable_status}", investigation_id
+        ).model_copy(update={"status": durable_status})
+    )
+    candidate = _candidate()
+    review = _owned_review(investigation_id, run.id, candidate)
+    summary = _owned_run_summary(run.id, DiagnosticStatus.COMPLETE)
+    container.repository.save(
+        container.repository.get(investigation_id).model_copy(
+            update={
+                "status": InvestigationStatus.COMPLETED,
+                "active_runtime_run_id": run.id,
+                "multi_agent_run": summary,
+            }
+        )
+    )
+    container.repository.save_coordination_review(review)
+
+    with TestClient(app) as client:
+        for path in ("rca-workbench", "report"):
+            response = client.get(f"/investigations/{investigation_id}/{path}")
+            assert response.status_code == 409, response.text
+    container.close()
+
+
+def test_v11_report_api_rejects_stale_candidate_reference():
+    """报告 API 不得发布脱离 Lead 裁决的 diagnosis candidate。"""
+    container = reset_container()
+    investigation_id = "inv-api-stale-report"
+    container.repository.save(InvestigationRecord(id=investigation_id, event=_event()))
+    run = container.runtime_store.create_run(
+        _persisted_v11_run("run-api-stale-report", investigation_id).model_copy(
+            update={"status": RuntimeRunStatus.COMPLETED}
+        )
+    )
+    candidate = _candidate()
+    review = _owned_review(investigation_id, run.id, candidate)
+    summary = _owned_run_summary(run.id, DiagnosticStatus.COMPLETE)
+    report = IncidentReport(
+        investigation_id=investigation_id,
+        summary="stale report",
+        markdown="stale report",
+        diagnoses=[candidate.model_copy(update={"id": "candidate-foreign"})],
+        diagnostic_status=DiagnosticStatus.COMPLETE,
+        authority_mode="agent",
+        runtime_run_id=run.id,
+    )
+    container.repository.save(
+        container.repository.get(investigation_id).model_copy(
+            update={
+                "status": InvestigationStatus.COMPLETED,
+                "active_runtime_run_id": run.id,
+                "multi_agent_run": summary,
+                "report": report,
+            }
+        )
+    )
+    container.repository.save_coordination_review(review)
+
+    with TestClient(app) as client:
+        for path in ("report", "rca-workbench"):
+            response = client.get(f"/investigations/{investigation_id}/{path}")
+            assert response.status_code == 409, response.text
     container.close()
 
 

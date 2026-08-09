@@ -140,11 +140,14 @@ export function isUsableV11Review(
     run?.authority_mode !== "agent" ||
     !review.runtime_run_id ||
     review.runtime_run_id !== run.runtime_run_id ||
-    (activeRuntimeRunId !== undefined && activeRuntimeRunId !== review.runtime_run_id) ||
+    !activeRuntimeRunId ||
+    activeRuntimeRunId !== review.runtime_run_id ||
     !["completed", "partial"].includes(run.status) ||
     review.run_status !== run.status ||
     !["complete", "partial", "inconclusive"].includes(review.diagnostic_status ?? "") ||
     review.diagnostic_status !== run.diagnostic_status ||
+    (review.diagnostic_status === "partial" && run.status !== "partial") ||
+    (review.diagnostic_status !== "partial" && run.status !== "completed") ||
     !review.lead_decision
   ) {
     return false;
@@ -650,7 +653,7 @@ function RcaWorkbenchPanel({ investigationId }: { investigationId: string }) {
     (action) => action.title,
   );
   const v11Diagnoses = v11Review
-    ? selectVisibleCandidates(v11Review, run, legacyCandidates)
+    ? selectVisibleCandidates(v11Review, run, legacyCandidates, activeRuntimeRunId)
     : [];
   const v11Executions = workbenchQuery.data?.agent_executions ?? [];
   const v11Actors = [...new Set(v11Executions.map((execution) => execution.agent_name))];
