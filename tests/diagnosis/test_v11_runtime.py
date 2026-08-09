@@ -795,6 +795,7 @@ async def test_v11_sdk_outer_retry_replays_success_with_new_reservation_and_reus
             if False:
                 yield None
 
+    repository, record = _repository()
     events: list[tuple[str, dict[str, object]]] = []
 
     async def persist_model_event(
@@ -827,6 +828,7 @@ async def test_v11_sdk_outer_retry_replays_success_with_new_reservation_and_reus
     )
     model = ReplayModel()
     runtime = V11Runtime(model=model, token_budget=1000)
+    runtime.runtime_run_id = "run-sdk-usage-retry"
     runtime._persist_model_event = persist_model_event
 
     await runtime._call_model(
@@ -837,6 +839,11 @@ async def test_v11_sdk_outer_retry_replays_success_with_new_reservation_and_reus
         tools=[tool],
         remaining_token_budget=1000,
         remaining_tool_budget=8,
+        repository=repository,
+        investigation_id=record.id,
+        task_id="task-sdk-usage-retry",
+        step_kind=ExecutionStepKind.LEAD_PLANNING,
+        analysis_round=1,
     )
 
     assert model.calls == 4
@@ -850,6 +857,7 @@ async def test_v11_sdk_outer_retry_replays_success_with_new_reservation_and_reus
     assert len(started) == 4
     assert len(completed) == 3
     assert len(retrying) == 1
+    assert [payload["actual_input_tokens"] for payload in completed] == [20, 20, 20]
     first_request = started[0]["reservation_id"]
     failed_request = retrying[0]["reservation_id"]
     assert started[2]["reservation_id"] != first_request
@@ -860,6 +868,277 @@ async def test_v11_sdk_outer_retry_replays_success_with_new_reservation_and_reus
         int(payload["input_tokens"]) + int(payload["output_tokens"])
         for payload in completed
     )
+    runtime._update_summary(repository, record.id)
+    summary = repository.get(record.id).multi_agent_run
+    assert summary is not None
+    assert summary.total_input_tokens == 60
+    assert summary.total_output_tokens == 15
+    executions = [
+        item
+        for item in repository.list_executions(record.id)
+        if item.runtime_run_id == runtime.runtime_run_id
+    ]
+    assert len(executions) == 2
+    attempt_one = next(item for item in executions if item.attempt == 1)
+    attempt_two = next(item for item in executions if item.attempt == 2)
+    assert attempt_one.status == AgentExecutionStatus.FAILED
+    assert attempt_one.input_tokens == 20 + int(retrying[0]["input_estimate"])
+    assert attempt_one.output_tokens == 5
+    assert attempt_two.status == AgentExecutionStatus.COMPLETED
+    assert attempt_two.input_tokens == 40
+    assert attempt_two.output_tokens == 10
+
+
+@pytest.mark.anyio
+async def test_v11_single_sdk_request_usage_is_not_counted_twice():
+    class StrictOutput(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+        value: str
+
+    class SingleRequestModel(Model):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def get_response(self, **_kwargs):
+            self.calls += 1
+            return ModelResponse(
+                output=[
+                    ResponseOutputMessage(
+                        id="single-message",
+                        content=[
+                            ResponseOutputText(
+                                annotations=[],
+                                text='{"value":"ok"}',
+                                type="output_text",
+                            )
+                        ],
+                        role="assistant",
+                        status="completed",
+                        type="message",
+                    )
+                ],
+                usage=Usage(input_tokens=20, output_tokens=5),
+                response_id="single-response",
+            )
+
+        async def stream_response(self, *_args, **_kwargs):
+            if False:
+                yield None
+
+    repository, record = _repository()
+    events: list[tuple[str, dict[str, object]]] = []
+
+    async def persist_model_event(
+        execution_id,
+        status,
+        input_tokens=0,
+        output_tokens=0,
+        actor_name="CoordinatorAgent",
+        safe_payload=None,
+    ):
+        del execution_id, actor_name
+        payload = dict(safe_payload or {})
+        payload["input_tokens"] = input_tokens
+        payload["output_tokens"] = output_tokens
+        events.append((status, payload))
+
+    model = SingleRequestModel()
+    runtime = V11Runtime(model=model, token_budget=1000)
+    runtime.runtime_run_id = "run-single-usage"
+    runtime._persist_model_event = persist_model_event
+
+    await runtime._call_model(
+        actor="LeadAgent",
+        prompt="single request usage",
+        output_type=StrictOutput,
+        context={"request": "one"},
+        tools=[],
+        remaining_token_budget=1000,
+        remaining_tool_budget=8,
+        repository=repository,
+        investigation_id=record.id,
+        task_id="task-single-usage",
+        step_kind=ExecutionStepKind.LEAD_PLANNING,
+        analysis_round=1,
+    )
+
+    runtime._update_summary(repository, record.id)
+    summary = repository.get(record.id).multi_agent_run
+    assert summary is not None
+    assert model.calls == 1
+    assert summary.total_input_tokens == 20
+    assert summary.total_output_tokens == 5
+    completed = [payload for status, payload in events if status == "completed"]
+    assert len(completed) == 1
+    assert completed[0]["actual_input_tokens"] == 20
+    execution = repository.list_executions(record.id)[0]
+    assert execution.input_tokens == 20
+    assert execution.output_tokens == 5
+
+
+@pytest.mark.anyio
+async def test_v11_all_failed_sdk_retry_records_estimate_without_summary_usage():
+    class AlwaysFailModel(Model):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def get_response(self, **_kwargs):
+            self.calls += 1
+            raise ClassifiedRetryableError(FailureCategory.TRANSPORT)
+
+        async def stream_response(self, *_args, **_kwargs):
+            if False:
+                yield None
+
+    repository, record = _repository()
+    events: list[tuple[str, dict[str, object]]] = []
+
+    async def persist_model_event(
+        execution_id,
+        status,
+        input_tokens=0,
+        output_tokens=0,
+        actor_name="CoordinatorAgent",
+        safe_payload=None,
+    ):
+        del execution_id, actor_name
+        payload = dict(safe_payload or {})
+        payload["input_tokens"] = input_tokens
+        payload["output_tokens"] = output_tokens
+        events.append((status, payload))
+
+    model = AlwaysFailModel()
+    runtime = V11Runtime(model=model, token_budget=1000)
+    runtime.runtime_run_id = "run-all-failed-usage"
+    runtime._persist_model_event = persist_model_event
+
+    with pytest.raises(ClassifiedRetryableError):
+        await runtime._call_model(
+            actor="LeadAgent",
+            prompt="all failed usage",
+            output_type=BaseModel,
+            context={"request": "fail"},
+            tools=[],
+            remaining_token_budget=1000,
+            remaining_tool_budget=8,
+            repository=repository,
+            investigation_id=record.id,
+            task_id="task-all-failed-usage",
+            step_kind=ExecutionStepKind.LEAD_PLANNING,
+            analysis_round=1,
+        )
+
+    runtime._update_summary(repository, record.id)
+    summary = repository.get(record.id).multi_agent_run
+    assert summary is not None
+    assert model.calls == 2
+    assert summary.total_input_tokens == 0
+    assert summary.total_output_tokens == 0
+    assert runtime._input_tokens == 0
+    assert runtime._output_tokens == 0
+    assert runtime._model_reservations == {}
+    assert not [status for status, _payload in events if status == "completed"]
+    executions = repository.list_executions(record.id)
+    assert len(executions) == 2
+    assert all(item.status == AgentExecutionStatus.FAILED for item in executions)
+    assert all(item.input_tokens > 0 for item in executions)
+    assert all(item.output_tokens == 0 for item in executions)
+
+
+@pytest.mark.anyio
+async def test_v11_sdk_retry_resume_usage_is_idempotent():
+    class RetryResumeModel(Model):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def get_response(self, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise ClassifiedRetryableError(FailureCategory.TRANSPORT)
+            return ModelResponse(
+                output=[
+                    ResponseOutputMessage(
+                        id="retry-resume-message",
+                        content=[
+                            ResponseOutputText(
+                                annotations=[],
+                                text='{"value":"ok"}',
+                                type="output_text",
+                            )
+                        ],
+                        role="assistant",
+                        status="completed",
+                        type="message",
+                    )
+                ],
+                usage=Usage(input_tokens=20, output_tokens=5),
+                response_id="retry-resume-response",
+            )
+
+        async def stream_response(self, *_args, **_kwargs):
+            if False:
+                yield None
+
+    repository, record = _repository()
+    events: list[tuple[str, dict[str, object]]] = []
+
+    async def persist_model_event(
+        execution_id,
+        status,
+        input_tokens=0,
+        output_tokens=0,
+        actor_name="CoordinatorAgent",
+        safe_payload=None,
+    ):
+        del execution_id, actor_name
+        payload = dict(safe_payload or {})
+        payload["input_tokens"] = input_tokens
+        payload["output_tokens"] = output_tokens
+        events.append((status, payload))
+
+    model = RetryResumeModel()
+    runtime = V11Runtime(model=model, token_budget=1000)
+    runtime.runtime_run_id = "run-retry-resume-usage"
+    runtime._persist_model_event = persist_model_event
+
+    await runtime._call_model(
+        actor="LeadAgent",
+        prompt="retry resume usage",
+        output_type=BaseModel,
+        context={"request": "retry once"},
+        tools=[],
+        remaining_token_budget=1000,
+        remaining_tool_budget=8,
+        repository=repository,
+        investigation_id=record.id,
+        task_id="task-retry-resume-usage",
+        step_kind=ExecutionStepKind.LEAD_PLANNING,
+        analysis_round=1,
+    )
+
+    runtime._update_summary(repository, record.id)
+    summary = repository.get(record.id).multi_agent_run
+    assert summary is not None
+    assert model.calls == 2
+    assert summary.total_input_tokens == 20
+    assert summary.total_output_tokens == 5
+    completed = [payload for status, payload in events if status == "completed"]
+    assert len(completed) == 1
+    reservation_id = completed[0]["reservation_id"]
+    await runtime._settle_model_budget(
+        1000,
+        25,
+        reservation_id=reservation_id,
+        logical_call_id=completed[0]["logical_call_id"],
+        input_tokens=20,
+        actual_input_tokens=20,
+        output_tokens=5,
+        reservation_status="completed",
+    )
+    assert runtime._input_tokens == 20
+    assert runtime._output_tokens == 5
+    assert runtime._model_reservations == {}
 
 
 @pytest.mark.anyio

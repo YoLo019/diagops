@@ -177,6 +177,89 @@ class _ModelRequestEvent:
     reservation_status: str | None
 
 
+@dataclass(slots=True)
+class _ModelUsageAccumulator:
+    """按 logical model call 去重并累计 request/attempt 的 usage。"""
+
+    attempt_totals: dict[int, list[int]]
+    event_keys: set[tuple[str, str, str | None, int]]
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+
+    @staticmethod
+    def _token_value(value: Any) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def record_event(
+        self,
+        *,
+        status: str,
+        input_tokens: int,
+        output_tokens: int,
+        safe_payload: dict[str, Any] | None,
+    ) -> tuple[int, int] | None:
+        payload = safe_payload or {}
+        reservation_id = payload.get("reservation_id")
+        attempt = payload.get("attempt")
+        if not isinstance(reservation_id, str) or not isinstance(attempt, int):
+            return None
+        reservation_status = payload.get("reservation_status")
+        if reservation_status is not None and not isinstance(
+            reservation_status, str
+        ):
+            reservation_status = None
+        if status == "completed":
+            actual_input = self._token_value(
+                payload["actual_input_tokens"]
+                if "actual_input_tokens" in payload
+                else input_tokens
+            )
+            actual_output = self._token_value(output_tokens)
+        elif status == "failed" and reservation_status != "deferred":
+            actual_input = max(
+                self._token_value(input_tokens),
+                self._token_value(payload.get("input_estimate")),
+            )
+            actual_output = 0
+        else:
+            return None
+        key = (reservation_id, status, reservation_status, attempt)
+        if key in self.event_keys:
+            return None
+        self.event_keys.add(key)
+        totals = self.attempt_totals.setdefault(attempt, [0, 0])
+        totals[0] += actual_input
+        totals[1] += actual_output
+        if status == "completed":
+            self.total_input_tokens += actual_input
+            self.total_output_tokens += actual_output
+            return actual_input, actual_output
+        return 0, 0
+
+    def record_fallback(
+        self, attempt: int, input_tokens: int, output_tokens: int
+    ) -> tuple[int, int] | None:
+        if attempt in self.attempt_totals:
+            return None
+        actual_input = self._token_value(input_tokens)
+        actual_output = self._token_value(output_tokens)
+        self.event_keys.add((f"attempt-{attempt}", "fallback", None, attempt))
+        self.attempt_totals[attempt] = [actual_input, actual_output]
+        self.total_input_tokens += actual_input
+        self.total_output_tokens += actual_output
+        return actual_input, actual_output
+
+    def has_attempt_usage(self, attempt: int) -> bool:
+        return attempt in self.attempt_totals
+
+    def attempt_usage(self, attempt: int) -> tuple[int, int]:
+        input_tokens, output_tokens = self.attempt_totals.get(attempt, [0, 0])
+        return input_tokens, output_tokens
+
+
 class _V11BudgetedModel(Model):
     """把 durable token reservation 下沉到 Agents SDK 的每个 request。"""
 
@@ -248,6 +331,7 @@ class _V11BudgetedModel(Model):
                 actor=self._actor,
                 request_index=request_index,
                 input_tokens=max(input_estimate, input_tokens),
+                actual_input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 reservation_status="completed",
             )
@@ -411,6 +495,7 @@ class V11Runtime:
         self._model_request_history: dict[
             tuple[str, int], list[_ModelRequestEvent]
         ] = {}
+        self._model_usage_accumulators: dict[str, _ModelUsageAccumulator] = {}
         self._commit_lock = asyncio.Lock()
         self._execution_contract: dict[str, Any] | None = None
         self._remaining_deadline_seconds: Callable[[], float] = lambda: float("inf")
@@ -470,6 +555,7 @@ class V11Runtime:
         runtime._model_reservations = {}
         runtime._settled_model_reservations = set()
         runtime._model_request_history = {}
+        runtime._model_usage_accumulators = {}
         runtime._commit_lock = asyncio.Lock()
         runtime._remaining_deadline_seconds = lambda: float("inf")
         runtime.timeout_seconds = (
@@ -2478,6 +2564,14 @@ class V11Runtime:
     def _request_index_payload(request_index: int | None) -> dict[str, int]:
         return {"request_index": request_index} if request_index is not None else {}
 
+    @staticmethod
+    def _actual_input_payload(actual_input_tokens: int | None) -> dict[str, int]:
+        return (
+            {"actual_input_tokens": actual_input_tokens}
+            if actual_input_tokens is not None
+            else {}
+        )
+
     async def _defer_later_model_retries(
         self,
         logical_call_id: str,
@@ -2656,6 +2750,7 @@ class V11Runtime:
         actor: str = "CoordinatorAgent",
         request_index: int | None = None,
         input_tokens: int | None = None,
+        actual_input_tokens: int | None = None,
         output_tokens: int = 0,
         reservation_status: str = "completed",
     ) -> None:
@@ -2704,6 +2799,7 @@ class V11Runtime:
                         "reserved_tokens": reservation.reserved_total,
                         "input_estimate": reservation.input_estimate,
                         "attempt": attempt,
+                        **self._actual_input_payload(actual_input_tokens),
                         **self._request_index_payload(request_index),
                     },
                 )
@@ -2773,6 +2869,7 @@ class V11Runtime:
         previous_execution_id: str | None = None
         current_execution_id: str | None = None
         current_started_at: datetime | None = None
+        usage_accumulator = _ModelUsageAccumulator({}, set())
 
         async def persist_attempt(
             *,
@@ -2787,6 +2884,8 @@ class V11Runtime:
         ) -> None:
             if not audit_enabled or current_execution_id is None:
                 return
+            if status != AgentExecutionStatus.RUNNING:
+                input_tokens, output_tokens = usage_accumulator.attempt_usage(attempt)
             completed_at = datetime.now(UTC)
             self._record_execution(
                 repository,
@@ -2823,6 +2922,7 @@ class V11Runtime:
             )
 
         await self._emit_agent(actor, "started")
+        self._model_usage_accumulators[model_event_id] = usage_accumulator
         try:
             async def invoke_model(attempt: int) -> Any:
                 nonlocal current_execution_id, current_started_at, previous_execution_id
@@ -2926,6 +3026,15 @@ class V11Runtime:
                                 await model_provider.aclose()
                     measured = _coerce_turn(raw_result)
                     self._model_timeout()
+                    if not usage_accumulator.has_attempt_usage(attempt):
+                        fallback = usage_accumulator.record_fallback(
+                            attempt,
+                            measured.input_tokens,
+                            measured.output_tokens,
+                        )
+                        if fallback is not None:
+                            self._input_tokens += fallback[0]
+                            self._output_tokens += fallback[1]
                     if self.turn is not None:
                         await self._settle_model_budget(
                             reserved_total,
@@ -2936,6 +3045,7 @@ class V11Runtime:
                             attempt=attempt,
                             actor=actor,
                             input_tokens=measured.input_tokens,
+                            actual_input_tokens=measured.input_tokens,
                             output_tokens=measured.output_tokens,
                             reservation_status="completed",
                         )
@@ -3030,8 +3140,7 @@ class V11Runtime:
             usage = result.input_tokens + result.output_tokens
             if remaining_token_budget is not None and usage > remaining_token_budget:
                 raise V11RuntimeContractError("model response exceeded token budget")
-            self._input_tokens += result.input_tokens
-            self._output_tokens += result.output_tokens
+            self._model_usage_accumulators.pop(model_event_id, None)
             await self._emit_agent(actor, "completed")
             return _ModelTurn(
                 result.output,
@@ -3040,9 +3149,11 @@ class V11Runtime:
                 current_execution_id,
             )
         except asyncio.CancelledError:
+            self._model_usage_accumulators.pop(model_event_id, None)
             await self._emit_agent(actor, "failed")
             raise
         except Exception:
+            self._model_usage_accumulators.pop(model_event_id, None)
             await self._emit_agent(actor, "failed")
             raise
 
@@ -3050,6 +3161,29 @@ class V11Runtime:
         if self._persist_agent_event is None:
             return
         await _maybe_await(self._persist_agent_event(actor, status))
+
+    def _record_model_usage_event(
+        self,
+        status: str,
+        input_tokens: int,
+        output_tokens: int,
+        safe_payload: dict[str, Any] | None,
+    ) -> None:
+        logical_call_id = (safe_payload or {}).get("logical_call_id")
+        if not isinstance(logical_call_id, str):
+            return
+        accumulator = self._model_usage_accumulators.get(logical_call_id)
+        if accumulator is None:
+            return
+        delta = accumulator.record_event(
+            status=status,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            safe_payload=safe_payload,
+        )
+        if delta is not None:
+            self._input_tokens += delta[0]
+            self._output_tokens += delta[1]
 
     async def _emit_model(
         self,
@@ -3063,6 +3197,9 @@ class V11Runtime:
         callback = self._persist_model_event
         if callback is None:
             self._record_model_request_event(status, safe_payload)
+            self._record_model_usage_event(
+                status, input_tokens, output_tokens, safe_payload
+            )
             return
         args = (
             execution_id,
@@ -3085,9 +3222,15 @@ class V11Runtime:
                     continue
                 await _maybe_await(callback(*candidate))
                 self._record_model_request_event(status, safe_payload)
+                self._record_model_usage_event(
+                    status, input_tokens, output_tokens, safe_payload
+                )
                 return
         await _maybe_await(callback(*args))
         self._record_model_request_event(status, safe_payload)
+        self._record_model_usage_event(
+            status, input_tokens, output_tokens, safe_payload
+        )
 
     @staticmethod
     def _parse_output(value: Any, output_type: type[BaseModel]) -> BaseModel:

@@ -1672,6 +1672,36 @@ TestClient deprecation warning. The single `M3_REVIEW_FIX4_SHA` commit remains
 isolated to `codex/v11-m3`; no approved requirement changed; no merge, push, M4,
 or M5 action was taken.
 
+M3 fifth-round review-fix5 ledger (2026-08-09): independent review verdict
+`CHANGES_REQUIRED` was issued against base
+`e52e47984c4b460ed3b06dc4147d3d3b0532345b`; only H1 remained and
+Blocking/Medium/Low were zero. The approved §6 contract, V10 legacy boundary,
+and fourth-round reservation identity/replay behavior remain unchanged.
+
+The production RED used `_call_model → Agents SDK Runner → RetryCoordinator`
+with four provider calls: request one succeeded, request two failed with
+transport, and both requests succeeded on the outer retry. The old runtime
+counter and execution audit retained only final-attempt `40/10` and the last
+failed request estimate. GREEN reuses the existing per-request MODEL event
+callback: `input_tokens` remains the reservation billed/estimate value,
+`actual_input_tokens` records provider actual input, terminal events are
+deduplicated by reservation/status/attempt, successful actual usage accumulates
+across outer attempts, AgentExecution aggregates each attempt, and the final
+RunResult is not counted again.
+
+| Finding | RED → GREEN evidence | Contract-preserving resolution |
+| --- | --- | --- |
+| H1 | `test_v11_sdk_outer_retry_replays_success_with_new_reservation_and_reuses_failed_request` (RED `summary=40/10`, GREEN `summary=60/15`); `test_v11_single_sdk_request_usage_is_not_counted_twice`; `test_v11_all_failed_sdk_retry_records_estimate_without_summary_usage`; `test_v11_sdk_retry_resume_usage_is_idempotent` | Durable MODEL events carry actual-vs-billed input distinctly. A per-logical-call accumulator counts each terminal request once, adds only successful actual usage to summary/runtime counters, writes aggregate attempt usage before AgentExecution persistence, retains failed estimates in attempt audit, and keeps duplicate retry/resume settlement idempotent. |
+
+Final fifth-round verification: T7 exact `91 passed`; T8 exact `207 passed`;
+M2R-2/M2R-3 and isolation focused `84 passed, 3 skipped`; changed/runtime
+focused `102 passed, 2 skipped`; full `uv run pytest -q` `1995 passed, 3
+skipped, 1 warning`; both `uv run ruff check .` and `uv run ruff check backend
+tests` clean; diff-check clean. The warning is the existing Starlette/httpx
+TestClient deprecation warning. The single `M3_REVIEW_FIX5_SHA` commit remains
+isolated to `codex/v11-m3`; no approved requirement changed; no merge, push, M4,
+or M5 action was taken.
+
 ## 16. Approval state
 
 - Requirements Brief: confirmed by user.
@@ -1691,7 +1721,7 @@ or M5 action was taken.
   introduce no new product scope.
 - The implementation Plan was rewritten from this specification, independently
   reviewed, and approved by the user on 2026-08-02 with execution authorization.
-- Implementation: M2 baseline `c2245ac` committed; M3 fourth-round review-fix4
-base `9a7bf4a43efd313e5dcb528361dfbfbfec1c37f0` is RED→GREEN verified in
-isolated branch `codex/v11-m3`, with single commit `M3_REVIEW_FIX4_SHA` pending
+- Implementation: M2 baseline `c2245ac` committed; M3 fifth-round review-fix5
+base `e52e47984c4b460ed3b06dc4147d3d3b0532345b` is RED→GREEN verified in
+isolated branch `codex/v11-m3`, with single commit `M3_REVIEW_FIX5_SHA` pending
 handoff to the same-thread independent review; M4/M5 not started.

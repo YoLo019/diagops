@@ -538,6 +538,7 @@ for _event_type in (
             "reservation_status",
             "reserved_tokens",
             "input_estimate",
+            "actual_input_tokens",
             "attempt",
             "request_index",
         }

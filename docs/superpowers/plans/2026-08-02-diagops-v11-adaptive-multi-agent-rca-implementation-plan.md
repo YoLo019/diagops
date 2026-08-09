@@ -770,6 +770,38 @@ tests` clean; diff-check clean. The warning is the existing Starlette/httpx
 TestClient deprecation warning. The single `M3_REVIEW_FIX4_SHA` commit remains
 isolated to `codex/v11-m3`; no merge, push, M4, or M5 action was taken.
 
+### M3 fifth-round review-fix5 evidence (2026-08-09)
+
+The fifth independent M3 review returned `CHANGES_REQUIRED` against base
+`e52e47984c4b460ed3b06dc4147d3d3b0532345b`; the sole remaining finding was H1
+usage and execution-audit aggregation, with Blocking/Medium/Low all zero. The
+approved §6 scope, V10 legacy boundary, and fourth-round reservation replay
+contract were preserved.
+
+The production RED used `_call_model → Agents SDK Runner → RetryCoordinator`
+with four provider calls: request one succeeded, request two failed with
+transport, and both requests succeeded on the outer retry. The old path kept
+only the final attempt's `40/10` in runtime counters and wrote only the last
+failed request estimate into attempt one. The minimal GREEN fix uses the
+existing per-request MODEL event callback: durable `input_tokens` remains the
+reservation billed/estimate value, `actual_input_tokens` records provider
+actual input, terminal request events are deduplicated by reservation/status/
+attempt, successful actual usage accumulates across outer attempts, and
+AgentExecution stores each attempt's successful actual usage plus the existing
+failed-request estimate. The final RunResult is not counted again.
+
+| Finding | RED → GREEN evidence | Shared-boundary closure |
+| --- | --- | --- |
+| H1 | `test_v11_sdk_outer_retry_replays_success_with_new_reservation_and_reuses_failed_request` (RED `summary=40/10`, GREEN `summary=60/15`); `test_v11_single_sdk_request_usage_is_not_counted_twice`; `test_v11_all_failed_sdk_retry_records_estimate_without_summary_usage`; `test_v11_sdk_retry_resume_usage_is_idempotent` | Existing MODEL event persistence now carries the separate actual-input field. One logical call accumulator consumes each terminal request once, updates runtime counters only for successful actual usage, aggregates per-attempt audit usage before writing AgentExecution, and leaves failed estimates in attempt audit without presenting them as successful summary usage. Duplicate settlement/retry-resume leaves counters and reservations unchanged. |
+
+Final fifth-round verification: T7 exact `91 passed`; T8 exact `207 passed`;
+M2R-2/M2R-3 and isolation focused `84 passed, 3 skipped`; changed/runtime
+focused `102 passed, 2 skipped`; full `uv run pytest -q` `1995 passed, 3
+skipped, 1 warning`; both `uv run ruff check .` and `uv run ruff check backend
+tests` clean; diff-check clean. The warning is the existing Starlette/httpx
+TestClient deprecation warning. The single `M3_REVIEW_FIX5_SHA` commit remains
+isolated to `codex/v11-m3`; no merge, push, M4, or M5 action was taken.
+
 ## 7. M4 — Product and compatibility integration
 
 ### T9. Reports, actions, human transitions, API/UI, and OpenRCA
@@ -1055,8 +1087,8 @@ request only the missing authority.
 | T4 | implemented / verified | R3, R11, R21–R22, R24, R27 | 336 focused passed; offline acceptance rows=80, failed=0; nine-tool/data-only skill evidence recorded; independent M2 review approve_with_followups |
 | T5 | implemented / verified (live Docker blocked) | R21–R23 | 17 focused passed; File/Tempo parity contracts green; Docker gate explicitly blocked by unavailable daemon, retained as a host-dependent follow-up |
 | T6 | implemented / verified | R8, R11–R13, R26–R27 | 110 focused passed including M2R-1 slow-endpoint cancellation/no-late-commit/cleanup evidence; independent M2 review approve_with_followups |
-| T7 | implemented / verifying | R1–R3, R5–R6, R11–R13, R24, R27 | M3 fourth-round review-fix4 RED→GREEN; exact gate and scoped Ruff counts recorded in the fourth-round ledger; M2R-2 resolver wiring and M2R-3 invocation recheck remain closed; multi-request SDK outer-retry reservation replay preserves durable request identity and budget accounting |
-| T8 | implemented / verifying | R1, R4–R7, R9, R11–R13, R27 | M3 fourth-round review-fix4 preserves the already-green exact T8, validator, terminal, safe-text, supplemental-linkage, and final-actor contracts; final gate count recorded in the fourth-round ledger |
+| T7 | implemented / verifying | R1–R3, R5–R6, R11–R13, R24, R27 | M3 fifth-round review-fix5 H1 usage/audit RED→GREEN; exact gate 91 passed; scoped Ruff clean; M2R-2 resolver wiring and M2R-3 invocation recheck remain closed; reservation replay and actual-vs-billed request usage are covered |
+| T8 | implemented / verifying | R1, R4–R7, R9, R11–R13, R27 | M3 fifth-round review-fix5 preserves the already-green exact T8 validator, terminal, safe-text, supplemental-linkage, and final-actor contracts; exact gate 207 passed and scoped Ruff clean |
 | T9 | pending | R5–R12, R18–R19, R27 | pending |
 | T10 | pending | R8–R13, R16, R18, R21–R23, R26–R27 | pending |
 | T11 | pending | R14–R17, R24–R27 | pending |
@@ -1146,4 +1178,4 @@ M1 third-round review (migration/runtime, 2026-08-07): conclusion
 - Specification: approved by the user on 2026-08-02 after L22–L30 reuse review.
 - Implementation Plan: independently reviewed with H1–H3/M1–M2 closed; approved
   by the user on 2026-08-02 with authorization to begin execution.
-- Implementation: M0/T1 complete; M1/T2–T3 implemented and verified on 2026-08-05 in the delegated worktree; third-round independent migration/runtime review concluded `approve_with_followups` on 2026-08-07 with all six findings closed the same day (RR-H1/RR-M1/RR-M2/RR-L2 at commit `336067c`, RR-L1/RR-L3 in the follow-up Light fix); M2 snapshot committed as `M2_BASE_SHA=c2245ac`; M3 fourth-round review-fix4 base is `9a7bf4a43efd313e5dcb528361dfbfbfec1c37f0`, the multi-request SDK reservation replay finding is RED→GREEN verified on isolated branch `codex/v11-m3`, and the single `M3_REVIEW_FIX4_SHA` commit is pending handoff to the same-thread independent review; M4/M5 not started.
+- Implementation: M0/T1 complete; M1/T2–T3 implemented and verified on 2026-08-05 in the delegated worktree; third-round independent migration/runtime review concluded `approve_with_followups` on 2026-08-07 with all six findings closed the same day (RR-H1/RR-M1/RR-M2/RR-L2 at commit `336067c`, RR-L1/RR-L3 in the follow-up Light fix); M2 snapshot committed as `M2_BASE_SHA=c2245ac`; M3 fifth-round review-fix5 base is `e52e47984c4b460ed3b06dc4147d3d3b0532345b`, H1 usage/audit aggregation is RED→GREEN verified on isolated branch `codex/v11-m3`, and the single `M3_REVIEW_FIX5_SHA` commit is pending handoff to the same-thread independent review; M4/M5 not started.

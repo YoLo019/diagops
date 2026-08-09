@@ -43,7 +43,7 @@ Plan status: `approved`
 
 Implementation status: `verifying`
 
-Completion commit: `M3_REVIEW_FIX4_SHA` (fourth-round M3 review-fix commit;
+Completion commit: `M3_REVIEW_FIX5_SHA` (fifth-round M3 review-fix commit;
 independent re-review is still pending)
 
 M2 baseline commit: `c2245ac` (`chore(v11): checkpoint M2 T4-T6`), committed
@@ -53,18 +53,18 @@ Verification evidence: `M1/T2–T3 third-round review-fix RED→GREEN evidence i
 
 Verification evidence (M2, 2026-08-08): `M2/T4–T6 独立复审 approve_with_followups 且无未关闭 blocking/high：评审独立重跑 T4 336 passed + 离线验收 rows=80 failed=0、T5 17 passed + Docker gate blocked（daemon 不可用，按 plan 记录）、T6 106 passed、全量 1927 passed/3 skipped、Ruff clean、runtime acceptance exit=0；M2R-1（high，§7.8 取消/no-late-commit 证据）当日补 4 条 slow-endpoint 测试经针对性复审 closed；T5 digest 环境注入裁定等价安全机制、schema 断言 6→7 确认为 M1 遗留（a40942a 复现 2 failed）；M2 基线已以 `c2245ac` 单独提交；M2R-2/3 在 M3 T7 中关闭，M2R-4 跟踪。`
 
-Verification evidence (M3 T7–T8 and fourth-round review-fix4, 2026-08-09):
-`fourth-round base 9a7bf4a43efd313e5dcb528361dfbfbfec1c37f0；M3_REVIEW_FIX4_SHA
-为本次隔离提交；T7 exact gate 88 passed，T8 exact gate 204 passed；M2R-2/3
+Verification evidence (M3 T7–T8 and fifth-round review-fix5, 2026-08-09):
+`fifth-round base e52e47984c4b460ed3b06dc4147d3d3b0532345b；M3_REVIEW_FIX5_SHA
+为本次隔离提交；T7 exact gate 91 passed，T8 exact gate 207 passed；M2R-2/3
 及运行时隔离 focused 84 passed/3 skipped，变更相关 runtime/review 102
-passed/2 skipped；全量 pytest 1992 passed/3 skipped/1 warning；T7/T8 scoped
-Ruff、uv run ruff check .、uv run ruff check backend tests 均 clean；唯一
-blocking finding 已先以
-最小 RED 复现，再以共享 RuntimeEvent model lifecycle GREEN 修复：每个 SDK
-request 持久化 request_index，outer retry 为已完成 request 分配新的 replay
-reservation，并为失败 request 复用原 reservation；PhaseInput 从 durable model
-events 恢复游标，resume/repeated replay 不复用已结算 identity。实现保留
-V10 legacy runtime 边界，V11 phase executor 仅消费 persisted V11 phases；未
+passed/2 skipped；全量 pytest 1995 passed/3 skipped/1 warning；T7/T8 scoped
+Ruff、uv run ruff check .、uv run ruff check backend tests 均 clean；唯一 H1
+先以最小 RED 复现，再以既有 MODEL event callback GREEN 修复：持久化
+actual_input_tokens 区分 provider actual 与 reservation billed/estimate，按
+logical call/attempt/request 去重累计，AgentExecution 汇总整个 attempt，
+summary/runtime counters 只累计成功 request actual usage，最终 result 不再
+二次计数；失败 request estimate 仍保留在 attempt audit。实现保留 V10
+legacy runtime 边界，V11 phase executor 仅消费 persisted V11 phases；未
 merge/push，未开始 M4/M5，当前等待同一审查线程独立复审。`
 
 Blocker: `none`
@@ -104,9 +104,9 @@ docs/superpowers/plans/2026-08-02-diagops-v11-adaptive-multi-agent-rca-implement
 
 ## V11 Planning Dashboard
 
-Overall progress: `V11 Spec/Plan approved, execution authorized 2026-08-02; M0/T1 done：真实 RCAEval RE2 全链路完成（byte-verified 双向对账 2700/2700、真实 prepare runtime manifest_hash bb119fc9…/150 cases/26 GB、二次 prepare diff -r 零差异字节等价）；M0 exit review 2026-08-04 approve_with_followups（出口判据满足，M0-I2 措辞 followup 已修复并 closed：28 focused + 142 regression passed, Ruff clean；M0-L1/L2 low open，M5 前处理）；M1/T2–T3 第三轮独立复审 2026-08-07 approve_with_followups，全部 6 项发现当日 RED→GREEN 关闭并已合并 main 336067c；M2/T4–T6 2026-08-08 独立复审 approve_with_followups，M2 基线 `c2245ac` 已提交；M3/T7–T8 第四轮 review-fix4 已完成 RED→GREEN 验证，等待同一审查线程复审`
+Overall progress: `V11 Spec/Plan approved, execution authorized 2026-08-02; M0/T1 done：真实 RCAEval RE2 全链路完成（byte-verified 双向对账 2700/2700、真实 prepare runtime manifest_hash bb119fc9…/150 cases/26 GB、二次 prepare diff -r 零差异字节等价）；M0 exit review 2026-08-04 approve_with_followups（出口判据满足，M0-I2 措辞 followup 已修复并 closed：28 focused + 142 regression passed, Ruff clean；M0-L1/L2 low open，M5 前处理）；M1/T2–T3 第三轮独立复审 2026-08-07 approve_with_followups，全部 6 项发现当日 RED→GREEN 关闭并已合并 main 336067c；M2/T4–T6 2026-08-08 独立复审 approve_with_followups，M2 基线 `c2245ac` 已提交；M3/T7–T8 第五轮 review-fix5 已完成 RED→GREEN 验证，等待同一审查线程复审`
 
-Current phase: Full iteration / M3 T7–T8 fourth-round review-fix4 implemented and
+Current phase: Full iteration / M3 T7–T8 fifth-round review-fix5 implemented and
 verified in isolated worktree; awaiting same-thread independent review
 
 Next action: 独立复审 M3；保持当前 worktree/branch，不 merge、push 或进入
@@ -122,7 +122,7 @@ M4/M5。
 | M1/T2 | Execute | Domain contracts, run ownership, and Schema V7 | implemented / verified | 初始审查问题 H8–H10 已补最小 RED 并 GREEN；第二轮 Medium 1–3 的 domain/memory/SQLite 直接写入回归先 RED 后 GREEN；`uv run pytest tests/domain tests/db/test_migrations.py tests/db/test_runtime_migrations.py tests/db/test_v5_agentic_rca_persistence.py -q` → `199 passed in 6.81s`; T2 Ruff clean；fresh、V3/V4/V5、legacy-V6/current-V6 manifest 一致且仅三列物理变更 | 独立迁移复审通过（第三轮 RR 全关闭） |
 | M1/T3 | Execute | Versioned phase profiles, activation, gates, replay, and diff | implemented / verified | 初始审查问题 H1–H7 已补最小 RED 并 GREEN；第二轮 ownerless RESULT_VALIDATION、计划/任务和 Investigation 聚合写入回归先 RED 后 GREEN；`uv run pytest tests/runtime tests/api/test_runtime_runs_api.py -q` → `420 passed, 2 skipped, 1 warning in 117.53s`; `tests/runtime/test_review_fixes.py` → `27 passed, 1 skipped`; T3 Ruff clean；V10/V11 phase、owner、replay/diff、contract-integrity reload、service/API gate 回归通过 | 独立运行时复审通过（第三轮 RR 全关闭）；M2 基线 `c2245ac` 已提交，T4–T5 已按当前 Plan 记录完成 |
 | M2/T4–T6 | Execute | 九工具离线事件包与 data-only skills、File/Tempo trace 平价、模型边界与能力认证 | implemented / verified | 独立复审重跑：T4 336 passed + 离线验收 rows=80 failed=0；T5 17 passed + Docker gate blocked（daemon 不可用）；T6 106→110 passed（M2R-1 补 4 条 slow-endpoint 测试）；全量 1927 passed/3 skipped、Ruff clean、runtime acceptance exit=0；复审 approve_with_followups，M2R-1 closed；M2 基线 `c2245ac` 已单独提交，M2R-2/3 在 M3 T7 中关闭，M2R-4 跟踪 | 保持基线提交，不修改 dirty main |
-| M3/T7–T8 | Execute / Verify | Lead/Investigators/Critic/Lead V11 authority runtime | implemented / verifying | fourth-round base `9a7bf4a43efd313e5dcb528361dfbfbfec1c37f0`; T7 88 passed、T8 204 passed；M2R/隔离 84 passed/3 skipped；变更相关 102 passed/2 skipped；全量 1992 passed/3 skipped/1 warning；两套全仓 Ruff clean；唯一 finding RED→GREEN | 等待同一审查线程复审；不 merge/push，不进入 M4/M5 |
+| M3/T7–T8 | Execute / Verify | Lead/Investigators/Critic/Lead V11 authority runtime | implemented / verifying | fifth-round base `e52e47984c4b460ed3b06dc4147d3d3b0532345b`; T7 91 passed、T8 207 passed；M2R/隔离 84 passed/3 skipped；变更相关 102 passed/2 skipped；全量 1995 passed/3 skipped/1 warning；两套全仓 Ruff clean；H1 usage/audit RED→GREEN | 等待同一审查线程复审；不 merge/push，不进入 M4/M5 |
 
 M1 review-fix record (2026-08-06): High 1–6 and Medium 7–10 were reproduced
 with focused regressions, fixed at shared profile/ownership/transaction/entry
@@ -225,6 +225,32 @@ passed`, M2R/isolated `84 passed/3 skipped`, changed/runtime `102 passed/2
 skipped`, full `1992 passed/3 skipped/1 warning`, both full Ruff commands clean,
 and diff-check clean are recorded in Plan §6 and Spec §15 with the single
 `M3_REVIEW_FIX4_SHA` commit; no merge, push, M4, or M5 action was taken.
+
+M3 fifth-round review-fix5 record (2026-08-09): independent review verdict
+`CHANGES_REQUIRED` was issued against base
+`e52e47984c4b460ed3b06dc4147d3d3b0532345b`; only H1 remained and
+Blocking/Medium/Low were zero. The production RED used the real
+`_call_model → Agents SDK Runner → RetryCoordinator` path: four provider calls
+with request one success, request two transport failure, then both requests
+successful on the outer retry. The previous counters recorded only the final
+attempt's `40/10` instead of the three successful requests' `60/15`, and the
+first failed attempt audit omitted request one's usage.
+The GREEN fix reuses the existing per-request MODEL event callback. It adds
+mechanical `actual_input_tokens` beside the existing reservation
+`input_tokens`/`input_estimate`, deduplicates terminal events by reservation and
+attempt, accumulates all successful request actual usage into runtime counters,
+and writes per-attempt AgentExecution totals (successful actual usage plus the
+existing failed-request estimate). The final RunResult is no longer added a
+second time. Regressions are
+`test_v11_sdk_outer_retry_replays_success_with_new_reservation_and_reuses_failed_request`
+(`4 calls`, summary `60/15`, attempt-1/2 audit `91/5` and `40/10` for this
+prompt), `test_v11_single_sdk_request_usage_is_not_counted_twice`,
+`test_v11_all_failed_sdk_retry_records_estimate_without_summary_usage`, and
+`test_v11_sdk_retry_resume_usage_is_idempotent`. Final T7 `91 passed`, T8 `207
+passed`, M2R/isolated `84 passed/3 skipped`, changed/runtime `102 passed/2
+skipped`, full `1995 passed/3 skipped/1 warning`, both full Ruff commands clean,
+and diff-check clean are recorded in Plan §6 and Spec §15 with the single
+`M3_REVIEW_FIX5_SHA` commit; no merge, push, M4, or M5 action was taken.
 
 ## Archived V10.1 Planning Dashboard
 
