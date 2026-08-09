@@ -35,7 +35,9 @@ router = APIRouter(tags=["runtime-runs"])
 
 
 class RuntimeRunCreateRequest(BaseModel):
-    model_config = ConfigDict(str_strip_whitespace=True)
+    # server-owned 字段（execution identity、authority、endpoint、capability
+    # artifact）不接受请求覆盖；多余字段一律 422。
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
     strategy: InvestigationStrategy
     run_reason: RuntimeRunReason

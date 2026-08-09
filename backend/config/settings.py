@@ -1,10 +1,69 @@
+import hashlib
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import urlsplit
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from backend.domain.multi_agent import InvestigationStrategy, ModelProvider
+
+_LOCAL_CLEARTEXT_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def canonicalize_endpoint(value: str) -> str:
+    """openai_compatible base_url 的唯一 canonicalization 算法（spec 7.8）。
+
+    只接受绝对 http/https URL；拒绝 userinfo/query/fragment、百分号编码 path、
+    重复斜杠与 ./.. 段；scheme 与 IDNA host 小写化；去除默认端口（http 80、
+    https 443），保留非默认端口；去除 path 尾部斜杠。http 仅允许本机地址。
+    """
+    raw = value.strip()
+    parts = urlsplit(raw)
+    scheme = parts.scheme.lower()
+    if scheme not in {"http", "https"}:
+        raise ValueError("endpoint must use absolute http or https URL")
+    if parts.username is not None or parts.password is not None:
+        raise ValueError("endpoint must not contain userinfo")
+    if parts.query or parts.fragment:
+        raise ValueError("endpoint must not contain query or fragment")
+    hostname = parts.hostname
+    if not hostname:
+        raise ValueError("endpoint requires a host")
+    try:
+        port = parts.port
+    except ValueError as exc:
+        raise ValueError("endpoint port is invalid") from exc
+    if ":" in hostname:
+        # IPv6 字面量保持小写并加回括号。
+        host = f"[{hostname.lower()}]"
+        host_key = hostname.lower()
+    else:
+        try:
+            host = hostname.encode("idna").decode("ascii").lower()
+        except (UnicodeError, ValueError) as exc:
+            raise ValueError("endpoint host is not valid IDNA") from exc
+        host_key = host
+    if scheme == "http" and host_key not in _LOCAL_CLEARTEXT_HOSTS:
+        raise ValueError("cleartext http endpoints are only allowed for local hosts")
+    if (scheme, port) in {("http", 80), ("https", 443)}:
+        port = None
+    path = parts.path
+    if "%" in path:
+        raise ValueError("endpoint path must not contain percent-encoded bytes")
+    if "//" in path:
+        raise ValueError("endpoint path must not contain duplicate slashes")
+    segments = [segment for segment in path.split("/") if segment]
+    if any(segment in {".", ".."} for segment in segments):
+        raise ValueError("endpoint path must not contain dot segments")
+    path = "/" + "/".join(segments) if segments else ""
+    netloc = host if port is None else f"{host}:{port}"
+    return f"{scheme}://{netloc}{path}"
+
+
+def endpoint_id(canonical_url: str) -> str:
+    """canonical UTF-8 URL 的 SHA-256 身份；不含任何凭证信息。"""
+    return hashlib.sha256(canonical_url.encode("utf-8")).hexdigest()
 
 
 class StorageSettings(BaseModel):
@@ -33,6 +92,12 @@ class ServiceCatalogProviderSettings(ProviderToggle):
     path: Path = Path("config/services.yaml")
 
 
+class LocalPackageProviderSettings(ProviderToggle):
+    """离线 incident package 根目录；缺席 source 绝不回退 mock。"""
+
+    path: Path = Path("data/incident-packages/default")
+
+
 class ProviderSettings(BaseModel):
     mock: ProviderToggle = Field(default_factory=lambda: ProviderToggle(enabled=True))
     log_file: LogFileProviderSettings = Field(
@@ -47,6 +112,27 @@ class ProviderSettings(BaseModel):
     service_catalog: ServiceCatalogProviderSettings = Field(
         default_factory=lambda: ServiceCatalogProviderSettings(enabled=True)
     )
+    local_package: LocalPackageProviderSettings = Field(
+        default_factory=lambda: LocalPackageProviderSettings(enabled=False)
+    )
+
+
+class OpenAICompatibleSettings(BaseModel):
+    """generic Chat Completions endpoint 配置；API key 只允许环境变量。"""
+
+    model_config = ConfigDict(validate_assignment=True)
+
+    base_url: str | None = None
+    api_mode: Literal["chat_completions"] = "chat_completions"
+    timeout_seconds: int = Field(default=30, ge=1, le=120)
+    max_retries: int = Field(default=2, ge=0, le=5)
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return canonicalize_endpoint(value)
 
 
 class AgentsSettings(BaseModel):
@@ -61,6 +147,9 @@ class AgentsSettings(BaseModel):
     max_tool_calls_per_specialist: int = Field(default=3, ge=1, le=10)
     max_total_tool_calls: int = Field(default=8, ge=1, le=30)
     tool_timeout_seconds: int = Field(default=10, ge=1, le=60)
+    openai_compatible: OpenAICompatibleSettings = Field(
+        default_factory=OpenAICompatibleSettings
+    )
 
 
 class BenchmarkSettings(BaseModel):
@@ -137,6 +226,9 @@ def _apply_environment_overrides(settings: AppSettings) -> None:
 
     if value := _get_env("DIAGOPS_AGENTS_TOOL_TIMEOUT_SECONDS"):
         settings.agents.tool_timeout_seconds = int(value)
+
+    if value := _get_env("DIAGOPS_AGENTS_OPENAI_COMPATIBLE_BASE_URL"):
+        settings.agents.openai_compatible.base_url = value
 
     if value := _get_env("DIAGOPS_RUNTIME_ENABLED"):
         settings.runtime.enabled = _parse_bool(value)

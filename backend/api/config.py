@@ -4,9 +4,11 @@ from typing import Literal
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
+from backend.config.settings import endpoint_id
 from backend.diagnosis.deepseek_model import implementation_status
 from backend.domain.multi_agent import InvestigationStrategy, ModelProvider
 from backend.services.container import get_container
+from backend.services.model_capability import capability_certification_status
 from backend.services.reliability_artifacts import latest_certification
 
 router = APIRouter(prefix="/config", tags=["config"])
@@ -27,6 +29,8 @@ class AgentConfigResponse(BaseModel):
     model: str | None
     implementation_status: Literal["implemented", "unsupported"]
     certification_status: Literal["certified", "failed", "not_run"]
+    capability_certification_status: Literal["passed", "failed", "not_run", "not_applicable"]
+    endpoint_id: str | None
     strategy: InvestigationStrategy
     max_tool_calls_per_specialist: int
     max_total_tool_calls: int
@@ -88,11 +92,30 @@ def build_agent_config() -> AgentConfigResponse:
         if model is not None
         else "not_run"
     )
+    # 公共投影只暴露 credential-free 的 endpoint 哈希身份，绝不暴露 URL。
+    capability_status: Literal["passed", "failed", "not_run", "not_applicable"]
+    endpoint: str | None = None
+    if provider == ModelProvider.OPENAI_COMPATIBLE:
+        base_url = settings.openai_compatible.base_url
+        if base_url and model:
+            endpoint = endpoint_id(base_url)
+            capability_status = capability_certification_status(
+                Path("output/model_capability"),
+                provider=provider.value,
+                model=model,
+                endpoint_id_value=endpoint,
+            )
+        else:
+            capability_status = "not_run"
+    else:
+        capability_status = "not_applicable"
     return AgentConfigResponse(
         provider=provider,
         model=model,
         implementation_status=provider_implementation,
         certification_status=certification,
+        capability_certification_status=capability_status,
+        endpoint_id=endpoint,
         strategy=settings.strategy,
         max_tool_calls_per_specialist=settings.max_tool_calls_per_specialist,
         max_total_tool_calls=settings.max_total_tool_calls,

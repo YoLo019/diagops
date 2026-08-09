@@ -16,6 +16,11 @@ class ToolCallStatus(StrEnum):
     INTERRUPTED = "interrupted"
 
 
+class ToolExposure(StrEnum):
+    AGENT = "agent"
+    INTERNAL = "internal"
+
+
 class ToolSpec(BaseModel):
     name: str
     description: str
@@ -23,6 +28,8 @@ class ToolSpec(BaseModel):
     output_schema: dict[str, JsonValue] = Field(default_factory=dict)
     read_only: bool = True
     provider: EvidenceProvider | None = None
+    # 兼容默认 agent：历史 spec 不声明即视为 Agent 可见；internal 必须显式标记。
+    exposure: ToolExposure = ToolExposure.AGENT
 
 
 class ToolCallRecord(BaseModel):

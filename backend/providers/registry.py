@@ -10,6 +10,10 @@ from backend.providers.base import EvidenceProviderProtocol
 from backend.providers.file_deployments import FileDeploymentProvider
 from backend.providers.file_logs import FileLogProvider
 from backend.providers.file_service_catalog import FileServiceCatalogProvider
+from backend.providers.local_package import (
+    LocalIncidentPackage,
+    build_package_providers,
+)
 from backend.providers.mock_dependencies import MockDependencyProvider
 from backend.providers.mock_deploys import MockDeployProvider
 from backend.providers.mock_logs import MockLogProvider
@@ -30,6 +34,9 @@ _PROVIDER_BY_TOOL = {
     "read_deployments": EvidenceProvider.DEPLOY,
     "read_service_catalog": EvidenceProvider.SERVICE_CATALOG,
     "query_dependencies": EvidenceProvider.DEPENDENCY,
+    "query_traces": EvidenceProvider.TRACE,
+    "read_runtime_state": EvidenceProvider.RUNTIME_STATE,
+    "query_related_alerts": EvidenceProvider.RELATED_ALERT,
 }
 
 _LEGACY_EVIDENCE_PROVIDERS = (
@@ -215,7 +222,15 @@ def build_provider_registry_from_settings(settings: AppSettings) -> ProviderRegi
     if settings.providers.prometheus.enabled:
         providers.append(PrometheusProvider(settings.providers.prometheus.base_url))
 
+    if settings.providers.local_package.enabled:
+        providers.extend(build_local_package_providers(settings.providers.local_package.path))
+
     return ProviderRegistry(
         providers=providers,
         simulation_providers=simulation_providers,
     )
+
+
+def build_local_package_providers(path) -> list[EvidenceProviderProtocol]:
+    """从离线 incident package 构造全部本地 Provider；package 损坏即显式失败。"""
+    return build_package_providers(LocalIncidentPackage.load(path))

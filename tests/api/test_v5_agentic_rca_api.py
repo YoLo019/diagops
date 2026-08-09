@@ -125,6 +125,8 @@ def test_agent_config_and_workbench_expose_only_non_secret_provider_status(
         "model": "deepseek-v4-pro",
         "implementation_status": "implemented",
         "certification_status": "not_run",
+        "capability_certification_status": "not_applicable",
+        "endpoint_id": None,
         "strategy": "fixed",
         "max_tool_calls_per_specialist": 3,
         "max_total_tool_calls": 8,

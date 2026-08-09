@@ -408,3 +408,122 @@ def test_v11_explicit_execution_tuple_mismatch_is_422_before_linked_run() -> Non
     assert response.status_code == 422
     assert [item.id for item in container.repository.list()] == ["inv-api-v11"]
 
+
+@pytest.mark.parametrize(
+    "extra_field",
+    [
+        {"authority_mode": "agent"},
+        {"endpoint": "https://caller-selected.example/v1"},
+        {"base_url": "https://caller-selected.example/v1"},
+        {"capability_artifact_hash": "ab" * 32},
+    ],
+)
+def test_run_create_rejects_client_owned_execution_identity(extra_field) -> None:
+    container = get_container()
+    container.repository.save(_record("inv-api-owned"))
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/investigations/inv-api-owned/runtime-runs",
+            json={
+                "strategy": "adaptive",
+                "run_reason": "initial",
+                "execution_contract_version": ExecutionContractVersion.V11.value,
+                **extra_field,
+            },
+        )
+
+    assert response.status_code == 422
+    assert [item.id for item in container.repository.list()] == ["inv-api-owned"]
+
+
+def _compatible_container(monkeypatch, tmp_path: Path):
+    from backend.config.settings import OpenAICompatibleSettings
+    from backend.domain.multi_agent import ModelProvider
+    from backend.services.container import AppContainer
+
+    monkeypatch.setenv("DIAGOPS_AGENTS_API_KEY", "local-secret")
+    container = reset_container(
+        AppSettings(
+            storage=StorageSettings(url="memory://"),
+            agents=AgentsSettings(
+                enabled=True,
+                provider=ModelProvider.OPENAI_COMPATIBLE,
+                model="compat-model",
+                openai_compatible=OpenAICompatibleSettings(
+                    base_url="http://127.0.0.1:8000/v1"
+                ),
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        AppContainer, "_capability_directory", staticmethod(lambda: tmp_path)
+    )
+    return container
+
+
+def test_v11_compatible_tuple_requires_certification(monkeypatch, tmp_path) -> None:
+    container = _compatible_container(monkeypatch, tmp_path)
+    container.repository.save(_record("inv-api-compat"))
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/investigations/inv-api-compat/runtime-runs",
+            json={
+                "strategy": "adaptive",
+                "run_reason": "initial",
+                "execution_contract_version": ExecutionContractVersion.V11.value,
+            },
+        )
+
+    assert response.status_code == 422
+    assert "capability" in response.json()["detail"]
+    assert [item.id for item in container.repository.list()] == ["inv-api-compat"]
+
+
+def test_v11_certified_compatible_tuple_freezes_endpoint_identity(
+    monkeypatch, tmp_path
+) -> None:
+    from backend.config.settings import endpoint_id
+    from backend.services.model_capability import (
+        ModelCapabilityArtifact,
+        capability_manifest_hash,
+        write_capability_artifact,
+    )
+
+    container = _compatible_container(monkeypatch, tmp_path)
+    container.repository.save(_record("inv-api-certified"))
+    identity = endpoint_id("http://127.0.0.1:8000/v1")
+    artifact_path = write_capability_artifact(
+        tmp_path,
+        ModelCapabilityArtifact(
+            provider="openai_compatible",
+            model="compat-model",
+            endpoint_id=identity,
+            adapter_version="openai-compatible-adapter-v1",
+            openai_sdk_version="1.0.0",
+            agents_sdk_version="0.18.1",
+            tested_parallelism=2,
+            capability_manifest_hash=capability_manifest_hash(),
+            code_revision="abc123",
+            tested_at=datetime(2026, 8, 7, 12, 0, tzinfo=UTC),
+            result="passed",
+            observations=[],
+        ),
+    )
+    import json as json_module
+
+    artifact_hash = json_module.loads(artifact_path.read_text())["artifact_hash"]
+
+    run = container.create_runtime_run(
+        "inv-api-certified",
+        strategy=InvestigationStrategy.ADAPTIVE,
+        run_reason=RuntimeRunReason.INITIAL,
+        execution_contract_version=ExecutionContractVersion.V11,
+    )
+
+    assert run.execution_contract["endpoint_id"] == identity
+    assert run.execution_contract["capability_artifact_hash"] == artifact_hash
+    assert run.execution_contract["api_mode"] == "chat_completions"
+    assert "127.0.0.1" not in json.dumps(run.execution_contract)
+

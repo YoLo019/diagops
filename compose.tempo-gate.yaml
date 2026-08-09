@@ -1,0 +1,13 @@
+# Docker-local Tempo parity gate（spec 7.7 / R23）。
+# 版本以 tag 固定；不可变 digest 由 backend/services/tempo_acceptance.py 的
+# preflight 通过 `docker image inspect` 实测 RepoDigests 校验
+# （DIAGOPS_TEMPO_GATE_IMAGE_DIGEST）。本仓库离线环境无法解析真实 digest，
+# 未配置 digest 时 gate 以 blocked 记录原因，绝不静默通过。
+# 每次运行使用唯一 Compose project 名（tempo-gate-<uuid>），cleanup 只作用于
+# 该 project 下的 container/network/volume。
+services:
+  otel-lgtm:
+    image: grafana/otel-lgtm:0.11.0
+    ports:
+      - "3200:3200" # Tempo HTTP API
+      - "4318:4318" # OTLP/HTTP ingest

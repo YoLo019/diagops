@@ -1,9 +1,12 @@
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Literal
 
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from openai import AsyncOpenAI
-from pydantic import SecretStr
+
+from backend.diagnosis.openai_compatible_model import (
+    OpenAICompatibleChatCompletionsModel,
+)
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
@@ -42,34 +45,19 @@ DEEPSEEK_CAPABILITIES = DeepSeekCapabilityProfile(
 )
 
 
-class DeepSeekChatCompletionsModel(OpenAIChatCompletionsModel):
-    """通过请求级 client 复用 Agents SDK Chat Completions 适配逻辑。"""
+class DeepSeekChatCompletionsModel(OpenAICompatibleChatCompletionsModel):
+    """共享 compatible adapter 的 DeepSeek 预设；序列化身份保持 deepseek 不变。"""
 
     def __init__(self, *, model: str, api_key: str) -> None:
-        # 同一 adapter 会被同步 orchestrator 跨 event loop 复用，不能持有异步传输。
-        self.model = model
-        self._api_key = SecretStr(api_key)
-
-    async def get_response(self, *args: Any, **kwargs: Any) -> Any:
-        """在当前 event loop 内完成一次非流式请求并释放 transport。"""
-        client = self._create_client()
-        try:
-            delegate = self._create_delegate(client)
-            return await delegate.get_response(*args, **kwargs)
-        finally:
-            await client.close()
-
-    async def stream_response(self, *args: Any, **kwargs: Any):
-        """在消费或取消流后，于创建 transport 的 event loop 内关闭它。"""
-        client = self._create_client()
-        try:
-            delegate = self._create_delegate(client)
-            async for event in delegate.stream_response(*args, **kwargs):
-                yield event
-        finally:
-            await client.close()
+        super().__init__(
+            model=model,
+            api_key=api_key,
+            base_url=DEEPSEEK_BASE_URL,
+            strict_feature_validation=True,
+        )
 
     def _create_client(self) -> AsyncOpenAI:
+        # DeepSeek 预设只发送官方 endpoint 支持的字段，不带超时/重试覆盖。
         return AsyncOpenAI(
             api_key=self._api_key.get_secret_value(),
             base_url=DEEPSEEK_BASE_URL,
@@ -82,19 +70,12 @@ class DeepSeekChatCompletionsModel(OpenAIChatCompletionsModel):
             strict_feature_validation=True,
         )
 
-    def _supports_default_prompt_cache_key(self) -> bool:
-        # Agents SDK 的默认 cache key 仅针对官方 OpenAI endpoint。
-        return False
-
     def clone_for_model(self, model_name: str) -> "DeepSeekChatCompletionsModel":
         """为冻结 Run 创建不共享传输状态的同凭据 adapter。"""
         return type(self)(
             model=model_name,
             api_key=self._api_key.get_secret_value(),
         )
-
-    def __repr__(self) -> str:
-        return f"{type(self).__name__}(model={self.model!r})"
 
 
 def implementation_status() -> Literal["implemented", "unsupported"]:

@@ -1491,6 +1491,22 @@ payload field presence, and add focused RED→GREEN evidence without changing
 the approved contract or milestone scope. Independent re-review remains
 pending.
 
+M2 implementation review (2026-08-08): independent review concluded
+`approve_with_followups` with no blocking finding. The reviewer independently
+reran every focused gate (336/106/17 passed, offline acceptance rows=80
+failed=0, Ruff clean, full suite 1927 passed/3 skipped) and verified three
+implementer claims: the unreported `.gitignore` change is benign (three new
+acceptance-output ignore rules); the two schema-version assertion fixes (6→7)
+are a legitimate M1 leftover confirmed failing on merge commit `a40942a`
+(M1's scoped gates never included those two files, so merge-time full-suite
+green was unverified); and the T5 image-pinning deviation (digest injected via
+environment and verified against daemon RepoDigests instead of a repo-pinned
+value) preserves the security property that no passed gate exists without a
+cryptographic digest binding, so the plan remains approved. Findings M2R-1 to
+M2R-4 are recorded in the ledger below. M2R-1 was closed on 2026-08-08 with
+four slow-endpoint fake-endpoint tests and a focused re-review that confirmed
+their substance; M2R-2/M2R-3 remain explicit T7 wiring prerequisites.
+
 | ID | Severity | Finding | Resolution |
 | --- | --- | --- | --- |
 | B1 | blocking | Lead/Critic structured outputs and generic task/status contracts were underspecified | Closed in §8.1 with frozen enums, `LeadDecision`, `CriticAssessment`, seven checks, task/step kinds, references, rounds, and cancellation |
@@ -1537,6 +1553,10 @@ pending.
 | L28 | high reuse audit and re-review | Investigation-scoped latest projections had no owning run; the first amendment lacked an atomic owner switch, and the second still allowed a pre-INTAKE terminating run to freeze the previous owner's latest view | Closed in §5.1/§8.1/§12/R27 with payload-only active owner, atomic intake activation/clear/checkpoint, owner-aware terminal freezing with empty `not_activated` projection, fault injection, terminal freeze-before-switch, linked legacy-to-V11 rerun, and fail-closed resume ownership |
 | L29 | high reuse audit | Treating `AgentsRcaRuntime`, phase handlers, reports, actions, and OpenRCA modules as whole reusable units would retain deterministic hypotheses, fixed Agent loops, and CauseType authority | Closed in §5.1/O20/R27 by a primitive-level reuse allowlist and forbidden-call sentinel suite |
 | L30 | medium reuse re-review | Actions and verification suggestions participated in the latest projection and human transitions but were not bound to the owning V11 run | Closed in §5.1/§8.1/§8.6/§12/R27 with payload-only run IDs and active-owner validation on generation and transition |
+| M2R-1 | high M2 review | T6 adapter lacked the §7.8-required local slow-endpoint evidence for client cancellation, deadline enforcement, no late commit, and transport cleanup | Closed 2026-08-08: four slow-endpoint tests prove all four semantics against the real SDK/httpx stack; they passed with zero implementation change (coverage gap only, same shape as RR-M1), and focused re-review verified the assertions discriminate real cancellation/late-commit structures |
+| M2R-2 | medium M2 review | The only production wiring of `VerifiedMemoryLookup` injects no current-investigation resolver, so the self/source-ancestor memory exclusion guard is inert outside tests | Open: assigned as an M3/T7 wiring prerequisite with an integration test; the guard logic itself is fully tested |
+| M2R-3 | low M2 review | `assert_agent_callable` invocation rechecks have no production call site until V11 orchestration exists | Open: T7 must wire and forbid bypass; tracked for M3 acceptance |
+| M2R-4 | low M2 review | Offline acceptance redaction rows omit the span-attribute free-text channel | Open: optional hardening, not a gate |
 
 ## 16. Approval state
 

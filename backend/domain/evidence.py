@@ -3,16 +3,20 @@ from __future__ import annotations
 import math
 from datetime import datetime
 from enum import StrEnum
+from typing import Annotated
 from uuid import uuid4
 
 from pydantic import (
     BaseModel,
+    ConfigDict,
     Field,
     field_validator,
     model_serializer,
     model_validator,
 )
 from typing_extensions import TypeAliasType
+
+from backend.domain.events import Severity
 
 JsonPrimitive = str | int | float | bool | None
 JsonValue = TypeAliasType("JsonValue", JsonPrimitive | list["JsonValue"] | dict[str, "JsonValue"])
@@ -57,6 +61,105 @@ class EvidenceSourceClass(StrEnum):
     RECORDED_LOCAL = "recorded_local"
     SYNTHETIC_FIXTURE = "synthetic_fixture"
     LIVE_BACKEND = "live_backend"
+
+
+class SpanStatus(StrEnum):
+    OK = "ok"
+    ERROR = "error"
+    UNSET = "unset"
+
+
+class RuntimeKind(StrEnum):
+    CONTAINER = "container"
+    POD = "pod"
+    NODE = "node"
+    PROCESS = "process"
+    UNKNOWN = "unknown"
+
+
+class RuntimeStateValue(StrEnum):
+    RESTARTING = "restarting"
+    CRASH_LOOP = "crash_loop"
+    OOM_KILLED = "oom_killed"
+    PENDING = "pending"
+    NOT_READY = "not_ready"
+    TERMINATED = "terminated"
+    NODE_PRESSURE = "node_pressure"
+    HEALTHY = "healthy"
+
+
+class AlertStatus(StrEnum):
+    FIRING = "firing"
+    RESOLVED = "resolved"
+
+
+# span/trace 属性与告警 label 共用同一组安全边界，避免第二类自由文本通道。
+AlertLabelKey = Annotated[str, Field(min_length=1, max_length=64)]
+AlertLabelValue = Annotated[str, Field(max_length=256)]
+CanonicalTraceId = Annotated[str, Field(pattern=r"^([0-9a-f]{16}|[0-9a-f]{32})$")]
+CanonicalSpanId = Annotated[str, Field(pattern=r"^[0-9a-f]{16}$")]
+
+
+class TraceSpanPayload(BaseModel):
+    """进入 EvidenceItem.payload 前的唯一 span 投影；原始后端 JSON 不直接落库。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    trace_id: CanonicalTraceId
+    span_id: CanonicalSpanId
+    parent_span_id: CanonicalSpanId | None = None
+    service: str = Field(min_length=1, max_length=128)
+    operation: str = Field(min_length=1, max_length=128)
+    started_at: datetime
+    duration_ms: float = Field(ge=0, le=3_600_000, allow_inf_nan=False)
+    status: SpanStatus = SpanStatus.UNSET
+    attributes: dict[AlertLabelKey, AlertLabelValue] = Field(default_factory=dict, max_length=20)
+
+
+class RuntimeStatePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    entity_id: str = Field(min_length=1, max_length=128)
+    runtime_kind: RuntimeKind = RuntimeKind.UNKNOWN
+    state: RuntimeStateValue
+    reason: str = Field(min_length=1, max_length=256)
+    observed_at: datetime
+    restart_count: int | None = Field(default=None, ge=0)
+    ready: bool | None = None
+
+
+class RelatedAlertPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    fingerprint: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=128)
+    entity_id: str = Field(min_length=1, max_length=128)
+    severity: Severity
+    status: AlertStatus
+    starts_at: datetime
+    ends_at: datetime | None = None
+    labels: dict[AlertLabelKey, AlertLabelValue] = Field(default_factory=dict, max_length=20)
+
+    @model_validator(mode="after")
+    def validate_alert_window(self) -> RelatedAlertPayload:
+        if self.ends_at is not None and self.ends_at < self.starts_at:
+            raise ValueError("alert ends_at must not be earlier than starts_at")
+        return self
+
+
+class VerifiedIncidentPayload(BaseModel):
+    """verified memory 证据只携带来源身份与有界摘要，不复用外部证据 ID。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_investigation_id: str = Field(min_length=1, max_length=128)
+    root_candidate_id: str = Field(min_length=1, max_length=128)
+    verified_at: datetime
+    summary: str = Field(min_length=1, max_length=512)
+    service: str = Field(min_length=1, max_length=128)
+    environment: str = Field(min_length=1, max_length=128)
+    affected_entity: str | None = Field(default=None, max_length=128)
+    failure_mechanism: str | None = Field(default=None, max_length=256)
 
 
 class EvidenceProvenance(BaseModel):

@@ -16,3 +16,6 @@ frontend/tsconfig.tsbuildinfo
 /output/reliability/
 /output/runtime-acceptance/
 /output/production-acceptance/
+/output/offline_tool_acceptance/
+/output/tempo_acceptance/
+/output/model_capability/

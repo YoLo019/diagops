@@ -17,6 +17,10 @@ providers:
   service_catalog:
     enabled: true
     path: config/services.yaml
+  # 离线 incident package 根目录；缺席 source 绝不回退 mock。
+  local_package:
+    enabled: false
+    path: data/incident-packages/default
 
 agents:
   enabled: false
@@ -28,6 +32,13 @@ agents:
   max_tool_calls_per_specialist: 3
   max_total_tool_calls: 8
   tool_timeout_seconds: 10
+  # generic Chat Completions endpoint；API key 只允许 DIAGOPS_AGENTS_API_KEY
+  # 环境变量，绝不写入本文件。
+  openai_compatible:
+    base_url: null
+    api_mode: chat_completions
+    timeout_seconds: 30
+    max_retries: 2
 
 benchmark:
   results_path: output/benchmarks/openrca

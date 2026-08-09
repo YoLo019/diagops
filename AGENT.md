@@ -74,7 +74,9 @@ Architecture references:
   isolated context, shared artifacts, permission checks, checkpoints, compaction,
   and doom-loop detection; do not import its generic framework wholesale.
 
-Reuse ideas, not source code or dependencies:
+Reuse ideas and patterns from these projects. Small license-attributed code
+snippets may be reused; importing framework-level code or adding a dependency
+requires the approved-design gate in Section 2:
 <https://github.com/qinshihu/itops-agent-platform> and
 <https://github.com/derisk-ai/OpenDerisk>.
 
@@ -96,17 +98,14 @@ Reuse ideas, not source code or dependencies:
 
 1. Communicate in Chinese unless asked otherwise. Reviews report findings first,
    ordered by severity with file and line references.
-2. Use Simplified Chinese UTF-8 comments while preserving technical identifiers.
-   Explain reasons, constraints, boundaries, and risks; remove stale or decorative
-   comments, disabled code, mojibake, author/date notes, and empty TODOs.
-3. Treat models, enums, persisted payloads, configuration, and public APIs as
+2. Treat models, enums, persisted payloads, configuration, and public APIs as
    contracts. Reject NaN and Infinity. Renames/removals need compatibility plans.
-4. Provider failure produces explicit failed or partial evidence while independent
+3. Provider failure produces explicit failed or partial evidence while independent
    Providers continue. If all required paths fail, persist context and fail visibly.
-5. Preserve cancellation, timeout, retry, replay, concurrency, and cleanup behavior
+4. Preserve cancellation, timeout, retry, replay, concurrency, and cleanup behavior
    on changed paths. Do not weaken tests to make changes pass.
-6. Prefer the smallest change that fixes the shared root cause. Do not copy an
-   external framework or turn DiagOps into a chatbot or infrastructure manager.
+5. Do not copy an external framework or turn DiagOps into a chatbot or
+   infrastructure manager.
 
 ## 6. Workflow And Verification
 
@@ -119,11 +118,9 @@ under stale approval.
 Minimum commands as applicable:
 
 ```powershell
-uv sync
 uv run ruff check .
 uv run pytest -v
 uv run python -m backend.services.runtime_acceptance
-npm.cmd --prefix frontend install
 npm.cmd --prefix frontend run build
 ```
 
