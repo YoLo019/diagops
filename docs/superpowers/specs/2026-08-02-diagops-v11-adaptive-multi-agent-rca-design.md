@@ -1777,6 +1777,33 @@ warning`, offline `80/80`, runtime acceptance `14/14`, Ruff/build/diff-check
 green; the post-commit runtime artifact is bound with `git_dirty=false` in the
 implementation handoff.
 
+M4 fourth-round high-fix ledger (2026-08-10): the independent review reproduced
+three production-path High defects against the latest M4 commit. The approved
+V11/V10 boundary remains unchanged. The real OpenRCA V11 runner now computes
+the execution-contract Skill identity from its actual nine-tool agent manifest,
+so Skill admission matches the local provider registry and the real SQLite
+fixture path can complete without external telemetry. The V10 deterministic
+projector retains its existing tool/reason semantics.
+
+The V11 OpenRCA runner now enters the shared durable V11 publication guard
+before constructing prediction or CSV artifacts. Non-terminal or failed
+`RuntimeRun` states (`created`, `failed`, `cancelled`, `interrupted`) fail
+closed; only `completed` can publish. The shared guard also treats any report
+under an active V11 owner as V11-bound, regardless of its authority label, and
+rejects stale/foreign diagnosis or alternative references, status mismatches,
+owner mismatches, and invalid Lead bindings. Historical V10-only reports still
+use the legacy deterministic path.
+
+The required RED→GREEN regressions cover the real runner (`8 passed`), the
+active-V11 legacy-report boundary in memory and SQLite plus API/workbench
+publication (`4 passed`), and the combined focused source suite (`160 passed/1
+warning`). Final verification is M4 focused `124 passed/1 warning`, T9 exact
+`288 passed/1 warning`, T10 exact `868 passed/3 skipped/1 warning`, full pytest
+`2084 passed/3 skipped/1 warning`, offline `80/80`, runtime acceptance `14/14`
+with privacy scan clean, both Ruff commands, frontend build, and diff-check
+green. The post-commit runtime artifact is bound with `git_dirty=false` in the
+implementation handoff; no merge or push was performed and M5 was not started.
+
 ## 16. Approval state
 
 - Requirements Brief: confirmed by user.

@@ -2264,8 +2264,18 @@ class V11Runtime:
             authority_mode=AuthorityMode.AGENT,
             runtime_run_id=self.runtime_run_id,
         )
-        record = repository.get(investigation_id).model_copy(
-            update={"multi_agent_run": summary, "updated_at": datetime.now(UTC)}
+        record = repository.get(investigation_id)
+        active_runtime_run_id = record.active_runtime_run_id
+        if active_runtime_run_id is None and self._execution_contract is not None:
+            # durable V11 phase 的隔离快照在 INTAKE commit 前仍是旧 owner；这里只
+            # 补本地快照，权威 owner 切换仍由 PhaseCommit 原子提交。
+            active_runtime_run_id = self.runtime_run_id
+        record = record.model_copy(
+            update={
+                "active_runtime_run_id": active_runtime_run_id,
+                "multi_agent_run": summary,
+                "updated_at": datetime.now(UTC),
+            }
         )
         repository.save(record)
 

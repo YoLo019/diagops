@@ -895,6 +895,47 @@ passed/3 skipped/1 warning`; offline acceptance `80/80`; runtime acceptance
 The post-commit runtime artifact and `git_dirty=false` binding are recorded in
 the final implementation handoff. No merge or push was performed.
 
+### M4 fourth-round high-fix evidence (2026-08-10)
+
+The fourth independent review reproduced three production-path High findings
+against the M4 checkpoint. Each regression was run before the corresponding
+production change and then rerun GREEN on the isolated `codex/v11-m4` branch:
+
+- H1: the real `OpenRcaDiagnosisRunner(mode="v11-agent")` failed Skill admission
+  because the V11 contract fingerprint passed Skill objects where the admission
+  contract requires the actual agent tool manifest. The runner now derives the
+  Skill identity from `runtime.tool_registry.list_agent_specs()`. The real local
+  SQLite fixture path starts and completes with a bounded offline model turn;
+  admission remains enabled, the nine-tool manifest remains frozen, and the V10
+  deterministic runner is untouched.
+- H2: the V11 OpenRCA runner now calls the shared
+  `ensure_v11_projection_owner` before constructing prediction objects or CSV
+  rows. Durable `created`, `failed`, `cancelled`, and `interrupted` runs fail
+  closed; a `completed` run publishes normally. The failed-run CSV regression
+  proves the artifact contains an empty prediction plus a projection error,
+  rather than a stale public cause. This guard is not used by the V10
+  deterministic projector.
+- H3: when an active V11 owner exists, the shared projection guard validates
+  report authority, status, owner, and Lead candidate bindings for every report,
+  including legacy-authority labels. V10-only records without an active V11
+  owner continue through the historical deterministic path. Memory/SQLite
+  reloads, direct report projection, API report, workbench, and coordination
+  publication regressions cover both boundaries.
+
+RED→GREEN evidence:
+
+- real OpenRCA runner/admission/status/CSV regressions: `8 passed`;
+- active-V11 legacy-report guard/API/workbench regressions: `4 passed`;
+- focused source suite: `160 passed/1 warning`.
+
+Final local gates: M4 focused `124 passed/1 warning`; T9 exact `288 passed/1
+warning`; T10 exact `868 passed/3 skipped/1 warning`; full pytest `2084
+passed/3 skipped/1 warning`; offline acceptance `80/80`; runtime acceptance
+`14/14` with clean privacy output; both Ruff commands, frontend production
+build, and `git diff --check` passed. The final post-commit runtime artifact
+and `git_dirty=false` binding are recorded in the implementation handoff. No
+merge or push was performed and M5 was not started.
+
 ### T9. Reports, actions, human transitions, API/UI, and OpenRCA
 
 Requirements: R5–R12, R18–R19, R27.

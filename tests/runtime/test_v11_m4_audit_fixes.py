@@ -1054,6 +1054,108 @@ def test_v11_report_api_rejects_stale_candidate_reference():
     container.close()
 
 
+def test_active_v11_rejects_legacy_authority_report_with_foreign_candidate(
+    runtime_store,
+):
+    """active V11 下 legacy report 也必须服从同一候选绑定契约。"""
+    repository = runtime_store.investigation_repository
+    run = runtime_store.create_run(
+        _persisted_v11_run(
+            f"run-legacy-report-{type(runtime_store).__name__}",
+            "inv-1",
+        ).model_copy(update={"status": RuntimeRunStatus.COMPLETED})
+    )
+    candidate = _candidate()
+    review = _owned_review("inv-1", run.id, candidate)
+    summary = _owned_run_summary(run.id, DiagnosticStatus.COMPLETE)
+    report = IncidentReport(
+        investigation_id="inv-1",
+        summary="legacy stale report",
+        markdown="legacy stale report",
+        diagnoses=[candidate.model_copy(update={"id": "candidate-foreign"})],
+        authority_mode="legacy_deterministic",
+    )
+    repository.save(
+        repository.get("inv-1").model_copy(
+            update={
+                "status": InvestigationStatus.COMPLETED,
+                "active_runtime_run_id": run.id,
+                "multi_agent_run": summary,
+                "report": report,
+            }
+        )
+    )
+    repository.save_coordination_review(review)
+
+    with pytest.raises(V11ProjectionIntegrityError, match="report"):
+        ensure_v11_projection_owner(repository, runtime_store, repository.get("inv-1"))
+
+
+def test_v10_legacy_report_remains_usable_without_active_v11_owner(runtime_store):
+    """没有 active V11 owner 时保留 V10 legacy deterministic 兼容。"""
+    repository = runtime_store.investigation_repository
+    candidate = _candidate()
+    repository.save(
+        InvestigationRecord(
+            id="inv-v10-legacy-report",
+            event=_event(),
+            report=IncidentReport(
+                investigation_id="inv-v10-legacy-report",
+                summary="legacy report",
+                markdown="legacy report",
+                diagnoses=[candidate],
+                authority_mode="legacy_deterministic",
+            ),
+        )
+    )
+
+    ensure_v11_projection_owner(
+        repository,
+        runtime_store,
+        repository.get("inv-v10-legacy-report"),
+    )
+
+
+def test_v11_api_and_workbench_reject_legacy_authority_stale_report():
+    """active V11 的 report、workbench、graph 共享 legacy report guard。"""
+    container = reset_container()
+    investigation_id = "inv-api-legacy-stale-report"
+    container.repository.save(InvestigationRecord(id=investigation_id, event=_event()))
+    run = container.runtime_store.create_run(
+        _persisted_v11_run("run-api-legacy-stale-report", investigation_id).model_copy(
+            update={"status": RuntimeRunStatus.COMPLETED}
+        )
+    )
+    candidate = _candidate()
+    review = _owned_review(investigation_id, run.id, candidate)
+    report = IncidentReport(
+        investigation_id=investigation_id,
+        summary="legacy stale report",
+        markdown="legacy stale report",
+        diagnoses=[candidate.model_copy(update={"id": "candidate-foreign"})],
+        authority_mode="legacy_deterministic",
+    )
+    container.repository.save(
+        container.repository.get(investigation_id).model_copy(
+            update={
+                "status": InvestigationStatus.COMPLETED,
+                "active_runtime_run_id": run.id,
+                "multi_agent_run": _owned_run_summary(
+                    run.id, DiagnosticStatus.COMPLETE
+                ),
+                "report": report,
+            }
+        )
+    )
+    container.repository.save_coordination_review(review)
+
+    with TestClient(app) as client:
+        for path in ("report", "rca-workbench", "coordination-review"):
+            response = client.get(f"/investigations/{investigation_id}/{path}")
+            assert response.status_code == 409, response.text
+    container.close()
+
+
 @pytest.mark.parametrize("status", [EvidenceStatus.FAILED, EvidenceStatus.SKIPPED])
 def test_v11_report_rejects_unusable_referenced_evidence(status: EvidenceStatus):
     candidate = _candidate()

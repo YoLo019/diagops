@@ -63,6 +63,7 @@ from backend.runtime.phase_executor import DiagnosisPhaseExecutor
 from backend.runtime.telemetry import RuntimeTelemetry
 from backend.runtime.writer import RuntimeWriter
 from backend.services.model_capability import latest_capability_artifact
+from backend.services.v11_projection import ensure_v11_projection_owner
 from backend.tools.provider_tools import build_provider_tool_registry
 from backend.tools.registry import agent_manifest_hash
 
@@ -270,6 +271,9 @@ class OpenRcaDiagnosisRunner:
         projection_failed = False
         try:
             if self.mode == "v11-agent":
+                ensure_v11_projection_owner(
+                    self.repository, self.runtime_store, record
+                )
                 candidates = (
                     [
                         candidate
@@ -377,7 +381,9 @@ class OpenRcaDiagnosisRunner:
             "capability_artifact_hash": capability_hash,
             "tool_manifest": list(manifest),
             "tool_manifest_hash": agent_manifest_hash(manifest),
-            "skill_catalog": skill_catalog_identity(runtime.skills),
+            "skill_catalog": skill_catalog_identity(
+                runtime.tool_registry.list_agent_specs()
+            ),
             "capability_identity": {
                 "provider": provider,
                 "model": model_name,

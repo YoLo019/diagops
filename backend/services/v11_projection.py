@@ -30,7 +30,7 @@ def ensure_v11_projection_owner(repository, runtime_store, record: Investigation
 
     active_runtime_id = record.active_runtime_run_id
     active_run = None
-    if active_runtime_id is not None and not has_agent_projection:
+    if active_runtime_id is not None:
         try:
             active_run = runtime_store.get_run(active_runtime_id)
         except (KeyError, RuntimeNotFound):
@@ -106,7 +106,11 @@ def ensure_v11_projection_owner(repository, runtime_store, record: Investigation
             "Agent projection final status contract failed"
         ) from exc
 
-    if record.report is not None and record.report.authority_mode == AuthorityMode.AGENT:
+    if record.report is not None:
+        if record.report.authority_mode != AuthorityMode.AGENT:
+            raise V11ProjectionIntegrityError(
+                "active V11 projection cannot publish a legacy report"
+            )
         if record.report.investigation_id != record.id:
             raise V11ProjectionIntegrityError("Agent report investigation mismatch")
         if record.report.diagnostic_status != review.diagnostic_status:
