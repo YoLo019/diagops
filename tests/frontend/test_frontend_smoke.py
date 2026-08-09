@@ -180,6 +180,53 @@ def test_v7_agent_text_suppresses_active_past_actions_only_for_sdk() -> None:
     assert results[3:] == claims
 
 
+def test_v11_review_visibility_is_run_owned_and_candidate_led() -> None:
+    accepted = {
+        "id": "candidate-accepted",
+        "summary": "accepted",
+        "rank": 1,
+        "confidence": 0.9,
+        "supporting_finding_ids": [],
+        "contradicting_finding_ids": [],
+        "supporting_evidence_ids": ["ev-1"],
+        "contradicting_evidence_ids": [],
+        "rationale": "bounded",
+        "uncertainty": "",
+    }
+    rejected = {**accepted, "id": "candidate-rejected", "rank": 2}
+    review = {
+        "authority_mode": "agent",
+        "runtime_run_id": "run-v11",
+        "diagnostic_status": "complete",
+        "lead_decision": {"candidate_ids": [accepted["id"]]},
+        "candidates": [accepted, rejected],
+    }
+    run = {
+        "status": "completed",
+        "authority_mode": "agent",
+        "runtime_run_id": "run-v11",
+    }
+    results = _run_app_exports(
+        [
+            {"name": "isUsableV11Review", "args": [review, run]},
+            {
+                "name": "isUsableV11Review",
+                "args": [review, {**run, "runtime_run_id": "prior-run"}],
+            },
+            {"name": "selectVisibleCandidates", "args": [review, run, []]},
+            {
+                "name": "selectVisibleCandidates",
+                "args": [{**review, "diagnostic_status": "inconclusive"}, run, []],
+            },
+        ]
+    )
+
+    assert results[0] is True
+    assert results[1] is False
+    assert [item["id"] for item in results[2]] == ["candidate-accepted"]
+    assert results[3] == []
+
+
 def test_v7_review_guard_and_candidate_visibility_execute_against_payloads() -> None:
     agreement = {
         "execution_layer": "openai_agents_sdk",

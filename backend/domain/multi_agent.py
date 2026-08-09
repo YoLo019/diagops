@@ -142,6 +142,7 @@ class FailureCategory(StrEnum):
     MISSING_SPECIALIST = "missing_specialist"
     UNSAFE_OUTPUT = "unsafe_output"
     PERSISTENCE = "persistence"
+    CONTRACT_INTEGRITY = "contract_integrity"
     UNKNOWN = "unknown"
 
 

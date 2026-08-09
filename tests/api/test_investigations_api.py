@@ -4,6 +4,8 @@ from fastapi.testclient import TestClient
 from backend.db.models import InvestigationRecord
 from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
+from backend.domain.multi_agent import AuthorityMode
+from backend.domain.reports import IncidentReport
 from backend.main import app
 from backend.services.container import get_container, reset_container
 
@@ -145,6 +147,38 @@ def test_unknown_investigation_returns_404():
     response = client.get("/investigations/inv-not-found")
 
     assert response.status_code == 404
+
+
+def test_agent_projection_without_persisted_v11_run_is_not_public():
+    container = reset_container()
+    record = container.repository.save(
+        InvestigationRecord(
+            id="inv-unowned-v11",
+            event=IncidentEvent(
+                source="manual",
+                service="checkout",
+                environment="prod",
+                severity="warning",
+                title="unowned V11 projection",
+                description="invalid projection",
+                started_at="2026-07-18T00:00:00Z",
+            ),
+            report=IncidentReport(
+                investigation_id="inv-unowned-v11",
+                summary="candidate summary",
+                markdown="safe report",
+                authority_mode=AuthorityMode.AGENT,
+                runtime_run_id="missing-run",
+            ),
+            active_runtime_run_id="missing-run",
+        )
+    )
+
+    with TestClient(app) as client:
+        response = client.get(f"/investigations/{record.id}")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Agent projection RuntimeRun is unavailable"
 
 
 def test_detail_returns_legacy_and_additive_evidence_payloads_as_stored():

@@ -21,6 +21,7 @@ from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem
 from backend.domain.hypotheses import Hypothesis
 from backend.domain.multi_agent import (
+    AuthorityMode,
     ExecutionContractVersion,
     FailureCategory,
     InvestigationStrategy,
@@ -112,7 +113,7 @@ class DiagnosisPhaseExecutor:
             RuntimePhase.CRITIC_RECONCILIATION: self._v11_runtime_phase,
             RuntimePhase.LEAD_ADJUDICATION: self._v11_runtime_phase,
             RuntimePhase.RESULT_VALIDATION: self._v11_runtime_phase,
-            RuntimePhase.REPORT_GENERATION: self._v11_pass,
+            RuntimePhase.REPORT_GENERATION: self._v11_report_generation,
             RuntimePhase.FINALIZE: self._v11_finalize,
         }
 
@@ -388,6 +389,55 @@ class DiagnosisPhaseExecutor:
 
     async def _v11_pass(self, state: _DiagnosisState) -> PhaseOutput:
         return self._output(state)
+
+    async def _v11_report_generation(self, state: _DiagnosisState) -> PhaseOutput:
+        """把 V11 review 投影为报告和 candidate-owned 只读建议。"""
+        record, safe_event = self._required(state)
+        review = self._orchestrator.repository.get_coordination_review(record.id)
+        run = record.multi_agent_run
+        if review is None or run is None:
+            return await self._v11_pass(state)
+        if not hasattr(self._orchestrator, "action_planner") or not hasattr(
+            self._orchestrator, "report_generator"
+        ):
+            # 仅有 Runtime phase 的隔离调用不拥有产品投影服务，不能借此回退到旧路径。
+            return await self._v11_pass(state)
+        if (
+            review.authority_mode != AuthorityMode.AGENT
+            or run.authority_mode != AuthorityMode.AGENT
+            or review.runtime_run_id is None
+            or review.runtime_run_id != run.runtime_run_id
+        ):
+            raise RuntimeError("V11 report projection owner does not match the run")
+
+        actions, verifications = await asyncio.to_thread(
+            self._orchestrator.action_planner.plan_v11,
+            safe_event,
+            list(record.evidence),
+            review,
+            run,
+        )
+        record = record.model_copy(
+            update={
+                "actions": actions,
+                "verification_suggestions": verifications,
+            }
+        )
+        report = await asyncio.to_thread(
+            self._orchestrator.report_generator.generate_v11,
+            record.id,
+            safe_event,
+            list(record.evidence),
+            actions=actions,
+            verification_suggestions=verifications,
+            coordination_review=review,
+            multi_agent_run=run,
+            agent_findings=self._orchestrator.repository.list_agent_findings(record.id),
+        )
+        state.record = self._orchestrator.repository.save(
+            record.model_copy(update={"report": report, "updated_at": datetime.now(UTC)})
+        )
+        return self._output(state, report_count=1)
 
     async def _v11_runtime_phase(self, state: _DiagnosisState) -> PhaseOutput:
         """将 V11 phase 交给持久化 Runtime；兼容旧的隔离哨兵。"""

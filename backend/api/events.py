@@ -9,6 +9,10 @@ from backend.domain.multi_agent import InvestigationStrategy
 from backend.safety.redaction import assert_safe_label
 from backend.services.container import get_container
 from backend.services.incident_cases import list_case_ids, load_incident_case
+from backend.services.v11_projection import (
+    V11ProjectionIntegrityError,
+    ensure_v11_projection_owner,
+)
 
 router = APIRouter(prefix="/events", tags=["events"])
 
@@ -47,6 +51,10 @@ async def create_event(
 ) -> InvestigationSummary:
     container = get_container()
     record = await container.run_investigation(event, strategy=strategy)
+    try:
+        ensure_v11_projection_owner(container.repository, container.runtime_store, record)
+    except V11ProjectionIntegrityError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return to_summary(
         record,
         runtime_available=bool(container.runtime_store.list_runs(record.id)),
@@ -93,6 +101,9 @@ async def create_alertmanager_events(
             continue
         try:
             record = await container.run_investigation(event)
+            ensure_v11_projection_owner(
+                container.repository, container.runtime_store, record
+            )
         except Exception:
             results.append(
                 AlertmanagerAlertResult(
@@ -130,6 +141,10 @@ async def create_simulated_event(case_id: str) -> InvestigationSummary:
 
     container = get_container()
     record = await container.run_investigation(event)
+    try:
+        ensure_v11_projection_owner(container.repository, container.runtime_store, record)
+    except V11ProjectionIntegrityError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return to_summary(
         record,
         runtime_available=bool(container.runtime_store.list_runs(record.id)),

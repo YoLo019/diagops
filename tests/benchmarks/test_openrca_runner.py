@@ -365,6 +365,36 @@ def test_agent_shadow_always_writes_an_independent_run_directory(tmp_path: Path)
     )
 
 
+def test_v11_agent_writes_explicit_compatibility_artifact(tmp_path: Path):
+    result = run_benchmark_pair(
+        FakeRuntime(),
+        safe_index(tmp_path, 1),
+        tmp_path / "runs",
+        model="test-model",
+        strategies=(InvestigationStrategy.FIXED,),
+        mode="v11-agent",
+    )
+
+    manifest = json.loads((result.output_dir / "run-manifest.json").read_text())
+    assert manifest["mode"] == "v11-agent"
+    assert (result.output_dir / "fixed-predictions.csv").exists()
+    assert (result.output_dir / "v11-agent-predictions.csv").exists()
+
+
+def test_v11_compatible_runner_requires_the_configured_adapter():
+    runner = OpenRcaDiagnosisRunner(
+        Path("."),
+        "test-model",
+        repository=None,
+        runtime_store=None,
+        provider=ModelProvider.OPENAI_COMPATIBLE,
+        mode="v11-agent",
+    )
+
+    with pytest.raises(ValueError, match="configured model adapter"):
+        runner._v11_model_identity("test-model")
+
+
 def test_deterministic_run_rejects_legacy_index_without_expected_count(
     tmp_path: Path,
 ):

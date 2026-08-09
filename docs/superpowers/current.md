@@ -43,8 +43,8 @@ Plan status: `approved`
 
 Implementation status: `verifying`
 
-Completion commit: `M3_REVIEW_FIX5_SHA` (fifth-round M3 review-fix commit;
-independent re-review is still pending)
+Completion commit: pending local M4 handoff commit on `codex/v11-m4` (no merge
+or push)
 
 M2 baseline commit: `c2245ac` (`chore(v11): checkpoint M2 T4-T6`), committed
 in the isolated M3 worktree; dirty `main` was not modified.
@@ -66,6 +66,17 @@ summary/runtime counters 只累计成功 request actual usage，最终 result �
 二次计数；失败 request estimate 仍保留在 attempt audit。实现保留 V10
 legacy runtime 边界，V11 phase executor 仅消费 persisted V11 phases；未
 merge/push，未开始 M4/M5，当前等待同一审查线程独立复审。`
+
+Verification evidence (M4 T9–T10, 2026-08-09): `T9 exact gate 271 passed/1
+warning; T10 exact gate 794 passed/3 skipped/1 warning; full pytest 2005
+passed/3 skipped/1 warning; offline tool acceptance rows=80 failed=0; runtime
+acceptance exit=0; uv run ruff check . and uv run ruff check backend tests
+clean; frontend production build passed; git diff --check clean`. M4 adds
+candidate-led report/action paths, run/candidate/evidence ownership checks,
+V11 public projection guards, privacy-safe report rendering, and generic
+OpenRCA `v11-agent` projection while preserving deterministic history and the
+existing OpenAI-compatible adapter/capability gate. The local M4 commit is
+pending final handoff; independent M4 review remains the next gate.
 
 Blocker: `none`
 
@@ -104,13 +115,13 @@ docs/superpowers/plans/2026-08-02-diagops-v11-adaptive-multi-agent-rca-implement
 
 ## V11 Planning Dashboard
 
-Overall progress: `V11 Spec/Plan approved, execution authorized 2026-08-02; M0/T1 done：真实 RCAEval RE2 全链路完成（byte-verified 双向对账 2700/2700、真实 prepare runtime manifest_hash bb119fc9…/150 cases/26 GB、二次 prepare diff -r 零差异字节等价）；M0 exit review 2026-08-04 approve_with_followups（出口判据满足，M0-I2 措辞 followup 已修复并 closed：28 focused + 142 regression passed, Ruff clean；M0-L1/L2 low open，M5 前处理）；M1/T2–T3 第三轮独立复审 2026-08-07 approve_with_followups，全部 6 项发现当日 RED→GREEN 关闭并已合并 main 336067c；M2/T4–T6 2026-08-08 独立复审 approve_with_followups，M2 基线 `c2245ac` 已提交；M3/T7–T8 第五轮 review-fix5 已完成 RED→GREEN 验证，等待同一审查线程复审`
+Overall progress: `V11 Spec/Plan approved, execution authorized 2026-08-02; M0/T1 done：真实 RCAEval RE2 全链路完成（byte-verified 双向对账 2700/2700、真实 prepare runtime manifest_hash bb119fc9…/150 cases/26 GB、二次 prepare diff -r 零差异字节等价）；M0 exit review 2026-08-04 approve_with_followups（出口判据满足，M0-I2 措辞 followup 已修复并 closed：28 focused + 142 regression passed, Ruff clean；M0-L1/L2 low open，M5 前处理）；M1/T2–T3 第三轮独立复审 2026-08-07 approve_with_followups，全部 6 项发现当日 RED→GREEN 关闭并已合并 main 336067c；M2/T4–T6 2026-08-08 独立复审 approve_with_followups，M2 基线 `c2245ac` 已提交；M3/T7–T8 第五轮 review-fix5 已完成 RED→GREEN 验证；M4/T9–T10 已完成实现与本地门禁，等待 M4 独立复审`
 
-Current phase: Full iteration / M3 T7–T8 fifth-round review-fix5 implemented and
-verified in isolated worktree; awaiting same-thread independent review
+Current phase: Full iteration / M4 T9–T10 implemented and locally verified in
+isolated worktree; awaiting same-thread independent review
 
-Next action: 独立复审 M3；保持当前 worktree/branch，不 merge、push 或进入
-M4/M5。
+Next action: 独立复审 M4；保持当前 worktree/branch，不 merge、push 或进入
+M5。
 
 | ID | Phase | Task | Status | Evidence or result | Next action or blocker |
 | --- | --- | --- | --- | --- | --- |
@@ -123,6 +134,7 @@ M4/M5。
 | M1/T3 | Execute | Versioned phase profiles, activation, gates, replay, and diff | implemented / verified | 初始审查问题 H1–H7 已补最小 RED 并 GREEN；第二轮 ownerless RESULT_VALIDATION、计划/任务和 Investigation 聚合写入回归先 RED 后 GREEN；`uv run pytest tests/runtime tests/api/test_runtime_runs_api.py -q` → `420 passed, 2 skipped, 1 warning in 117.53s`; `tests/runtime/test_review_fixes.py` → `27 passed, 1 skipped`; T3 Ruff clean；V10/V11 phase、owner、replay/diff、contract-integrity reload、service/API gate 回归通过 | 独立运行时复审通过（第三轮 RR 全关闭）；M2 基线 `c2245ac` 已提交，T4–T5 已按当前 Plan 记录完成 |
 | M2/T4–T6 | Execute | 九工具离线事件包与 data-only skills、File/Tempo trace 平价、模型边界与能力认证 | implemented / verified | 独立复审重跑：T4 336 passed + 离线验收 rows=80 failed=0；T5 17 passed + Docker gate blocked（daemon 不可用）；T6 106→110 passed（M2R-1 补 4 条 slow-endpoint 测试）；全量 1927 passed/3 skipped、Ruff clean、runtime acceptance exit=0；复审 approve_with_followups，M2R-1 closed；M2 基线 `c2245ac` 已单独提交，M2R-2/3 在 M3 T7 中关闭，M2R-4 跟踪 | 保持基线提交，不修改 dirty main |
 | M3/T7–T8 | Execute / Verify | Lead/Investigators/Critic/Lead V11 authority runtime | implemented / verifying | fifth-round base `e52e47984c4b460ed3b06dc4147d3d3b0532345b`; T7 91 passed、T8 207 passed；M2R/隔离 84 passed/3 skipped；变更相关 102 passed/2 skipped；全量 1995 passed/3 skipped/1 warning；两套全仓 Ruff clean；H1 usage/audit RED→GREEN | 等待同一审查线程复审；不 merge/push，不进入 M4/M5 |
+| M4/T9–T10 | Execute / Verify | Reports/actions, human transitions, API/UI, OpenRCA compatibility, recovery/privacy/offline gates | implemented / verifying | T9 271 passed/1 warning；T10 794 passed/3 skipped/1 warning；全量 2005 passed/3 skipped/1 warning；offline rows=80 failed=0；runtime acceptance exit=0；frontend build、两套 Ruff、diff-check clean | 等待 M4 独立复审；不 merge/push，不进入 M5 |
 
 M1 review-fix record (2026-08-06): High 1–6 and Medium 7–10 were reproduced
 with focused regressions, fixed at shared profile/ownership/transaction/entry

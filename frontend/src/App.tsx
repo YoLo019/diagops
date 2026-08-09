@@ -130,11 +130,32 @@ export function isUsableV7Review(
   return true;
 }
 
+export function isUsableV11Review(
+  review: CoordinationReview | null | undefined,
+  run: MultiAgentRunSummary | null | undefined,
+): review is CoordinationReview {
+  return Boolean(
+    review?.authority_mode === "agent" &&
+      run?.authority_mode === "agent" &&
+      review.runtime_run_id &&
+      review.runtime_run_id === run.runtime_run_id &&
+      ["completed", "partial"].includes(run.status) &&
+      ["complete", "partial", "inconclusive"].includes(review.diagnostic_status ?? "") &&
+      review.lead_decision,
+  );
+}
+
 export function selectVisibleCandidates(
   review: CoordinationReview | null | undefined,
   run: MultiAgentRunSummary | null | undefined,
   legacyCandidates: RootCauseCandidate[],
 ) {
+  if (review?.authority_mode === "agent") {
+    if (!isUsableV11Review(review, run)) return [];
+    if (review.diagnostic_status === "inconclusive") return [];
+    const accepted = new Set(review.lead_decision?.candidate_ids ?? []);
+    return review.candidates.filter((candidate) => accepted.has(candidate.id));
+  }
   if (review?.execution_layer !== "openai_agents_sdk") {
     return legacyCandidates;
   }
@@ -355,6 +376,7 @@ function InvestigationList({
 
 function InvestigationDetail({ investigation }: { investigation: InvestigationRecord }) {
   const topHypothesis = investigation.hypotheses[0];
+  const topDiagnosis = investigation.report?.diagnoses[0];
 
   return (
     <section className="panel detail-panel">
@@ -389,6 +411,20 @@ function InvestigationDetail({ investigation }: { investigation: InvestigationRe
           <span>置信度 {formatPercent(topHypothesis.confidence)}</span>
         </div>
       ) : null}
+      {!topHypothesis && topDiagnosis ? (
+        <div className="callout">
+          <span className="label">V11 接受诊断</span>
+          <strong>{topDiagnosis.affected_entity ?? "未指定实体"}</strong>
+          <span>{topDiagnosis.failure_mechanism ?? topDiagnosis.summary}</span>
+          <span>置信度 {formatPercent(topDiagnosis.confidence)}</span>
+        </div>
+      ) : null}
+      {investigation.report?.authority_mode === "agent" ? (
+        <p className="muted">
+          权威模式: agent · 状态: {investigation.report.diagnostic_status ?? "pending"} ·
+          Run: {investigation.report.runtime_run_id ?? "未知"}
+        </p>
+      ) : null}
       {investigation.failure_reason ? <p className="error">{investigation.failure_reason}</p> : null}
     </section>
   );
@@ -422,25 +458,39 @@ function EvidenceList({ investigation }: { investigation: InvestigationRecord })
 }
 
 function Hypotheses({ investigation }: { investigation: InvestigationRecord }) {
+  const diagnoses = investigation.report?.diagnoses ?? [];
+  const isV11 = investigation.report?.authority_mode === "agent";
+  const items = isV11 ? diagnoses : investigation.hypotheses;
   return (
     <section className="panel">
       <div className="panel-heading">
         <h2>候选根因</h2>
-        <span>{investigation.hypotheses.length}</span>
+        <span>{items.length}</span>
       </div>
       <div className="hypothesis-list">
-        {investigation.hypotheses.map((hypothesis) => (
-          <article className="hypothesis-item" key={hypothesis.id}>
-            <div className="score-row">
-              <strong>{hypothesis.cause_type}</strong>
-              <span>{formatPercent(hypothesis.confidence)}</span>
-            </div>
-            <p>{hypothesis.summary}</p>
-            {hypothesis.next_actions.length > 0 ? (
-              <p className="muted">下一步: {hypothesis.next_actions.join(", ")}</p>
-            ) : null}
-          </article>
-        ))}
+        {isV11
+          ? diagnoses.map((candidate) => (
+              <article className="hypothesis-item" key={candidate.id}>
+                <div className="score-row">
+                  <strong>{candidate.affected_entity ?? "未指定实体"}</strong>
+                  <span>{formatPercent(candidate.confidence)}</span>
+                </div>
+                <p>{candidate.failure_mechanism ?? candidate.summary}</p>
+                <p className="muted">候选 ID: {candidate.id}</p>
+              </article>
+            ))
+          : investigation.hypotheses.map((hypothesis) => (
+              <article className="hypothesis-item" key={hypothesis.id}>
+                <div className="score-row">
+                  <strong>{hypothesis.cause_type}</strong>
+                  <span>{formatPercent(hypothesis.confidence)}</span>
+                </div>
+                <p>{hypothesis.summary}</p>
+                {hypothesis.next_actions.length > 0 ? (
+                  <p className="muted">下一步: {hypothesis.next_actions.join(", ")}</p>
+                ) : null}
+              </article>
+            ))}
       </div>
     </section>
   );
@@ -503,6 +553,8 @@ function RcaWorkbenchPanel({ investigationId }: { investigationId: string }) {
   const run = workbenchQuery.data?.multi_agent_run ?? null;
   const agentConfig = workbenchQuery.data?.agent_config ?? null;
   const persistedReview = workbenchQuery.data?.coordination_review;
+  const v11Review = isUsableV11Review(persistedReview, run) ? persistedReview : null;
+  const isV11Projection = Boolean(v11Review || persistedReview?.authority_mode === "agent");
   const review = isUsableV7Review(persistedReview, run) ? persistedReview : null;
   const candidates = selectVisibleCandidates(persistedReview, run, legacyCandidates);
   const visibleCandidateIds = new Set(candidates.map((candidate) => candidate.id));
@@ -548,6 +600,18 @@ function RcaWorkbenchPanel({ investigationId }: { investigationId: string }) {
   const recommendationTitles = (workbenchQuery.data?.investigation.actions ?? []).map(
     (action) => action.title,
   );
+  const v11Diagnoses = v11Review
+    ? selectVisibleCandidates(v11Review, run, legacyCandidates)
+    : [];
+  const v11Executions = workbenchQuery.data?.agent_executions ?? [];
+  const v11Actors = [...new Set(v11Executions.map((execution) => execution.agent_name))];
+  const v11TaskIds = [...new Set(v11Executions.map((execution) => execution.task_id))];
+  const v11Rounds = [...new Set(
+    v11Executions
+      .map((execution) => execution.analysis_round)
+      .filter((round): round is 1 | 2 => round === 1 || round === 2),
+  )].sort();
+  const v11EvidenceIds = workbenchQuery.data?.evidence.map((item) => item.id) ?? [];
   const isEmpty =
     Object.keys(findingsByAgent).length === 0 && candidates.length === 0 && edges.length === 0 && !run;
 
@@ -567,6 +631,35 @@ function RcaWorkbenchPanel({ investigationId }: { investigationId: string }) {
         <>
           {run ? (
             <>
+              {isV11Projection ? (
+                <div className="detail-grid">
+                  <div>
+                    <span className="label">权威模式</span>
+                    <strong>agent</strong>
+                  </div>
+                  <div>
+                    <span className="label">诊断状态</span>
+                    <StatusBadge value={v11Review?.diagnostic_status ?? "inconclusive"} />
+                  </div>
+                  <div>
+                    <span className="label">Runtime Run</span>
+                    <strong>{v11Review?.runtime_run_id ?? run.runtime_run_id ?? "未知"}</strong>
+                  </div>
+                  <div>
+                    <span className="label">接受诊断</span>
+                    <strong>{v11Diagnoses[0]?.affected_entity ?? "无"}</strong>
+                    {v11Diagnoses[0]?.failure_mechanism ? (
+                      <span>{v11Diagnoses[0].failure_mechanism}</span>
+                    ) : null}
+                  </div>
+                  {run.model_provider && run.model_name ? (
+                    <div>
+                      <span className="label">Provider / model</span>
+                      <strong>{run.model_provider} / {run.model_name}</strong>
+                    </div>
+                  ) : null}
+                </div>
+              ) : (
               <div className="detail-grid">
                 <div>
                   <span className="label">运行状态</span>
@@ -620,7 +713,55 @@ function RcaWorkbenchPanel({ investigationId }: { investigationId: string }) {
                   </div>
                 ) : null}
               </div>
+              )}
 
+              {isV11Projection ? (
+                <div className="compact-list">
+                  <article className="compact-row">
+                    <strong>V11 接受诊断</strong>
+                    {v11Diagnoses.length ? v11Diagnoses.map((candidate) => (
+                      <p key={candidate.id}>
+                        {candidate.affected_entity ?? "未指定实体"} · {candidate.failure_mechanism ?? candidate.summary}
+                        （置信度 {formatPercent(candidate.confidence)}）
+                      </p>
+                    )) : <p>当前没有接受的诊断候选。</p>}
+                  </article>
+                  <article className="compact-row">
+                    <strong>备选候选</strong>
+                    <p>
+                      {(workbenchQuery.data?.investigation.report?.alternatives ?? []).map(
+                        (candidate) => candidate.summary,
+                      ).join("；") || "无"}
+                    </p>
+                  </article>
+                  <article className="compact-row">
+                    <strong>Critic / 证据缺口</strong>
+                    <p>{v11Review?.critic_assessments?.map((item) => item.summary).join("；") || "暂无 Critic 摘要"}</p>
+                    <p>{workbenchQuery.data?.investigation.report?.evidence_gaps?.join("；") || "未记录证据缺口"}</p>
+                  </article>
+                  <article className="compact-row">
+                    <strong>证据</strong>
+                    <p>{v11EvidenceIds.join(", ") || "未记录证据"}</p>
+                  </article>
+                  <article className="compact-row">
+                    <strong>执行上下文</strong>
+                    <p>Actor: {v11Actors.join(", ") || "未记录"}</p>
+                    <p>Task IDs: {v11TaskIds.join(", ") || "未记录"}</p>
+                    <p>分析轮次: {v11Rounds.length ? v11Rounds.map((round) => `第 ${round} 轮`).join("、") : "未记录"}</p>
+                  </article>
+                  <article className="compact-row">
+                    <strong>运行用量</strong>
+                    <p>
+                      tokens {run.total_input_tokens ?? 0}/{run.total_output_tokens ?? 0} ·
+                      耗时 {run.elapsed_time_ms ?? 0} ms · Investigator {run.investigator_count ?? 0}
+                    </p>
+                  </article>
+                  {v11Review?.diagnostic_status === "inconclusive" ? (
+                    <p className="muted">not_activated: 没有激活可接受的 V11 诊断投影。</p>
+                  ) : null}
+                  {safeRunFailureReason ? <p className="error">失败原因: {safeRunFailureReason}</p> : null}
+                </div>
+              ) : (
               <div className="compact-list">
                 <article className="compact-row">
                   <strong>事实（证据）</strong>
@@ -649,9 +790,10 @@ function RcaWorkbenchPanel({ investigationId }: { investigationId: string }) {
                   ) : null}
                 </article>
               </div>
+              )}
 
               <div className="panel-heading">
-                <h2>Agent 推断</h2>
+                <h2>{isV11Projection ? "V11 Agent 推断" : "Agent 推断"}</h2>
                 <span>{v7Findings.length}</span>
               </div>
             </>
@@ -746,6 +888,9 @@ function RecommendedActions({ investigation }: { investigation: InvestigationRec
             <div className="meta-row">
               <span>风险级别: {action.risk_level}</span>
               <span>{action.requires_approval ? "需记录审批状态" : "可选记录审批状态"}</span>
+              {action.related_candidate_ids?.length ? (
+                <span>候选: {action.related_candidate_ids.join(", ")}</span>
+              ) : null}
             </div>
             <div className="control-row">
               <select
@@ -796,6 +941,7 @@ function VerificationSuggestions({ investigation }: { investigation: Investigati
       resultEvidenceIds,
       relatedActionIds,
       relatedCauseTypes,
+      relatedCandidateIds,
     }: {
       verificationId: string;
       status: VerificationStatus;
@@ -803,6 +949,7 @@ function VerificationSuggestions({ investigation }: { investigation: Investigati
       resultEvidenceIds: string[];
       relatedActionIds: string[];
       relatedCauseTypes: string[];
+      relatedCandidateIds: string[];
     }) =>
       updateVerificationStatus(
         investigation.id,
@@ -812,6 +959,7 @@ function VerificationSuggestions({ investigation }: { investigation: Investigati
         resultEvidenceIds,
         relatedActionIds,
         relatedCauseTypes,
+        relatedCandidateIds,
       ),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["investigation", investigation.id] });
@@ -858,6 +1006,10 @@ function VerificationSuggestions({ investigation }: { investigation: Investigati
                       status === "skipped" || !relation.startsWith("cause:")
                         ? []
                         : [relation.slice("cause:".length)],
+                    relatedCandidateIds:
+                      status === "skipped" || !relation.startsWith("candidate:")
+                        ? []
+                        : [relation.slice("candidate:".length)],
                   });
                 }}
               >
@@ -898,13 +1050,18 @@ function VerificationSuggestions({ investigation }: { investigation: Investigati
                       setRelationRefs({ ...relationRefs, [verification.id]: event.target.value })
                     }
                   >
-                    <option value="">选择关联 action 或 cause</option>
+                    <option value="">选择关联 action、candidate 或 cause</option>
                     {investigation.actions.map((action) => (
                       <option key={action.id} value={`action:${action.id}`}>action: {action.id}</option>
                     ))}
                     {investigation.hypotheses.map((hypothesis) => (
                       <option key={hypothesis.cause_type} value={`cause:${hypothesis.cause_type}`}>
                         cause: {hypothesis.cause_type}
+                      </option>
+                    ))}
+                    {(investigation.report?.diagnoses ?? []).map((candidate) => (
+                      <option key={candidate.id} value={`candidate:${candidate.id}`}>
+                        candidate: {candidate.id}
                       </option>
                     ))}
                   </select>

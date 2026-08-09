@@ -29,9 +29,11 @@ export type AdaptiveStopReason =
 export type ActionStatus = "proposed" | "approved" | "rejected" | "skipped" | "done";
 export type VerificationStatus = "pending" | "passed" | "failed" | "skipped";
 export type AgentExecutionLayer = "custom" | "openai_agents_sdk";
+export type AuthorityMode = "agent" | "legacy_deterministic";
+export type DiagnosticStatus = "complete" | "partial" | "inconclusive";
 export type CoordinationDecisionStatus = "agreement" | "conflict" | "agent_leads" | "fallback";
 export type MultiAgentRunStatus = "completed" | "partial" | "failed" | "skipped";
-export type ModelProvider = "openai" | "deepseek";
+export type ModelProvider = "openai" | "deepseek" | "openai_compatible";
 export type ResultValidationCategory =
   | "task_contract"
   | "execution_contract"
@@ -49,7 +51,11 @@ export type ExecutionStepKind =
   | "reference_validation"
   | "hybrid_arbitration"
   | "review_persistence"
-  | "result_validation";
+  | "result_validation"
+  | "lead_planning"
+  | "investigator_analysis"
+  | "critic_review"
+  | "lead_adjudication";
 export type FailureCategory =
   | "none"
   | "not_configured"
@@ -64,6 +70,7 @@ export type FailureCategory =
   | "missing_specialist"
   | "unsafe_output"
   | "persistence"
+  | "contract_integrity"
   | "unknown";
 export type StabilizationCategory =
   | "reference_validation"
@@ -123,6 +130,8 @@ export type RecommendedAction = {
   supporting_evidence_ids: string[];
   status: ActionStatus;
   note?: string | null;
+  related_candidate_ids?: string[];
+  runtime_run_id?: string | null;
 };
 
 export type VerificationSuggestion = {
@@ -135,6 +144,8 @@ export type VerificationSuggestion = {
   result_evidence_ids: string[];
   related_action_ids: string[];
   related_cause_types: string[];
+  related_candidate_ids?: string[];
+  runtime_run_id?: string | null;
 };
 
 export type IncidentReport = {
@@ -145,6 +156,17 @@ export type IncidentReport = {
   markdown: string;
   action_ids: string[];
   verification_suggestion_ids: string[];
+  diagnoses: RootCauseCandidate[];
+  alternatives: RootCauseCandidate[];
+  diagnostic_status?: DiagnosticStatus | null;
+  authority_mode?: AuthorityMode | null;
+  critic_assessments: CriticAssessment[];
+  critic_summary?: string | null;
+  evidence_gaps: string[];
+  total_input_tokens: number;
+  total_output_tokens: number;
+  elapsed_time_ms: number;
+  runtime_run_id?: string | null;
 };
 
 export type InvestigationRecord = {
@@ -163,6 +185,8 @@ export type InvestigationRecord = {
   updated_at: string;
   completed_at?: string | null;
   runtime_available: boolean;
+  active_runtime_run_id?: string | null;
+  source_investigation_id?: string | null;
 };
 
 export type LeadDecision = {
@@ -233,6 +257,13 @@ export type RuntimePhase =
   | "conflict_review"
   | "coordination"
   | "report_generation"
+  | "lead_planning"
+  | "investigator_round_1"
+  | "critic_review"
+  | "investigator_round_2"
+  | "critic_reconciliation"
+  | "lead_adjudication"
+  | "result_validation"
   | "finalize";
 
 export type RuntimeRun = {
@@ -253,6 +284,8 @@ export type RuntimeRun = {
   started_at?: string | null;
   completed_at?: string | null;
   cancel_requested_at?: string | null;
+  execution_contract_version?: "v10_legacy" | "v11";
+  authority_mode?: AuthorityMode;
 };
 
 export type RuntimeAttempt = {
@@ -332,6 +365,7 @@ export type RuntimeRunCreatePayload = {
   model_provider?: ModelProvider | null;
   model_name?: string | null;
   prompt_version?: string | null;
+  execution_contract_version?: "v10_legacy" | "v11";
 };
 
 export type ManualInvestigationPayload = {
@@ -458,7 +492,9 @@ export type AgentFinding = {
 
 export type RootCauseCandidate = {
   id: string;
-  cause_type: string;
+  cause_type?: string | null;
+  affected_entity?: string | null;
+  failure_mechanism?: string | null;
   summary: string;
   rank: number;
   confidence: number;
@@ -468,6 +504,8 @@ export type RootCauseCandidate = {
   contradicting_evidence_ids: string[];
   rationale: string;
   uncertainty: string;
+  onset_window_start?: string | null;
+  onset_window_end?: string | null;
 };
 
 export type CoordinationReview = {
@@ -475,6 +513,12 @@ export type CoordinationReview = {
   investigation_id: string;
   candidates: RootCauseCandidate[];
   execution_layer?: AgentExecutionLayer;
+  authority_mode?: AuthorityMode;
+  runtime_run_id?: string | null;
+  diagnostic_status?: DiagnosticStatus | null;
+  stop_reason?: string | null;
+  lead_decision?: LeadDecision | null;
+  critic_assessments?: CriticAssessment[];
   run_status?: MultiAgentRunStatus;
   decision_status?: CoordinationDecisionStatus | null;
   baseline_cause_type?: string | null;
@@ -501,6 +545,14 @@ export type MultiAgentRunSummary = {
   tool_call_count?: number;
   max_tool_calls_per_specialist?: number;
   max_total_tool_calls?: number;
+  diagnostic_status?: DiagnosticStatus | null;
+  authority_mode?: AuthorityMode | null;
+  completed_rounds?: number;
+  investigator_count?: number;
+  total_input_tokens?: number;
+  total_output_tokens?: number;
+  elapsed_time_ms?: number;
+  runtime_run_id?: string | null;
 };
 
 export type AgentConfig = {
@@ -575,6 +627,7 @@ export type OpenRcaArtifactName =
   | "run-manifest.json"
   | "fixed-predictions.csv"
   | "adaptive-predictions.csv"
+  | "v11-agent-predictions.csv"
   | "official-report.csv"
   | "summary.json";
 
@@ -723,6 +776,7 @@ export function updateVerificationStatus(
   resultEvidenceIds: string[],
   relatedActionIds: string[],
   relatedCauseTypes: string[],
+  relatedCandidateIds: string[] = [],
 ) {
   return request<VerificationSuggestion>(
     `/investigations/${investigationId}/verifications/${verificationId}`,
@@ -734,6 +788,7 @@ export function updateVerificationStatus(
         result_evidence_ids: resultEvidenceIds,
         related_action_ids: relatedActionIds,
         related_cause_types: relatedCauseTypes,
+        related_candidate_ids: relatedCandidateIds,
       }),
     },
   );

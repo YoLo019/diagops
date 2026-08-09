@@ -10,9 +10,10 @@ import pytest
 from backend.benchmarks.openrca.projection import (
     ProjectionAudit,
     project_root_causes,
+    project_v11_candidates,
     scored_fields,
 )
-from backend.domain.agent_findings import RootCauseAttribution
+from backend.domain.agent_findings import RootCauseAttribution, RootCauseCandidate
 from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
 
 BASE = datetime(2026, 7, 30, 9, 0, tzinfo=UTC)
@@ -192,3 +193,30 @@ def test_failed_audit_carries_no_candidate_counts_or_detail():
         "fallback_reason",
         "projection_error",
     }
+
+
+def test_v11_projection_maps_generic_candidate_without_legacy_taxonomy():
+    candidate = RootCauseCandidate(
+        id="candidate-generic",
+        summary="deployment changed request handling",
+        rank=1,
+        confidence=0.8,
+        affected_entity="checkout-api",
+        failure_mechanism="incompatible request handling",
+        supporting_evidence_ids=["ev-1"],
+        onset_window_start=BASE,
+    )
+
+    result = project_v11_candidates(
+        task_index="task_7",
+        expected_count=1,
+        evidence=[evidence("ev-1")],
+        candidates=[candidate],
+        fallback_timestamp=BASE + timedelta(minutes=5),
+    )
+
+    assert result.causes[0].root_cause_component == "checkout-api"
+    assert result.causes[0].root_cause_reason == "incompatible request handling"
+    assert result.causes[0].root_cause_occurred_at == BASE
+    assert result.audit.rule_version == "v11-agent-generic"
+    assert result.audit.projection_fallback is False

@@ -165,8 +165,16 @@ class InvestigationSummary(BaseModel):
             if review is not None and review.authority_mode == AuthorityMode.AGENT
             else None
         )
+        v11_report = (
+            record.report
+            if record.report is not None
+            and record.report.authority_mode == AuthorityMode.AGENT
+            else None
+        )
+        report_candidate = v11_report.diagnoses[0] if v11_report and v11_report.diagnoses else None
         v11_projection = bool(
             v11_review is not None
+            or v11_report is not None
             or record.active_runtime_run_id is not None
             or (
                 record.multi_agent_run is not None
@@ -187,6 +195,8 @@ class InvestigationSummary(BaseModel):
             confidence=(
                 authoritative_candidate.confidence
                 if v11_review is not None and authoritative_candidate is not None
+                else report_candidate.confidence
+                if report_candidate is not None
                 else 0.0
                 if v11_projection
                 else top.confidence if top else 0.0
@@ -194,6 +204,8 @@ class InvestigationSummary(BaseModel):
             top_affected_entity=(
                 authoritative_candidate.affected_entity
                 if v11_review is not None and authoritative_candidate is not None
+                else report_candidate.affected_entity
+                if report_candidate is not None
                 else None
                 if v11_projection
                 else getattr(top, "affected_entity", None) if top is not None else None
@@ -201,6 +213,8 @@ class InvestigationSummary(BaseModel):
             top_failure_mechanism=(
                 authoritative_candidate.failure_mechanism
                 if v11_review is not None and authoritative_candidate is not None
+                else report_candidate.failure_mechanism
+                if report_candidate is not None
                 else None
                 if v11_projection
                 else getattr(top, "failure_mechanism", None) if top is not None else None
@@ -208,6 +222,8 @@ class InvestigationSummary(BaseModel):
             diagnostic_status=(
                 v11_review.diagnostic_status
                 if v11_review is not None
+                else v11_report.diagnostic_status
+                if v11_report is not None
                 else record.multi_agent_run.diagnostic_status
                 if record.multi_agent_run is not None
                 else None
@@ -215,6 +231,8 @@ class InvestigationSummary(BaseModel):
             authority_mode=(
                 v11_review.authority_mode
                 if v11_review is not None
+                else v11_report.authority_mode
+                if v11_report is not None
                 else record.multi_agent_run.authority_mode
                 if record.multi_agent_run is not None
                 else None

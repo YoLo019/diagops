@@ -804,6 +804,33 @@ isolated to `codex/v11-m3`; no merge, push, M4, or M5 action was taken.
 
 ## 7. M4 — Product and compatibility integration
 
+### M4 implementation evidence (2026-08-09)
+
+M4 is implemented from the M3 checkpoint `290f13c` on the isolated
+`codex/v11-m4` branch. The product path now has an explicit V11 report/action
+projection: accepted candidates are the only diagnosis authority, empty
+hypotheses are valid for V11, recommendations are read-only and bound to the
+candidate/run/evidence owner, and human verification updates cannot cross a
+run or candidate projection. Public investigation/report/workbench paths fail
+closed unless a persisted V11 RuntimeRun has a valid matching contract digest.
+The API/UI and report markdown expose authority, status, actor/task/round,
+Critic checks, evidence, alternatives, gaps, usage, failures, and
+`not_activated` without raw prompt/private reasoning. OpenRCA `v11-agent`
+uses the generic candidate projection and retains the deterministic projector;
+the existing OpenAI-compatible adapter and capability gate remain required.
+
+Verification completed locally:
+
+- T9 exact gate: `uv run pytest tests/reports tests/domain/test_action_models.py tests/api tests/frontend tests/benchmarks/test_openrca_runner.py tests/benchmarks/test_openrca_projection.py -q` → `271 passed, 1 warning`.
+- T10 exact gate: `uv run pytest tests/runtime tests/safety tests/services tests/api tests/frontend tests/benchmarks/test_openrca_runner.py tests/benchmarks/test_openrca_projection.py -q` → `794 passed, 3 skipped, 1 warning`.
+- Full gate: `uv run pytest -q` → `2005 passed, 3 skipped, 1 warning`.
+- Offline gate: `uv run python -m backend.services.offline_tool_acceptance` → `rows=80 failed=0`.
+- Runtime acceptance: `uv run python -m backend.services.runtime_acceptance` → exit 0.
+- Static/build gates: `uv run ruff check .`, `uv run ruff check backend tests`, frontend production build, and `git diff --check` all passed. The only warnings are the existing Starlette/httpx TestClient deprecation and standard Vite `use client` bundle notices.
+
+The implementation is locally verified and awaits independent M4 review; no
+merge or push was performed.
+
 ### T9. Reports, actions, human transitions, API/UI, and OpenRCA
 
 Requirements: R5–R12, R18–R19, R27.
@@ -1089,8 +1116,8 @@ request only the missing authority.
 | T6 | implemented / verified | R8, R11–R13, R26–R27 | 110 focused passed including M2R-1 slow-endpoint cancellation/no-late-commit/cleanup evidence; independent M2 review approve_with_followups |
 | T7 | implemented / verifying | R1–R3, R5–R6, R11–R13, R24, R27 | M3 fifth-round review-fix5 H1 usage/audit RED→GREEN; exact gate 91 passed; scoped Ruff clean; M2R-2 resolver wiring and M2R-3 invocation recheck remain closed; reservation replay and actual-vs-billed request usage are covered |
 | T8 | implemented / verifying | R1, R4–R7, R9, R11–R13, R27 | M3 fifth-round review-fix5 preserves the already-green exact T8 validator, terminal, safe-text, supplemental-linkage, and final-actor contracts; exact gate 207 passed and scoped Ruff clean |
-| T9 | pending | R5–R12, R18–R19, R27 | pending |
-| T10 | pending | R8–R13, R16, R18, R21–R23, R26–R27 | pending |
+| T9 | implemented / verifying | R5–R12, R18–R19, R27 | Exact gate 271 passed/1 warning; candidate-led V11 reports/actions, human run/candidate/evidence ownership, additive API/UI, privacy-safe rendering, public V11 RuntimeRun/contract guard, and generic OpenRCA `v11-agent` projection verified |
+| T10 | implemented / verifying | R8–R13, R16, R18, R21–R23, R26–R27 | Exact gate 794 passed/3 skipped/1 warning; full pytest 2005 passed/3 skipped/1 warning; offline rows=80 failed=0; runtime acceptance exit=0; Ruff/build/diff-check clean |
 | T11 | pending | R14–R17, R24–R27 | pending |
 | T12 | pending | R14–R17, R25–R26 | pending |
 | T13 | pending | R1–R27 | pending |

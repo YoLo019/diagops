@@ -10,6 +10,7 @@ const artifacts: OpenRcaArtifactName[] = [
   "run-manifest.json",
   "fixed-predictions.csv",
   "adaptive-predictions.csv",
+  "v11-agent-predictions.csv",
   "official-report.csv",
   "summary.json",
 ];
@@ -17,6 +18,7 @@ const artifacts: OpenRcaArtifactName[] = [
 const strategyLabels: Record<string, string> = {
   fixed: "Fixed",
   adaptive: "Adaptive",
+  "v11-agent": "V11 Agent",
 };
 
 function formatScore(value?: number | null) {

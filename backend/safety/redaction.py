@@ -54,6 +54,7 @@ _SENSITIVE_COMPOUNDS = {"accesskey", "apikey", "baseurl", "privatekey"}
 _FAILURE_LABELS = {
     "authentication": "provider authentication failed",
     "cancelled": "operation cancelled",
+    "contract_integrity": "execution contract integrity failed",
     "invalid_output": "provider output invalid",
     "not_configured": "provider not configured",
     "provider_failure": "provider collection failed",
