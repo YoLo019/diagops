@@ -170,6 +170,28 @@ def test_v11_report_projects_candidate_led_diagnoses_without_hypotheses():
     assert "private chain of thought" not in report.model_dump_json()
 
 
+@pytest.mark.parametrize(
+    "run_update",
+    [
+        {"diagnostic_status": DiagnosticStatus.PARTIAL},
+        {"status": MultiAgentRunStatus.PARTIAL},
+    ],
+)
+def test_v11_report_rejects_inconsistent_review_run_projection(run_update):
+    review = _review(_candidate())
+    run = _run_summary(DiagnosticStatus.COMPLETE).model_copy(update=run_update)
+
+    with pytest.raises(ValueError, match="V11 review and run"):
+        ReportGenerator().generate(
+            "inv-v11-product",
+            _event(),
+            [_evidence()],
+            [],
+            coordination_review=review,
+            multi_agent_run=run,
+        )
+
+
 def test_v11_markdown_renders_actual_findings_tasks_rounds_and_lead_decision():
     finding = AgentFinding(
         id="finding-log-actual",

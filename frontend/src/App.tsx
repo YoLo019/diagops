@@ -133,15 +133,31 @@ export function isUsableV7Review(
 export function isUsableV11Review(
   review: CoordinationReview | null | undefined,
   run: MultiAgentRunSummary | null | undefined,
+  activeRuntimeRunId?: string | null,
 ): review is CoordinationReview {
-  return Boolean(
-    review?.authority_mode === "agent" &&
-      run?.authority_mode === "agent" &&
-      review.runtime_run_id &&
-      review.runtime_run_id === run.runtime_run_id &&
-      ["completed", "partial"].includes(run.status) &&
-      ["complete", "partial", "inconclusive"].includes(review.diagnostic_status ?? "") &&
-      review.lead_decision,
+  if (
+    review?.authority_mode !== "agent" ||
+    run?.authority_mode !== "agent" ||
+    !review.runtime_run_id ||
+    review.runtime_run_id !== run.runtime_run_id ||
+    (activeRuntimeRunId !== undefined && activeRuntimeRunId !== review.runtime_run_id) ||
+    !["completed", "partial"].includes(run.status) ||
+    review.run_status !== run.status ||
+    !["complete", "partial", "inconclusive"].includes(review.diagnostic_status ?? "") ||
+    review.diagnostic_status !== run.diagnostic_status ||
+    !review.lead_decision
+  ) {
+    return false;
+  }
+
+  const decision = review.lead_decision;
+  if (["complete", "partial"].includes(review.diagnostic_status ?? "")) {
+    return decision.action === "conclude" && decision.candidate_ids.length > 0;
+  }
+  return (
+    decision.action === "inconclusive" &&
+    decision.task_ids.length === 0 &&
+    decision.candidate_ids.length === 0
   );
 }
 
@@ -149,9 +165,10 @@ export function selectVisibleCandidates(
   review: CoordinationReview | null | undefined,
   run: MultiAgentRunSummary | null | undefined,
   legacyCandidates: RootCauseCandidate[],
+  activeRuntimeRunId?: string | null,
 ) {
   if (review?.authority_mode === "agent") {
-    if (!isUsableV11Review(review, run)) return [];
+    if (!isUsableV11Review(review, run, activeRuntimeRunId)) return [];
     if (review.diagnostic_status === "inconclusive") return [];
     const accepted = new Set(review.lead_decision?.candidate_ids ?? []);
     return review.candidates.filter((candidate) => accepted.has(candidate.id));
@@ -575,10 +592,18 @@ function RcaWorkbenchPanel({ investigationId }: { investigationId: string }) {
   const run = workbenchQuery.data?.multi_agent_run ?? null;
   const agentConfig = workbenchQuery.data?.agent_config ?? null;
   const persistedReview = workbenchQuery.data?.coordination_review;
-  const v11Review = isUsableV11Review(persistedReview, run) ? persistedReview : null;
+  const activeRuntimeRunId = workbenchQuery.data?.investigation.active_runtime_run_id;
+  const v11Review = isUsableV11Review(persistedReview, run, activeRuntimeRunId)
+    ? persistedReview
+    : null;
   const isV11Projection = Boolean(v11Review || persistedReview?.authority_mode === "agent");
   const review = isUsableV7Review(persistedReview, run) ? persistedReview : null;
-  const candidates = selectVisibleCandidates(persistedReview, run, legacyCandidates);
+  const candidates = selectVisibleCandidates(
+    persistedReview,
+    run,
+    legacyCandidates,
+    activeRuntimeRunId,
+  );
   const visibleCandidateIds = new Set(candidates.map((candidate) => candidate.id));
   const hiddenCandidateIds = new Set(
     legacyCandidates

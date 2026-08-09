@@ -198,13 +198,19 @@ def test_v11_review_visibility_is_run_owned_and_candidate_led() -> None:
         "authority_mode": "agent",
         "runtime_run_id": "run-v11",
         "diagnostic_status": "complete",
-        "lead_decision": {"candidate_ids": [accepted["id"]]},
+        "run_status": "completed",
+        "lead_decision": {
+            "action": "conclude",
+            "task_ids": [],
+            "candidate_ids": [accepted["id"]],
+        },
         "candidates": [accepted, rejected],
     }
     run = {
         "status": "completed",
         "authority_mode": "agent",
         "runtime_run_id": "run-v11",
+        "diagnostic_status": "complete",
     }
     results = _run_app_exports(
         [
@@ -212,6 +218,18 @@ def test_v11_review_visibility_is_run_owned_and_candidate_led() -> None:
             {
                 "name": "isUsableV11Review",
                 "args": [review, {**run, "runtime_run_id": "prior-run"}],
+            },
+            {
+                "name": "isUsableV11Review",
+                "args": [review, {**run, "diagnostic_status": "partial"}],
+            },
+            {
+                "name": "isUsableV11Review",
+                "args": [review, {**run, "status": "partial"}],
+            },
+            {
+                "name": "isUsableV11Review",
+                "args": [review, run, "prior-run"],
             },
             {"name": "selectVisibleCandidates", "args": [review, run, []]},
             {
@@ -223,8 +241,9 @@ def test_v11_review_visibility_is_run_owned_and_candidate_led() -> None:
 
     assert results[0] is True
     assert results[1] is False
-    assert [item["id"] for item in results[2]] == ["candidate-accepted"]
-    assert results[3] == []
+    assert results[2:5] == [False, False, False]
+    assert [item["id"] for item in results[5]] == ["candidate-accepted"]
+    assert results[6] == []
 
 
 def test_v7_review_guard_and_candidate_visibility_execute_against_payloads() -> None:

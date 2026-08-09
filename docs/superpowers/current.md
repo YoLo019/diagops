@@ -43,8 +43,8 @@ Plan status: `approved`
 
 Implementation status: `verifying`
 
-Completion commit: local M4 review-fix commit on `codex/v11-m4` (SHA is
-recorded in the final handoff; no merge or push)
+Completion commit: local M4 second-round review-fix commit on `codex/v11-m4`
+(SHA is recorded in the final handoff; no merge or push)
 
 M2 baseline commit: `c2245ac` (`chore(v11): checkpoint M2 T4-T6`), committed
 in the isolated M3 worktree; dirty `main` was not modified.
@@ -67,18 +67,19 @@ summary/runtime counters 只累计成功 request actual usage，最终 result �
 legacy runtime 边界，V11 phase executor 仅消费 persisted V11 phases；未
 merge/push，未开始 M4/M5，当前等待同一审查线程独立复审。`
 
-Verification evidence (M4 review-fix, 2026-08-09): `T9 exact gate 276 passed/1
-warning; T10 exact gate 812 passed/3 skipped/1 warning; full pytest 2025
-passed/3 skipped/1 warning; offline tool acceptance rows=80 failed=0; runtime
-acceptance exit=0; uv run ruff check . and uv run ruff check backend tests
-clean; frontend production build passed; git diff --check clean`. The review
-fix closes the ten reported B/H/M/L findings: PhaseCommit now owns report and
-action persistence atomically; configured product entries/reruns select V11
-and active V11 rejects V10 pollution; API/report/graph/workbench share the V11
-public privacy projection; report/OpenRCA validate usable evidence; candidate,
-verification, status, owner, summary, and Markdown contracts are covered by
-regressions. V10 historical behavior, the OpenAI-compatible adapter, and
-capability gate remain intact. Independent M4 re-review remains the next gate.
+Verification evidence (M4 second-round review-fix, 2026-08-09): `T9 exact gate
+279 passed/1 warning; T10 exact gate 830 passed/3 skipped/1 warning; full
+pytest 2045 passed/3 skipped/1 warning; offline tool acceptance rows=80
+failed=0; runtime acceptance 14/14; uv run ruff check . and uv run ruff check
+backend tests clean; frontend production build passed; git diff --check clean`.
+The second-round H1 OpenRCA prediction regression now reuses the shared V11
+public candidate projection for both prediction objects and CSV artifacts while
+leaving V10 deterministic projection unchanged. The second-round M2 guard now
+requires a non-empty active owner, matching latest Agent run summary, matching
+review/run diagnostic and terminal statuses, and a legal Lead decision matrix;
+API/report/graph/workbench paths fail closed and the frontend remains a second
+defense. V10 historical behavior, the OpenAI-compatible adapter, and capability
+gates remain intact. Independent M4 re-review remains the next gate.
 
 Blocker: `none`
 
@@ -117,7 +118,7 @@ docs/superpowers/plans/2026-08-02-diagops-v11-adaptive-multi-agent-rca-implement
 
 ## V11 Planning Dashboard
 
-Overall progress: `V11 Spec/Plan approved, execution authorized 2026-08-02; M0/T1 done：真实 RCAEval RE2 全链路完成（byte-verified 双向对账 2700/2700、真实 prepare runtime manifest_hash bb119fc9…/150 cases/26 GB、二次 prepare diff -r 零差异字节等价）；M0 exit review 2026-08-04 approve_with_followups（出口判据满足，M0-I2 措辞 followup 已修复并 closed：28 focused + 142 regression passed, Ruff clean；M0-L1/L2 low open，M5 前处理）；M1/T2–T3 第三轮独立复审 2026-08-07 approve_with_followups，全部 6 项发现当日 RED→GREEN 关闭并已合并 main 336067c；M2/T4–T6 2026-08-08 独立复审 approve_with_followups，M2 基线 `c2245ac` 已提交；M3/T7–T8 第五轮 review-fix5 已完成 RED→GREEN 验证；M4/T9–T10 初始实现经独立复审提出 10 项 changes_required，当前已全部按根因 RED→GREEN 修复并完成本地门禁，等待复审`
+Overall progress: `V11 Spec/Plan approved, execution authorized 2026-08-02; M0/T1 done：真实 RCAEval RE2 全链路完成（byte-verified 双向对账 2700/2700、真实 prepare runtime manifest_hash bb119fc9…/150 cases/26 GB、二次 prepare diff -r 零差异字节等价）；M0 exit review 2026-08-04 approve_with_followups（出口判据满足，M0-I2 措辞 followup 已修复并 closed：28 focused + 142 regression passed, Ruff clean；M0-L1/L2 low open，M5 前处理）；M1/T2–T3 第三轮独立复审 2026-08-07 approve_with_followups，全部 6 项发现当日 RED→GREEN 关闭并已合并 main 336067c；M2/T4–T6 2026-08-08 独立复审 approve_with_followups，M2 基线 `c2245ac` 已提交；M3/T7–T8 第五轮 review-fix5 已完成 RED→GREEN 验证；M4/T9–T10 首轮 10 项 changes_required 已按根因关闭，第二轮 H1/M2 亦已 RED→GREEN 并完成本地门禁，等待复审`
 
 Current phase: Full iteration / M4 review-fix implemented and locally verified
 in isolated worktree; awaiting same-thread independent re-review
@@ -136,7 +137,7 @@ Next action: 独立复审 M4 review-fix；保持当前 worktree/branch，不 mer
 | M1/T3 | Execute | Versioned phase profiles, activation, gates, replay, and diff | implemented / verified | 初始审查问题 H1–H7 已补最小 RED 并 GREEN；第二轮 ownerless RESULT_VALIDATION、计划/任务和 Investigation 聚合写入回归先 RED 后 GREEN；`uv run pytest tests/runtime tests/api/test_runtime_runs_api.py -q` → `420 passed, 2 skipped, 1 warning in 117.53s`; `tests/runtime/test_review_fixes.py` → `27 passed, 1 skipped`; T3 Ruff clean；V10/V11 phase、owner、replay/diff、contract-integrity reload、service/API gate 回归通过 | 独立运行时复审通过（第三轮 RR 全关闭）；M2 基线 `c2245ac` 已提交，T4–T5 已按当前 Plan 记录完成 |
 | M2/T4–T6 | Execute | 九工具离线事件包与 data-only skills、File/Tempo trace 平价、模型边界与能力认证 | implemented / verified | 独立复审重跑：T4 336 passed + 离线验收 rows=80 failed=0；T5 17 passed + Docker gate blocked（daemon 不可用）；T6 106→110 passed（M2R-1 补 4 条 slow-endpoint 测试）；全量 1927 passed/3 skipped、Ruff clean、runtime acceptance exit=0；复审 approve_with_followups，M2R-1 closed；M2 基线 `c2245ac` 已单独提交，M2R-2/3 在 M3 T7 中关闭，M2R-4 跟踪 | 保持基线提交，不修改 dirty main |
 | M3/T7–T8 | Execute / Verify | Lead/Investigators/Critic/Lead V11 authority runtime | implemented / verifying | fifth-round base `e52e47984c4b460ed3b06dc4147d3d3b0532345b`; T7 91 passed、T8 207 passed；M2R/隔离 84 passed/3 skipped；变更相关 102 passed/2 skipped；全量 1995 passed/3 skipped/1 warning；两套全仓 Ruff clean；H1 usage/audit RED→GREEN | 等待同一审查线程复审；不 merge/push，不进入 M4/M5 |
-| M4/T9–T10 | Execute / Verify | Reports/actions, human transitions, API/UI, OpenRCA compatibility, recovery/privacy/offline gates | implemented / verifying | 独立复审 10 项 B/H/M/L findings 已逐项复现并 RED→GREEN；T9 276 passed/1 warning；T10 812 passed/3 skipped/1 warning；全量 2025 passed/3 skipped/1 warning；offline rows=80 failed=0；runtime acceptance exit=0；frontend build、两套 Ruff、diff-check clean | 等待 M4 独立复审；不 merge/push，不进入 M5 |
+| M4/T9–T10 | Execute / Verify | Reports/actions, human transitions, API/UI, OpenRCA compatibility, recovery/privacy/offline gates | implemented / verifying | 首轮 10 项 B/H/M/L findings 与第二轮 OpenRCA privacy/status guard findings 均逐项复现并 RED→GREEN；T9 279 passed/1 warning；T10 830 passed/3 skipped/1 warning；全量 2045 passed/3 skipped/1 warning；offline rows=80 failed=0；runtime acceptance 14/14；frontend build、两套 Ruff、diff-check clean | 等待 M4 独立复审；不 merge/push，不进入 M5 |
 
 M1 review-fix record (2026-08-06): High 1–6 and Medium 7–10 were reproduced
 with focused regressions, fixed at shared profile/ownership/transaction/entry
@@ -266,7 +267,7 @@ skipped`, full `1995 passed/3 skipped/1 warning`, both full Ruff commands clean,
 and diff-check clean are recorded in Plan §6 and Spec §15 with the single
 `M3_REVIEW_FIX5_SHA` commit; no merge, push, M4, or M5 action was taken.
 
-M4 review-fix record (2026-08-09): independent review verdict
+M4 first-round review-fix record (2026-08-09): independent review verdict
 `CHANGES_REQUIRED` was issued against the initial M4 implementation. All ten
 findings were reproduced before production changes and closed in the shared
 transaction, entry, projection, evidence, transition, status, ownership,
@@ -289,6 +290,19 @@ V10 historical compatibility, the OpenAI-compatible URL adapter, capability
 gates, and local-only/offline constraints remain unchanged. This review-fix is
 local to `codex/v11-m4`; no merge or push was performed and independent
 re-review remains pending.
+
+M4 second-round review-fix record (2026-08-09): the independent re-review
+reproduced two additional issues. H1 — V11 OpenRCA prediction objects and CSV
+rows bypassed the shared public candidate projection; the RED artifact regression
+now passes through `public_v11_candidate`, while the V10 deterministic projector
+retains its original output. M2 — the public guard accepted contradictory
+review/run status and missing active/latest Agent ownership; the RED memory,
+SQLite reload, API, report, and frontend regressions now share
+`validate_v11_final_status` plus the durable-owner guard and fail closed. T9
+`279 passed/1 warning`, T10 `830 passed/3 skipped/1 warning`, full pytest
+`2045 passed/3 skipped/1 warning`, offline `80/80`, runtime acceptance `14/14`,
+Ruff, frontend build, and diff-check are green. The local branch remains
+`codex/v11-m4`; no merge or push was performed.
 
 ## Archived V10.1 Planning Dashboard
 

@@ -804,7 +804,7 @@ isolated to `codex/v11-m3`; no merge, push, M4, or M5 action was taken.
 
 ## 7. M4 — Product and compatibility integration
 
-### M4 review-fix evidence (2026-08-09)
+### M4 first-round review-fix evidence (2026-08-09)
 
 M4 review fixes remain isolated on `codex/v11-m4`, based on the M3 checkpoint
 `290f13c`. The ten independent-review findings were reproduced with focused
@@ -835,7 +835,7 @@ V10/V11 contract:
 
 The focused RED→GREEN regressions are in
 `tests/runtime/test_v11_m4_audit_fixes.py` and the related report/API/OpenRCA
-test modules. Final local verification:
+test modules. First-round local verification:
 
 - T9 exact gate: `uv run pytest tests/reports tests/domain/test_action_models.py tests/api tests/frontend tests/benchmarks/test_openrca_runner.py tests/benchmarks/test_openrca_projection.py -q` → `276 passed, 1 warning`.
 - T10 exact gate: `uv run pytest tests/runtime tests/safety tests/services tests/api tests/frontend tests/benchmarks/test_openrca_runner.py tests/benchmarks/test_openrca_projection.py -q` → `812 passed, 3 skipped, 1 warning`.
@@ -846,6 +846,28 @@ test modules. Final local verification:
 
 This is a local review-fix commit on `codex/v11-m4`; no merge or push was
 performed. Same-thread independent re-review remains the next gate.
+
+### M4 second-round review-fix evidence (2026-08-09)
+
+The second independent review reproduced two further V11 publication defects
+against the first-round M4 result. The fixes remain isolated on `codex/v11-m4`
+and preserve V10 legacy semantics:
+
+| Finding | RED → GREEN evidence | Shared-boundary closure |
+| --- | --- | --- |
+| H1 | `test_v11_prediction_artifact_uses_public_candidate_projection` failed with the private marker in both the `RootCauseAttribution` prediction and CSV; it now passes and asserts the V10 deterministic reason remains unchanged. | `project_v11_candidates` applies `public_v11_candidate` before constructing the V11 `RootCauseAttribution`, so the object and every downstream official/CSV prediction share the existing V11 public text projection. |
+| M2 | `test_v11_projection_guard_rejects_invalid_reloaded_payload` (memory and SQLite), `test_v11_api_guard_rejects_inconsistent_review_run_and_missing_active_owner`, report regressions, and frontend payload regressions were RED before the fix and GREEN after it. | `validate_v11_final_status` is shared by action planning, report generation, and the V11 owner guard. The guard additionally requires a non-empty active owner, a matching latest Agent run summary, an Agent coordination review, and one durable runtime owner; invalid status/owner payloads fail closed. |
+
+Focused evidence: OpenRCA projection `14 passed`; M4 audit-fix suite `32
+passed`; report/frontend integration `17 passed`; the status matrix covers
+complete, partial, and inconclusive legal combinations across memory and SQLite
+reloads. Final gates are T9 exact `279 passed/1 warning`, T10 exact `830
+passed/3 skipped/1 warning`, full pytest `2045 passed/3 skipped/1 warning`,
+offline acceptance `80/80`, runtime acceptance `14/14`, `uv run ruff check .`
+and `uv run ruff check backend tests`, frontend production build, and
+`git diff --check` all green. The only test warning remains the existing
+Starlette/httpx TestClient deprecation; Vite emits only its existing `use
+client` bundle notices. No merge or push was performed.
 
 ### T9. Reports, actions, human transitions, API/UI, and OpenRCA
 
@@ -1221,4 +1243,4 @@ M1 third-round review (migration/runtime, 2026-08-07): conclusion
 - Specification: approved by the user on 2026-08-02 after L22–L30 reuse review.
 - Implementation Plan: independently reviewed with H1–H3/M1–M2 closed; approved
   by the user on 2026-08-02 with authorization to begin execution.
-- Implementation: M0/T1 complete; M1/T2–T3 implemented and verified on 2026-08-05 in the delegated worktree; third-round independent migration/runtime review concluded `approve_with_followups` on 2026-08-07 with all six findings closed the same day (RR-H1/RR-M1/RR-M2/RR-L2 at commit `336067c`, RR-L1/RR-L3 in the follow-up Light fix); M2 snapshot committed as `M2_BASE_SHA=c2245ac`; M3 fifth-round review-fix5 remains isolated on `codex/v11-m3`; M4 review-fix is RED→GREEN verified on isolated branch `codex/v11-m4`, with the local commit SHA recorded in the final handoff. No merge or push was performed; M5 has not started.
+- Implementation: M0/T1 complete; M1/T2–T3 implemented and verified on 2026-08-05 in the delegated worktree; third-round independent migration/runtime review concluded `approve_with_followups` on 2026-08-07 with all six findings closed the same day (RR-H1/RR-M1/RR-M2/RR-L2 at commit `336067c`, RR-L1/RR-L3 in the follow-up Light fix); M2 snapshot committed as `M2_BASE_SHA=c2245ac`; M3 fifth-round review-fix5 remains isolated on `codex/v11-m3`; M4 second-round review-fix is RED→GREEN verified on isolated branch `codex/v11-m4`, with the local commit SHA recorded in the final handoff. No merge or push was performed; M5 has not started.

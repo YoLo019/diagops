@@ -17,6 +17,7 @@ from backend.domain.multi_agent import (
     MultiAgentRunSummary,
 )
 from backend.domain.reports import IncidentReport
+from backend.domain.v11_contracts import validate_v11_final_status
 from backend.safety.redaction import (
     escape_markdown,
     escape_markdown_code,
@@ -221,6 +222,7 @@ class ReportGenerator:
             or coordination_review.runtime_run_id != multi_agent_run.runtime_run_id
         ):
             raise ValueError("V11 report authority and runtime owner must match")
+        validate_v11_final_status(coordination_review, multi_agent_run)
 
         candidates_by_id = {
             candidate.id: _public_v11_candidate(candidate)

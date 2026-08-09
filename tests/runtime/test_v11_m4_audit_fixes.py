@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.config.settings import AppSettings, StorageSettings
 from backend.db.models import InvestigationRecord, InvestigationStatus
 from backend.diagnosis.action_planner import ActionPlanner
 from backend.diagnosis.coordinator import DiagnosisCoordinator
@@ -42,7 +43,7 @@ from backend.runtime.faults import DeterministicFaultInjector
 from backend.runtime.phase_executor import DiagnosisPhaseExecutor
 from backend.runtime.phases import PhaseCommit, PhaseInput
 from backend.runtime.store import RuntimePersistenceError
-from backend.services.container import reset_container
+from backend.services.container import AppContainer, reset_container
 from backend.services.v11_projection import (
     V11ProjectionIntegrityError,
     ensure_v11_projection_owner,
@@ -55,6 +56,76 @@ from tests.reports.test_v11_product_integration import (
     _run_summary,
 )
 from tests.runtime.test_v11_isolation_red import _v11_run
+
+
+def _owned_review(
+    investigation_id: str,
+    runtime_run_id: str,
+    candidate,
+    *,
+    diagnostic_status: DiagnosticStatus = DiagnosticStatus.COMPLETE,
+    run_status: MultiAgentRunStatus = MultiAgentRunStatus.COMPLETED,
+    inconclusive: bool = False,
+):
+    review = _review(candidate, inconclusive=inconclusive)
+    return review.model_copy(
+        update={
+            "investigation_id": investigation_id,
+            "runtime_run_id": runtime_run_id,
+            "diagnostic_status": diagnostic_status,
+            "run_status": run_status,
+            "critic_assessments": [
+                item.model_copy(update={"runtime_run_id": runtime_run_id})
+                for item in review.critic_assessments
+            ],
+        }
+    )
+
+
+def _owned_run_summary(
+    runtime_run_id: str,
+    diagnostic_status: DiagnosticStatus,
+    *,
+    status: MultiAgentRunStatus = MultiAgentRunStatus.COMPLETED,
+):
+    return _run_summary(diagnostic_status).model_copy(
+        update={
+            "runtime_run_id": runtime_run_id,
+            "status": status,
+        }
+    )
+
+
+def _persisted_v11_run(run_id: str, investigation_id: str):
+    contract_container = AppContainer(
+        AppSettings(storage=StorageSettings(url="memory://"))
+    )
+    contract_container.orchestrator.agents_runtime = SimpleNamespace(
+        model_provider=ModelProvider.OPENAI,
+        _model_name="gpt-test",
+        prompt_version="v11-test",
+    )
+    contract_container.repository.save(
+        InvestigationRecord(id=investigation_id, event=_event())
+    )
+    persisted = contract_container.create_runtime_run(
+        investigation_id,
+        strategy=InvestigationStrategy.ADAPTIVE,
+        run_reason="initial",
+        execution_contract_version=ExecutionContractVersion.V11,
+    )
+    execution_contract = persisted.execution_contract
+    contract_container.close()
+    return _v11_run(
+        run_id=run_id,
+        investigation_id=investigation_id,
+        model_name=execution_contract["model_name"],
+        prompt_version=execution_contract["prompt_version"],
+        tool_budget=execution_contract["tool_budget"],
+        token_budget=execution_contract["token_budget"],
+        timeout_seconds=execution_contract["timeout_seconds"],
+        execution_contract=execution_contract,
+    )
 
 
 @pytest.mark.anyio
@@ -574,6 +645,164 @@ def test_v11_projection_rejects_ownerless_business_artifacts(artifact):
 
     with pytest.raises(V11ProjectionIntegrityError, match="owner"):
         ensure_v11_projection_owner(container.repository, container.runtime_store, record)
+    container.close()
+
+
+@pytest.mark.parametrize(
+    "invalid_case",
+    [
+        "diagnostic_status",
+        "run_status",
+        "inconclusive_lead",
+        "missing_active_owner",
+        "missing_latest_run",
+    ],
+)
+def test_v11_projection_guard_rejects_invalid_reloaded_payload(
+    runtime_store, invalid_case
+):
+    """memory/SQLite reload 后的无效 Agent 投影必须 fail closed。"""
+    repository = runtime_store.investigation_repository
+    run = runtime_store.create_run(
+        _persisted_v11_run(
+            f"run-invalid-projection-{type(runtime_store).__name__}-{invalid_case}",
+            "inv-1",
+        )
+    )
+    candidate = _candidate()
+    review = _owned_review("inv-1", run.id, candidate)
+    run_summary = _owned_run_summary(run.id, DiagnosticStatus.COMPLETE)
+    active_runtime_run_id = run.id
+
+    if invalid_case == "diagnostic_status":
+        run_summary = _owned_run_summary(run.id, DiagnosticStatus.INCONCLUSIVE)
+    elif invalid_case == "run_status":
+        run_summary = _owned_run_summary(
+            run.id,
+            DiagnosticStatus.COMPLETE,
+            status=MultiAgentRunStatus.PARTIAL,
+        )
+    elif invalid_case == "inconclusive_lead":
+        review = _owned_review(
+            "inv-1",
+            run.id,
+            candidate,
+            diagnostic_status=DiagnosticStatus.INCONCLUSIVE,
+        )
+        run_summary = _owned_run_summary(run.id, DiagnosticStatus.INCONCLUSIVE)
+    elif invalid_case == "missing_active_owner":
+        active_runtime_run_id = None
+    else:
+        run_summary = None
+
+    repository.save(
+        repository.get("inv-1").model_copy(
+            update={
+                "active_runtime_run_id": active_runtime_run_id,
+                "multi_agent_run": run_summary,
+            }
+        )
+    )
+    repository.save_coordination_review(review)
+    reloaded = repository.get("inv-1")
+
+    with pytest.raises(V11ProjectionIntegrityError):
+        ensure_v11_projection_owner(repository, runtime_store, reloaded)
+
+
+@pytest.mark.parametrize(
+    ("diagnostic_status", "run_status", "inconclusive"),
+    [
+        (DiagnosticStatus.COMPLETE, MultiAgentRunStatus.COMPLETED, False),
+        (DiagnosticStatus.PARTIAL, MultiAgentRunStatus.PARTIAL, False),
+        (DiagnosticStatus.INCONCLUSIVE, MultiAgentRunStatus.COMPLETED, True),
+    ],
+)
+def test_v11_projection_guard_accepts_legal_final_status_matrix(
+    runtime_store,
+    diagnostic_status,
+    run_status,
+    inconclusive,
+):
+    repository = runtime_store.investigation_repository
+    run = runtime_store.create_run(
+        _persisted_v11_run(
+            f"run-valid-projection-{type(runtime_store).__name__}-{diagnostic_status}",
+            "inv-1",
+        )
+    )
+    candidate = _candidate()
+    review = _owned_review(
+        "inv-1",
+        run.id,
+        candidate,
+        diagnostic_status=diagnostic_status,
+        run_status=run_status,
+        inconclusive=inconclusive,
+    )
+    run_summary = _owned_run_summary(
+        run.id,
+        diagnostic_status,
+        status=run_status,
+    )
+    repository.save(
+        repository.get("inv-1").model_copy(
+            update={
+                "active_runtime_run_id": run.id,
+                "multi_agent_run": run_summary,
+            }
+        )
+    )
+    repository.save_coordination_review(review)
+
+    ensure_v11_projection_owner(repository, runtime_store, repository.get("inv-1"))
+
+
+def test_v11_api_guard_rejects_inconsistent_review_run_and_missing_active_owner():
+    """Workbench/API 不能发布未绑定 active owner 或状态矛盾的候选。"""
+    container = reset_container()
+    candidate = _candidate()
+    cases = {
+        "status-mismatch": {
+            "active_runtime_run_id": "run-api-status-mismatch",
+            "run_status": DiagnosticStatus.INCONCLUSIVE,
+        },
+        "missing-owner": {
+            "active_runtime_run_id": None,
+            "run_status": DiagnosticStatus.COMPLETE,
+        },
+    }
+    for suffix, values in cases.items():
+        investigation_id = f"inv-api-invalid-{suffix}"
+        container.repository.save(
+            InvestigationRecord(id=investigation_id, event=_event())
+        )
+        run = container.runtime_store.create_run(
+            _persisted_v11_run(f"run-api-{suffix}", investigation_id)
+        )
+        review = _owned_review(investigation_id, run.id, candidate)
+        run_summary = _owned_run_summary(
+            run.id,
+            values["run_status"],
+        )
+        container.repository.save(
+            InvestigationRecord(
+                id=investigation_id,
+                event=_event(),
+                status=InvestigationStatus.COMPLETED,
+                active_runtime_run_id=(
+                    run.id if values["active_runtime_run_id"] is not None else None
+                ),
+                multi_agent_run=run_summary,
+            )
+        )
+        container.repository.save_coordination_review(review)
+
+    with TestClient(app) as client:
+        for suffix in cases:
+            response = client.get(f"/investigations/inv-api-invalid-{suffix}/rca-workbench")
+            assert response.status_code == 409, response.text
+
     container.close()
 
 

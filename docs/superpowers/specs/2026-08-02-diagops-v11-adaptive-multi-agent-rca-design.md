@@ -1720,7 +1720,7 @@ production-shaped RED regression and then a shared-boundary GREEN fix:
 | M9 | `test_v11_product_entry_summary_preserves_safe_lead_and_critic` | Event/manual/list summaries pass the persisted coordination review through the shared V11 public projection, preserving safe Lead/Critic fields. |
 | L10 | `test_v11_markdown_renders_actual_findings_tasks_rounds_and_lead_decision` | V11 Markdown renders actual finding actor/instance/task/round/evidence data and the public Lead decision; placeholder actors and private reasoning are absent. |
 
-Final M4 verification is green: T9 exact `276 passed/1 warning`; T10 exact
+First-round M4 verification was green: T9 exact `276 passed/1 warning`; T10 exact
 `812 passed/3 skipped/1 warning`; full `uv run pytest -q` `2025 passed/3
 skipped/1 warning`; offline tool acceptance `rows=80 failed=0`; runtime
 acceptance exit 0; `uv run ruff check .`, `uv run ruff check backend tests`,
@@ -1729,6 +1729,32 @@ warning is the existing Starlette/httpx TestClient deprecation; Vite emitted
 only its existing `use client` bundle notices. The review-fix is local to
 `codex/v11-m4`; no merge or push was performed and independent re-review is
 pending.
+
+M4 second-round review-fix ledger (2026-08-09): the independent re-review
+reproduced two additional V11 publication defects against the first-round M4
+commit. H1 covered the OpenRCA V11 prediction boundary: a private marker in
+`affected_entity`, `failure_mechanism`, or `summary` was present in the
+`RootCauseAttribution` and `v11-agent-predictions.csv`. The V11 projector now
+reuses `backend/services/v11_public.py::public_v11_candidate` before building
+the artifact; the V10 deterministic projector and its legacy reason output are
+unchanged. M2 covered the shared public guard: contradictory review/run status,
+an invalid Lead/status combination, missing `active_runtime_run_id`, and a
+missing or mismatched latest Agent run summary were accepted. The shared domain
+`validate_v11_final_status` is now used by action planning, reports, and the
+V11 owner guard; the guard requires one active/latest durable Agent owner and
+fails closed for API, report, graph, and workbench publication. The frontend
+mirrors the same status/owner checks as a second defense.
+
+Second-round RED→GREEN evidence includes
+`test_v11_prediction_artifact_uses_public_candidate_projection`, the memory and
+SQLite `test_v11_projection_guard_rejects_invalid_reloaded_payload` matrix,
+`test_v11_api_guard_rejects_inconsistent_review_run_and_missing_active_owner`,
+the direct report status regressions, and frontend payload regressions. Final
+verification: T9 `279 passed/1 warning`, T10 `830 passed/3 skipped/1 warning`,
+full pytest `2045 passed/3 skipped/1 warning`, offline `80/80`, runtime
+acceptance `14/14`, Ruff, frontend build, and `git diff --check` all passed.
+V10 legacy behavior, the OpenAI-compatible URL adapter, capability gates, and
+local-only/offline boundary were not changed; no merge or push was performed.
 
 ## 16. Approval state
 

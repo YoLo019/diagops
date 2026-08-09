@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from backend.domain.agent_findings import RootCauseAttribution, RootCauseCandidate
 from backend.domain.evidence import EvidenceItem, validate_usable_evidence
+from backend.services.v11_public import public_v11_candidate
 
 RULE_VERSION = "v2"
 _TASK_FIELDS = {
@@ -121,6 +122,7 @@ def project_v11_candidates(
     fields = scored_fields(task_index)
     projected: list[RootCauseAttribution] = []
     for candidate in sorted(candidates, key=lambda item: item.rank):
+        public_candidate = public_v11_candidate(candidate)
         validate_usable_evidence(
             evidence,
             candidate.supporting_evidence_ids,
@@ -130,10 +132,12 @@ def project_v11_candidates(
         projected.append(
             RootCauseAttribution(
                 root_cause_occurred_at=(
-                    candidate.onset_window_start or fallback_timestamp
+                    public_candidate.onset_window_start or fallback_timestamp
                 ),
-                root_cause_component=candidate.affected_entity or "unknown",
-                root_cause_reason=candidate.failure_mechanism or candidate.summary,
+                root_cause_component=public_candidate.affected_entity or "unknown",
+                root_cause_reason=(
+                    public_candidate.failure_mechanism or public_candidate.summary
+                ),
                 supporting_evidence_ids=supporting,
             )
         )

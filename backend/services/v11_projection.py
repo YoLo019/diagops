@@ -1,6 +1,7 @@
 from backend.db.models import InvestigationRecord
 from backend.domain.multi_agent import AuthorityMode
 from backend.domain.runtime import execution_contract_digest, validate_v11_execution_contract
+from backend.domain.v11_contracts import validate_v11_final_status
 from backend.runtime.store import RuntimeNotFound
 
 
@@ -54,9 +55,9 @@ def ensure_v11_projection_owner(repository, runtime_store, record: Investigation
 
     if not has_agent_projection:
         return
+
     if len(runtime_ids) != 1:
         raise V11ProjectionIntegrityError("Agent projection runtime owner mismatch")
-
     runtime_id = next(iter(runtime_ids))
     try:
         run = (
@@ -72,6 +73,41 @@ def ensure_v11_projection_owner(repository, runtime_store, record: Investigation
         or run.investigation_id != record.id
     ):
         raise V11ProjectionIntegrityError("Agent projection RuntimeRun is not the owner")
+
+    if active_runtime_id is None:
+        raise V11ProjectionIntegrityError(
+            "Agent projection lacks active runtime owner"
+        )
+
+    latest_run = record.multi_agent_run
+    if (
+        latest_run is None
+        or latest_run.authority_mode != AuthorityMode.AGENT
+        or latest_run.runtime_run_id != active_runtime_id
+    ):
+        raise V11ProjectionIntegrityError(
+            "Agent projection latest run summary does not match active owner"
+        )
+    if review is None or review.authority_mode != AuthorityMode.AGENT:
+        raise V11ProjectionIntegrityError(
+            "Agent projection coordination review is unavailable"
+        )
+    if review.investigation_id != record.id:
+        raise V11ProjectionIntegrityError(
+            "Agent projection coordination review investigation mismatch"
+        )
+    try:
+        validate_v11_final_status(review, latest_run)
+    except ValueError as exc:
+        raise V11ProjectionIntegrityError(
+            "Agent projection final status contract failed"
+        ) from exc
+
+    if record.report is not None and record.report.authority_mode == AuthorityMode.AGENT:
+        if record.report.investigation_id != record.id:
+            raise V11ProjectionIntegrityError("Agent report investigation mismatch")
+        if record.report.diagnostic_status != review.diagnostic_status:
+            raise V11ProjectionIntegrityError("Agent report diagnostic status mismatch")
 
     contract = run.execution_contract
     try:
