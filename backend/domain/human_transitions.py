@@ -117,6 +117,14 @@ def validate_verification_transition(
         if related_candidate_ids is None
         else related_candidate_ids
     )
+    if (
+        verification.runtime_run_id is not None
+        and related_candidate_ids is not None
+        and candidate_ids != verification.related_candidate_ids
+    ):
+        # V11 verification 是对已持久化候选的结果回填，人工请求不能借此
+        # 把结果重新绑定到同一投影中的另一个候选。
+        raise HumanStateConflict("verification_reference")
     _validate_candidate_refs(record, verification.related_candidate_ids, "verification_reference")
     _validate_candidate_refs(record, candidate_ids, "verification_reference")
     target = VerificationStatus(target)

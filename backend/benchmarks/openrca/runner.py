@@ -285,6 +285,7 @@ class OpenRcaDiagnosisRunner:
                     evidence=list(record.evidence),
                     candidates=candidates,
                     fallback_timestamp=record.event.started_at,
+                    runtime_run_id=runtime_run.id,
                 )
             else:
                 projection = project_root_causes(

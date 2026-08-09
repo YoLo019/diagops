@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from backend.domain.agent_findings import RootCauseAttribution, RootCauseCandidate
-from backend.domain.evidence import EvidenceItem
+from backend.domain.evidence import EvidenceItem, validate_usable_evidence
 
 RULE_VERSION = "v2"
 _TASK_FIELDS = {
@@ -115,17 +115,18 @@ def project_v11_candidates(
     evidence: list[EvidenceItem],
     candidates: list[RootCauseCandidate],
     fallback_timestamp,
+    runtime_run_id: str,
 ) -> ProjectionResult:
     """把已接受的 V11 候选投影为 OpenRCA 兼容字段，不重跑 RCA 规则。"""
     fields = scored_fields(task_index)
-    evidence_ids = {item.id for item in evidence}
     projected: list[RootCauseAttribution] = []
     for candidate in sorted(candidates, key=lambda item: item.rank):
-        supporting = [
-            item for item in candidate.supporting_evidence_ids if item in evidence_ids
-        ]
-        if not supporting:
-            continue
+        validate_usable_evidence(
+            evidence,
+            candidate.supporting_evidence_ids,
+            runtime_run_id=runtime_run_id,
+        )
+        supporting = list(candidate.supporting_evidence_ids)
         projected.append(
             RootCauseAttribution(
                 root_cause_occurred_at=(

@@ -14,7 +14,12 @@ from backend.benchmarks.openrca.projection import (
     scored_fields,
 )
 from backend.domain.agent_findings import RootCauseAttribution, RootCauseCandidate
-from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
+from backend.domain.evidence import (
+    EvidenceItem,
+    EvidenceKind,
+    EvidenceProvider,
+    EvidenceStatus,
+)
 
 BASE = datetime(2026, 7, 30, 9, 0, tzinfo=UTC)
 
@@ -210,9 +215,10 @@ def test_v11_projection_maps_generic_candidate_without_legacy_taxonomy():
     result = project_v11_candidates(
         task_index="task_7",
         expected_count=1,
-        evidence=[evidence("ev-1")],
+        evidence=[evidence("ev-1").model_copy(update={"runtime_run_id": "run-v11"})],
         candidates=[candidate],
         fallback_timestamp=BASE + timedelta(minutes=5),
+        runtime_run_id="run-v11",
     )
 
     assert result.causes[0].root_cause_component == "checkout-api"
@@ -220,3 +226,48 @@ def test_v11_projection_maps_generic_candidate_without_legacy_taxonomy():
     assert result.causes[0].root_cause_occurred_at == BASE
     assert result.audit.rule_version == "v11-agent-generic"
     assert result.audit.projection_fallback is False
+
+
+@pytest.mark.parametrize("status", [EvidenceStatus.FAILED, EvidenceStatus.SKIPPED])
+def test_v11_projection_rejects_unusable_evidence(status: EvidenceStatus):
+    candidate = RootCauseCandidate(
+        id="candidate-unusable-evidence",
+        summary="candidate",
+        rank=1,
+        confidence=0.8,
+        supporting_evidence_ids=["ev-unusable"],
+    )
+
+    with pytest.raises(ValueError, match="usable evidence"):
+        project_v11_candidates(
+            task_index="task_1",
+            expected_count=1,
+            evidence=[evidence("ev-unusable").model_copy(update={"status": status})],
+            candidates=[candidate],
+            fallback_timestamp=BASE,
+            runtime_run_id="run-v11",
+        )
+
+
+def test_v11_projection_rejects_cross_run_evidence():
+    candidate = RootCauseCandidate(
+        id="candidate-cross-run-evidence",
+        summary="candidate",
+        rank=1,
+        confidence=0.8,
+        supporting_evidence_ids=["ev-foreign"],
+    )
+
+    with pytest.raises(ValueError, match="owner"):
+        project_v11_candidates(
+            task_index="task_1",
+            expected_count=1,
+            evidence=[
+                evidence("ev-foreign").model_copy(
+                    update={"runtime_run_id": "run-foreign"}
+                )
+            ],
+            candidates=[candidate],
+            fallback_timestamp=BASE,
+            runtime_run_id="run-v11",
+        )

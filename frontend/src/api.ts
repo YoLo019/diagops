@@ -486,6 +486,7 @@ export type AgentFinding = {
   blocking: boolean;
   execution_layer?: AgentExecutionLayer;
   analysis_round?: 1 | 2;
+  runtime_run_id?: string | null;
   revises_finding_id?: string | null;
   created_at: string;
 };

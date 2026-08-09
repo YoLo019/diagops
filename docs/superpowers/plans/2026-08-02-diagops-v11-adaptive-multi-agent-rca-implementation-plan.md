@@ -804,33 +804,48 @@ isolated to `codex/v11-m3`; no merge, push, M4, or M5 action was taken.
 
 ## 7. M4 — Product and compatibility integration
 
-### M4 implementation evidence (2026-08-09)
+### M4 review-fix evidence (2026-08-09)
 
-M4 is implemented from the M3 checkpoint `290f13c` on the isolated
-`codex/v11-m4` branch. The product path now has an explicit V11 report/action
-projection: accepted candidates are the only diagnosis authority, empty
-hypotheses are valid for V11, recommendations are read-only and bound to the
-candidate/run/evidence owner, and human verification updates cannot cross a
-run or candidate projection. Public investigation/report/workbench paths fail
-closed unless a persisted V11 RuntimeRun has a valid matching contract digest.
-The API/UI and report markdown expose authority, status, actor/task/round,
-Critic checks, evidence, alternatives, gaps, usage, failures, and
-`not_activated` without raw prompt/private reasoning. OpenRCA `v11-agent`
-uses the generic candidate projection and retains the deterministic projector;
-the existing OpenAI-compatible adapter and capability gate remain required.
-Implementation commit: `3e1c20b` (`feat(v11): integrate product and OpenRCA paths`).
+M4 review fixes remain isolated on `codex/v11-m4`, based on the M3 checkpoint
+`290f13c`. The ten independent-review findings were reproduced with focused
+RED regressions and closed at shared boundaries without changing the approved
+V10/V11 contract:
 
-Verification completed locally:
+- B1: report generation now returns a `BusinessMutation`; report/actions and
+  phase/checkpoint/lease state commit only through the shared `PhaseCommit`
+  transaction, with memory and SQLite fault-injection rollback coverage.
+- B2: configured product event/manual/runtime-create/rerun paths select V11;
+  an explicit or legacy V10 run is rejected while an active V11 projection is
+  owned by the investigation. Historical V10 remains available when the V11
+  runtime is not configured, and legacy-to-V11 linked rerun behavior remains
+  covered.
+- H3: API, report, graph, and workbench paths use one V11 public projection
+  for findings, candidates, Critic checks, Lead decisions, summaries, and
+  graph labels; the frontend projection is a second defense.
+- H4: report and V11 OpenRCA projection share usable-evidence validation for
+  status and durable run owner; V10 legacy evidence validation remains
+  unchanged.
+- M5–M9: inconclusive output clears all candidate projections; human
+  verification cannot replace persisted candidate refs; action planning checks
+  the review/run/Lead status matrix; V11 artifacts require exactly one shared
+  runtime owner; summary APIs preserve safe Critic/Lead fields.
+- L10: V11 Markdown renders actual finding actors, task IDs, analysis rounds,
+  evidence references, and the public Lead decision without placeholder actors
+  or private reasoning.
 
-- T9 exact gate: `uv run pytest tests/reports tests/domain/test_action_models.py tests/api tests/frontend tests/benchmarks/test_openrca_runner.py tests/benchmarks/test_openrca_projection.py -q` → `271 passed, 1 warning`.
-- T10 exact gate: `uv run pytest tests/runtime tests/safety tests/services tests/api tests/frontend tests/benchmarks/test_openrca_runner.py tests/benchmarks/test_openrca_projection.py -q` → `794 passed, 3 skipped, 1 warning`.
-- Full gate: `uv run pytest -q` → `2005 passed, 3 skipped, 1 warning`.
+The focused RED→GREEN regressions are in
+`tests/runtime/test_v11_m4_audit_fixes.py` and the related report/API/OpenRCA
+test modules. Final local verification:
+
+- T9 exact gate: `uv run pytest tests/reports tests/domain/test_action_models.py tests/api tests/frontend tests/benchmarks/test_openrca_runner.py tests/benchmarks/test_openrca_projection.py -q` → `276 passed, 1 warning`.
+- T10 exact gate: `uv run pytest tests/runtime tests/safety tests/services tests/api tests/frontend tests/benchmarks/test_openrca_runner.py tests/benchmarks/test_openrca_projection.py -q` → `812 passed, 3 skipped, 1 warning`.
+- Full gate: `uv run pytest -q` → `2025 passed, 3 skipped, 1 warning`.
 - Offline gate: `uv run python -m backend.services.offline_tool_acceptance` → `rows=80 failed=0`.
 - Runtime acceptance: `uv run python -m backend.services.runtime_acceptance` → exit 0.
 - Static/build gates: `uv run ruff check .`, `uv run ruff check backend tests`, frontend production build, and `git diff --check` all passed. The only warnings are the existing Starlette/httpx TestClient deprecation and standard Vite `use client` bundle notices.
 
-The implementation is locally verified and awaits independent M4 review; no
-merge or push was performed.
+This is a local review-fix commit on `codex/v11-m4`; no merge or push was
+performed. Same-thread independent re-review remains the next gate.
 
 ### T9. Reports, actions, human transitions, API/UI, and OpenRCA
 
@@ -1117,8 +1132,8 @@ request only the missing authority.
 | T6 | implemented / verified | R8, R11–R13, R26–R27 | 110 focused passed including M2R-1 slow-endpoint cancellation/no-late-commit/cleanup evidence; independent M2 review approve_with_followups |
 | T7 | implemented / verifying | R1–R3, R5–R6, R11–R13, R24, R27 | M3 fifth-round review-fix5 H1 usage/audit RED→GREEN; exact gate 91 passed; scoped Ruff clean; M2R-2 resolver wiring and M2R-3 invocation recheck remain closed; reservation replay and actual-vs-billed request usage are covered |
 | T8 | implemented / verifying | R1, R4–R7, R9, R11–R13, R27 | M3 fifth-round review-fix5 preserves the already-green exact T8 validator, terminal, safe-text, supplemental-linkage, and final-actor contracts; exact gate 207 passed and scoped Ruff clean |
-| T9 | implemented / verifying | R5–R12, R18–R19, R27 | Exact gate 271 passed/1 warning; candidate-led V11 reports/actions, human run/candidate/evidence ownership, additive API/UI, privacy-safe rendering, public V11 RuntimeRun/contract guard, and generic OpenRCA `v11-agent` projection verified |
-| T10 | implemented / verifying | R8–R13, R16, R18, R21–R23, R26–R27 | Exact gate 794 passed/3 skipped/1 warning; full pytest 2005 passed/3 skipped/1 warning; offline rows=80 failed=0; runtime acceptance exit=0; Ruff/build/diff-check clean |
+| T9 | implemented / verifying | R5–R12, R18–R19, R27 | M4 review-fix reproduced and closed all ten findings with focused RED→GREEN regressions; exact gate 276 passed/1 warning; candidate-led V11 reports/actions, active-owner/rerun fencing, additive API/UI, shared privacy-safe public projection, usable-evidence validation, actual Markdown actors/tasks/rounds, and generic OpenRCA `v11-agent` projection verified |
+| T10 | implemented / verifying | R8–R13, R16, R18, R21–R23, R26–R27 | Exact gate 812 passed/3 skipped/1 warning; full pytest 2025 passed/3 skipped/1 warning; offline rows=80 failed=0; runtime acceptance exit=0; Ruff/build/diff-check clean |
 | T11 | pending | R14–R17, R24–R27 | pending |
 | T12 | pending | R14–R17, R25–R26 | pending |
 | T13 | pending | R1–R27 | pending |
@@ -1206,4 +1221,4 @@ M1 third-round review (migration/runtime, 2026-08-07): conclusion
 - Specification: approved by the user on 2026-08-02 after L22–L30 reuse review.
 - Implementation Plan: independently reviewed with H1–H3/M1–M2 closed; approved
   by the user on 2026-08-02 with authorization to begin execution.
-- Implementation: M0/T1 complete; M1/T2–T3 implemented and verified on 2026-08-05 in the delegated worktree; third-round independent migration/runtime review concluded `approve_with_followups` on 2026-08-07 with all six findings closed the same day (RR-H1/RR-M1/RR-M2/RR-L2 at commit `336067c`, RR-L1/RR-L3 in the follow-up Light fix); M2 snapshot committed as `M2_BASE_SHA=c2245ac`; M3 fifth-round review-fix5 base is `e52e47984c4b460ed3b06dc4147d3d3b0532345b`, H1 usage/audit aggregation is RED→GREEN verified on isolated branch `codex/v11-m3`, and the single `M3_REVIEW_FIX5_SHA` commit is pending handoff to the same-thread independent review; M4/M5 not started.
+- Implementation: M0/T1 complete; M1/T2–T3 implemented and verified on 2026-08-05 in the delegated worktree; third-round independent migration/runtime review concluded `approve_with_followups` on 2026-08-07 with all six findings closed the same day (RR-H1/RR-M1/RR-M2/RR-L2 at commit `336067c`, RR-L1/RR-L3 in the follow-up Light fix); M2 snapshot committed as `M2_BASE_SHA=c2245ac`; M3 fifth-round review-fix5 remains isolated on `codex/v11-m3`; M4 review-fix is RED→GREEN verified on isolated branch `codex/v11-m4`, with the local commit SHA recorded in the final handoff. No merge or push was performed; M5 has not started.

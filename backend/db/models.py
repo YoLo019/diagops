@@ -55,6 +55,19 @@ class InvestigationRecord(BaseModel):
 
     @model_validator(mode="after")
     def validate_runtime_ownership(self) -> "InvestigationRecord":
+        has_agent_projection = any(
+            projection is not None
+            and projection.authority_mode == AuthorityMode.AGENT
+            for projection in (self.multi_agent_run, self.report)
+        )
+        if has_agent_projection:
+            for label, projections in (
+                ("evidence", self.evidence),
+                ("action", self.actions),
+                ("verification", self.verification_suggestions),
+            ):
+                if any(item.runtime_run_id is None for item in projections):
+                    raise ValueError(f"V11 {label} requires runtime_run_id")
         owners = {
             item.runtime_run_id
             for item in self.evidence

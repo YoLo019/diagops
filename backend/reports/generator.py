@@ -1,9 +1,13 @@
 import re
 
 from backend.domain.actions import RecommendedAction, VerificationSuggestion
-from backend.domain.agent_findings import AgentFinding, CoordinationReview, RootCauseCandidate
+from backend.domain.agent_findings import (
+    AgentFinding,
+    CoordinationReview,
+    RootCauseCandidate,
+)
 from backend.domain.events import IncidentEvent
-from backend.domain.evidence import EvidenceItem
+from backend.domain.evidence import EvidenceItem, validate_usable_evidence
 from backend.domain.hypotheses import Hypothesis
 from backend.domain.multi_agent import (
     AgentExecutionLayer,
@@ -17,8 +21,28 @@ from backend.safety.redaction import (
     escape_markdown,
     escape_markdown_code,
     redact_model,
-    redact_text,
     safe_failure,
+)
+from backend.services.v11_public import (
+    public_v11_action as _public_v11_action,
+)
+from backend.services.v11_public import (
+    public_v11_assessment as _public_v11_assessment,
+)
+from backend.services.v11_public import (
+    public_v11_candidate as _public_v11_candidate,
+)
+from backend.services.v11_public import (
+    public_v11_finding as _public_v11_finding,
+)
+from backend.services.v11_public import (
+    public_v11_lead_decision as _public_v11_lead_decision,
+)
+from backend.services.v11_public import (
+    public_v11_verification as _public_v11_verification,
+)
+from backend.services.v11_public import (
+    scrub_v11_text as _scrub_v11_text,
 )
 
 DECISION_LABELS = {
@@ -211,6 +235,7 @@ class ReportGenerator:
         ]
         if coordination_review.diagnostic_status == DiagnosticStatus.INCONCLUSIVE:
             diagnoses = []
+            alternatives = []
         actions = [_public_v11_action(item) for item in actions]
         verification_suggestions = [
             _public_v11_verification(item) for item in verification_suggestions
@@ -219,11 +244,17 @@ class ReportGenerator:
             _public_v11_assessment(item)
             for item in coordination_review.critic_assessments
         ]
+        public_findings = [_public_v11_finding(item) for item in agent_findings]
         safe_review_summary = _scrub_v11_text(coordination_review.summary)
 
         safe_review = coordination_review.model_copy(
             update={
                 "critic_assessments": critic_assessments,
+                "lead_decision": (
+                    _public_v11_lead_decision(coordination_review.lead_decision)
+                    if coordination_review.lead_decision is not None
+                    else None
+                ),
                 "summary": safe_review_summary,
                 "uncertainty": _scrub_v11_text(coordination_review.uncertainty),
             }
@@ -244,7 +275,7 @@ class ReportGenerator:
             verification_suggestions,
             safe_review,
             multi_agent_run,
-            agent_findings,
+            public_findings,
         )
         evidence_gaps = list(
             dict.fromkeys(
@@ -350,6 +381,32 @@ class ReportGenerator:
         else:
             lines.append("- 当前没有 Critic 评估。")
 
+        lines.extend(["", "## Investigator Findings", ""])
+        if findings:
+            for finding in findings:
+                actor = _code(str(finding.agent_name))
+                instance = (
+                    f"，Instance：{_code(finding.agent_instance_id)}"
+                    if finding.agent_instance_id
+                    else ""
+                )
+                lines.append(f"- {_code(finding.id)}（Actor：{actor}{instance}）")
+                lines.append(
+                    f"  - Task ID：{_code(finding.task_id) if finding.task_id else '未指定'}"
+                )
+                lines.append(f"  - analysis round：{finding.analysis_round}")
+                lines.append(f"  - 类型：{_code(finding.finding_type)}")
+                lines.append(f"  - 摘要：{_safe_v11_text(finding.summary)}")
+                if finding.rationale:
+                    lines.append(f"  - 公开依据：{_safe_v11_text(finding.rationale)}")
+                if finding.evidence_ids:
+                    lines.append(
+                        "  - 证据："
+                        + ", ".join(_code(item) for item in finding.evidence_ids)
+                    )
+        else:
+            lines.append("- 当前没有 Investigator finding。")
+
         gaps = [assessment.gap for assessment in review.critic_assessments if assessment.gap]
         lines.extend(["", "## 证据缺口", ""])
         lines.extend(f"- {_safe_v11_text(gap)}" for gap in dict.fromkeys(gaps))
@@ -359,13 +416,69 @@ class ReportGenerator:
         lines.extend(["", "## 证据链", ""])
         lines.extend(_evidence_line(item) for item in evidence)
         self._append_v11_actions_section(lines, actions, verification_suggestions)
+
+        lines.extend(["", "## Lead 决策", ""])
+        if review.lead_decision is not None:
+            decision = review.lead_decision
+            lines.append(f"- Action：{_code(decision.action)}")
+            lines.append(f"- 摘要：{_safe_v11_text(decision.summary)}")
+            lines.append(
+                "- Candidate IDs："
+                + ", ".join(_code(item) for item in decision.candidate_ids)
+                if decision.candidate_ids
+                else "- Candidate IDs：无"
+            )
+            lines.append(
+                "- Evidence IDs："
+                + ", ".join(_code(item) for item in decision.evidence_ids)
+                if decision.evidence_ids
+                else "- Evidence IDs：无"
+            )
+            lines.append(
+                "- Task IDs："
+                + ", ".join(_code(item) for item in decision.task_ids)
+                if decision.task_ids
+                else "- Task IDs：无"
+            )
+            if decision.stop_reason:
+                lines.append(f"- Stop reason：{_safe_v11_text(decision.stop_reason)}")
+        else:
+            lines.append("- 当前没有最终 Lead decision。")
+
+        finding_task_ids = [
+            finding.task_id for finding in findings if finding.task_id is not None
+        ]
+        review_task_ids = [
+            task_id
+            for assessment in review.critic_assessments
+            for task_id in assessment.supplemental_task_ids
+        ]
+        lead_task_ids = (
+            review.lead_decision.task_ids if review.lead_decision is not None else []
+        )
+        task_ids = list(dict.fromkeys(finding_task_ids + review_task_ids + lead_task_ids))
+        actors = list(dict.fromkeys(str(finding.agent_name) for finding in findings))
+        if review.critic_assessments:
+            actors.append("CriticAgent")
+        if review.lead_decision is not None:
+            actors.append("LeadAgent")
+        actor_text = (
+            ", ".join(_code(actor) for actor in dict.fromkeys(actors))
+            if actors
+            else "无"
+        )
+        task_text = (
+            ", ".join(_code(task_id) for task_id in task_ids)
+            if task_ids
+            else "无"
+        )
         lines.extend(
             [
                 "",
                 "## 运行信息",
                 "",
-                f"- Actor：{_code('LeadAgent / InvestigatorAgent / CriticAgent')}",
-                f"- Task IDs：{_code('见 Critic 评估')}",
+                f"- Actor：{actor_text}",
+                f"- Task IDs：{task_text}",
                 f"- Investigator 数量：{run.investigator_count}",
                 f"- 完成轮次：{run.completed_rounds}",
                 f"- 输入 tokens：{run.total_input_tokens}",
@@ -720,7 +833,6 @@ class ReportGenerator:
         agent_findings: list[AgentFinding] | None = None,
         verification_suggestions: list[VerificationSuggestion] | None = None,
     ) -> None:
-        evidence_ids = {item.id for item in evidence}
         agent_findings = agent_findings or []
         finding_by_id: dict[str, AgentFinding] = {}
         for finding in agent_findings:
@@ -819,9 +931,20 @@ class ReportGenerator:
                 for check in assessment.checks:
                     referenced_ids.extend(check.evidence_ids)
 
-        for evidence_id in referenced_ids:
-            if evidence_id not in evidence_ids:
-                raise ValueError(f"missing evidence id: {evidence_id}")
+        if (
+            coordination_review is not None
+            and coordination_review.authority_mode == AuthorityMode.AGENT
+        ):
+            validate_usable_evidence(
+                evidence,
+                referenced_ids,
+                runtime_run_id=coordination_review.runtime_run_id,
+            )
+        else:
+            evidence_ids = {item.id for item in evidence}
+            for evidence_id in referenced_ids:
+                if evidence_id not in evidence_ids:
+                    raise ValueError(f"missing evidence id: {evidence_id}")
 
         if coordination_review is not None:
             for candidate in coordination_review.candidates:
@@ -849,96 +972,6 @@ def _safe_v7_text(text: str) -> str:
         return "[未验证操作声明已省略]"
 
     return escape_markdown(text)
-
-
-_V11_PRIVATE_TEXT = re.compile(
-    r"(?is)(system\s+prompt|developer\s+message|private\s+reasoning|"
-    r"chain\s+of\s+thought|thought\s+process|internal\s+prompt|"
-    r"原始提示词|私有推理|思维链|系统提示)"
-)
-
-
-def _scrub_v11_text(text: str | None) -> str:
-    if not text:
-        return ""
-    if _V11_PRIVATE_TEXT.search(text):
-        return "[内部推理内容已省略]"
-    return redact_text(text)
-
-
-def _public_v11_candidate(candidate: RootCauseCandidate) -> RootCauseCandidate:
-    return candidate.model_copy(
-        update={
-            "affected_entity": (
-                _scrub_v11_text(candidate.affected_entity)
-                if candidate.affected_entity is not None
-                else None
-            ),
-            "failure_mechanism": (
-                _scrub_v11_text(candidate.failure_mechanism)
-                if candidate.failure_mechanism is not None
-                else None
-            ),
-            "summary": _scrub_v11_text(candidate.summary),
-            "rationale": _scrub_v11_text(candidate.rationale),
-            "uncertainty": _scrub_v11_text(candidate.uncertainty),
-        }
-    )
-
-
-def _public_v11_assessment(assessment):
-    return assessment.model_copy(
-        update={
-            "checks": [
-                check.model_copy(
-                    update={
-                        "summary": _scrub_v11_text(check.summary),
-                        "gap": (
-                            _scrub_v11_text(check.gap)
-                            if check.gap is not None
-                            else None
-                        ),
-                    }
-                )
-                for check in assessment.checks
-            ],
-            "gap": (
-                _scrub_v11_text(assessment.gap)
-                if assessment.gap is not None
-                else None
-            ),
-            "summary": _scrub_v11_text(assessment.summary),
-        }
-    )
-
-
-def _public_v11_action(action: RecommendedAction) -> RecommendedAction:
-    return action.model_copy(
-        update={
-            "title": _scrub_v11_text(action.title),
-            "description": _scrub_v11_text(action.description),
-            "note": (
-                _scrub_v11_text(action.note) if action.note is not None else None
-            ),
-        }
-    )
-
-
-def _public_v11_verification(
-    suggestion: VerificationSuggestion,
-) -> VerificationSuggestion:
-    return suggestion.model_copy(
-        update={
-            "title": _scrub_v11_text(suggestion.title),
-            "description": _scrub_v11_text(suggestion.description),
-            "expected_signal": _scrub_v11_text(suggestion.expected_signal),
-            "result_note": (
-                _scrub_v11_text(suggestion.result_note)
-                if suggestion.result_note is not None
-                else None
-            ),
-        }
-    )
 
 
 def _safe_v11_text(text: str) -> str:

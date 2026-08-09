@@ -434,8 +434,10 @@ class DiagnosisPhaseExecutor:
             multi_agent_run=run,
             agent_findings=self._orchestrator.repository.list_agent_findings(record.id),
         )
-        state.record = self._orchestrator.repository.save(
-            record.model_copy(update={"report": report, "updated_at": datetime.now(UTC)})
+        # 报告和 action 必须与本 phase 的 checkpoint 一起提交；handler 只返回
+        # BusinessMutation，避免在 PhaseCommit 之前留下不可回滚的业务写入。
+        state.record = record.model_copy(
+            update={"report": report, "updated_at": datetime.now(UTC)}
         )
         return self._output(state, report_count=1)
 

@@ -39,13 +39,17 @@ def ensure_v11_projection_owner(repository, runtime_store, record: Investigation
     if has_agent_projection and active_runtime_id is not None:
         runtime_ids.add(active_runtime_id)
     if has_agent_projection:
-        for projection in (
-            *record.evidence,
-            *record.actions,
-            *record.verification_suggestions,
+        for label, projections in (
+            ("evidence", record.evidence),
+            ("action", record.actions),
+            ("verification", record.verification_suggestions),
         ):
-            runtime_id = getattr(projection, "runtime_run_id", None)
-            if runtime_id is not None:
+            for projection in projections:
+                runtime_id = getattr(projection, "runtime_run_id", None)
+                if runtime_id is None:
+                    raise V11ProjectionIntegrityError(
+                        f"Agent {label} projection lacks runtime owner"
+                    )
                 runtime_ids.add(runtime_id)
 
     if not has_agent_projection:

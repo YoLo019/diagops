@@ -51,6 +51,7 @@ from backend.runtime.store import (
     InMemoryRuntimeStore,
     RuntimeConflict,
     RuntimeContractError,
+    RuntimeNotFound,
 )
 from backend.runtime.telemetry import RuntimeTelemetry
 from backend.runtime.writer import RuntimeWriter
@@ -272,6 +273,12 @@ class AppContainer:
                     )
                     self.close()
 
+    def product_execution_contract_version(self) -> ExecutionContractVersion:
+        """选择产品入口的持久化执行版本，保留无 Agent 配置的 legacy 路径。"""
+        if self.settings.runtime.enabled and self.orchestrator.v11_runtime is not None:
+            return ExecutionContractVersion.V11
+        return ExecutionContractVersion.V10_LEGACY
+
     async def run_investigation(
         self,
         event: IncidentEvent,
@@ -282,14 +289,24 @@ class AppContainer:
         ),
         runtime_run_id: str | None = None,
     ):
-        if ExecutionContractVersion(execution_contract_version) == ExecutionContractVersion.V11:
+        version = ExecutionContractVersion(execution_contract_version)
+        if version == ExecutionContractVersion.V11:
             if not self.settings.runtime.enabled:
                 raise RuntimeConflict("V11 execution requires enabled Runtime")
             if runtime_run_id is None:
-                raise RuntimeConflict(
-                    "V11 service execution requires a persisted RuntimeRun"
+                effective_strategy = strategy or self.settings.agents.strategy
+                record = redact_model(
+                    InvestigationRecord(event=event, strategy=effective_strategy)
                 )
-            run = self.runtime_store.get_run(runtime_run_id)
+                self.repository.save(record)
+                run = self.create_runtime_run(
+                    record.id,
+                    strategy=effective_strategy,
+                    run_reason=RuntimeRunReason.INITIAL,
+                    execution_contract_version=version,
+                )
+            else:
+                run = self.runtime_store.get_run(runtime_run_id)
             if (
                 not run.is_v11
                 or getattr(event, "investigation_id", run.investigation_id)
@@ -361,6 +378,19 @@ class AppContainer:
             if prompt_version is not None and prompt_version != configured_prompt:
                 raise RuntimeContractError("V11 prompt_version is server-owned")
         source_record = self.repository.get(investigation_id)
+        if version == ExecutionContractVersion.V10_LEGACY:
+            active_owner = source_record.active_runtime_run_id
+            if active_owner is not None:
+                try:
+                    active_run = self.runtime_store.get_run(active_owner)
+                except RuntimeNotFound as exc:
+                    raise RuntimeConflict(
+                        "active projection owner RuntimeRun is unavailable"
+                    ) from exc
+                if active_run.is_v11:
+                    raise RuntimeConflict(
+                        "V10 RuntimeRun is not allowed on an active V11 projection"
+                    )
         if version == ExecutionContractVersion.V11:
             investigation_id = self._v11_investigation_id(
                 source_record,

@@ -8,7 +8,13 @@ from backend.domain.agent_findings import CoordinationReview
 from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem
 from backend.domain.hypotheses import CauseType, Hypothesis
-from backend.domain.multi_agent import AuthorityMode, DiagnosticStatus, MultiAgentRunSummary
+from backend.domain.multi_agent import (
+    AuthorityMode,
+    DiagnosticStatus,
+    LeadAction,
+    MultiAgentRunStatus,
+    MultiAgentRunSummary,
+)
 
 
 class ActionPlanner:
@@ -130,10 +136,8 @@ class ActionPlanner:
             or run.runtime_run_id != review.runtime_run_id
         ):
             raise ValueError("V11 actions require matching Agent review and run")
-        if DiagnosticStatus.INCONCLUSIVE in {
-            review.diagnostic_status,
-            run.diagnostic_status,
-        }:
+        self._validate_v11_final_status(review, run)
+        if review.diagnostic_status == DiagnosticStatus.INCONCLUSIVE:
             return [], []
 
         evidence_by_id = {
@@ -185,6 +189,42 @@ class ActionPlanner:
                 )
             )
         return actions, verifications
+
+    @staticmethod
+    def _validate_v11_final_status(
+        review: CoordinationReview,
+        run: MultiAgentRunSummary,
+    ) -> None:
+        """拒绝状态漂移，避免未验证的 Lead 结论生成副作用投影。"""
+        if review.run_status != run.status:
+            raise ValueError("V11 review and run status mismatch")
+        if run.status not in {
+            MultiAgentRunStatus.COMPLETED,
+            MultiAgentRunStatus.PARTIAL,
+        }:
+            raise ValueError("V11 actions require a completed or partial run")
+        if (
+            review.diagnostic_status is None
+            or run.diagnostic_status is None
+            or review.diagnostic_status != run.diagnostic_status
+        ):
+            raise ValueError("V11 review and run diagnostic status mismatch")
+        decision = review.lead_decision
+        if decision is None:
+            raise ValueError("V11 actions require a final Lead decision")
+        if review.diagnostic_status in {
+            DiagnosticStatus.COMPLETE,
+            DiagnosticStatus.PARTIAL,
+        }:
+            if decision.action != LeadAction.CONCLUDE or not decision.candidate_ids:
+                raise ValueError("V11 final Lead decision is inconsistent with status")
+            return
+        if (
+            decision.action != LeadAction.INCONCLUSIVE
+            or decision.task_ids
+            or decision.candidate_ids
+        ):
+            raise ValueError("V11 final Lead decision is inconsistent with status")
 
     def _manual_follow_up(
         self,

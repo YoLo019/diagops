@@ -186,6 +186,18 @@ export function projectAgentUiText(text: string, executionLayer?: AgentExecution
     .replace(/\s+/gu, " ");
 }
 
+export function projectV11UiText(text: string | null | undefined) {
+  if (!text) return "";
+  if (
+    /(system\s+prompt|developer\s+message|private\s+reasoning|chain\s+of\s+thought|thought\s+process|internal\s+prompt|原始提示词|私有推理|思维链|系统提示)/iu.test(
+      text,
+    )
+  ) {
+    return "[内部推理内容已省略]";
+  }
+  return projectAgentUiText(text, "openai_agents_sdk");
+}
+
 function formatDate(value?: string | null) {
   if (!value) {
     return "暂无";
@@ -472,10 +484,10 @@ function Hypotheses({ investigation }: { investigation: InvestigationRecord }) {
           ? diagnoses.map((candidate) => (
               <article className="hypothesis-item" key={candidate.id}>
                 <div className="score-row">
-                  <strong>{candidate.affected_entity ?? "未指定实体"}</strong>
+                  <strong>{projectV11UiText(candidate.affected_entity ?? "未指定实体")}</strong>
                   <span>{formatPercent(candidate.confidence)}</span>
                 </div>
-                <p>{candidate.failure_mechanism ?? candidate.summary}</p>
+                <p>{projectV11UiText(candidate.failure_mechanism ?? candidate.summary)}</p>
                 <p className="muted">候选 ID: {candidate.id}</p>
               </article>
             ))
@@ -511,7 +523,11 @@ function AgentFindingList({ findingsByAgent }: { findingsByAgent: Record<string,
           <strong>{agentName}</strong>
           {findings.map((finding) => (
             <div key={finding.id}>
-              <p>{projectAgentUiText(finding.summary, finding.execution_layer)}</p>
+              <p>
+                {finding.runtime_run_id
+                  ? projectV11UiText(finding.summary)
+                  : projectAgentUiText(finding.summary, finding.execution_layer)}
+              </p>
               <div className="process-detail">
                 {finding.execution_layer === "openai_agents_sdk" ? (
                   <>
@@ -528,12 +544,18 @@ function AgentFindingList({ findingsByAgent }: { findingsByAgent: Record<string,
                 <span className="evidence-link">证据: {formatIdList(finding.evidence_ids)}</span>
                 <span>
                   缺口: {formatIdList(
-                    finding.gaps.map((gap) => projectAgentUiText(gap, finding.execution_layer)),
+                    finding.gaps.map((gap) =>
+                      finding.runtime_run_id
+                        ? projectV11UiText(gap)
+                        : projectAgentUiText(gap, finding.execution_layer),
+                    ),
                   )}
                 </span>
               </div>
               <p className="muted">
-                {projectAgentUiText(finding.rationale, finding.execution_layer)}
+                {finding.runtime_run_id
+                  ? projectV11UiText(finding.rationale)
+                  : projectAgentUiText(finding.rationale, finding.execution_layer)}
               </p>
             </div>
           ))}
@@ -592,10 +614,12 @@ function RcaWorkbenchPanel({ investigationId }: { investigationId: string }) {
   const reviewUncertainty = review
     ? projectAgentUiText(review.uncertainty ?? "", review.execution_layer)
     : "";
-  const safeRunFailureReason = projectAgentUiText(
-    run?.failure_reason ?? "",
-    run ? "openai_agents_sdk" : undefined,
-  );
+  const safeRunFailureReason = isV11Projection
+    ? projectV11UiText(run?.failure_reason ?? "")
+    : projectAgentUiText(
+        run?.failure_reason ?? "",
+        run ? "openai_agents_sdk" : undefined,
+      );
   const evidenceIds = (workbenchQuery.data?.evidence ?? []).map((item) => item.id);
   const recommendationTitles = (workbenchQuery.data?.investigation.actions ?? []).map(
     (action) => action.title,
@@ -647,9 +671,9 @@ function RcaWorkbenchPanel({ investigationId }: { investigationId: string }) {
                   </div>
                   <div>
                     <span className="label">接受诊断</span>
-                    <strong>{v11Diagnoses[0]?.affected_entity ?? "无"}</strong>
+                    <strong>{projectV11UiText(v11Diagnoses[0]?.affected_entity ?? "无")}</strong>
                     {v11Diagnoses[0]?.failure_mechanism ? (
-                      <span>{v11Diagnoses[0].failure_mechanism}</span>
+                      <span>{projectV11UiText(v11Diagnoses[0].failure_mechanism)}</span>
                     ) : null}
                   </div>
                   {run.model_provider && run.model_name ? (
@@ -721,7 +745,7 @@ function RcaWorkbenchPanel({ investigationId }: { investigationId: string }) {
                     <strong>V11 接受诊断</strong>
                     {v11Diagnoses.length ? v11Diagnoses.map((candidate) => (
                       <p key={candidate.id}>
-                        {candidate.affected_entity ?? "未指定实体"} · {candidate.failure_mechanism ?? candidate.summary}
+                        {projectV11UiText(candidate.affected_entity ?? "未指定实体")} · {projectV11UiText(candidate.failure_mechanism ?? candidate.summary)}
                         （置信度 {formatPercent(candidate.confidence)}）
                       </p>
                     )) : <p>当前没有接受的诊断候选。</p>}
@@ -730,15 +754,21 @@ function RcaWorkbenchPanel({ investigationId }: { investigationId: string }) {
                     <strong>备选候选</strong>
                     <p>
                       {(workbenchQuery.data?.investigation.report?.alternatives ?? []).map(
-                        (candidate) => candidate.summary,
+                        (candidate) => projectV11UiText(candidate.summary),
                       ).join("；") || "无"}
                     </p>
                   </article>
                   <article className="compact-row">
                     <strong>Critic / 证据缺口</strong>
-                    <p>{v11Review?.critic_assessments?.map((item) => item.summary).join("；") || "暂无 Critic 摘要"}</p>
-                    <p>{workbenchQuery.data?.investigation.report?.evidence_gaps?.join("；") || "未记录证据缺口"}</p>
+                    <p>{v11Review?.critic_assessments?.map((item) => projectV11UiText(item.summary)).join("；") || "暂无 Critic 摘要"}</p>
+                    <p>{workbenchQuery.data?.investigation.report?.evidence_gaps?.map((item) => projectV11UiText(item)).join("；") || "未记录证据缺口"}</p>
                   </article>
+                  {v11Review?.lead_decision ? (
+                    <article className="compact-row">
+                      <strong>Lead decision: {v11Review.lead_decision.action}</strong>
+                      <p>{projectV11UiText(v11Review.lead_decision.summary)}</p>
+                    </article>
+                  ) : null}
                   <article className="compact-row">
                     <strong>证据</strong>
                     <p>{v11EvidenceIds.join(", ") || "未记录证据"}</p>
@@ -820,8 +850,8 @@ function RcaWorkbenchPanel({ investigationId }: { investigationId: string }) {
                   <strong>#{candidate.rank} {candidate.cause_type}</strong>
                   <span>{formatPercent(candidate.confidence)}</span>
                 </div>
-                <p>{projectAgentUiText(candidate.summary, persistedReview?.execution_layer)}</p>
-                <p>{projectAgentUiText(candidate.rationale, persistedReview?.execution_layer)}</p>
+                <p>{isV11Projection ? projectV11UiText(candidate.summary) : projectAgentUiText(candidate.summary, persistedReview?.execution_layer)}</p>
+                <p>{isV11Projection ? projectV11UiText(candidate.rationale) : projectAgentUiText(candidate.rationale, persistedReview?.execution_layer)}</p>
                 <div className="process-detail">
                   <span>支持判断: {formatIdList(candidate.supporting_finding_ids)}</span>
                   <span>反对判断: {formatIdList(candidate.contradicting_finding_ids)}</span>
@@ -829,7 +859,7 @@ function RcaWorkbenchPanel({ investigationId }: { investigationId: string }) {
                   <span>反对证据: {formatIdList(candidate.contradicting_evidence_ids)}</span>
                 </div>
                 <p className="muted">
-                  {projectAgentUiText(candidate.uncertainty, persistedReview?.execution_layer)}
+                  {isV11Projection ? projectV11UiText(candidate.uncertainty) : projectAgentUiText(candidate.uncertainty, persistedReview?.execution_layer)}
                 </p>
               </article>
             ))}
@@ -1345,7 +1375,13 @@ function ReportPanel({ investigation }: { investigation: InvestigationRecord }) 
         <h2>诊断报告</h2>
       </div>
       {investigation.report ? (
-        <MarkdownReport markdown={investigation.report.markdown} />
+        <MarkdownReport
+          markdown={
+            investigation.report.authority_mode === "agent"
+              ? projectV11UiText(investigation.report.markdown)
+              : investigation.report.markdown
+          }
+        />
       ) : (
         <div className="empty-state">该诊断尚未生成报告。</div>
       )}

@@ -9,9 +9,12 @@ from backend.diagnosis.coordinator import DiagnosisCoordinator
 from backend.diagnosis.orchestrator import DiagnosisOrchestrator
 from backend.domain.actions import VerificationStatus
 from backend.domain.agent_findings import (
+    AgentFinding,
+    AgentFindingType,
     CausalCheck,
     CoordinationReview,
     CriticAssessment,
+    FindingActor,
     RootCauseCandidate,
 )
 from backend.domain.agent_plan import LeadDecision
@@ -19,6 +22,7 @@ from backend.domain.events import IncidentEvent, IncidentSource, Severity
 from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
 from backend.domain.human_transitions import HumanStateConflict, validate_verification_transition
 from backend.domain.multi_agent import (
+    AgentExecutionLayer,
     AuthorityMode,
     CausalCheckName,
     CausalCheckStatus,
@@ -166,6 +170,41 @@ def test_v11_report_projects_candidate_led_diagnoses_without_hypotheses():
     assert "private chain of thought" not in report.model_dump_json()
 
 
+def test_v11_markdown_renders_actual_findings_tasks_rounds_and_lead_decision():
+    finding = AgentFinding(
+        id="finding-log-actual",
+        investigation_id="inv-v11-product",
+        agent_name=FindingActor.LOG,
+        agent_instance_id="log-instance-7",
+        finding_type=AgentFindingType.ROOT_CAUSE,
+        summary="deployment evidence explains request failure",
+        rationale="bounded public rationale",
+        confidence=0.8,
+        evidence_ids=["ev-deploy"],
+        execution_layer=AgentExecutionLayer.OPENAI_AGENTS_SDK,
+        task_id="task-log-actual",
+        runtime_run_id=RUN_ID,
+        analysis_round=1,
+    )
+    report = ReportGenerator().generate(
+        "inv-v11-product",
+        _event(),
+        [_evidence()],
+        [],
+        coordination_review=_review(_candidate()),
+        multi_agent_run=_run_summary(DiagnosticStatus.COMPLETE),
+        agent_findings=[finding],
+    )
+
+    assert "finding-log-actual" in report.markdown
+    assert "log-instance-7" in report.markdown
+    assert "task-log-actual" in report.markdown
+    assert "analysis round" in report.markdown
+    assert "conclude" in report.markdown
+    assert "LeadAgent / InvestigatorAgent / CriticAgent" not in report.markdown
+    assert "见 Critic 评估" not in report.markdown
+
+
 def test_v11_action_planner_binds_read_only_recommendations_to_candidates():
     candidate = _candidate()
     actions, verifications = ActionPlanner().plan_v11(
@@ -202,7 +241,7 @@ def test_v11_inconclusive_report_does_not_activate_diagnosis_or_actions():
     )
 
     assert report.diagnoses == []
-    assert report.alternatives == [candidate]
+    assert report.alternatives == []
     assert actions == []
     assert verifications == []
     assert "not_activated" in report.markdown
@@ -242,6 +281,48 @@ def test_v11_human_verification_rejects_candidate_from_another_projection():
             [],
             [],
             ["candidate-from-another-run"],
+        )
+
+
+def test_v11_human_verification_cannot_replace_persisted_candidate_refs():
+    candidate = _candidate()
+    other = _candidate().model_copy(
+        update={"id": "candidate-other", "rank": 2, "summary": "another candidate"}
+    )
+    review = _review(candidate)
+    actions, verifications = ActionPlanner().plan_v11(
+        _event(), [_evidence()], review, _run_summary(DiagnosticStatus.COMPLETE)
+    )
+    record = InvestigationRecord(
+        id="inv-v11-product",
+        event=_event(),
+        strategy=InvestigationStrategy.ADAPTIVE,
+        status=InvestigationStatus.COMPLETED,
+        evidence=[_evidence()],
+        actions=actions,
+        verification_suggestions=verifications,
+        report=IncidentReport(
+            investigation_id="inv-v11-product",
+            summary=candidate.summary,
+            markdown="safe report",
+            diagnoses=[candidate],
+            alternatives=[other],
+            authority_mode=AuthorityMode.AGENT,
+            runtime_run_id=RUN_ID,
+        ),
+        active_runtime_run_id=RUN_ID,
+    )
+
+    with pytest.raises(HumanStateConflict, match="verification reference"):
+        validate_verification_transition(
+            record,
+            verifications[0].id,
+            VerificationStatus.SKIPPED,
+            None,
+            [],
+            [],
+            [],
+            [other.id],
         )
 
 

@@ -26,6 +26,13 @@ from backend.domain.react_trace import ReActTrace
 from backend.domain.tool_calls import ToolCallRecord
 from backend.safety.redaction import redact_model
 from backend.services.container import get_container
+from backend.services.v11_public import (
+    public_v11_execution,
+    public_v11_finding,
+    public_v11_graph_seed,
+    public_v11_review,
+    scrub_v11_text,
+)
 
 router = APIRouter(prefix="/investigations", tags=["agent-views"])
 
@@ -36,14 +43,24 @@ def _repository() -> Any:
 
 def _list_agent_findings(investigation_id: str) -> list[AgentFinding]:
     return [
-        redact_model(item)
+        (
+            public_v11_finding(item)
+            if item.runtime_run_id is not None
+            else redact_model(item)
+        )
         for item in _repository().list_agent_findings(investigation_id)
     ]
 
 
 def _get_coordination_review(investigation_id: str) -> CoordinationReview | None:
     review = _repository().get_coordination_review(investigation_id)
-    return None if review is None else redact_model(review)
+    if review is None:
+        return None
+    return (
+        public_v11_review(review)
+        if review.authority_mode == AuthorityMode.AGENT
+        else redact_model(review)
+    )
 
 
 def _get_react_trace(investigation_id: str) -> ReActTrace | None:
@@ -168,6 +185,10 @@ def _multi_agent_run_summary(
             else AdaptiveRunStatus.DEGRADED
         )
     )
+    if is_v11_review:
+        summary = summary.model_copy(
+            update={"failure_reason": scrub_v11_text(summary.failure_reason)}
+        )
     return summary.model_copy(
         update={
             "strategy": strategy,
@@ -285,7 +306,11 @@ def get_investigation_rca_workbench(investigation_id: str) -> dict[str, Any]:
     findings = _list_agent_findings(investigation_id)
     review = _get_coordination_review(investigation_id)
     executions = [
-        redact_model(item)
+        (
+            public_v11_execution(item)
+            if item.runtime_run_id is not None
+            else redact_model(item)
+        )
         for item in _repository().list_executions(investigation_id)
     ]
     tasks = _repository().list_tasks(investigation_id)
@@ -341,6 +366,13 @@ def _build_rca_graph_seed(
     *,
     review: CoordinationReview | None = None,
 ) -> dict[str, list[dict[str, str]]]:
+    if review is not None and review.authority_mode == AuthorityMode.AGENT:
+        return public_v11_graph_seed(
+            evidence,
+            findings,
+            candidates,
+            review=review,
+        )
     nodes: dict[str, dict[str, str]] = {}
     edges: list[dict[str, str]] = []
 
