@@ -100,7 +100,12 @@ def ensure_v11_projection_owner(repository, runtime_store, record: Investigation
             "Agent projection coordination review investigation mismatch"
         )
     try:
-        validate_v11_final_status(review, latest_run, durable_status=run.status)
+        validate_v11_final_status(
+            review,
+            latest_run,
+            durable_status=run.status,
+            investigation_status=record.status,
+        )
     except ValueError as exc:
         raise V11ProjectionIntegrityError(
             "Agent projection final status contract failed"

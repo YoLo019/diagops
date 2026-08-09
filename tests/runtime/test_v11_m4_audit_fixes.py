@@ -817,6 +817,44 @@ def test_v11_projection_guard_rejects_nonterminal_durable_run_after_reload(
 
 
 @pytest.mark.parametrize(
+    "investigation_status",
+    [
+        InvestigationStatus.FAILED,
+        InvestigationStatus.CANCELLED,
+        InvestigationStatus.RUNNING,
+        InvestigationStatus.PENDING,
+    ],
+)
+def test_v11_projection_guard_rejects_noncompleted_investigation_after_reload(
+    runtime_store, investigation_status
+):
+    """失败、取消或未完成的调查不得公开已完成 durable run 的 Agent 投影。"""
+    repository = runtime_store.investigation_repository
+    run = runtime_store.create_run(
+        _persisted_v11_run(
+            f"run-investigation-status-{type(runtime_store).__name__}-{investigation_status}",
+            "inv-1",
+        ).model_copy(update={"status": RuntimeRunStatus.COMPLETED})
+    )
+    candidate = _candidate()
+    review = _owned_review("inv-1", run.id, candidate)
+    summary = _owned_run_summary(run.id, DiagnosticStatus.COMPLETE)
+    repository.save(
+        repository.get("inv-1").model_copy(
+            update={
+                "status": investigation_status,
+                "active_runtime_run_id": run.id,
+                "multi_agent_run": summary,
+            }
+        )
+    )
+    repository.save_coordination_review(review)
+
+    with pytest.raises(V11ProjectionIntegrityError, match="final status contract"):
+        ensure_v11_projection_owner(repository, runtime_store, repository.get("inv-1"))
+
+
+@pytest.mark.parametrize(
     "report_shape",
     ["foreign_diagnosis", "foreign_alternative", "inconclusive_diagnosis"],
 )
@@ -913,6 +951,7 @@ def test_v11_projection_guard_accepts_legal_final_status_matrix(
     repository.save(
         repository.get("inv-1").model_copy(
             update={
+                "status": InvestigationStatus.COMPLETED,
                 "active_runtime_run_id": run.id,
                 "multi_agent_run": run_summary,
             }
@@ -1008,6 +1047,47 @@ def test_v11_api_rejects_nonterminal_durable_run_for_report_and_workbench(
 
     with TestClient(app) as client:
         for path in ("rca-workbench", "report"):
+            response = client.get(f"/investigations/{investigation_id}/{path}")
+            assert response.status_code == 409, response.text
+    container.close()
+
+
+@pytest.mark.parametrize(
+    "investigation_status",
+    [
+        InvestigationStatus.FAILED,
+        InvestigationStatus.CANCELLED,
+        InvestigationStatus.RUNNING,
+        InvestigationStatus.PENDING,
+    ],
+)
+def test_v11_api_rejects_noncompleted_investigation_status(
+    investigation_status,
+):
+    """report、workbench、coordination-review 共用调查终态 guard。"""
+    container = reset_container()
+    investigation_id = f"inv-api-investigation-status-{investigation_status}"
+    container.repository.save(InvestigationRecord(id=investigation_id, event=_event()))
+    run = container.runtime_store.create_run(
+        _persisted_v11_run(
+            f"run-api-investigation-status-{investigation_status}", investigation_id
+        ).model_copy(update={"status": RuntimeRunStatus.COMPLETED})
+    )
+    candidate = _candidate()
+    review = _owned_review(investigation_id, run.id, candidate)
+    container.repository.save(
+        container.repository.get(investigation_id).model_copy(
+            update={
+                "status": investigation_status,
+                "active_runtime_run_id": run.id,
+                "multi_agent_run": _owned_run_summary(run.id, DiagnosticStatus.COMPLETE),
+            }
+        )
+    )
+    container.repository.save_coordination_review(review)
+
+    with TestClient(app) as client:
+        for path in ("report", "rca-workbench", "coordination-review"):
             response = client.get(f"/investigations/{investigation_id}/{path}")
             assert response.status_code == 409, response.text
     container.close()

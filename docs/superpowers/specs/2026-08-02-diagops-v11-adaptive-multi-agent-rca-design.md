@@ -1804,6 +1804,32 @@ with privacy scan clean, both Ruff commands, frontend build, and diff-check
 green. The post-commit runtime artifact is bound with `git_dirty=false` in the
 implementation handoff; no merge or push was performed and M5 was not started.
 
+M4 fifth-round final High-fix ledger (2026-08-10): the independent review
+reproduced the last publication bypass: the shared V11 guard validated the
+durable runtime and final Agent review but not `InvestigationRecord.status`.
+The approved publication matrix is now explicit at both lifecycle layers:
+V11 complete/partial/inconclusive output requires
+`InvestigationStatus.COMPLETED` and `RuntimeRunStatus.COMPLETED`; failed,
+cancelled, running, pending, created, or interrupted state fails closed.
+
+The lifecycle check is part of the shared V11 domain/publication contract used
+by the guard, rather than an API-only filter. Memory/SQLite reload, report,
+coordination-review, graph/workbench, and API regressions cover the public
+boundary. The OpenRCA V11 runner calls the same guard before projection, and
+its CSV writer refuses to serialize root causes for any non-success outcome,
+writing an empty prediction plus safe `failure_category` metadata. The V10
+deterministic projector/writer and V10-only legacy report behavior are
+unchanged.
+
+Required RED→GREEN evidence is guard/API `12 failed` then `12 passed`, real
+OpenRCA failed-investigation CSV `1 failed` then `1 passed`, affected
+OpenRCA runner/projection `45 passed`, M4 focused `137 passed/1 warning`, T9
+`289 passed/1 warning`, T10 `881 passed/3 skipped/1 warning`, and full pytest
+`2097 passed/3 skipped/1 warning`. Offline `80/80`, Ruff, frontend build, and
+diff-check passed; post-commit runtime acceptance is recorded in the final
+handoff with `git_dirty=false`. No merge or push was performed and M5 was not
+started.
+
 ## 16. Approval state
 
 - Requirements Brief: confirmed by user.

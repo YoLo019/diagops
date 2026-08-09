@@ -569,6 +569,22 @@ def run_benchmark_pair(
                     failure_category=f"{type(exc).__name__}: benchmark case failed"
                 )
             outcomes[strategy].append((case, outcome))
+            published_root_causes = outcome.root_causes
+            publication_failure_category = outcome.failure_category
+            if mode == "v11-agent" and not outcome.completed:
+                published_root_causes = []
+                publication_failure_category = publication_failure_category or "failed"
+            metadata = {
+                "expected_root_cause_count": (case.expected_root_cause_count),
+                "runtime_run_id": outcome.runtime_run_id,
+                "projection": (
+                    outcome.projection_audit.metadata()
+                    if outcome.projection_audit is not None
+                    else None
+                ),
+            }
+            if mode == "v11-agent":
+                metadata["failure_category"] = publication_failure_category
             rows[strategy].append(
                 {
                     "case_id": case.case_id,
@@ -576,19 +592,11 @@ def run_benchmark_pair(
                     "row_id": case.row_id,
                     "task_index": case.task_index,
                     "prediction": _official_prediction(
-                        outcome.root_causes,
+                        published_root_causes,
                         case.expected_root_cause_count,
                     ),
                     "metadata": json.dumps(
-                        {
-                            "expected_root_cause_count": (case.expected_root_cause_count),
-                            "runtime_run_id": outcome.runtime_run_id,
-                            "projection": (
-                                outcome.projection_audit.metadata()
-                                if outcome.projection_audit is not None
-                                else None
-                            ),
-                        },
+                        metadata,
                         ensure_ascii=False,
                         separators=(",", ":"),
                         sort_keys=True,

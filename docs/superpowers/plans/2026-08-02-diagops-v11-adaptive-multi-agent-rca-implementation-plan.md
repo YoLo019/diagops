@@ -936,6 +936,40 @@ build, and `git diff --check` passed. The final post-commit runtime artifact
 and `git_dirty=false` binding are recorded in the implementation handoff. No
 merge or push was performed and M5 was not started.
 
+### M4 fifth-round final High-fix evidence (2026-08-10)
+
+The fifth independent review reproduced one remaining High publication bypass
+against the fourth-round checkpoint. The RED regressions covered failed,
+cancelled, running, and pending `InvestigationStatus` values with a completed
+durable run in both memory and SQLite reloads, all three API publication paths,
+and a real local OpenRCA V11 runner writing `v11-agent-predictions.csv`.
+
+The shared domain status contract now accepts a V11 public projection only when
+the InvestigationRecord is `completed`; it continues to require the legal
+review/run/Lead matrix and durable `RuntimeRunStatus.COMPLETED`. The shared
+guard is used by API, coordination-review, report, graph/workbench, and the
+OpenRCA V11 runner, so failed/cancelled/running/pending investigations fail
+closed before any public projection. The V11 benchmark writer also treats every
+non-success outcome as non-publishable, emits `{}` in prediction/CSV, and stores
+the safe `failure_category`; the V10 deterministic writer and legacy report
+path remain unchanged.
+
+RED→GREEN evidence:
+
+- InvestigationStatus memory/SQLite guard plus API matrix: RED `12 failed`,
+  GREEN `12 passed/1 warning`;
+- real OpenRCA failed-investigation prediction/CSV: RED `1 failed`, GREEN
+  `1 passed`;
+- affected benchmark/projection suite: `45 passed`; full M4 focused suite:
+  `137 passed/1 warning`.
+
+Final pre-commit gates: T9 exact `289 passed/1 warning`; T10 exact `881
+passed/3 skipped/1 warning`; full pytest `2097 passed/3 skipped/1 warning`;
+offline acceptance `80/80`; both Ruff commands, frontend production build,
+and `git diff --check` passed. Runtime acceptance is rerun after the final
+commit so its artifact can bind the new SHA with `git_dirty=false`. No merge or
+push was performed and M5 was not started.
+
 ### T9. Reports, actions, human transitions, API/UI, and OpenRCA
 
 Requirements: R5–R12, R18–R19, R27.

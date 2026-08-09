@@ -30,6 +30,7 @@ from backend.benchmarks.openrca.runner import (
     OpenRcaDiagnosisRunner,
     run_benchmark_pair,
 )
+from backend.db.models import InvestigationStatus
 from backend.db.session import create_db_engine, initialize_database
 from backend.db.sqlite_repository import SQLiteInvestigationRepository
 from backend.domain.agent_findings import RootCauseAttribution
@@ -466,6 +467,61 @@ def test_real_v11_runner_csv_fails_closed_when_durable_run_is_failed(
     summary = json.loads((result.output_dir / "summary.json").read_text(encoding="utf-8"))
     assert summary["strategies"]["fixed"]["projection_errors"] == 1
     assert runtime_store.get_run(metadata["runtime_run_id"]).status == RuntimeRunStatus.COMPLETED
+
+
+def test_real_v11_runner_csv_fails_closed_when_investigation_is_failed(
+    tmp_path: Path, monkeypatch
+):
+    runner, case, repository, _runtime_store = build_real_v11_fixture_runner(tmp_path)
+    index_path = tmp_path / "single-v11-investigation-failed.json"
+    index_path.write_text(
+        OpenRcaRuntimeIndex(case_manifest_hash="fixture", cases=[case]).model_dump_json(),
+        encoding="utf-8",
+    )
+    original_guard = openrca_runner.ensure_v11_projection_owner
+    projected_cause = RootCauseAttribution(
+        root_cause_occurred_at=case.start_time,
+        root_cause_component="must-not-publish",
+        root_cause_reason="must-not-publish",
+        supporting_evidence_ids=["ev-must-not-publish"],
+    )
+    projected = ProjectionResult(
+        causes=(projected_cause,),
+        audit=ProjectionAudit(
+            rule_version="v11-agent-generic",
+            scored_fields=scored_fields(case.task_index),
+            selected_evidence_ids=(("ev-must-not-publish",),),
+        ),
+    )
+
+    def project(**_arguments):
+        return projected
+
+    def guard(repo, store, record):
+        repo.save(record.model_copy(update={"status": InvestigationStatus.FAILED}))
+        return original_guard(repo, store, repo.get(record.id))
+
+    monkeypatch.setattr(openrca_runner, "project_v11_candidates", project)
+    monkeypatch.setattr(openrca_runner, "ensure_v11_projection_owner", guard)
+    result = run_benchmark_pair(
+        runner,
+        index_path,
+        tmp_path / "runs",
+        model="fake-model",
+        strategies=(InvestigationStrategy.FIXED,),
+        mode="v11-agent",
+    )
+
+    prediction_path = result.output_dir / "v11-agent-predictions.csv"
+    with prediction_path.open(encoding="utf-8", newline="") as file:
+        rows = list(csv.DictReader(file))
+    assert len(rows) == 1
+    assert json.loads(rows[0]["prediction"]) == {}
+    metadata = json.loads(rows[0]["metadata"])
+    assert metadata["failure_category"] == "projection_error"
+    assert metadata["projection"]["projection_error"] is True
+    summary = json.loads((result.output_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary["strategies"]["fixed"]["projection_errors"] == 1
 
 
 def test_real_runner_projects_output_without_mutating_persisted_review(

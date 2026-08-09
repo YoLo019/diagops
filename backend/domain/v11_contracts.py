@@ -16,8 +16,13 @@ def validate_v11_final_status(
     run: MultiAgentRunSummary,
     *,
     durable_status: RuntimeRunStatus | None = None,
+    investigation_status: object | None = None,
 ) -> None:
     """Validate the final review/run/Lead combination before V11 publication."""
+    if investigation_status is not None:
+        status_value = getattr(investigation_status, "value", investigation_status)
+        if status_value != "completed":
+            raise ValueError("V11 projection requires a completed investigation")
     if review.run_status != run.status:
         raise ValueError("V11 review and run status mismatch")
     if run.status not in {

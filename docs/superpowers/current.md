@@ -43,7 +43,7 @@ Plan status: `approved`
 
 Implementation status: `complete`
 
-Completion commit: local M4 fourth-round high-fix commit on `codex/v11-m4`
+Completion commit: local M4 fifth-round final High-fix commit on `codex/v11-m4`
 (SHA is recorded in the final handoff; no merge or push)
 
 M2 baseline commit: `c2245ac` (`chore(v11): checkpoint M2 T4-T6`), committed
@@ -159,11 +159,18 @@ T9 288, T10 868, and full pytest 2084 all passed with the recorded skips and
 warnings. Offline 80/80, runtime 14/14 privacy-clean, Ruff, frontend build,
 and diff-check are green.
 
+Latest M4 fifth-round verification: the shared V11 guard now requires
+`InvestigationStatus.COMPLETED` in addition to the existing final review and
+durable `RuntimeRunStatus.COMPLETED` matrix. Non-success V11 OpenRCA outcomes
+produce empty prediction/CSV output with an explicit failure category; V10
+legacy output remains unchanged. M4 focused 137, T9 289, T10 881, and full
+pytest 2097 passed with only the recorded skips/warning.
+
 Current phase: Full iteration / M4 review-fix implemented and locally verified
-in isolated worktree; fourth-round H1–H3 fix and all local gates verified;
+in isolated worktree; fifth-round final High fix and all local gates verified;
 awaiting same-thread independent re-review
 
-Next action: 独立复审 M4 fourth-round review-fix；保持当前 worktree/branch，不 merge、push
+Next action: 独立复审 M4 fifth-round review-fix；保持当前 worktree/branch，不 merge、push
 或进入 M5。
 
 | ID | Phase | Task | Status | Evidence or result | Next action or blocker |
@@ -177,7 +184,7 @@ Next action: 独立复审 M4 fourth-round review-fix；保持当前 worktree/bra
 | M1/T3 | Execute | Versioned phase profiles, activation, gates, replay, and diff | implemented / verified | 初始审查问题 H1–H7 已补最小 RED 并 GREEN；第二轮 ownerless RESULT_VALIDATION、计划/任务和 Investigation 聚合写入回归先 RED 后 GREEN；`uv run pytest tests/runtime tests/api/test_runtime_runs_api.py -q` → `420 passed, 2 skipped, 1 warning in 117.53s`; `tests/runtime/test_review_fixes.py` → `27 passed, 1 skipped`; T3 Ruff clean；V10/V11 phase、owner、replay/diff、contract-integrity reload、service/API gate 回归通过 | 独立运行时复审通过（第三轮 RR 全关闭）；M2 基线 `c2245ac` 已提交，T4–T5 已按当前 Plan 记录完成 |
 | M2/T4–T6 | Execute | 九工具离线事件包与 data-only skills、File/Tempo trace 平价、模型边界与能力认证 | implemented / verified | 独立复审重跑：T4 336 passed + 离线验收 rows=80 failed=0；T5 17 passed + Docker gate blocked（daemon 不可用）；T6 106→110 passed（M2R-1 补 4 条 slow-endpoint 测试）；全量 1927 passed/3 skipped、Ruff clean、runtime acceptance exit=0；复审 approve_with_followups，M2R-1 closed；M2 基线 `c2245ac` 已单独提交，M2R-2/3 在 M3 T7 中关闭，M2R-4 跟踪 | 保持基线提交，不修改 dirty main |
 | M3/T7–T8 | Execute / Verify | Lead/Investigators/Critic/Lead V11 authority runtime | implemented / verifying | fifth-round base `e52e47984c4b460ed3b06dc4147d3d3b0532345b`; T7 91 passed、T8 207 passed；M2R/隔离 84 passed/3 skipped；变更相关 102 passed/2 skipped；全量 1995 passed/3 skipped/1 warning；两套全仓 Ruff clean；H1 usage/audit RED→GREEN | 等待同一审查线程复审；不 merge/push，不进入 M4/M5 |
-| M4/T9–T10 | Execute / Verify | Reports/actions, human transitions, API/UI, OpenRCA compatibility, recovery/privacy/offline gates | implemented / verifying | 第四轮 H1–H3 先复现并补 RED，再完成真实 OpenRCA runner admission、共享 durable publication guard、active-V11 legacy-report binding 修复；M4 focused 124 passed/1 warning；T9 288 passed/1 warning；T10 868 passed/3 skipped/1 warning；全量 2084 passed/3 skipped/1 warning；offline 80/80；runtime 14/14 privacy clean；frontend build、两套 Ruff、diff-check clean | 等待 M4 独立复审；不 merge/push，不进入 M5 |
+| M4/T9–T10 | Execute / Verify | Reports/actions, human transitions, API/UI, OpenRCA compatibility, recovery/privacy/offline gates | implemented / verifying | 第五轮 High 先 RED 后 GREEN：共享 guard 收敛 InvestigationStatus 与 RuntimeRunStatus 发布矩阵，V11 非成功 outcome 的 prediction/CSV fail-closed；M4 focused 137 passed/1 warning；T9 289 passed/1 warning；T10 881 passed/3 skipped/1 warning；全量 2097 passed/3 skipped/1 warning；offline 80/80；runtime acceptance 提交后复跑；frontend build、两套 Ruff、diff-check clean | 等待 M4 独立复审；不 merge/push，不进入 M5 |
 
 M1 review-fix record (2026-08-06): High 1–6 and Medium 7–10 were reproduced
 with focused regressions, fixed at shared profile/ownership/transaction/entry
