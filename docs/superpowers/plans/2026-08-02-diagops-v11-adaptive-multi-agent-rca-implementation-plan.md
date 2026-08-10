@@ -1247,7 +1247,7 @@ request only the missing authority.
 
 | Task | Status | Requirements | Evidence |
 | --- | --- | --- | --- |
-| T1 | done | R15, R17, R25 | 代码侧：M0 review 三轮后 approve（全部 findings closed）；修正案 TDD red→green 落地，55 focused + 142 benchmarks regression passed + ruff clean。真实 artifact 全链路（2026-08-04）：归一化 270 cases + custodian pin（SHA `b064b858…`，archive hash `10863f25…`）；`verify_against_raw.py`（SHA `88fa5ab2…`）双向逐文件对账 2700/2700 全匹配（provenance 升级为 byte-verified）；真实 prepare 产出 `D:\data\RCAEval\prepared-v11-m0`——runtime manifest_hash `bb119fc9fe338f7cf2d6f03a82f87a0038a1a589fde0c96ad99b02504a5f3d73`（150 cases：OB30+SS30+TT90，1560 telemetry files，26 GB），label manifest_hash `06413003c877177e01d907106ad1181631d16a568b26a4dea86e52d73108a05d`，产物内 SHA256SUMS 1561 行全 OK；taxonomy 词 grep 对 manifest/文件名 0 命中（遥测正文合法包含服务名，见 M0-I2）；二次独立 prepare `diff -r` 零差异 + manifest_hash 逐字符一致（真实数据字节等价确定性，此前仅合成 fixture 覆盖）；M0-R1/R2 closed、M0-R3 closed（用户追认 256 MiB）、M0-I3 closed、M0-I4 recorded、M0-I2 closed（测试断言范围修正，28 focused + 142 regression passed）。剩余 open：M0-L1/L2（low，M5 freeze 前处理）；M0 exit review 2026-08-04 `approve_with_followups`，出口判据满足（见 §10 评审记录） |
+| T1 | done | R15, R17, R25 | 代码侧：M0 review 三轮后 approve；真实 artifact 全链路（2026-08-04）：归一化 270 cases、双向逐文件对账 2700/2700、runtime manifest `bb119fc9fe338f7cf2d6f03a82f87a0038a1a589fde0c96ad99b02504a5f3d73`（150 cases/26 GB）、label manifest `06413003c877177e01d907106ad1181631d16a568b26a4dea86e52d73108a05d`。M0-L1/L2 已在 T11 freeze 前以 frozen golden vector 与 symlink checksum rejection RED→GREEN 关闭。 |
 | T2 | implemented / verified | R2, R4–R6, R9–R10, R20, R27 | RED→GREEN domain/migration/persistence tests; `198 passed in 8.07s`; scoped Ruff clean; full requirement acceptance remains subject to later M3–M5 tasks and M1 independent review |
 | T3 | implemented / verified | R7–R10, R13, R18, R20, R27 | RED→GREEN runtime isolation/recovery tests; `391 passed, 1 skipped, 1 warning in 160.40s`; scoped Ruff clean; full requirement acceptance remains subject to later M3–M5 tasks and M1 independent review |
 | T4 | implemented / verified | R3, R11, R21–R22, R24, R27 | 336 focused passed; offline acceptance rows=80, failed=0; nine-tool/data-only skill evidence recorded; independent M2 review approve_with_followups |
@@ -1257,9 +1257,9 @@ request only the missing authority.
 | T8 | implemented / verifying | R1, R4–R7, R9, R11–R13, R27 | M3 fifth-round review-fix5 preserves the already-green exact T8 validator, terminal, safe-text, supplemental-linkage, and final-actor contracts; exact gate 207 passed and scoped Ruff clean |
 | T9 | implemented / verified | R5–R12, R18–R19, R27 | M4 first/second/third-round review fixes reproduced and closed with focused RED→GREEN regressions; exact gate 280 passed/1 warning; candidate-led V11 reports/actions, active-owner/rerun fencing, additive API/UI, shared privacy-safe public projection, usable-evidence validation, actual Markdown actors/tasks/rounds, generic OpenRCA `v11-agent` projection, semantic status matrix, durable lifecycle guard, and Lead-bound report references verified |
 | T10 | implemented / verified | R8–R13, R16, R18, R21–R23, R26–R27 | Exact gate 855 passed/3 skipped/1 warning; full pytest 2071 passed/3 skipped/1 warning; offline rows=80 failed=0; runtime acceptance exit=0; Ruff/build/diff-check clean |
-| T11 | pending | R14–R17, R24–R27 | pending |
-| T12 | pending | R14–R17, R25–R26 | pending |
-| T13 | pending | R1–R27 | pending |
+| T11 | implemented / locally verified | R14–R17, R24–R27 | TDD focused gate `79 passed in 44.39s`; benchmark Ruff clean。冻结 single control 复用真实 V11 planning/tool/model accounting 与显式空 run-owned memory；四配置、公平预算、真实 SQLite RuntimeRun/publication guard/replay locator、offline RCAEval providers、prediction/evaluator isolation、exact/statistics、pre-label manual audit、policy/acceptance archive 均已落地；M0-L1 golden vector 与 M0-L2 symlink rejection closed。独立 M5 review pending。 |
+| T12 | blocked at capability admission | R14–R17, R25–R26 | 真实 runtime package 完整 checksum 复核通过：manifest `bb119fc9fe338f7cf2d6f03a82f87a0038a1a589fde0c96ad99b02504a5f3d73`/150 cases；但本 worktree capability artifact=0，`DIAGOPS_AGENTS_API_KEY/BASE_URL/MODEL` 均 absent。未执行 OB30 model run 或 SS30 四配置，未打开 SS labels，未冻结 acceptance policy。任务线程 Luna Max 配置不是 benchmark endpoint certification。 |
+| T13 | not started / protected | R1–R27 | TT90 predictions=0、formal label opens=0、paired attempts=0；未消耗 holdout。仓库 gate：Ruff clean，full pytest 2121 passed/3 skipped/1 warning，frontend build passed，offline 80/80，runtime 14/14 + privacy passed，diff-check clean；production gate 因 Docker daemon unavailable 在正式 preflight 阻断，Tempo claim 未发布/未运行。必须在同一 clean frozen source、passed capability identity 和已冻结 SS policy 下恢复；任何正式非可恢复失败仍按实现归档并停止。 |
 
 Independent Plan review: completed on 2026-08-02; initial review found three
 high and two medium issues. Focused re-review confirmed H1–H3/M1–M2 closed and
@@ -1272,6 +1272,8 @@ found no remaining blocking, high, or medium issue.
 | H3 | high | T9 required an RCAEval entry gate before the runner existed | Closed by limiting T9 to existing entries and adding RCAEval run/hash/forbidden-call gates in T11 |
 | M1 | medium | Same-account label isolation wording implied an OS sandbox that the mechanism did not provide | Closed in §1/T1 by freezing the trusted-input threat model, supported-input/path-traversal denial, and bounded claim language |
 | M2 | medium | Lifecycle status updates were missing at implementation start and milestone reviews | Closed in §2 with ready/implementing transitions and M0–M5 Plan/Spec/current evidence updates |
+| M5-E1 | external blocker | 正式 SS30/TT90 需要一个 exact passed capability artifact、可调用 endpoint/model 和 process-only credential；当前三者均不存在 | Open；prediction 在首个模型调用前 fail closed。不得以 Codex task 的 Luna Max 配置、FakeRuntime 或测试 double 替代；TT90 保持未消耗，等待外部 owner 提供认证端点后恢复。 |
+| M5-R1 | review pending | T11–T13 source/artifact independent review 尚未执行 | Open；本实现线程只记录 focused/full gates 与 cold self-review，不自行给出 approve。父任务应基于最终本地提交创建独立 review 线程。 |
 
 M0 review (dataset/leakage): completed on 2026-08-02 in worktree
 `agent+v11-m0`; conclusion `approve_with_followups`. Reviewer independently
@@ -1301,7 +1303,7 @@ unblocked. Followups: one low (M0-I2 wording materialized in a test assertion ov
 the whole-package blob — fixed same day by scoping service/fault assertions to
 manifest bytes + file names, 28 focused + 142 benchmarks regression passed, Ruff
 clean; reviewer's duplicate-content and `"service"`-token measurements folded into
-the M0-I2 closure evidence); M0-L1/L2 remain open (low), due before the M5 freeze.
+the M0-I2 closure evidence); M0-L1/L2 were closed in T11 before any formal M5 freeze.
 
 | ID | Severity | Finding | Resolution |
 | --- | --- | --- | --- |
@@ -1309,8 +1311,8 @@ the M0-I2 closure evidence); M0-L1/L2 remain open (low), due before the M5 freez
 | M0-M1 | medium | Evaluator forbidden tokens match only dotted module names; slash-path references to production runtime pass | Closed on 2026-08-03: `_module_token_in` matches dotted and slashed forms with repeated-separator folding; residual `backend//runtime//coordinator.py` bypass fixed and confirmed |
 | M0-M2 | medium | Evaluator launcher does not cross-check `LabelManifest.runtime_manifest_hash`, so swapped label/runtime package pairs are accepted | Closed on 2026-08-03: required `expected_runtime_manifest_hash` parameter with format and pairing validation |
 | M0-I1 | informational | Bare `..` argv element escaped both path-form and traversal checks | Closed on 2026-08-03: explicit bare `..` rejection in `_reject_argv_traversal`; benign `wait..please` control still passes |
-| M0-L1 | low | Selector test mirrors the formula without a frozen golden vector | open |
-| M0-L2 | low | Package checksum verification does not reject symlink entries | open |
+| M0-L1 | low | Selector test mirrors the formula without a frozen golden vector | closed in T11：独立 frozen OB30/SS30 selection vector fixture 与 exact match regression |
+| M0-L2 | low | Package checksum verification does not reject symlink entries | closed in T11：checksum traversal rejects symlink entries；Windows 无权限环境以边界 mock 验证同一分支 |
 | M0-L3 | low | AST no-runtime-import scan covers direct imports only | recorded |
 | M0-I1 | informational | Worktree base `7b26024` predates V10.1 archive commits; final TT90 freeze must rebase onto the approved baseline | Closed on 2026-08-04: 分支 `worktree-agent+v11-m0` 已 rebase 到 main `58c6382`（V10.1 归档提交）之上，唯一冲突 current.md 按"V11 active + V10.1 archived"语义解决；M0 以单个提交落在该基线上，后续 freeze 不再背负基线债 |
 | M0-I2 | informational | "Runtime package contains no service/fault strings" holds only on synthetic fixtures; reword after real prepare | Closed on 2026-08-04: M0 exit review 实测确认真实遥测正文合法包含全部 15 个服务名（抽样 3 case CSV 头部 15/15）与通用 fault 词元；泄漏判据限定为答案元数据（源 case ID、manifest/文件名字段的标签值）。`test_runtime_package_has_no_labels_or_source_ids` 的 service/fault 断言已从全包 blob 收缩到 manifest 字节 + 文件名（源 case ID 仍对全包字节断言，真实包 1561 文件 0 命中）；spec §11.1/prepare.py/models.py 的字段级表述经评审确认无需修改；28 focused + 142 regression passed。附带实测记录：51 组字节相同遥测（均为 telemetry-05/06.csv 小文件、无一跨分区，内容不随答案变化，非泄漏）；2 处带引号 `"service"` 命中定位于单个遥测 CSV 正文（内容非字段，非泄漏） |

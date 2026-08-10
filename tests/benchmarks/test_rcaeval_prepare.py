@@ -496,3 +496,17 @@ def test_inspect_reports_selection_without_writing(source_root, pin_path, tmp_pa
     )
     assert len(report.selected_source_ids[RcaEvalPartition.TT90]) == 90
     assert not (tmp_path / "out").exists()
+
+
+def test_selector_matches_frozen_golden_vector(source_root, pin_path):
+    golden_path = Path(__file__).parent / "fixtures" / "rcaeval-selector-golden-v1.json"
+    golden = json.loads(golden_path.read_text(encoding="utf-8"))
+    report = inspect_source(source_root, load_pin(pin_path))
+
+    assert golden["schema_version"] == "rcaeval-selector-golden-v1"
+    assert golden["selection_seed"] == TEST_SEED
+    assert {
+        partition.value: source_ids
+        for partition, source_ids in report.selected_source_ids.items()
+        if partition in {RcaEvalPartition.OB30, RcaEvalPartition.SS30}
+    } == golden["selected_source_ids"]

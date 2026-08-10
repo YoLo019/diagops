@@ -23,7 +23,16 @@ from pathlib import Path
 from backend.benchmarks.rcaeval.models import LabelManifest, RuntimeManifest
 
 # prediction 进程只允许这组最小环境变量穿过；其余环境一律不带入。
-PREDICTION_ENV_ALLOWLIST = ("PATH", "SYSTEMROOT", "TEMP", "TMP", "USERPROFILE")
+PREDICTION_ENV_ALLOWLIST = (
+    "PATH",
+    "SYSTEMROOT",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    # compatible endpoint 凭证只注入 prediction 子进程，不写入任何 artifact。
+    "DIAGOPS_AGENTS_API_KEY",
+    "RCAEVAL_PREDICTION_CHILD",
+)
 
 # evaluator 入口必须留在本包内；生产 runtime/诊断/报告/服务/API 模块一律拒绝。
 EVALUATOR_ENTRY_PREFIX = "backend.benchmarks.rcaeval"
@@ -166,6 +175,7 @@ def build_evaluator_launch(
     label_package: Path,
     argv: list[str],
     expected_runtime_manifest_hash: str,
+    expected_label_manifest_hash: str | None = None,
     cwd: Path | None = None,
 ) -> EvaluatorLaunchSpec:
     """构造 evaluator 进程启动规格；只接受已冻结的 prediction bundle。
@@ -190,18 +200,25 @@ def build_evaluator_launch(
     labels_path = labels_root / "labels.json"
     if not labels_path.is_file():
         raise ValueError("label package has no labels.json")
-    # 标签只读打开：本启动器只读取并记录哈希，不提供任何写路径。
-    label_manifest = LabelManifest.model_validate(
-        json.loads(labels_path.read_bytes().decode("utf-8"))
-    )
-    recomputed = _manifest_hash(label_manifest)
-    if recomputed != label_manifest.manifest_hash:
-        raise ValueError("label manifest hash mismatch: label package fails closed")
-    if label_manifest.runtime_manifest_hash != expected_runtime_manifest_hash:
-        raise ValueError(
-            "label/runtime binding mismatch: label package is not paired "
-            "with the expected runtime manifest"
+    if expected_label_manifest_hash is None:
+        # M0 兼容路径；正式 TT90 传 custodian 冻结 hash，避免 launcher 预读后
+        # evaluator 再读而违反「标签只打开一次」。
+        label_manifest = LabelManifest.model_validate(
+            json.loads(labels_path.read_bytes().decode("utf-8"))
         )
+        recomputed = _manifest_hash(label_manifest)
+        if recomputed != label_manifest.manifest_hash:
+            raise ValueError("label manifest hash mismatch: label package fails closed")
+        if label_manifest.runtime_manifest_hash != expected_runtime_manifest_hash:
+            raise ValueError(
+                "label/runtime binding mismatch: label package is not paired "
+                "with the expected runtime manifest"
+            )
+        labels_manifest_hash = label_manifest.manifest_hash
+    else:
+        if not _SHA256_PATTERN.fullmatch(expected_label_manifest_hash):
+            raise ValueError("expected label manifest hash must be a sha256 hex digest")
+        labels_manifest_hash = expected_label_manifest_hash
 
     if not argv or not any(_module_token_in(EVALUATOR_ENTRY_PREFIX, item) for item in argv):
         raise ValueError("evaluator entry must stay inside backend.benchmarks.rcaeval")
@@ -218,7 +235,7 @@ def build_evaluator_launch(
         env={},
         cwd=str(cwd_resolved),
         predictions_hash=actual_hash,
-        labels_manifest_hash=label_manifest.manifest_hash,
+        labels_manifest_hash=labels_manifest_hash,
     )
 
 
@@ -257,6 +274,13 @@ def _verify_runtime_package(runtime_root: Path) -> str:
     return manifest_text
 
 
+def verify_runtime_package(runtime_root: Path) -> RuntimeManifest:
+    """完整复核 runtime package，并返回已验证 manifest。"""
+    resolved = _resolve_no_traversal(runtime_root, "runtime package")
+    text = _verify_runtime_package(resolved)
+    return RuntimeManifest.model_validate_json(text)
+
+
 def _verify_checksums(package_root: Path) -> None:
     """按 SHA256SUMS 逐文件复核：缺失、多余或哈希不符一律 fail closed。"""
     sums_path = package_root / "SHA256SUMS"
@@ -272,7 +296,9 @@ def _verify_checksums(package_root: Path) -> None:
         expected[relative] = digest
     actual: dict[str, str] = {}
     for path in sorted(package_root.rglob("*")):
-        if path.is_file() and path.name != "SHA256SUMS":
+        if path.is_symlink():
+            raise ValueError(f"package checksum symlink rejected: {path}")
+        if path.is_file() and path != sums_path:
             relative = path.relative_to(package_root).as_posix()
             actual[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
     if actual != expected:

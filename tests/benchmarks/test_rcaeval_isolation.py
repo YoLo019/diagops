@@ -3,9 +3,11 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from backend.benchmarks.rcaeval.__main__ import _evaluate, _launch_predict, _predict
 from backend.benchmarks.rcaeval.isolation import (
     build_evaluator_launch,
     build_prediction_launch,
@@ -205,6 +207,27 @@ def test_prediction_launch_rejects_tampered_runtime_package(packages):
         )
 
 
+def test_prediction_launch_rejects_checksum_symlink_entry(packages, monkeypatch):
+    case_file = packages["runtime"] / "cases" / OPAQUE_ID / "telemetry-00.csv"
+    symlink = packages["runtime"] / "linked-telemetry.csv"
+    symlink.write_bytes(case_file.read_bytes())
+    _write_checksums(packages["runtime"])
+    original_is_symlink = Path.is_symlink
+    monkeypatch.setattr(
+        Path,
+        "is_symlink",
+        lambda path: path == symlink or original_is_symlink(path),
+    )
+
+    with pytest.raises(ValueError, match="symlink"):
+        build_prediction_launch(
+            runtime_package=packages["runtime"],
+            predictions_dir=packages["predictions"],
+            argv=_argv(),
+            environ={},
+        )
+
+
 def test_prediction_launch_rejects_tampered_manifest(packages):
     manifest_path = packages["runtime"] / "manifest.json"
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -365,6 +388,28 @@ def test_evaluator_launch_happy_path(packages):
     assert spec.env == {}
 
 
+def test_formal_evaluator_launch_does_not_preopen_labels(packages, monkeypatch):
+    labels_path = packages["labels"] / "labels.json"
+    original = Path.read_bytes
+
+    def reject_label_read(path):
+        if path == labels_path:
+            raise AssertionError("formal launcher must leave the only label open to evaluator")
+        return original(path)
+
+    monkeypatch.setattr(Path, "read_bytes", reject_label_read)
+    spec = build_evaluator_launch(
+        predictions_bundle=packages["predictions"],
+        expected_bundle_hash=_bundle_hash(packages["predictions"]),
+        label_package=packages["labels"],
+        argv=["python", "-m", "backend.benchmarks.rcaeval.evaluator"],
+        expected_runtime_manifest_hash=_runtime_hash(),
+        expected_label_manifest_hash=_label_manifest(_runtime_hash()).manifest_hash,
+    )
+
+    assert spec.labels_manifest_hash == _label_manifest(_runtime_hash()).manifest_hash
+
+
 def test_evaluator_launch_rejects_post_freeze_change(packages):
     frozen = _bundle_hash(packages["predictions"])
     (packages["predictions"] / "predictions.json").write_text("{}", encoding="utf-8")
@@ -409,7 +454,7 @@ def test_evaluator_launch_rejects_production_or_foreign_entries(packages, argv):
         )
 
 
-def test_rcaeval_package_does_not_import_production_runtime():
+def test_evaluator_dependency_boundary_does_not_import_production_runtime():
     package_dir = Path(__file__).parents[2] / "backend" / "benchmarks" / "rcaeval"
     forbidden_prefixes = (
         "backend.diagnosis",
@@ -420,7 +465,10 @@ def test_rcaeval_package_does_not_import_production_runtime():
         "backend.api",
     )
     offenders: list[str] = []
-    for source_path in package_dir.glob("*.py"):
+    # runner 是受信 prediction 入口，必须调用生产 runtime；标签进程只允许
+    # evaluator/audit/models 这一闭包，不能因同包放置而把两侧混为一谈。
+    for name in ("evaluator.py", "audit.py", "models.py"):
+        source_path = package_dir / name
         tree = ast.parse(source_path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             names: list[str] = []
@@ -434,3 +482,164 @@ def test_rcaeval_package_does_not_import_production_runtime():
                 if name.startswith(forbidden_prefixes)
             )
     assert offenders == []
+
+
+def test_prediction_runner_imports_production_v11_runtime():
+    source_path = (
+        Path(__file__).parents[2]
+        / "backend"
+        / "benchmarks"
+        / "rcaeval"
+        / "runner.py"
+    )
+    source = source_path.read_text(encoding="utf-8")
+
+    assert "backend.diagnosis.v11_runtime" in source
+    assert "backend.runtime.coordinator" in source
+    assert "backend.runtime.sqlite_store" in source
+
+
+def test_formal_evaluation_marks_post_child_artifact_failure_non_resumable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from backend.benchmarks.rcaeval import isolation
+
+    monkeypatch.setattr(
+        isolation,
+        "build_evaluator_launch",
+        lambda **_: SimpleNamespace(
+            predictions_hash="a" * 64,
+            labels_manifest_hash="b" * 64,
+            argv=["evaluator"],
+            cwd=tmp_path,
+            env={},
+        ),
+    )
+    monkeypatch.setattr("subprocess.run", lambda *_, **__: None)
+    output_dir = tmp_path / "evaluation-attempt"
+
+    with pytest.raises(FileNotFoundError):
+        _evaluate(
+            SimpleNamespace(
+                predictions_root=tmp_path / "predictions",
+                partition="tt90",
+                prediction_set_hash="a" * 64,
+                label_package=tmp_path / "labels",
+                runtime_manifest_hash="c" * 64,
+                label_manifest_hash="b" * 64,
+                output_dir=output_dir,
+            )
+        )
+
+    attempt = json.loads(
+        (output_dir / "evaluation-attempt.json").read_text(encoding="utf-8")
+    )
+    assert attempt["status"] == "failed_non_resumable"
+    assert "completed_at" in attempt
+
+
+def test_prediction_worker_rejects_direct_unisolated_entry(monkeypatch):
+    monkeypatch.delenv("RCAEVAL_PREDICTION_CHILD", raising=False)
+
+    with pytest.raises(ValueError, match="launch-predict"):
+        _predict(SimpleNamespace())
+
+
+def test_prediction_launcher_sanitizes_child_and_never_passes_label_locator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from backend.benchmarks.rcaeval import isolation
+
+    captured = {}
+
+    def build_spec(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(argv=tuple(kwargs["argv"]), cwd=str(tmp_path), env={})
+
+    output = tmp_path / "single_intended"
+    def run_child(*_, **__):
+        output.mkdir()
+        (output / "SHA256SUMS").write_text("frozen\n", encoding="utf-8")
+
+    monkeypatch.setattr(isolation, "build_prediction_launch", build_spec)
+    monkeypatch.setattr("subprocess.run", run_child)
+    label_path = tmp_path / "private-labels"
+
+    _launch_predict(
+        SimpleNamespace(
+            runtime=tmp_path / "runtime",
+            partition="ss30",
+            configuration="single_intended",
+            base_url="https://endpoint.invalid/v1",
+            capability_artifact=tmp_path / "capability.json",
+            database=tmp_path / "runtime.db",
+            output=output,
+            token_budget=4_000,
+            max_turns=8,
+            tool_budget=8,
+            timeout_seconds=120,
+            label_package=label_path,
+        )
+    )
+
+    child_argv = [str(item) for item in captured["argv"]]
+    assert str(label_path) not in child_argv
+    assert captured["environ"]["RCAEVAL_PREDICTION_CHILD"] == "1"
+    assert str(label_path) in captured["forbidden_locators"]
+
+
+def test_formal_evaluation_rejects_child_artifact_with_wrong_label_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from backend.benchmarks.rcaeval import isolation
+    from backend.benchmarks.rcaeval.models import EvaluationArtifact
+
+    monkeypatch.setattr(
+        isolation,
+        "build_evaluator_launch",
+        lambda **_: SimpleNamespace(
+            predictions_hash="a" * 64,
+            labels_manifest_hash="b" * 64,
+            argv=["evaluator"],
+            cwd=tmp_path,
+            env={},
+        ),
+    )
+    output_dir = tmp_path / "evaluation-attempt"
+
+    def run_child(*_, **__):
+        (output_dir / "evaluation.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr("subprocess.run", run_child)
+    monkeypatch.setattr(
+        EvaluationArtifact,
+        "model_validate_json",
+        lambda _: SimpleNamespace(
+            label_open_count=1,
+            labels_manifest_hash="d" * 64,
+            runtime_manifest_hash="c" * 64,
+            partition=RcaEvalPartition.TT90,
+            artifact_hash="e" * 64,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="label.*binding"):
+        _evaluate(
+            SimpleNamespace(
+                predictions_root=tmp_path / "predictions",
+                partition="tt90",
+                prediction_set_hash="a" * 64,
+                label_package=tmp_path / "labels",
+                runtime_manifest_hash="c" * 64,
+                label_manifest_hash="b" * 64,
+                output_dir=output_dir,
+            )
+        )
+
+    attempt = json.loads(
+        (output_dir / "evaluation-attempt.json").read_text(encoding="utf-8")
+    )
+    assert attempt["status"] == "failed_non_resumable"

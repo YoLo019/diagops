@@ -35,16 +35,19 @@ authority for a general-purpose SRE workflow while preserving the existing
 read-only safety, durable runtime, historical records, and benchmark-neutral
 provider contracts.
 
-Iteration status: `verifying`
+Iteration status: `blocked`
 
 Spec status: `approved`
 
 Plan status: `approved`
 
-Implementation status: `complete`
+Implementation status: `blocked`
 
-Completion commit: local M4 fifth-round final High-fix commit on `codex/v11-m4`
-(SHA is recorded in the final handoff; no merge or push)
+Completion commit: `none`（M5 尚未完成正式 SS30/TT90）
+
+M4 approved baseline: `7539c7fd8b707fc54cf2ed75a7d9fcba13d7618c`
+on `codex/v11-m5`; M4 independent review approved before this worktree was
+created. No merge or push was performed.
 
 M2 baseline commit: `c2245ac` (`chore(v11): checkpoint M2 T4-T6`), committed
 in the isolated M3 worktree; dirty `main` was not modified.
@@ -114,7 +117,30 @@ the shared V11 contract; V10-only legacy reports remain unchanged. The final
 post-commit runtime artifact and `git_dirty=false` binding are recorded in the
 handoff.
 
-Blocker: `none`
+Verification evidence (M5 engineering and stop gate, 2026-08-10): `T11/M0-L1/
+M0-L2 RED→GREEN；frozen SingleInvestigatorAgent、真实 V11/SQLite runner、RCAEval
+offline providers、四 SS30 配置、exact/统计 evaluator、pre-label manual audit、
+controlled prediction/evaluator launch、policy/acceptance archive 均已实现；T11
+focused 79 passed，benchmark Ruff clean；真实 26 GB runtime package 再校验为
+manifest bb119fc9…、150 cases。正式 capability admission 在首个 OB30 model
+call 前失败：本 worktree 无 passed model-capability artifact，且
+DIAGOPS_AGENTS_API_KEY/BASE_URL/MODEL 均未配置。因此 SS30 未执行、SS/TT
+labels 未由正式 evaluator 打开、TT90 未消耗；父任务为本 Codex task 设置的
+Luna Max 只证明实现线程模型，不是 RCAEval 可调用 endpoint identity。独立 M5
+复审未执行。`
+
+Verification evidence (M5 repository gates, 2026-08-10): `uv run ruff check .
+clean；full pytest 2121 passed/3 skipped/1 existing Starlette warning；frontend
+production build passed；offline_tool_acceptance rows=80 failed=0（matrix SHA
+3a49df20…）；runtime_acceptance 14/14、privacy scan passed（pre-commit artifact
+SHA 2a980b25…）；git diff --check clean。production gate 的 Compose config
+通过，但正式脚本 preflight 因 Docker Desktop Linux daemon unavailable 阻断，
+未生成或伪造 7-scenario result。未发布 Tempo claim，故按 Plan 不运行
+tempo_acceptance。独立 review 仍 pending。`
+
+Blocker: `T12 capability admission：缺少 exact passed model-capability artifact、
+可调用 endpoint/model 与 process-only credential；SS30/TT90 不得以任务线程模型
+或 test double 替代。外部 owner：父任务/用户提供已认证本机端点后另行恢复。`
 
 Allowed values:
 
@@ -151,7 +177,7 @@ docs/superpowers/plans/2026-08-02-diagops-v11-adaptive-multi-agent-rca-implement
 
 ## V11 Planning Dashboard
 
-Overall progress: `V11 Spec/Plan approved, execution authorized 2026-08-02; M0/T1 done：真实 RCAEval RE2 全链路完成（byte-verified 双向对账 2700/2700、真实 prepare runtime manifest_hash bb119fc9…/150 cases/26 GB、二次 prepare diff -r 零差异字节等价）；M0 exit review 2026-08-04 approve_with_followups（出口判据满足，M0-I2 措辞 followup 已修复并 closed：28 focused + 142 regression passed, Ruff clean；M0-L1/L2 low open，M5 前处理）；M1/T2–T3 第三轮独立复审 2026-08-07 approve_with_followups，全部 6 项发现当日 RED→GREEN 关闭并已合并 main 336067c；M2/T4–T6 2026-08-08 独立复审 approve_with_followups，M2 基线 `c2245ac` 已提交；M3/T7–T8 第五轮 review-fix5 已完成 RED→GREEN 验证；M4/T9–T10 首轮 10 项 changes_required 已按根因关闭，第二轮 H1/M2 亦已 RED→GREEN 并完成本地门禁，等待复审`
+Overall progress: `V11 Spec/Plan approved；M0–M3 已按记录完成；M4 最终提交 7539c7f 已获独立 review approve；M5 T11 与 M0-L1/L2 工程实现/ focused 验证完成，T12 在 capability admission 前阻断，T13 未开始且 TT90 未消耗。`
 
 Latest M4 verification: fourth-round H1–H3 were reproduced and fixed at the
 real OpenRCA runner and shared V11 publication boundaries; M4 focused 124,
@@ -166,12 +192,12 @@ produce empty prediction/CSV output with an explicit failure category; V10
 legacy output remains unchanged. M4 focused 137, T9 289, T10 881, and full
 pytest 2097 passed with only the recorded skips/warning.
 
-Current phase: Full iteration / M4 review-fix implemented and locally verified
-in isolated worktree; fifth-round final High fix and all local gates verified;
-awaiting same-thread independent re-review
+Current phase: Full iteration / M5 engineering implemented，T12 capability stop
+gate blocked；等待独立 M5 source/artifact review 与可调用认证端点
 
-Next action: 独立复审 M4 fifth-round review-fix；保持当前 worktree/branch，不 merge、push
-或进入 M5。
+Next action: 父任务先创建独立 M5 review；若后续提供 exact passed capability
+artifact、endpoint/model 与 process-only credential，再从 OB30/SS30 继续；保持
+当前 worktree/branch，不 merge、push，不打开 TT90 labels。
 
 | ID | Phase | Task | Status | Evidence or result | Next action or blocker |
 | --- | --- | --- | --- | --- | --- |
@@ -184,7 +210,8 @@ Next action: 独立复审 M4 fifth-round review-fix；保持当前 worktree/bran
 | M1/T3 | Execute | Versioned phase profiles, activation, gates, replay, and diff | implemented / verified | 初始审查问题 H1–H7 已补最小 RED 并 GREEN；第二轮 ownerless RESULT_VALIDATION、计划/任务和 Investigation 聚合写入回归先 RED 后 GREEN；`uv run pytest tests/runtime tests/api/test_runtime_runs_api.py -q` → `420 passed, 2 skipped, 1 warning in 117.53s`; `tests/runtime/test_review_fixes.py` → `27 passed, 1 skipped`; T3 Ruff clean；V10/V11 phase、owner、replay/diff、contract-integrity reload、service/API gate 回归通过 | 独立运行时复审通过（第三轮 RR 全关闭）；M2 基线 `c2245ac` 已提交，T4–T5 已按当前 Plan 记录完成 |
 | M2/T4–T6 | Execute | 九工具离线事件包与 data-only skills、File/Tempo trace 平价、模型边界与能力认证 | implemented / verified | 独立复审重跑：T4 336 passed + 离线验收 rows=80 failed=0；T5 17 passed + Docker gate blocked（daemon 不可用）；T6 106→110 passed（M2R-1 补 4 条 slow-endpoint 测试）；全量 1927 passed/3 skipped、Ruff clean、runtime acceptance exit=0；复审 approve_with_followups，M2R-1 closed；M2 基线 `c2245ac` 已单独提交，M2R-2/3 在 M3 T7 中关闭，M2R-4 跟踪 | 保持基线提交，不修改 dirty main |
 | M3/T7–T8 | Execute / Verify | Lead/Investigators/Critic/Lead V11 authority runtime | implemented / verifying | fifth-round base `e52e47984c4b460ed3b06dc4147d3d3b0532345b`; T7 91 passed、T8 207 passed；M2R/隔离 84 passed/3 skipped；变更相关 102 passed/2 skipped；全量 1995 passed/3 skipped/1 warning；两套全仓 Ruff clean；H1 usage/audit RED→GREEN | 等待同一审查线程复审；不 merge/push，不进入 M4/M5 |
-| M4/T9–T10 | Execute / Verify | Reports/actions, human transitions, API/UI, OpenRCA compatibility, recovery/privacy/offline gates | implemented / verifying | 第五轮 High 先 RED 后 GREEN：共享 guard 收敛 InvestigationStatus 与 RuntimeRunStatus 发布矩阵，V11 非成功 outcome 的 prediction/CSV fail-closed；M4 focused 137 passed/1 warning；T9 289 passed/1 warning；T10 881 passed/3 skipped/1 warning；全量 2097 passed/3 skipped/1 warning；offline 80/80；runtime acceptance 提交后复跑；frontend build、两套 Ruff、diff-check clean | 等待 M4 独立复审；不 merge/push，不进入 M5 |
+| M4/T9–T10 | Execute / Verify | Reports/actions, human transitions, API/UI, OpenRCA compatibility, recovery/privacy/offline gates | implemented / verified | 最终提交 `7539c7fd8b707fc54cf2ed75a7d9fcba13d7618c` 已获独立 review approve；第五轮 High RED→GREEN 与 focused/full/offline/runtime/frontend/Ruff/diff-check 证据沿用 M4 handoff | M5 worktree 精确从该提交创建；不 merge/push |
+| M5/T11–T13 | Execute / Verify | Frozen RCAEval control, sealed validation, one TT90 paired result | blocked at T12 capability admission | T11 + M0-L1/L2：79 focused passed、benchmark Ruff clean；真实 runtime checksum bb119fc9…/150；受控 prediction/evaluator、policy、manual audit 与 non-resumable archive 已覆盖。SS30/TT90 无模型结果，labels 未正式打开 | 缺 passed capability artifact/endpoint/credential；T13 未开始、TT90 未消耗；等待独立 M5 review |
 
 M1 review-fix record (2026-08-06): High 1–6 and Medium 7–10 were reproduced
 with focused regressions, fixed at shared profile/ownership/transaction/entry

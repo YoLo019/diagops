@@ -1673,6 +1673,12 @@ class V11Runtime:
             else f"investigator-{uuid4().hex}"
         )
         manifest = self._agent_manifest()
+        plan = repository.get_plan(investigation_id)
+        selected_skills = (
+            list(plan.lead_decision.selected_skills)
+            if plan is not None and plan.lead_decision is not None
+            else []
+        )
         session = AdaptiveToolSession(
             event=event,
             seed_evidence=seed_evidence,
@@ -1704,6 +1710,7 @@ class V11Runtime:
                 seed_evidence,
                 own_findings,
                 assessment,
+                selected_skills,
             )
             turn = await self._call_model(
                 actor=ExecutionActor.INVESTIGATOR.value,
@@ -1715,6 +1722,7 @@ class V11Runtime:
                     "agent_instance_id": instance_id,
                     "round": round_number,
                     "tool_manifest": manifest,
+                    "selected_skills": selected_skills,
                     "own_committed_evidence_ids": [item.id for item in seed_evidence],
                     "own_committed_finding_ids": [item.id for item in own_findings],
                     "assessment_id": assessment.id if assessment is not None else None,
@@ -2341,6 +2349,7 @@ class V11Runtime:
         evidence: list[EvidenceItem],
         own_findings: Iterable[AgentFinding],
         assessment: CriticAssessment | None,
+        selected_skills: list[str],
     ) -> str:
         payload = {
             "role": "general investigator",
@@ -2350,6 +2359,7 @@ class V11Runtime:
             "round": task.analysis_round,
             "tool_manifest": manifest,
             "skills": [_skill_projection(skill) for skill in self.skills],
+            "selected_skills": selected_skills,
             "own_committed_evidence": [
                 _evidence_projection(item) for item in evidence
             ],
