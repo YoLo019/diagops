@@ -20,8 +20,11 @@ from backend.diagnosis.action_planner import ActionPlanner
 from backend.diagnosis.agents_runtime import AgentsRcaRuntime
 from backend.diagnosis.coordinator import DiagnosisCoordinator
 from backend.diagnosis.deepseek_model import create_deepseek_model
+from backend.diagnosis.diagnostic_skills import skill_catalog_identity
 from backend.diagnosis.openai_compatible_model import create_openai_compatible_model
+from backend.diagnosis.openai_model import OFFICIAL_OPENAI_BASE_URL
 from backend.diagnosis.orchestrator import DiagnosisOrchestrator
+from backend.diagnosis.v11_runtime import V11Runtime
 from backend.domain.events import IncidentEvent
 from backend.domain.multi_agent import (
     AuthorityMode,
@@ -32,6 +35,7 @@ from backend.domain.runtime import (
     RuntimeRun,
     RuntimeRunKind,
     RuntimeRunReason,
+    seal_v11_execution_contract,
 )
 from backend.providers.registry import build_provider_registry_from_settings
 from backend.rca.analyzer import RcaAnalyzer
@@ -47,12 +51,18 @@ from backend.runtime.store import (
     InMemoryRuntimeStore,
     RuntimeConflict,
     RuntimeContractError,
+    RuntimeNotFound,
 )
 from backend.runtime.telemetry import RuntimeTelemetry
 from backend.runtime.writer import RuntimeWriter
 from backend.safety.redaction import redact_model
 from backend.services.model_capability import latest_capability_artifact
-from backend.tools.provider_tools import VerifiedMemoryLookup, build_provider_tool_registry
+from backend.tools.provider_tools import (
+    VerifiedMemoryLookup,
+    build_provider_tool_registry,
+    current_investigation_id,
+)
+from backend.tools.registry import agent_manifest_hash
 
 logger = logging.getLogger(__name__)
 _TELEMETRY_SHUTDOWN_TIMEOUT_SECONDS = 5.0
@@ -68,33 +78,38 @@ class AppContainer:
         providers = build_provider_registry_from_settings(self.settings)
         # verified memory 只读当前 repository 的受 guard 记录；tool registry 与
         # Provider registry 同源构造，保证九个 Agent 工具单一事实来源。
+        self.verified_memory_lookup = VerifiedMemoryLookup(
+            self.repository,
+            current_investigation_id=current_investigation_id,
+        )
         self.tool_registry = build_provider_tool_registry(
             providers,
-            VerifiedMemoryLookup(self.repository),
+            self.verified_memory_lookup,
         )
         agents_runtime = None
+        v11_runtime = None
         if self.settings.agents.enabled:
             try:
                 provider = self.settings.agents.provider
-                model = self.settings.agents.model
+                agent_model = self.settings.agents.model
                 if provider == ModelProvider.DEEPSEEK:
-                    model = create_deepseek_model(
-                        model,
+                    agent_model = create_deepseek_model(
+                        agent_model,
                         os.getenv("DEEPSEEK_API_KEY"),
                     )
                 elif provider == ModelProvider.OPENAI_COMPATIBLE:
                     compatible = self.settings.agents.openai_compatible
                     # generic endpoint 的凭证只允许 DIAGOPS_AGENTS_API_KEY，
                     # 绝不回退到官方 provider 的环境变量。
-                    model = create_openai_compatible_model(
-                        model,
+                    agent_model = create_openai_compatible_model(
+                        agent_model,
                         os.getenv("DIAGOPS_AGENTS_API_KEY"),
                         compatible.base_url,
                         timeout_seconds=float(compatible.timeout_seconds),
                         max_retries=compatible.max_retries,
                     )
                 agents_runtime = AgentsRcaRuntime(
-                    model=model,
+                    model=agent_model,
                     max_turns=self.settings.agents.max_turns,
                     timeout_seconds=self.settings.agents.timeout_seconds,
                     model_provider=provider,
@@ -110,7 +125,26 @@ class AppContainer:
                     tool_timeout_seconds=(
                         self.settings.agents.tool_timeout_seconds
                     ),
+                    runtime_token_budget=self.settings.agents.token_budget,
                     prompt_version="v9",
+                )
+                v11_runtime = V11Runtime(
+                    model=agent_model,
+                    model_provider=provider,
+                    model_name=self.settings.agents.model,
+                    tool_registry=self.tool_registry,
+                    max_turns=self.settings.agents.max_turns,
+                    timeout_seconds=min(
+                        120.0, float(self.settings.agents.timeout_seconds)
+                    ),
+                    max_total_tool_calls=self.settings.agents.max_total_tool_calls,
+                    max_tool_calls_per_specialist=(
+                        self.settings.agents.max_tool_calls_per_specialist
+                    ),
+                    token_budget=self.settings.agents.token_budget,
+                    tool_timeout_seconds=(
+                        self.settings.agents.tool_timeout_seconds
+                    ),
                 )
             except Exception as exc:
                 logger.warning(
@@ -125,6 +159,7 @@ class AppContainer:
             coordinator=DiagnosisCoordinator(providers),
             action_planner=ActionPlanner(),
             agents_runtime=agents_runtime,
+            v11_runtime=v11_runtime,
             default_strategy=self.settings.agents.strategy,
             max_tool_calls_per_specialist=(
                 self.settings.agents.max_tool_calls_per_specialist
@@ -238,6 +273,12 @@ class AppContainer:
                     )
                     self.close()
 
+    def product_execution_contract_version(self) -> ExecutionContractVersion:
+        """选择产品入口的持久化执行版本，保留无 Agent 配置的 legacy 路径。"""
+        if self.settings.runtime.enabled and self.orchestrator.v11_runtime is not None:
+            return ExecutionContractVersion.V11
+        return ExecutionContractVersion.V10_LEGACY
+
     async def run_investigation(
         self,
         event: IncidentEvent,
@@ -248,14 +289,24 @@ class AppContainer:
         ),
         runtime_run_id: str | None = None,
     ):
-        if ExecutionContractVersion(execution_contract_version) == ExecutionContractVersion.V11:
+        version = ExecutionContractVersion(execution_contract_version)
+        if version == ExecutionContractVersion.V11:
             if not self.settings.runtime.enabled:
                 raise RuntimeConflict("V11 execution requires enabled Runtime")
             if runtime_run_id is None:
-                raise RuntimeConflict(
-                    "V11 service execution requires a persisted RuntimeRun"
+                effective_strategy = strategy or self.settings.agents.strategy
+                record = redact_model(
+                    InvestigationRecord(event=event, strategy=effective_strategy)
                 )
-            run = self.runtime_store.get_run(runtime_run_id)
+                self.repository.save(record)
+                run = self.create_runtime_run(
+                    record.id,
+                    strategy=effective_strategy,
+                    run_reason=RuntimeRunReason.INITIAL,
+                    execution_contract_version=version,
+                )
+            else:
+                run = self.runtime_store.get_run(runtime_run_id)
             if (
                 not run.is_v11
                 or getattr(event, "investigation_id", run.investigation_id)
@@ -327,6 +378,19 @@ class AppContainer:
             if prompt_version is not None and prompt_version != configured_prompt:
                 raise RuntimeContractError("V11 prompt_version is server-owned")
         source_record = self.repository.get(investigation_id)
+        if version == ExecutionContractVersion.V10_LEGACY:
+            active_owner = source_record.active_runtime_run_id
+            if active_owner is not None:
+                try:
+                    active_run = self.runtime_store.get_run(active_owner)
+                except RuntimeNotFound as exc:
+                    raise RuntimeConflict(
+                        "active projection owner RuntimeRun is unavailable"
+                    ) from exc
+                if active_run.is_v11:
+                    raise RuntimeConflict(
+                        "V10 RuntimeRun is not allowed on an active V11 projection"
+                    )
         if version == ExecutionContractVersion.V11:
             investigation_id = self._v11_investigation_id(
                 source_record,
@@ -344,11 +408,20 @@ class AppContainer:
             if version == ExecutionContractVersion.V11
             else AuthorityMode.LEGACY_DETERMINISTIC
         )
+        run_token_budget = (
+            self.settings.agents.token_budget
+            if version == ExecutionContractVersion.V11
+            else None
+        )
         contract = {}
         if version == ExecutionContractVersion.V11:
             endpoint_identity, capability_hash = self._v11_model_identity(
                 effective_provider, effective_model
             )
+            tool_manifest = self.tool_registry.agent_manifest()
+            if len(tool_manifest) != 9:
+                raise RuntimeContractError("V11 requires exactly nine Agent tools")
+            skill_identity = skill_catalog_identity(self.tool_registry.list_agent_specs())
             contract = {
                 "execution_contract_version": version.value,
                 "authority_mode": authority.value,
@@ -360,10 +433,41 @@ class AppContainer:
                 "api_mode": self._api_mode_for(effective_provider),
                 "endpoint_id": endpoint_identity,
                 "capability_artifact_hash": capability_hash,
+                "tool_manifest": list(tool_manifest),
+                "tool_manifest_hash": agent_manifest_hash(tool_manifest),
+                "skill_catalog": skill_identity,
+                "capability_identity": {
+                    "provider": (
+                        effective_provider.value
+                        if isinstance(effective_provider, ModelProvider)
+                        else effective_provider
+                    ),
+                    "model": effective_model,
+                    "api_mode": self._api_mode_for(effective_provider),
+                    "endpoint_id": endpoint_identity,
+                    "artifact_hash": capability_hash,
+                },
+                "limits": {
+                    "max_turns": self.settings.agents.max_turns,
+                    "max_investigators": 3,
+                    "max_rounds": 2,
+                    "token_budget": self.settings.agents.token_budget,
+                    "max_tool_calls_per_specialist": (
+                        self.settings.agents.max_tool_calls_per_specialist
+                    ),
+                    "tool_timeout_seconds": self.settings.agents.tool_timeout_seconds,
+                },
+                "retry_policy": {
+                    "max_retries": 1,
+                    "retryable_categories": ["transport", "rate_limit"],
+                    "provider_max_retries": 0,
+                    "sdk_max_retries": 0,
+                },
                 "tool_budget": self.settings.agents.max_total_tool_calls,
-                "token_budget": getattr(agents_runtime, "runtime_token_budget", None),
+                "token_budget": self.settings.agents.token_budget,
                 "timeout_seconds": float(self.settings.agents.timeout_seconds),
             }
+            contract = seal_v11_execution_contract(contract)
         run = RuntimeRun(
             investigation_id=investigation_id,
             run_kind=RuntimeRunKind.LIVE,
@@ -374,7 +478,7 @@ class AppContainer:
             model_name=effective_model,
             prompt_version=effective_prompt,
             tool_budget=self.settings.agents.max_total_tool_calls,
-            token_budget=getattr(agents_runtime, "runtime_token_budget", None),
+            token_budget=run_token_budget,
             timeout_seconds=float(self.settings.agents.timeout_seconds),
             execution_contract_version=version,
             authority_mode=authority,
@@ -390,11 +494,9 @@ class AppContainer:
         )
 
     def _v11_model_identity(self, provider, model_name: str | None):
-        """openai_compatible 的 V11 run 只接受精确 tuple 已认证的 endpoint。
-
-        返回 (endpoint_id, capability_artifact_hash)；非 generic provider 不携带
-        endpoint 身份（None）。未认证即 RuntimeContractError，run 行不会插入。
-        """
+        """返回 admission 固定的 endpoint/capability 身份。"""
+        if provider == ModelProvider.OPENAI:
+            return endpoint_id(OFFICIAL_OPENAI_BASE_URL), None
         if provider != ModelProvider.OPENAI_COMPATIBLE:
             return None, None
         base_url = self.settings.agents.openai_compatible.base_url

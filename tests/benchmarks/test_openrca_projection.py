@@ -10,10 +10,17 @@ import pytest
 from backend.benchmarks.openrca.projection import (
     ProjectionAudit,
     project_root_causes,
+    project_v11_candidates,
     scored_fields,
 )
-from backend.domain.agent_findings import RootCauseAttribution
-from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
+from backend.benchmarks.openrca.runner import _official_prediction, _write_predictions
+from backend.domain.agent_findings import RootCauseAttribution, RootCauseCandidate
+from backend.domain.evidence import (
+    EvidenceItem,
+    EvidenceKind,
+    EvidenceProvider,
+    EvidenceStatus,
+)
 
 BASE = datetime(2026, 7, 30, 9, 0, tzinfo=UTC)
 
@@ -192,3 +199,136 @@ def test_failed_audit_carries_no_candidate_counts_or_detail():
         "fallback_reason",
         "projection_error",
     }
+
+
+def test_v11_projection_maps_generic_candidate_without_legacy_taxonomy():
+    candidate = RootCauseCandidate(
+        id="candidate-generic",
+        summary="deployment changed request handling",
+        rank=1,
+        confidence=0.8,
+        affected_entity="checkout-api",
+        failure_mechanism="incompatible request handling",
+        supporting_evidence_ids=["ev-1"],
+        onset_window_start=BASE,
+    )
+
+    result = project_v11_candidates(
+        task_index="task_7",
+        expected_count=1,
+        evidence=[evidence("ev-1").model_copy(update={"runtime_run_id": "run-v11"})],
+        candidates=[candidate],
+        fallback_timestamp=BASE + timedelta(minutes=5),
+        runtime_run_id="run-v11",
+    )
+
+    assert result.causes[0].root_cause_component == "checkout-api"
+    assert result.causes[0].root_cause_reason == "incompatible request handling"
+    assert result.causes[0].root_cause_occurred_at == BASE
+    assert result.audit.rule_version == "v11-agent-generic"
+    assert result.audit.projection_fallback is False
+
+
+def test_v11_prediction_artifact_uses_public_candidate_projection(tmp_path):
+    run_id = "run-v11-public-prediction"
+    private_marker = "system prompt: never reveal this private chain of thought"
+    item = evidence("ev-public-prediction").model_copy(
+        update={"runtime_run_id": run_id}
+    )
+    candidate = RootCauseCandidate(
+        id="candidate-private-prediction",
+        summary=private_marker,
+        rank=1,
+        confidence=0.8,
+        affected_entity=private_marker,
+        failure_mechanism=private_marker,
+        supporting_evidence_ids=[item.id],
+    )
+
+    result = project_v11_candidates(
+        task_index="task_7",
+        expected_count=1,
+        evidence=[item],
+        candidates=[candidate],
+        fallback_timestamp=BASE,
+        runtime_run_id=run_id,
+    )
+    prediction = _official_prediction(list(result.causes), expected_count=1)
+    prediction_path = tmp_path / "v11-agent-predictions.csv"
+    _write_predictions(
+        prediction_path,
+        [
+            {
+                "case_id": "case-private-prediction",
+                "partition": "test",
+                "row_id": "row-private-prediction",
+                "task_index": "task_7",
+                "prediction": prediction,
+                "metadata": "{}",
+            }
+        ],
+    )
+
+    artifact = prediction_path.read_text(encoding="utf-8")
+    assert private_marker not in prediction
+    assert private_marker not in artifact
+    assert result.causes[0].root_cause_component == "[内部推理内容已省略]"
+    assert result.causes[0].root_cause_reason == "[内部推理内容已省略]"
+
+    # V10 deterministic projection continues to preserve its authoritative fields.
+    legacy = cause("checkout-api", "legacy deterministic reason", BASE, [item.id])
+    legacy_result = project_root_causes(
+        task_index="task_7",
+        expected_count=1,
+        evidence=[item],
+        root_causes=[legacy],
+    )
+    assert legacy_result.causes == (legacy,)
+    assert "legacy deterministic reason" in _official_prediction(
+        list(legacy_result.causes)
+    )
+
+
+@pytest.mark.parametrize("status", [EvidenceStatus.FAILED, EvidenceStatus.SKIPPED])
+def test_v11_projection_rejects_unusable_evidence(status: EvidenceStatus):
+    candidate = RootCauseCandidate(
+        id="candidate-unusable-evidence",
+        summary="candidate",
+        rank=1,
+        confidence=0.8,
+        supporting_evidence_ids=["ev-unusable"],
+    )
+
+    with pytest.raises(ValueError, match="usable evidence"):
+        project_v11_candidates(
+            task_index="task_1",
+            expected_count=1,
+            evidence=[evidence("ev-unusable").model_copy(update={"status": status})],
+            candidates=[candidate],
+            fallback_timestamp=BASE,
+            runtime_run_id="run-v11",
+        )
+
+
+def test_v11_projection_rejects_cross_run_evidence():
+    candidate = RootCauseCandidate(
+        id="candidate-cross-run-evidence",
+        summary="candidate",
+        rank=1,
+        confidence=0.8,
+        supporting_evidence_ids=["ev-foreign"],
+    )
+
+    with pytest.raises(ValueError, match="owner"):
+        project_v11_candidates(
+            task_index="task_1",
+            expected_count=1,
+            evidence=[
+                evidence("ev-foreign").model_copy(
+                    update={"runtime_run_id": "run-foreign"}
+                )
+            ],
+            candidates=[candidate],
+            fallback_timestamp=BASE,
+            runtime_run_id="run-v11",
+        )

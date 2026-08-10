@@ -1,9 +1,10 @@
 from datetime import UTC, datetime
 from enum import StrEnum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_serializer
 
 from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider, EvidenceStatus
+from backend.domain.multi_agent import FailureCategory
 
 
 class ProviderStatus(StrEnum):
@@ -19,6 +20,14 @@ class ProviderResult(BaseModel):
     evidence_items: list[EvidenceItem] = Field(default_factory=list)
     error_message: str | None = None
     duration_ms: int = Field(default=0, ge=0)
+    failure_category: FailureCategory | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize_legacy_payload(self, handler):
+        data = handler(self)
+        if self.failure_category is None and "failure_category" not in self.model_fields_set:
+            data.pop("failure_category", None)
+        return data
 
     def to_error_evidence(self) -> EvidenceItem:
         status = EvidenceStatus(self.status)

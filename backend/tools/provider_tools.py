@@ -1,4 +1,6 @@
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from functools import partial
 from time import perf_counter
@@ -79,6 +81,25 @@ QUERY_MODELS_BY_TOOL = {
     "lookup_memory": MemoryQuery,
 }
 
+_CURRENT_INVESTIGATION_ID: ContextVar[str | None] = ContextVar(
+    "diagops_current_investigation_id", default=None
+)
+
+
+def current_investigation_id() -> str | None:
+    """返回当前异步诊断上下文的 investigation owner。"""
+    return _CURRENT_INVESTIGATION_ID.get()
+
+
+@contextmanager
+def current_investigation_scope(investigation_id: str) -> Iterator[None]:
+    """为 Provider 查询绑定当前 investigation，退出时恢复外层上下文。"""
+    token = _CURRENT_INVESTIGATION_ID.set(investigation_id)
+    try:
+        yield
+    finally:
+        _CURRENT_INVESTIGATION_ID.reset(token)
+
 
 def build_provider_tool_registry(
     provider_registry: ProviderRegistry,
@@ -110,6 +131,7 @@ def build_provider_tool_registry(
         ),
         partial(invoke_lookup_memory, memory_lookup),
     )
+    registry.verified_memory_lookup = memory_lookup
     return registry
 
 

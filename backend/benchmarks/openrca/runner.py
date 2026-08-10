@@ -21,24 +21,39 @@ from backend.benchmarks.openrca.models import (
 from backend.benchmarks.openrca.projection import (
     ProjectionAudit,
     project_root_causes,
+    project_v11_candidates,
 )
 from backend.benchmarks.openrca.providers import (
     OpenRcaDependencyProvider,
     OpenRcaLogProvider,
     OpenRcaMetricProvider,
 )
+from backend.config.settings import canonicalize_endpoint, endpoint_id
 from backend.db.models import InvestigationRecord, InvestigationStatus
 from backend.diagnosis.agents_runtime import AgentsRcaRuntime
 from backend.diagnosis.coordinator import DiagnosisCoordinator
+from backend.diagnosis.diagnostic_skills import skill_catalog_identity
+from backend.diagnosis.openai_compatible_model import (
+    OpenAICompatibleChatCompletionsModel,
+)
+from backend.diagnosis.openai_model import OFFICIAL_OPENAI_BASE_URL
 from backend.diagnosis.orchestrator import DiagnosisOrchestrator
+from backend.diagnosis.v11_runtime import V11Runtime
 from backend.domain.agent_findings import RootCauseAttribution
 from backend.domain.events import IncidentEvent, IncidentSource, Severity
-from backend.domain.multi_agent import FailureCategory, InvestigationStrategy, ModelProvider
+from backend.domain.multi_agent import (
+    AuthorityMode,
+    ExecutionContractVersion,
+    FailureCategory,
+    InvestigationStrategy,
+    ModelProvider,
+)
 from backend.domain.runtime import (
     RuntimeEventType,
     RuntimeRun,
     RuntimeRunKind,
     RuntimeRunReason,
+    seal_v11_execution_contract,
 )
 from backend.providers.registry import ProviderRegistry
 from backend.rca.analyzer import RcaAnalyzer
@@ -47,7 +62,10 @@ from backend.runtime.coordinator import RuntimeCoordinator
 from backend.runtime.phase_executor import DiagnosisPhaseExecutor
 from backend.runtime.telemetry import RuntimeTelemetry
 from backend.runtime.writer import RuntimeWriter
+from backend.services.model_capability import latest_capability_artifact
+from backend.services.v11_projection import ensure_v11_projection_owner
 from backend.tools.provider_tools import build_provider_tool_registry
+from backend.tools.registry import agent_manifest_hash
 
 
 @dataclass(frozen=True)
@@ -90,7 +108,7 @@ class OpenRcaDiagnosisRunner:
     def __init__(
         self,
         dataset_root: Path,
-        model: str | None,
+        model: object | None,
         *,
         repository,
         runtime_store,
@@ -98,6 +116,8 @@ class OpenRcaDiagnosisRunner:
         prompt_version: str = "v8.2",
         timeout_seconds: float = 60,
         deterministic: bool = False,
+        mode: str | None = None,
+        turn=None,
     ) -> None:
         self.dataset_root = dataset_root
         self.model = model
@@ -107,10 +127,20 @@ class OpenRcaDiagnosisRunner:
         self.repository = repository
         self.runtime_store = runtime_store
         self.deterministic = deterministic
+        self.mode = mode or ("deterministic" if deterministic else "agent")
+        self.turn = turn
 
-    def configure_runtime(self, *, provider, model, prompt_version, timeout_seconds) -> None:
+    def configure_runtime(
+        self, *, provider, model, prompt_version, timeout_seconds
+    ) -> None:
         self.provider = ModelProvider(provider)
-        self.model = model
+        if (
+            self.provider in {ModelProvider.DEEPSEEK, ModelProvider.OPENAI_COMPATIBLE}
+            and isinstance(self.model, OpenAICompatibleChatCompletionsModel)
+        ):
+            self.model = self.model.clone_for_model(model, max_retries=0)
+        else:
+            self.model = model
         self.prompt_version = prompt_version
         self.timeout_seconds = timeout_seconds
 
@@ -132,7 +162,19 @@ class OpenRcaDiagnosisRunner:
         )
         registry = build_provider_tool_registry(providers)
         runtime = None
-        if not self.deterministic:
+        v11_runtime = None
+        model_name = self._model_name()
+        if self.mode == "v11-agent":
+            v11_runtime = V11Runtime(
+                model=self.model,
+                model_provider=self.provider,
+                model_name=model_name,
+                tool_registry=registry,
+                turn=self.turn,
+                timeout_seconds=min(120.0, self.timeout_seconds),
+                token_budget=10_000,
+            )
+        elif not self.deterministic:
             runtime = AgentsRcaRuntime(
                 model=self.model,
                 strategy=strategy,
@@ -149,26 +191,46 @@ class OpenRcaDiagnosisRunner:
             report_generator=ReportGenerator(),
             coordinator=DiagnosisCoordinator(providers),
             agents_runtime=runtime,
+            v11_runtime=v11_runtime,
             default_strategy=strategy,
         )
         record = self.repository.save(record)
+        execution_contract = (
+            self._v11_execution_contract(v11_runtime)
+            if v11_runtime is not None
+            else {}
+        )
         runtime_run = self.runtime_store.create_run(
             RuntimeRun(
                 investigation_id=record.id,
                 run_kind=RuntimeRunKind.LIVE,
                 strategy=strategy,
                 run_reason=RuntimeRunReason.INITIAL,
-                model_provider=None if self.deterministic else self.provider,
-                model_name=(
-                    "deterministic"
-                    if self.deterministic
-                    else self.model
-                    if isinstance(self.model, str)
-                    else type(self.model).__name__
+                model_provider=(
+                    self.provider
+                    if not self.deterministic
+                    else None
                 ),
+                model_name="deterministic" if self.deterministic else model_name,
                 prompt_version=self.prompt_version,
                 tool_budget=8,
-                timeout_seconds=self.timeout_seconds,
+                token_budget=10_000 if v11_runtime is not None else None,
+                timeout_seconds=(
+                    min(120.0, self.timeout_seconds)
+                    if v11_runtime is not None
+                    else self.timeout_seconds
+                ),
+                execution_contract_version=(
+                    ExecutionContractVersion.V11
+                    if v11_runtime is not None
+                    else ExecutionContractVersion.V10_LEGACY
+                ),
+                authority_mode=(
+                    AuthorityMode.AGENT
+                    if v11_runtime is not None
+                    else AuthorityMode.LEGACY_DETERMINISTIC
+                ),
+                execution_contract=execution_contract,
             )
         )
         writer = RuntimeWriter(self.runtime_store)
@@ -208,12 +270,34 @@ class OpenRcaDiagnosisRunner:
         authoritative_root_causes = list(review.root_causes) if review is not None else []
         projection_failed = False
         try:
-            projection = project_root_causes(
-                task_index=case.task_index,
-                expected_count=case.expected_root_cause_count or 1,
-                evidence=list(record.evidence),
-                root_causes=authoritative_root_causes,
-            )
+            if self.mode == "v11-agent":
+                ensure_v11_projection_owner(
+                    self.repository, self.runtime_store, record
+                )
+                candidates = (
+                    [
+                        candidate
+                        for candidate in review.candidates
+                        if candidate.id in review.authoritative_candidate_ids
+                    ]
+                    if review is not None
+                    else []
+                )
+                projection = project_v11_candidates(
+                    task_index=case.task_index,
+                    expected_count=case.expected_root_cause_count or 1,
+                    evidence=list(record.evidence),
+                    candidates=candidates,
+                    fallback_timestamp=record.event.started_at,
+                    runtime_run_id=runtime_run.id,
+                )
+            else:
+                projection = project_root_causes(
+                    task_index=case.task_index,
+                    expected_count=case.expected_root_cause_count or 1,
+                    evidence=list(record.evidence),
+                    root_causes=authoritative_root_causes,
+                )
             root_causes = list(projection.causes)
             projection_audit = projection.audit
         except Exception:
@@ -270,6 +354,89 @@ class OpenRcaDiagnosisRunner:
             projection_audit=projection_audit,
         )
 
+    def _model_name(self) -> str:
+        if isinstance(self.model, str):
+            return self.model
+        configured_name = getattr(self.model, "model", None)
+        return configured_name if isinstance(configured_name, str) else type(self.model).__name__
+
+    def _v11_execution_contract(self, runtime: V11Runtime) -> dict[str, object]:
+        provider = self.provider.value
+        model_name = self._model_name()
+        api_mode = (
+            "responses"
+            if self.provider == ModelProvider.OPENAI
+            else "chat_completions"
+        )
+        endpoint, capability_hash = self._v11_model_identity(model_name)
+        manifest = runtime.tool_registry.agent_manifest()
+        contract = {
+            "execution_contract_version": ExecutionContractVersion.V11.value,
+            "authority_mode": AuthorityMode.AGENT.value,
+            "model_provider": provider,
+            "model_name": model_name,
+            "prompt_version": self.prompt_version,
+            "api_mode": api_mode,
+            "endpoint_id": endpoint,
+            "capability_artifact_hash": capability_hash,
+            "tool_manifest": list(manifest),
+            "tool_manifest_hash": agent_manifest_hash(manifest),
+            "skill_catalog": skill_catalog_identity(
+                runtime.tool_registry.list_agent_specs()
+            ),
+            "capability_identity": {
+                "provider": provider,
+                "model": model_name,
+                "api_mode": api_mode,
+                "endpoint_id": endpoint,
+                "artifact_hash": capability_hash,
+            },
+            "limits": {
+                "max_turns": runtime.max_turns,
+                "max_investigators": runtime.max_investigators,
+                "max_rounds": runtime.max_rounds,
+                "token_budget": 10_000,
+                "max_tool_calls_per_specialist": runtime.max_tool_calls_per_specialist,
+                "tool_timeout_seconds": runtime.tool_timeout_seconds,
+            },
+            "retry_policy": {
+                "max_retries": 1,
+                "retryable_categories": ["transport", "rate_limit"],
+                "provider_max_retries": 0,
+                "sdk_max_retries": 0,
+            },
+            "tool_budget": runtime.max_total_tool_calls,
+            "token_budget": 10_000,
+            "timeout_seconds": min(120.0, self.timeout_seconds),
+        }
+        return seal_v11_execution_contract(contract)
+
+    def _v11_model_identity(self, model_name: str) -> tuple[str | None, str | None]:
+        """冻结 OpenRCA V11 的端点身份；兼容端点必须先通过 capability gate。"""
+        if self.provider == ModelProvider.OPENAI:
+            return endpoint_id(OFFICIAL_OPENAI_BASE_URL), None
+        if self.provider != ModelProvider.OPENAI_COMPATIBLE:
+            return f"openrca-{self.provider.value}", None
+        if not isinstance(self.model, OpenAICompatibleChatCompletionsModel):
+            raise ValueError(
+                "OpenRCA V11 openai_compatible requires the configured model adapter"
+            )
+        try:
+            identity = endpoint_id(canonicalize_endpoint(self.model._base_url))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError("OpenRCA V11 compatible endpoint is unavailable") from exc
+        artifact = latest_capability_artifact(
+            Path("output/model_capability"),
+            provider=ModelProvider.OPENAI_COMPATIBLE.value,
+            model=model_name,
+            endpoint_id_value=identity,
+        )
+        if artifact is None or artifact.result != "passed":
+            raise ValueError(
+                "OpenRCA V11 compatible endpoint lacks a passed capability artifact"
+            )
+        return identity, artifact.artifact_hash
+
     def register_replay_artifact(
         self,
         *,
@@ -290,7 +457,7 @@ class OpenRcaDiagnosisRunner:
                 "benchmark_run_id": benchmark_run_id,
                 "strategy": strategy.value,
                 "provider": self.provider.value,
-                "model": self.model,
+                "model": self._model_name(),
                 "prompt_version": self.prompt_version,
                 "case_id": case.case_id,
                 "partition": case.partition.value,
@@ -345,7 +512,7 @@ def run_benchmark_pair(
     if any(not math.isfinite(rate) or rate < 0 for rate in cost_rates):
         raise ValueError("cost rates must be finite and non-negative")
     index = OpenRcaRuntimeIndex.model_validate_json(safe_index.read_text(encoding="utf-8"))
-    if mode not in {"agent", "agent-shadow", "deterministic"}:
+    if mode not in {"agent", "agent-shadow", "v11-agent", "deterministic"}:
         raise ValueError("unsupported OpenRCA benchmark mode")
     if mode == "deterministic":
         if strategies != (InvestigationStrategy.FIXED,):
@@ -361,6 +528,8 @@ def run_benchmark_pair(
             prompt_version=prompt_version,
             timeout_seconds=timeout_seconds,
         )
+    if hasattr(case_runner, "mode"):
+        case_runner.mode = mode
     started_at = datetime.now(UTC)
     run_id = started_at.strftime("run-%Y%m%dT%H%M%S%fZ")
     output_dir = output_root / run_id
@@ -400,6 +569,22 @@ def run_benchmark_pair(
                     failure_category=f"{type(exc).__name__}: benchmark case failed"
                 )
             outcomes[strategy].append((case, outcome))
+            published_root_causes = outcome.root_causes
+            publication_failure_category = outcome.failure_category
+            if mode == "v11-agent" and not outcome.completed:
+                published_root_causes = []
+                publication_failure_category = publication_failure_category or "failed"
+            metadata = {
+                "expected_root_cause_count": (case.expected_root_cause_count),
+                "runtime_run_id": outcome.runtime_run_id,
+                "projection": (
+                    outcome.projection_audit.metadata()
+                    if outcome.projection_audit is not None
+                    else None
+                ),
+            }
+            if mode == "v11-agent":
+                metadata["failure_category"] = publication_failure_category
             rows[strategy].append(
                 {
                     "case_id": case.case_id,
@@ -407,19 +592,11 @@ def run_benchmark_pair(
                     "row_id": case.row_id,
                     "task_index": case.task_index,
                     "prediction": _official_prediction(
-                        outcome.root_causes,
+                        published_root_causes,
                         case.expected_root_cause_count,
                     ),
                     "metadata": json.dumps(
-                        {
-                            "expected_root_cause_count": (case.expected_root_cause_count),
-                            "runtime_run_id": outcome.runtime_run_id,
-                            "projection": (
-                                outcome.projection_audit.metadata()
-                                if outcome.projection_audit is not None
-                                else None
-                            ),
-                        },
+                        metadata,
                         ensure_ascii=False,
                         separators=(",", ":"),
                         sort_keys=True,
@@ -430,6 +607,11 @@ def run_benchmark_pair(
                 output_dir / f"{strategy.value}-predictions.csv",
                 rows[strategy],
             )
+            if mode == "v11-agent" and strategy == InvestigationStrategy.FIXED:
+                _write_predictions(
+                    output_dir / "v11-agent-predictions.csv",
+                    rows[strategy],
+                )
             register = getattr(case_runner, "register_replay_artifact", None)
             if register is not None and outcome.runtime_run_id is not None:
                 register(

@@ -34,6 +34,7 @@ from backend.domain.runtime import (
     RuntimeRunStatus,
     ensure_attempt_transition,
     ensure_run_transition,
+    validate_v11_execution_contract,
 )
 from backend.domain.tool_calls import ToolCallRecord, ToolCallStatus
 from backend.runtime.diff import freeze_business_projection
@@ -45,6 +46,7 @@ from backend.runtime.store import (
     RuntimeNotFound,
     RuntimePersistenceError,
     RuntimeTerminalCommit,
+    ensure_v11_tool_budget_available,
     validate_v11_phase_ownership,
 )
 from backend.safety.redaction import safe_failure
@@ -936,6 +938,18 @@ class SQLiteRuntimeStore:
                         raise RuntimeConflict(
                             "terminal tool call rejects a late result"
                         )
+                existing_calls = [
+                    ToolCallRecord.model_validate(payload)
+                    for payload in connection.execute(
+                        select(tool_calls.c.payload).where(
+                            tool_calls.c.investigation_id
+                            == run_snapshot.investigation_id
+                        )
+                    ).scalars()
+                ]
+                ensure_v11_tool_budget_available(
+                    run_snapshot, existing_calls, commit.call
+                )
                 commit.business_mutation.apply_sqlite(
                     self.investigation_repository, connection
                 )
@@ -1744,6 +1758,11 @@ class SQLiteRuntimeStore:
             "timeout_seconds",
         } <= contract.keys():
             return True
+        if version == "v11" and "execution_contract_digest" in contract:
+            try:
+                validate_v11_execution_contract(contract)
+            except ValueError:
+                return True
         return False
 
     @staticmethod

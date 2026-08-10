@@ -13,12 +13,21 @@ from backend.domain.evidence import EvidenceItem, EvidenceProvider
 from backend.domain.human_transitions import HumanStateConflict
 from backend.domain.hypotheses import CauseType
 from backend.domain.memory import MemoryItem
-from backend.domain.multi_agent import InvestigationStrategy
+from backend.domain.multi_agent import AuthorityMode, InvestigationStrategy
 from backend.domain.reports import IncidentReport
 from backend.memory import MemoryStore
 from backend.providers.results import ProviderResult
 from backend.safety.redaction import assert_safe_label, redact_model, redact_text
 from backend.services.container import get_container
+from backend.services.v11_projection import (
+    V11ProjectionIntegrityError,
+    ensure_v11_projection_owner,
+)
+from backend.services.v11_public import (
+    public_v11_action,
+    public_v11_report,
+    public_v11_verification,
+)
 
 router = APIRouter(prefix="/investigations", tags=["investigations"])
 
@@ -50,6 +59,7 @@ class UpdateVerificationStatusRequest(BaseModel):
     result_evidence_ids: list[str] = Field(default_factory=list)
     related_action_ids: list[str] = Field(default_factory=list)
     related_cause_types: list[CauseType] = Field(default_factory=list)
+    related_candidate_ids: list[str] | None = None
 
 
 class FeedbackRequest(BaseModel):
@@ -62,7 +72,14 @@ class FeedbackRequest(BaseModel):
 def _get_investigation_record(investigation_id: str) -> InvestigationRecord:
     container = get_container()
     try:
-        record = redact_model(container.repository.get(investigation_id))
+        stored = container.repository.get(investigation_id)
+        try:
+            ensure_v11_projection_owner(
+                container.repository, container.runtime_store, stored
+            )
+        except V11ProjectionIntegrityError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        record = _public_investigation_record(stored)
         return record.model_copy(
             update={"runtime_available": _runtime_available(investigation_id)}
         )
@@ -74,6 +91,22 @@ def _sorted_evidence(record: InvestigationRecord) -> list[EvidenceItem]:
     return sorted(record.evidence, key=lambda item: (item.timestamp, item.id))
 
 
+def _public_investigation_record(record: InvestigationRecord) -> InvestigationRecord:
+    projected = redact_model(record)
+    if record.report is None or record.report.authority_mode != AuthorityMode.AGENT:
+        return projected
+    return projected.model_copy(
+        update={
+            "report": public_v11_report(projected.report),
+            "actions": [public_v11_action(item) for item in projected.actions],
+            "verification_suggestions": [
+                public_v11_verification(item)
+                for item in projected.verification_suggestions
+            ],
+        }
+    )
+
+
 def _runtime_available(investigation_id: str) -> bool:
     container = get_container()
     return bool(container.runtime_store.list_runs(investigation_id))
@@ -82,23 +115,44 @@ def _runtime_available(investigation_id: str) -> bool:
 @router.get("", response_model=list[InvestigationRecord])
 def list_investigations() -> list[InvestigationRecord]:
     container = get_container()
-    return [
-        redact_model(record).model_copy(
+    records = []
+    for record in container.repository.list():
+        try:
+            ensure_v11_projection_owner(
+                container.repository, container.runtime_store, record
+            )
+        except V11ProjectionIntegrityError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        records.append(
+            _public_investigation_record(record).model_copy(
             update={"runtime_available": _runtime_available(record.id)}
+            )
         )
-        for record in container.repository.list()
-    ]
+    return records
 
 
 @router.get("/summaries", response_model=list[InvestigationSummary])
 def list_investigation_summaries() -> list[InvestigationSummary]:
     container = get_container()
-    return [
-        redact_model(item).model_copy(
-            update={"runtime_available": _runtime_available(item.id)}
+    summaries = []
+    for item in container.repository.list_summaries():
+        record = container.repository.get(item.id)
+        try:
+            ensure_v11_projection_owner(
+                container.repository, container.runtime_store, record
+            )
+        except V11ProjectionIntegrityError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        summaries.append(
+            to_summary(
+                record,
+                runtime_available=_runtime_available(record.id),
+                coordination_review=container.repository.get_coordination_review(
+                    record.id
+                ),
+            )
         )
-        for item in container.repository.list_summaries()
-    ]
+    return summaries
 
 
 @router.post("/manual", response_model=InvestigationSummary)
@@ -118,10 +172,19 @@ async def create_manual_investigation(
         started_at=datetime.now(UTC),
     )
     container = get_container()
-    record = await container.run_investigation(event, strategy=request.strategy)
+    record = await container.run_investigation(
+        event,
+        strategy=request.strategy,
+        execution_contract_version=container.product_execution_contract_version(),
+    )
+    try:
+        ensure_v11_projection_owner(container.repository, container.runtime_store, record)
+    except V11ProjectionIntegrityError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return to_summary(
         record,
         runtime_available=_runtime_available(record.id),
+        coordination_review=container.repository.get_coordination_review(record.id),
     )
 
 
@@ -169,6 +232,7 @@ def update_verification_status(
             result_evidence_ids=request.result_evidence_ids,
             related_action_ids=request.related_action_ids,
             related_cause_types=request.related_cause_types,
+            related_candidate_ids=request.related_candidate_ids,
         )
         return redact_model(updated)
     except HumanStateConflict as exc:

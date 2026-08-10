@@ -267,8 +267,8 @@ class CoordinationReview(BaseModel):
         if self.authority_mode == AuthorityMode.AGENT:
             if self.runtime_run_id is None:
                 raise ValueError("V11 CoordinationReview requires runtime_run_id")
-            if self.lead_decision is None:
-                raise ValueError("V11 CoordinationReview requires lead_decision")
+            if self.lead_decision is None and self.diagnostic_status is not None:
+                raise ValueError("final V11 CoordinationReview requires lead_decision")
             if any(
                 assessment.runtime_run_id != self.runtime_run_id
                 for assessment in self.critic_assessments
@@ -280,6 +280,8 @@ class CoordinationReview(BaseModel):
             }
             if not assessment_candidates <= candidate_ids:
                 raise ValueError("Critic assessment references an unknown candidate")
+            if self.lead_decision is None:
+                return self
             if not set(self.lead_decision.candidate_ids) <= candidate_ids:
                 raise ValueError("Lead decision references an unknown candidate")
             accepted = {

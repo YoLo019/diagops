@@ -2561,6 +2561,7 @@ def stabilization_categories_from_executions(
             FailureCategory.TRANSPORT: StabilizationCategory.PROVIDER_OR_SDK_TRANSPORT,
             FailureCategory.UNSAFE_OUTPUT: StabilizationCategory.UNSAFE_OUTPUT,
             FailureCategory.PERSISTENCE: StabilizationCategory.REVIEW_PERSISTENCE,
+            FailureCategory.CONTRACT_INTEGRITY: StabilizationCategory.HYBRID_CONTRACT,
         }.get(execution.failure_category)
         if execution.failure_category == FailureCategory.INVALID_OUTPUT:
             category = (
@@ -2580,6 +2581,7 @@ def stabilization_categories_from_executions(
             FailureCategory.TRANSPORT,
             FailureCategory.UNSAFE_OUTPUT,
             FailureCategory.PERSISTENCE,
+            FailureCategory.CONTRACT_INTEGRITY,
         }:
             category = StabilizationCategory.UNKNOWN
         if category is not None:

@@ -11,6 +11,7 @@ from backend.domain.actions import (
 )
 from backend.domain.evidence import EvidenceStatus
 from backend.domain.hypotheses import CauseType
+from backend.domain.multi_agent import AuthorityMode
 from backend.providers.results import ProviderStatus
 from backend.safety.redaction import redact_text
 
@@ -25,8 +26,9 @@ _SAFE_DETAILS = {
     "verification_result_note_required": "verification result requires a note",
     "verification_result_evidence_required": "verification result requires valid evidence",
     "verification_relation_required": "verification result requires an action or cause",
-    "verification_reference": "verification reference is invalid",
+    "verification_reference": "verification reference or runtime owner is invalid",
     "skipped_verification_evidence": "skipped verification cannot claim result evidence",
+    "action_reference": "action candidate reference or runtime owner is invalid",
 }
 
 
@@ -49,7 +51,8 @@ def validate_action_transition(
     action = next((item for item in record.actions if item.id == action_id), None)
     if action is None:
         raise ValueError(f"Unknown action: {action_id}")
-    _validate_runtime_owner(record, action)
+    _validate_runtime_owner(record, action, "action_reference")
+    _validate_candidate_refs(record, action.related_candidate_ids, "action_reference")
     target = ActionStatus(target)
     allowed = (
         {
@@ -99,6 +102,7 @@ def validate_verification_transition(
     result_evidence_ids: list[str],
     related_action_ids: list[str],
     related_cause_types: list[CauseType | str],
+    related_candidate_ids: list[str] | None = None,
 ) -> VerificationSuggestion:
     """验证 verification 结果仅引用同一调查内的有效事实与人工对象。"""
     verification = next(
@@ -107,7 +111,22 @@ def validate_verification_transition(
     )
     if verification is None:
         raise ValueError(f"Unknown verification suggestion: {verification_id}")
-    _validate_runtime_owner(record, verification)
+    _validate_runtime_owner(record, verification, "verification_reference")
+    candidate_ids = list(
+        verification.related_candidate_ids
+        if related_candidate_ids is None
+        else related_candidate_ids
+    )
+    if (
+        verification.runtime_run_id is not None
+        and related_candidate_ids is not None
+        and candidate_ids != verification.related_candidate_ids
+    ):
+        # V11 verification 是对已持久化候选的结果回填，人工请求不能借此
+        # 把结果重新绑定到同一投影中的另一个候选。
+        raise HumanStateConflict("verification_reference")
+    _validate_candidate_refs(record, verification.related_candidate_ids, "verification_reference")
+    _validate_candidate_refs(record, candidate_ids, "verification_reference")
     target = VerificationStatus(target)
     if verification.status != VerificationStatus.PENDING or target not in {
         VerificationStatus.PASSED,
@@ -118,6 +137,8 @@ def validate_verification_transition(
 
     note = redact_text(result_note.strip()) if result_note and result_note.strip() else None
     cause_types = [CauseType(item) for item in related_cause_types]
+    if verification.runtime_run_id is not None and cause_types:
+        raise HumanStateConflict("verification_reference")
     eligible_evidence = {
         item.id: item
         for item in record.evidence
@@ -141,13 +162,25 @@ def validate_verification_transition(
         or not set(cause_types) <= valid_causes
     ):
         raise HumanStateConflict("verification_reference")
+    if verification.runtime_run_id is not None:
+        related_actions = {item.id: item for item in record.actions}
+        if any(
+            related_actions[action_id].runtime_run_id != verification.runtime_run_id
+            or (
+                related_actions[action_id].related_candidate_ids
+                and not set(related_actions[action_id].related_candidate_ids)
+                <= set(candidate_ids)
+            )
+            for action_id in related_action_ids
+        ):
+            raise HumanStateConflict("verification_reference")
 
     if target in {VerificationStatus.PASSED, VerificationStatus.FAILED}:
         if note is None:
             raise HumanStateConflict("verification_result_note_required")
         if not result_evidence_ids:
             raise HumanStateConflict("verification_result_evidence_required")
-        if not related_action_ids and not cause_types:
+        if not related_action_ids and not cause_types and not candidate_ids:
             raise HumanStateConflict("verification_relation_required")
     elif result_evidence_ids:
         raise HumanStateConflict("skipped_verification_evidence")
@@ -159,13 +192,37 @@ def validate_verification_transition(
             "result_evidence_ids": list(dict.fromkeys(result_evidence_ids)),
             "related_action_ids": list(dict.fromkeys(related_action_ids)),
             "related_cause_types": list(dict.fromkeys(cause_types)),
+            "related_candidate_ids": list(dict.fromkeys(candidate_ids)),
         }
     )
 
 
-def _validate_runtime_owner(record: InvestigationRecord, projection: object) -> None:
+def _validate_runtime_owner(
+    record: InvestigationRecord,
+    projection: object,
+    error_code: str,
+) -> None:
     active_owner = getattr(record, "active_runtime_run_id", None)
     projection_owner = getattr(projection, "runtime_run_id", None)
     if active_owner is not None or projection_owner is not None:
         if active_owner != projection_owner:
-            raise ValueError("projection owner mismatch")
+            raise HumanStateConflict(error_code)
+
+
+def _validate_candidate_refs(
+    record: InvestigationRecord,
+    candidate_ids: list[str],
+    error_code: str,
+) -> None:
+    if not candidate_ids:
+        return
+    report = record.report
+    if (
+        report is None
+        or report.authority_mode != AuthorityMode.AGENT
+        or report.runtime_run_id != getattr(record, "active_runtime_run_id", None)
+    ):
+        raise HumanStateConflict(error_code)
+    known_ids = {candidate.id for candidate in report.diagnoses + report.alternatives}
+    if not set(candidate_ids) <= known_ids:
+        raise HumanStateConflict(error_code)

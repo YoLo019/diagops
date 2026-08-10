@@ -94,6 +94,7 @@ export function RuntimeWorkbench({
         strategy: "fixed",
         run_reason: "manual_rerun",
         parent_run_id: currentRun?.id,
+        execution_contract_version: "v11",
       }),
     onSuccess: invalidateRuntime,
   });

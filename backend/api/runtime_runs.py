@@ -45,9 +45,7 @@ class RuntimeRunCreateRequest(BaseModel):
     model_provider: ModelProvider | None = None
     model_name: str | None = None
     prompt_version: str | None = None
-    execution_contract_version: ExecutionContractVersion = (
-        ExecutionContractVersion.V10_LEGACY
-    )
+    execution_contract_version: ExecutionContractVersion | None = None
 
     @model_validator(mode="after")
     def validate_live_run_contract(self):
@@ -137,6 +135,10 @@ async def create_runtime_run(
 ) -> RuntimeRun:
     container = _runtime_container()
     try:
+        execution_contract_version = (
+            request.execution_contract_version
+            or container.product_execution_contract_version()
+        )
         run = container.create_runtime_run(
             investigation_id,
             strategy=request.strategy,
@@ -145,7 +147,7 @@ async def create_runtime_run(
             model_provider=request.model_provider,
             model_name=request.model_name,
             prompt_version=request.prompt_version,
-            execution_contract_version=request.execution_contract_version,
+            execution_contract_version=execution_contract_version,
         )
         await container.runtime_writer.start()
         await container.runtime_manager.start(run.id)

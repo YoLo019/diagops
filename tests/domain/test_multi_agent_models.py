@@ -72,6 +72,7 @@ def test_multi_agent_contract_values_are_stable():
         "missing_specialist",
         "unsafe_output",
         "persistence",
+        "contract_integrity",
         "unknown",
     ]
     assert [item.value for item in StabilizationCategory] == [

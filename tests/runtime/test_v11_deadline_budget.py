@@ -9,14 +9,22 @@ from backend.db.models import InvestigationRecord, InvestigationStatus
 from backend.db.repositories import InMemoryInvestigationRepository
 from backend.domain.events import IncidentEvent, IncidentSource, Severity
 from backend.domain.runtime import (
+    RuntimeActorType,
     RuntimeAttempt,
     RuntimeAttemptStatus,
+    RuntimeEvent,
+    RuntimeEventType,
     RuntimeFailureCategory,
     RuntimePhase,
     RuntimeRunStatus,
 )
 from backend.runtime.coordinator import RuntimeCoordinator
-from backend.runtime.phases import BusinessMutation, PhaseOutput
+from backend.runtime.phases import (
+    BusinessMutation,
+    PhaseOutput,
+    durable_model_reservations,
+    durable_token_usage,
+)
 from backend.runtime.store import InMemoryRuntimeStore
 from backend.runtime.writer import RuntimeWriter
 from tests.runtime.test_v11_isolation_red import _contract, _v11_run
@@ -79,6 +87,31 @@ class BlockingV11PhaseExecutor(V11PhaseExecutor):
         if phase_input.phase == self.block_phase:
             self.started.set()
             await self.release.wait()
+        return await super().execute_phase(phase_input)
+
+
+class InvestigatorFailureV11PhaseExecutor(V11PhaseExecutor):
+    async def execute_phase(self, phase_input) -> PhaseOutput:
+        if phase_input.phase == RuntimePhase.INVESTIGATOR_ROUND_1:
+            self.phases.append(phase_input.phase)
+            record = self.repository.get("inv-1")
+            mutation = BusinessMutation(
+                investigation_id="inv-1",
+                investigation=record.model_copy(
+                    update={
+                        "status": InvestigationStatus.FAILED,
+                        "failure_reason": "all investigators failed",
+                    }
+                ),
+            )
+            return PhaseOutput(
+                business_mutation=mutation,
+                status="completed",
+                safe_payload={"status": "failed"},
+                resume_state=phase_input.resume_state.model_copy(
+                    update={"remaining_tool_budget": 8, "remaining_token_budget": 1000}
+                ),
+            )
         return await super().execute_phase(phase_input)
 
 
@@ -252,6 +285,29 @@ async def test_v11_failed_investigation_after_phase_loop_fails_run_with_output_v
     await coordinator.shutdown()
 
 
+@pytest.mark.anyio
+async def test_v11_required_investigator_failure_stops_before_critic_or_lead() -> None:
+    repository, store, run, executor, coordinator = _v11_services(
+        run_id="run-v11-investigator-terminal"
+    )
+    failing = InvestigatorFailureV11PhaseExecutor(repository, run.id)
+    coordinator.phase_executor = failing
+
+    result = await coordinator.execute(run.id, owner="worker-a")
+
+    assert result.status == RuntimeRunStatus.FAILED
+    assert failing.phases == [
+        RuntimePhase.INTAKE,
+        RuntimePhase.EVIDENCE_COLLECTION,
+        RuntimePhase.LEAD_PLANNING,
+        RuntimePhase.INVESTIGATOR_ROUND_1,
+    ]
+    assert RuntimePhase.CRITIC_REVIEW not in failing.phases
+    assert RuntimePhase.LEAD_ADJUDICATION not in failing.phases
+    assert repository.get("inv-1").multi_agent_run is None
+    await coordinator.shutdown()
+
+
 def test_v11_run_rejects_timeout_seconds_above_hard_deadline() -> None:
     with pytest.raises(ValidationError, match="hard deadline"):
         _v11_run(
@@ -259,3 +315,86 @@ def test_v11_run_rejects_timeout_seconds_above_hard_deadline() -> None:
             timeout_seconds=121,
             execution_contract={**_contract(), "timeout_seconds": 121.0},
         )
+
+
+def test_v11_started_model_reservation_is_durable_for_resume_reconciliation() -> None:
+    started = RuntimeEvent(
+        run_id="run-token-reservation",
+        attempt_id="attempt-1",
+        sequence=1,
+        event_type=RuntimeEventType.MODEL_STARTED,
+        actor_type=RuntimeActorType.MODEL,
+        execution_id="execution-1",
+        safe_payload={
+            "status": "started",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "logical_call_id": "logical-call-1",
+            "reservation_id": "reservation-1",
+            "reservation_status": "reserved",
+            "reserved_tokens": 100,
+            "input_estimate": 10,
+        },
+    )
+
+    assert durable_token_usage([started], "run-token-reservation") == 0
+    assert durable_model_reservations([started], "run-token-reservation") == {
+        "reservation-1": {
+            "logical_call_id": "logical-call-1",
+            "reserved_tokens": 100,
+            "input_estimate": 10,
+            "attempt_id": "attempt-1",
+            "execution_id": "execution-1",
+        }
+    }
+
+
+@pytest.mark.anyio
+async def test_v11_resume_releases_crash_window_reservation_once() -> None:
+    repository, store, run, _executor, coordinator = _v11_services(
+        run_id="run-token-reservation-resume"
+    )
+    leased, attempt = store.acquire_lease_and_create_attempt(
+        run.id,
+        attempt=RuntimeAttempt(
+            run_id=run.id,
+            attempt_number=1,
+            status=RuntimeAttemptStatus.RUNNING,
+        ),
+        owner="worker-a",
+        expected_status=RuntimeRunStatus.CREATED,
+    )
+    await coordinator.writer.start()
+    await coordinator._persist_model_event(
+        leased,
+        attempt,
+        "worker-a",
+        RuntimePhase.LEAD_PLANNING,
+        "execution-crash-window",
+        "started",
+        actor_name="LeadAgent",
+        safe_payload={
+            "logical_call_id": "logical-crash-window",
+            "reservation_id": "reservation-crash-window",
+            "reservation_status": "reserved",
+            "reserved_tokens": 100,
+            "input_estimate": 10,
+            "attempt": 1,
+        },
+    )
+    assert durable_model_reservations(store.list_events(run.id), run.id)
+
+    store.audit_expired_leases(datetime.now(UTC) + timedelta(seconds=31))
+    result = await coordinator.resume(run.id, owner="worker-b")
+
+    assert result.status == RuntimeRunStatus.COMPLETED
+    events = store.list_events(run.id)
+    releases = [
+        event
+        for event in events
+        if event.safe_payload.get("reservation_id") == "reservation-crash-window"
+        and event.safe_payload.get("reservation_status") == "released"
+    ]
+    assert len(releases) == 1
+    assert durable_model_reservations(events, run.id) == {}
+    await coordinator.shutdown()

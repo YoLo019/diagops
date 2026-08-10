@@ -30,6 +30,7 @@ from backend.benchmarks.openrca.runner import (
     OpenRcaDiagnosisRunner,
     run_benchmark_pair,
 )
+from backend.db.models import InvestigationStatus
 from backend.db.session import create_db_engine, initialize_database
 from backend.db.sqlite_repository import SQLiteInvestigationRepository
 from backend.domain.agent_findings import RootCauseAttribution
@@ -271,6 +272,258 @@ def run_one_real_fixture_case(tmp_path: Path):
     return outcome, repository, runtime_store
 
 
+def v11_fixture_turn(**kwargs):
+    output_type = kwargs["output_type"].__name__
+    if output_type == "LeadPlanningOutput":
+        return {
+            "decision": {
+                "action": "investigate",
+                "summary": "Inspect the bounded local fixture.",
+                "task_ids": ["task-local-fixture"],
+                "candidate_ids": [],
+                "selected_skills": [],
+            },
+            "tasks": [
+                {
+                    "id": "task-local-fixture",
+                    "title": "Inspect local fixture",
+                    "description": "Inspect the local benchmark signals.",
+                    "analysis_round": 1,
+                    "tool_names": ["read_logs"],
+                    "information_gap": "local fixture evidence",
+                }
+            ],
+        }
+    if output_type == "InvestigatorOutput":
+        return {
+            "summary": "No candidate in the bounded fixture.",
+            "findings": [],
+            "candidates": [],
+        }
+    assert output_type == "LeadAdjudicationOutput"
+    return {
+        "decision": {
+            "action": "inconclusive",
+            "summary": "The bounded local fixture has no candidate.",
+            "stop_reason": "local fixture boundary",
+            "task_ids": [],
+            "candidate_ids": [],
+        }
+    }
+
+
+def build_real_v11_fixture_runner(tmp_path: Path):
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'v11-runtime.db'}")
+    initialize_database(engine)
+    repository = SQLiteInvestigationRepository(engine)
+    runtime_store = SQLiteRuntimeStore(engine, repository)
+    case = OpenRcaRuntimeIndex.model_validate_json(
+        safe_index(tmp_path, 1).read_text(encoding="utf-8")
+    ).cases[0]
+
+    runner = OpenRcaDiagnosisRunner(
+        Path(__file__).parents[1] / "fixtures" / "openrca",
+        "fake-model",
+        repository=repository,
+        runtime_store=runtime_store,
+        mode="v11-agent",
+        turn=v11_fixture_turn,
+    )
+    return runner, case, repository, runtime_store
+
+
+def run_one_real_v11_fixture_case(tmp_path: Path):
+    runner, case, repository, runtime_store = build_real_v11_fixture_runner(tmp_path)
+    outcome = runner.run_case(case, InvestigationStrategy.FIXED)
+    return outcome, repository, runtime_store
+
+
+def test_real_v11_runner_starts_through_local_provider_registry(tmp_path: Path):
+    outcome, repository, runtime_store = run_one_real_v11_fixture_case(tmp_path)
+
+    assert outcome.runtime_run_id is not None
+    assert outcome.completed is True
+    assert outcome.projection_audit is not None
+    assert outcome.projection_audit.rule_version == "v11-agent-generic"
+    runtime_run = runtime_store.get_run(outcome.runtime_run_id)
+    assert runtime_run.status == RuntimeRunStatus.COMPLETED
+    review = repository.get_coordination_review(runtime_run.investigation_id)
+    assert review is not None
+    assert review.authority_mode.value == "agent"
+
+
+def test_real_v11_runner_routes_public_projection_through_shared_guard(
+    tmp_path: Path, monkeypatch
+):
+    calls = []
+
+    def reject_projection(_repository, _runtime_store, record):
+        calls.append(record.id)
+        raise ValueError("injected publication guard failure")
+
+    monkeypatch.setattr(
+        openrca_runner,
+        "ensure_v11_projection_owner",
+        reject_projection,
+        raising=False,
+    )
+
+    outcome, _repository, _runtime_store = run_one_real_v11_fixture_case(tmp_path)
+
+    assert calls
+    assert outcome.completed is False
+    assert outcome.root_causes == []
+    assert outcome.projection_audit is not None
+    assert outcome.projection_audit.projection_error is True
+
+
+@pytest.mark.parametrize(
+    "durable_status",
+    [
+        RuntimeRunStatus.CREATED,
+        RuntimeRunStatus.FAILED,
+        RuntimeRunStatus.CANCELLED,
+        RuntimeRunStatus.INTERRUPTED,
+        RuntimeRunStatus.COMPLETED,
+    ],
+)
+def test_real_v11_runner_fails_closed_for_noncompleted_durable_projection(
+    tmp_path: Path, monkeypatch, durable_status: RuntimeRunStatus
+):
+    original_guard = openrca_runner.ensure_v11_projection_owner
+
+    class StatusOverrideStore:
+        def __init__(self, delegate):
+            self._delegate = delegate
+
+        def __getattr__(self, name):
+            return getattr(self._delegate, name)
+
+        def get_run(self, run_id):
+            return self._delegate.get_run(run_id).model_copy(
+                update={"status": durable_status}
+            )
+
+    def guard(repository, runtime_store, record):
+        return original_guard(repository, StatusOverrideStore(runtime_store), record)
+
+    monkeypatch.setattr(openrca_runner, "ensure_v11_projection_owner", guard)
+
+    outcome, _repository, _runtime_store = run_one_real_v11_fixture_case(tmp_path)
+
+    if durable_status == RuntimeRunStatus.COMPLETED:
+        assert outcome.completed is True
+    else:
+        assert outcome.completed is False
+        assert outcome.root_causes == []
+        assert outcome.projection_audit is not None
+        assert outcome.projection_audit.projection_error is True
+
+
+def test_real_v11_runner_csv_fails_closed_when_durable_run_is_failed(
+    tmp_path: Path, monkeypatch
+):
+    runner, case, _repository, runtime_store = build_real_v11_fixture_runner(tmp_path)
+    index_path = tmp_path / "single-v11-case.json"
+    index_path.write_text(
+        OpenRcaRuntimeIndex(case_manifest_hash="fixture", cases=[case]).model_dump_json(),
+        encoding="utf-8",
+    )
+    original_guard = openrca_runner.ensure_v11_projection_owner
+
+    class FailedStatusStore:
+        def __init__(self, delegate):
+            self._delegate = delegate
+
+        def __getattr__(self, name):
+            return getattr(self._delegate, name)
+
+        def get_run(self, run_id):
+            return self._delegate.get_run(run_id).model_copy(
+                update={"status": RuntimeRunStatus.FAILED}
+            )
+
+    def guard(repository, store, record):
+        return original_guard(repository, FailedStatusStore(store), record)
+
+    monkeypatch.setattr(openrca_runner, "ensure_v11_projection_owner", guard)
+    result = run_benchmark_pair(
+        runner,
+        index_path,
+        tmp_path / "runs",
+        model="fake-model",
+        strategies=(InvestigationStrategy.FIXED,),
+        mode="v11-agent",
+    )
+
+    prediction_path = result.output_dir / "v11-agent-predictions.csv"
+    assert prediction_path.exists()
+    with prediction_path.open(encoding="utf-8", newline="") as file:
+        rows = list(csv.DictReader(file))
+    assert len(rows) == 1
+    assert json.loads(rows[0]["prediction"]) == {}
+    metadata = json.loads(rows[0]["metadata"])
+    assert metadata["projection"]["projection_error"] is True
+    summary = json.loads((result.output_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary["strategies"]["fixed"]["projection_errors"] == 1
+    assert runtime_store.get_run(metadata["runtime_run_id"]).status == RuntimeRunStatus.COMPLETED
+
+
+def test_real_v11_runner_csv_fails_closed_when_investigation_is_failed(
+    tmp_path: Path, monkeypatch
+):
+    runner, case, repository, _runtime_store = build_real_v11_fixture_runner(tmp_path)
+    index_path = tmp_path / "single-v11-investigation-failed.json"
+    index_path.write_text(
+        OpenRcaRuntimeIndex(case_manifest_hash="fixture", cases=[case]).model_dump_json(),
+        encoding="utf-8",
+    )
+    original_guard = openrca_runner.ensure_v11_projection_owner
+    projected_cause = RootCauseAttribution(
+        root_cause_occurred_at=case.start_time,
+        root_cause_component="must-not-publish",
+        root_cause_reason="must-not-publish",
+        supporting_evidence_ids=["ev-must-not-publish"],
+    )
+    projected = ProjectionResult(
+        causes=(projected_cause,),
+        audit=ProjectionAudit(
+            rule_version="v11-agent-generic",
+            scored_fields=scored_fields(case.task_index),
+            selected_evidence_ids=(("ev-must-not-publish",),),
+        ),
+    )
+
+    def project(**_arguments):
+        return projected
+
+    def guard(repo, store, record):
+        repo.save(record.model_copy(update={"status": InvestigationStatus.FAILED}))
+        return original_guard(repo, store, repo.get(record.id))
+
+    monkeypatch.setattr(openrca_runner, "project_v11_candidates", project)
+    monkeypatch.setattr(openrca_runner, "ensure_v11_projection_owner", guard)
+    result = run_benchmark_pair(
+        runner,
+        index_path,
+        tmp_path / "runs",
+        model="fake-model",
+        strategies=(InvestigationStrategy.FIXED,),
+        mode="v11-agent",
+    )
+
+    prediction_path = result.output_dir / "v11-agent-predictions.csv"
+    with prediction_path.open(encoding="utf-8", newline="") as file:
+        rows = list(csv.DictReader(file))
+    assert len(rows) == 1
+    assert json.loads(rows[0]["prediction"]) == {}
+    metadata = json.loads(rows[0]["metadata"])
+    assert metadata["failure_category"] == "projection_error"
+    assert metadata["projection"]["projection_error"] is True
+    summary = json.loads((result.output_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary["strategies"]["fixed"]["projection_errors"] == 1
+
+
 def test_real_runner_projects_output_without_mutating_persisted_review(
     tmp_path: Path,
     monkeypatch,
@@ -363,6 +616,36 @@ def test_agent_shadow_always_writes_an_independent_run_directory(tmp_path: Path)
         json.loads((shadow.output_dir / "run-manifest.json").read_text(encoding="utf-8"))["mode"]
         == "agent-shadow"
     )
+
+
+def test_v11_agent_writes_explicit_compatibility_artifact(tmp_path: Path):
+    result = run_benchmark_pair(
+        FakeRuntime(),
+        safe_index(tmp_path, 1),
+        tmp_path / "runs",
+        model="test-model",
+        strategies=(InvestigationStrategy.FIXED,),
+        mode="v11-agent",
+    )
+
+    manifest = json.loads((result.output_dir / "run-manifest.json").read_text())
+    assert manifest["mode"] == "v11-agent"
+    assert (result.output_dir / "fixed-predictions.csv").exists()
+    assert (result.output_dir / "v11-agent-predictions.csv").exists()
+
+
+def test_v11_compatible_runner_requires_the_configured_adapter():
+    runner = OpenRcaDiagnosisRunner(
+        Path("."),
+        "test-model",
+        repository=None,
+        runtime_store=None,
+        provider=ModelProvider.OPENAI_COMPATIBLE,
+        mode="v11-agent",
+    )
+
+    with pytest.raises(ValueError, match="configured model adapter"):
+        runner._v11_model_identity("test-model")
 
 
 def test_deterministic_run_rejects_legacy_index_without_expected_count(

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from backend.domain.agent_findings import RootCauseAttribution
-from backend.domain.evidence import EvidenceItem
+from backend.domain.agent_findings import RootCauseAttribution, RootCauseCandidate
+from backend.domain.evidence import EvidenceItem, validate_usable_evidence
+from backend.services.v11_public import public_v11_candidate
 
 RULE_VERSION = "v2"
 _TASK_FIELDS = {
@@ -104,6 +105,55 @@ def project_root_causes(
             ),
             projection_fallback=fallback,
             fallback_reason="insufficient_distinct_candidates" if fallback else None,
+        ),
+    )
+
+
+def project_v11_candidates(
+    *,
+    task_index: str,
+    expected_count: int,
+    evidence: list[EvidenceItem],
+    candidates: list[RootCauseCandidate],
+    fallback_timestamp,
+    runtime_run_id: str,
+) -> ProjectionResult:
+    """把已接受的 V11 候选投影为 OpenRCA 兼容字段，不重跑 RCA 规则。"""
+    fields = scored_fields(task_index)
+    projected: list[RootCauseAttribution] = []
+    for candidate in sorted(candidates, key=lambda item: item.rank):
+        public_candidate = public_v11_candidate(candidate)
+        validate_usable_evidence(
+            evidence,
+            candidate.supporting_evidence_ids,
+            runtime_run_id=runtime_run_id,
+        )
+        supporting = list(candidate.supporting_evidence_ids)
+        projected.append(
+            RootCauseAttribution(
+                root_cause_occurred_at=(
+                    public_candidate.onset_window_start or fallback_timestamp
+                ),
+                root_cause_component=public_candidate.affected_entity or "unknown",
+                root_cause_reason=(
+                    public_candidate.failure_mechanism or public_candidate.summary
+                ),
+                supporting_evidence_ids=supporting,
+            )
+        )
+        if len(projected) >= expected_count:
+            break
+    fallback = len(projected) < expected_count
+    return ProjectionResult(
+        causes=tuple(projected),
+        audit=ProjectionAudit(
+            rule_version="v11-agent-generic",
+            scored_fields=fields,
+            selected_evidence_ids=tuple(
+                tuple(sorted(cause.supporting_evidence_ids)) for cause in projected
+            ),
+            projection_fallback=fallback,
+            fallback_reason="insufficient_accepted_candidates" if fallback else None,
         ),
     )
 

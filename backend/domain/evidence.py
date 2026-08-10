@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 from datetime import datetime
 from enum import StrEnum
 from typing import Annotated
@@ -230,3 +231,24 @@ class EvidenceItem(BaseModel):
 
         validate_json_value(payload)
         return payload
+
+
+def validate_usable_evidence(
+    evidence: Iterable[EvidenceItem],
+    evidence_ids: Iterable[str],
+    *,
+    runtime_run_id: str | None = None,
+) -> None:
+    """校验被诊断结论引用的证据可用且属于同一 runtime owner。"""
+    evidence_by_id = {item.id: item for item in evidence}
+    for evidence_id in evidence_ids:
+        item = evidence_by_id.get(evidence_id)
+        if item is None:
+            raise ValueError(f"missing evidence id: {evidence_id}")
+        if item.status not in {EvidenceStatus.SUCCESS, EvidenceStatus.PARTIAL}:
+            raise ValueError(
+                f"evidence {evidence_id} has unusable status {item.status.value}; "
+                "usable evidence requires success or partial status"
+            )
+        if runtime_run_id is not None and item.runtime_run_id != runtime_run_id:
+            raise ValueError(f"evidence {evidence_id} owner mismatch")

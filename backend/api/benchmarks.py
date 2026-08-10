@@ -19,6 +19,7 @@ ALLOWED_ARTIFACTS = frozenset(
         "run-manifest.json",
         "fixed-predictions.csv",
         "adaptive-predictions.csv",
+        "v11-agent-predictions.csv",
         "official-report.csv",
         "summary.json",
     }

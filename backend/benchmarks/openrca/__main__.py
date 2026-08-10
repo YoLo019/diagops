@@ -17,6 +17,9 @@ from backend.benchmarks.openrca.runner import (
     OpenRcaDiagnosisRunner,
     run_benchmark_pair,
 )
+from backend.diagnosis.openai_compatible_model import (
+    OpenAICompatibleChatCompletionsModel,
+)
 from backend.domain.multi_agent import InvestigationStrategy, ModelProvider
 from backend.services.container import get_container
 
@@ -39,7 +42,7 @@ def main() -> None:
     run.add_argument("--safe-index", type=Path, required=True)
     run.add_argument("--output", type=Path, required=True)
     run.add_argument("--model")
-    run.add_argument("--mode", choices=("deterministic", "agent-shadow"))
+    run.add_argument("--mode", choices=("deterministic", "agent-shadow", "v11-agent"))
     run.add_argument(
         "--provider",
         choices=tuple(item.value for item in ModelProvider),
@@ -143,20 +146,39 @@ def main() -> None:
         else (InvestigationStrategy(arguments.strategy),)
     )
     container = get_container()
+    configured_model = None if arguments.mode == "deterministic" else model
+    provider = ModelProvider(arguments.provider)
+    if arguments.mode == "v11-agent" and provider in {
+        ModelProvider.DEEPSEEK,
+        ModelProvider.OPENAI_COMPATIBLE,
+    }:
+        configured_runtime = container.orchestrator.v11_runtime
+        configured_adapter = (
+            None if configured_runtime is None else configured_runtime.model
+        )
+        if not isinstance(configured_adapter, OpenAICompatibleChatCompletionsModel):
+            parser.error(
+                "v11-agent requires the configured DeepSeek/OpenAI-compatible model adapter"
+            )
+        configured_model = configured_adapter.clone_for_model(
+            model,
+            max_retries=0,
+        )
     result = run_benchmark_pair(
         OpenRcaDiagnosisRunner(
             arguments.dataset_root,
-            None if arguments.mode == "deterministic" else model,
+            configured_model,
             repository=container.repository,
             runtime_store=container.runtime_store,
-            provider=ModelProvider(arguments.provider),
+            provider=provider,
             prompt_version=prompt_version,
             deterministic=arguments.mode == "deterministic",
+            mode=arguments.mode or "agent",
         ),
         arguments.safe_index,
         arguments.output,
         model=model,
-        provider=ModelProvider(arguments.provider),
+        provider=provider,
         prompt_version=prompt_version,
         timeout_seconds=container.settings.agents.timeout_seconds,
         input_cost_per_million=arguments.input_cost_per_million,

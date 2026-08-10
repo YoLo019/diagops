@@ -439,12 +439,16 @@ def test_alertmanager_investigation_failure_does_not_block_later_alert(
     original = container.run_investigation
     calls = 0
 
-    async def fail_once(event, *, strategy=None):
+    async def fail_once(event, *, strategy=None, execution_contract_version=None):
         nonlocal calls
         calls += 1
         if calls == 1:
             raise RuntimeError("unsafe provider detail")
-        return await original(event, strategy=strategy)
+        return await original(
+            event,
+            strategy=strategy,
+            execution_contract_version=execution_contract_version,
+        )
 
     monkeypatch.setattr(container, "run_investigation", fail_once)
     response = TestClient(app).post(

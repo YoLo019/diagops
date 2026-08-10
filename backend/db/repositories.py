@@ -300,6 +300,7 @@ class InMemoryInvestigationRepository:
         result_evidence_ids: list[str] | None = None,
         related_action_ids: list[str] | None = None,
         related_cause_types: list[CauseType | str] | None = None,
+        related_candidate_ids: list[str] | None = None,
     ):
         with self._lock:
             record = self.get(investigation_id)
@@ -311,6 +312,7 @@ class InMemoryInvestigationRepository:
                 result_evidence_ids or [],
                 related_action_ids or [],
                 related_cause_types or [],
+                related_candidate_ids,
             )
             for index, suggestion in enumerate(record.verification_suggestions):
                 if suggestion.id != verification_id:

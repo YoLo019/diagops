@@ -1394,33 +1394,33 @@ historical replay—not because the old benchmark score is unchanged.
 
 | ID | Requirement | Baseline evidence | Acceptance check | Plan task | Focused/final evidence |
 | --- | --- | --- | --- | --- | --- |
-| R1 | Agent adjudication is authoritative | Orchestrator currently replaces Agent roots | Authority-invariant unit/integration tests | T7, T8, T13 | pending |
+| R1 | Agent adjudication is authoritative | Orchestrator currently replaces Agent roots | Authority-invariant unit/integration tests | T7, T8, T13 | M3/T7–T8: Lead-authored plan/adjudication and Critic outputs are persisted and projected without deterministic root assignment; exact T7/T8 gates green; product-path authority remains in T9/T13 |
 | R2 | Lead plans adaptive information gaps with frozen structured actions/tasks | Fixed modality task map today | Lead action/task/phase contract tests | T2, T7, T13 | M1/T2: bounded Lead/task/phase contracts and ownership tests; full authority behavior remains in T7/T13 |
-| R3 | Up to three isolated Investigators use the same bounded nine-tool read-only manifest | Parallel fixed specialists and adaptive session exist; current allowlists drift | Isolation, registry-manifest, concurrency, and budget tests | T4, T7, T13 | pending |
-| R4 | Critic emits the frozen seven-check contract and may request one round | Current review only revisits deterministic conflicts | Critic verdict/reference/supplemental-round tests | T2, T8, T13 | M1/T2: bounded Critic verdict and seven-check validation with same-run owner plus supplemental-task linkage checks; full authority behavior remains in T8/T13 |
+| R3 | Up to three isolated Investigators use the same bounded nine-tool read-only manifest | Parallel fixed specialists and adaptive session exist; current allowlists drift | Isolation, registry-manifest, concurrency, and budget tests | T4, T7, T13 | M3/T7: bounded generic Investigator instances, unique IDs, isolated round-one contexts, frozen nine-tool manifest, budget/timeout/cancel/cleanup, per-request reservations, and retry evidence; second-round exact T7 gate 79 passed; final concurrency/acceptance remains in T10/T13 |
+| R4 | Critic emits the frozen seven-check contract and may request one round | Current review only revisits deterministic conflicts | Critic verdict/reference/supplemental-round tests | T2, T8, T13 | M1/T2: bounded Critic verdict and seven-check validation with same-run owner plus supplemental-task linkage checks; second-round M3/T8 exact gate 195 passed with exactly seven checks/candidate, one reconciliation, no third round, and mechanical safe-text validation; final product path remains in T13 |
 | R5 | Hypotheses are optional | Report and coordination currently require hypotheses | Empty-hypothesis complete/inconclusive tests | T2, T7, T9, T13 | M1/T2–T3: optional V11 candidate fields and status-aware finalize/frozen projection; complete flow remains in T7/T9/T13 |
-| R6 | Findings support free-text entity/mechanism and evidence/counterevidence | Current output is `CauseType`-centered | Domain validation and persistence round-trip | T2, T7, T8, T13 | M1/T2: bounded entity/mechanism, onset, counterevidence, and memory/SQLite round-trip coverage; full finding production remains in T7/T8 |
-| R7 | Validator rejects but never rewrites conclusions | Current authoritative root copy violates this | Mutation-sentinel tests | T3, T8, T13 | M1/T3: versioned V11 handlers and frozen projection preserve authoritative Lead/Critic fields; sentinel/full validator coverage remains in T8/T13 |
-| R8 | Versioned durable phases, cancel, resume, replay, idempotency, deadlines, and budgets remain correct | V9 runtime lacks execution contract identity | Migration, fault-injection, legacy-rejection, and replay suites | T3, T6, T10, T13 | M1/T3: persisted-contract phase ordering, activation/recovery ownership, frozen source integrity, contract-integrity reload repair, replay/diff, legacy rejection, and monotonic deadline checks green; later provider/model gates remain |
-| R9 | Complete/partial/inconclusive/failed/cancelled semantics are explicit | Current summary lacks inconclusive | Status matrix tests across API/report/runtime | T2, T3, T8–T10, T13 | M1/T2–T3: bounded status/failure/cancelled contracts and ownership-aware frozen states; full API/report matrix remains in T8–T10/T13 |
-| R10 | Historical records and all hypothesis/cause downstream projections remain readable | Reports, actions, human transitions, summaries, and diff are CauseType-centered | V3–V7 migration, legacy fixture, API/report/action/diff compatibility tests | T2, T3, T9, T10, T13 | M1/T2–T3: V3–V7/current-V6 migration manifests, legacy payload serializers, V10 golden/replay/diff compatibility, and additive Lead/Critic summary/API projection green; product projections remain in T9/T10 |
-| R11 | No production writes or unsafe tool escalation | Current read-only allowlist exists | Safety and injection suites | T4, T6–T10, T13 | pending |
-| R12 | No private reasoning or secrets are persisted/exposed | Current ReAct trace can store assistant text | Payload privacy scans | T6–T10, T13 | pending |
-| R13 | Production run is bounded to 3 Investigators, 2 rounds, and 120s | Current parallel/budget primitives exist | Boundary, timeout, and race tests | T3, T6–T8, T10, T13 | M1/T3: V11 absolute deadline/phase budget monotonicity and timeout ownership checks; Investigator/tool/model execution remains in T6–T8/T10 |
+| R6 | Findings support free-text entity/mechanism and evidence/counterevidence | Current output is `CauseType`-centered | Domain validation and persistence round-trip | T2, T7, T8, T13 | M1/T2: bounded entity/mechanism, onset, counterevidence, and memory/SQLite round-trip coverage; M3/T7–T8 produces and preserves Agent-authored fields with committed evidence/counterevidence; exact T7/T8 gates green |
+| R7 | Validator rejects but never rewrites conclusions | Current authoritative root copy violates this | Mutation-sentinel tests | T3, T8, T13 | M1/T3: versioned V11 handlers and frozen projection preserve authoritative Lead/Critic fields; M3/T8 mutation sentinel proves mechanical validator does not rewrite rank/entity/mechanism/evidence/counterevidence/onset; final product validation remains in T13 |
+| R8 | Versioned durable phases, cancel, resume, replay, idempotency, deadlines, and budgets remain correct | V9 runtime lacks execution contract identity | Migration, fault-injection, legacy-rejection, and replay suites | T3, T6, T10, T13 | M1/T3: persisted-contract phase ordering, activation/recovery ownership, frozen source integrity, contract-integrity reload repair, replay/diff, legacy rejection, and monotonic deadline checks green; M4 adds report/action fault-injection proving PhaseCommit rollback for memory and SQLite; later provider/model gates remain |
+| R9 | Complete/partial/inconclusive/failed/cancelled semantics are explicit | Current summary lacks inconclusive | Status matrix tests across API/report/runtime | T2, T3, T8–T10, T13 | M1/T2–T3: bounded status/failure/cancelled contracts and ownership-aware frozen states; M3/T8 covers complete/partial final Critic+Lead and inconclusive-without-candidates; M4 clears diagnoses and alternatives for inconclusive reports and validates the review/run/Lead status matrix; T9/T10 green |
+| R10 | Historical records and all hypothesis/cause downstream projections remain readable | Reports, actions, human transitions, summaries, and diff are CauseType-centered | V3–V7 migration, legacy fixture, API/report/action/diff compatibility tests | T2, T3, T9, T10, T13 | M1/T2–T3: V3–V7/current-V6 migration manifests, legacy payload serializers, V10 golden/replay/diff compatibility, and additive Lead/Critic summary/API projection green; M4 scopes usable-evidence validation to V11 while preserving V10 missing-ID behavior and legacy-to-V11 linked rerun; T9/T10 green |
+| R11 | No production writes or unsafe tool escalation | Current read-only allowlist exists | Safety and injection suites | T4, T6–T10, T13 | M3/T7–T8: all model tool calls use the frozen registry manifest with invocation-time callable/read-only checks; no report/action/fixed specialist path is entered; full safety/privacy suite remains in T10/T13 |
+| R12 | No private reasoning or secrets are persisted/exposed | Current ReAct trace can store assistant text | Payload privacy scans | T6–T10, T13 | M3/T7–T8: only bounded structured outputs/summaries and committed evidence references are persisted; M4 adds one shared V11 public projection across findings, candidates, Critic/Lead, summaries, reports, and graph seeds, with API/UI end-to-end private-marker regressions; T10 green |
+| R13 | Production run is bounded to 3 Investigators, 2 rounds, and 120s | Current parallel/budget primitives exist | Boundary, timeout, and race tests | T3, T6–T8, T10, T13 | M1/T3: V11 absolute deadline/phase budget monotonicity and timeout ownership checks; second-round M3/T7–T8 covers 1–3 bounded concurrent Investigators, two rounds, per-request model/tool/turn reservations, timeout, cancellation, late results, and cleanup; final acceptance remains in T10 |
 | R14 | Frozen V11 single-Agent control is reproducible and Multi-Agent tokens are ≤3x in primary evaluation | No current paired V11 single-Agent path | Control-contract tests and artifact/hash verifier | T11–T13 | pending |
 | R15 | Primary locally held-out exact score meets frozen formula and gains ≥10pp | V10.1 OpenRCA delta was zero; no independent external custodian is available | One frozen RCAEval final paired gate with prediction/label process isolation | T1, T11–T13 | pending |
 | R16 | Reference integrity 100%, single-reviewer evidence-support rubric pass rate ≥95%, P95 ≤120s, read-only/leakage zero | Existing acceptance measures only reference existence | Runtime integrity tests plus frozen label-input-isolated support/latency/safety gate | T10–T13 | pending |
 | R17 | Equal-token ablation is published with bounded claim language | Not currently measured | Artifact presence and claim checker | T1, T11–T13 | pending |
-| R18 | OpenRCA remains compatible without production-path adaptation | Deterministic historical runner/projector exist | Dual-mode compatibility suite and code scan | T3, T9, T10, T13 | M1/T3: V10 phase/profile and golden payload compatibility green; complete OpenRCA product-path suite remains in T9/T10/T13 |
-| R19 | Report/API/UI expose V11 reasoning artifacts and legacy authority labels | Current UI is deterministic-hypothesis-led | Contract and frontend tests | T9, T13 | pending |
+| R18 | OpenRCA remains compatible without production-path adaptation | Deterministic historical runner/projector exist | Dual-mode compatibility suite and code scan | T3, T9, T10, T13 | M1/T3: V10 phase/profile and golden payload compatibility green; M4 adds a V11-only generic candidate projector with shared usable-evidence/status/owner validation while retaining the deterministic V10 projector; T9/T10 green |
+| R19 | Report/API/UI expose V11 reasoning artifacts and legacy authority labels | Current UI is deterministic-hypothesis-led | Contract and frontend tests | T9, T13 | M4 API/UI/report regressions preserve safe Critic/Lead summaries, finding/candidate rationale, graph labels, actual finding actors/tasks/rounds/evidence, and legacy authority labels without private markers; T9/T10 green |
 | R20 | Add only the three Schema V7 run-contract columns; no new framework or table family | Existing runtime/payload tables are reusable but lack immutable execution identity and full budgets | Diff/design review and schema V3–V7 manifest tests | T2, T3, T13 | M1/T2: fresh/V3/V4/V5/legacy-V6/current-V6 manifests agree, only the three approved columns are added, and contract-integrity reload is fail-closed; final review remains in T13 |
 | R21 | Trace, runtime-state, related-alert, dependency, and verified-memory evidence are available through provider-neutral contracts | Trace is absent; dependency is mock-only in production; related alerts lack a tool; memory returns empty success | Domain/query/provider/tool contract tests | T4, T5, T10, T13 | pending |
 | R22 | Every V11 tool is verifiable offline on one host without credentials, Docker, or external services | Local OpenRCA metrics/logs/traces exist but there is no complete incident-package gate | Nine-tool offline acceptance and artifact hash check | T4, T10, T13 | pending |
 | R23 | Tempo is the only V11 real trace backend and is reproducibly testable through local Docker and OTLP replay | Docker/Compose client exists locally but the daemon may be unavailable; no Tempo Provider or replay gate exists | Pinned-image preflight, unique-project Compose, replay, parity, bounded polling, blocked-state, and scoped cleanup acceptance | T5, T10, T13 | pending |
-| R24 | Four versioned data-only diagnostic skills are selectable without adding executable plugins or MCP | Strategies are prose only; no Skill/MCP subsystem exists | Catalog schema/hash, required-tool, prompt, and no-dynamic-load checks | T4, T7, T11–T13 | pending |
+| R24 | Four versioned data-only diagnostic skills are selectable without adding executable plugins or MCP | Strategies are prose only; no Skill/MCP subsystem exists | Catalog schema/hash, required-tool, prompt, and no-dynamic-load checks | T4, T7, T11–T13 | M3/T7 uses the existing data-only skill catalog and registry-derived manifest without executable plugin/MCP loading; exact T7 gate green; control/evaluation parity remains in T11–T13 |
 | R25 | Formal scoring uses offline evidence and locally isolates runtime inputs from labels until prediction freeze | Current spec assumed an unavailable external custodian | Mount/path/environment denial tests and evaluator ordering/hash checks | T1, T11–T13 | pending |
 | R26 | Official OpenAI, existing DeepSeek, and certified OpenAI-compatible Chat Completions endpoints share one safe model boundary without vendor lock-in | Current settings expose only OpenAI/DeepSeek; the DeepSeek adapter hardcodes its URL/key and runtime treats every non-OpenAI provider as DeepSeek | Generic-adapter contract tests, fake-endpoint failure matrix, secret/tracing scans, live capability certification, and paired-run identity checks | T6, T10–T13 | pending |
-| R27 | Reused V10 infrastructure is isolated from V11 diagnostic semantics and every V11 artifact/entry is bound to one durable run | Current phase executor, direct orchestrator, Agent runtime, report/action paths, manifests, and latest-projection rows can execute or retain legacy semantics | Versioned-phase/profile tests, forbidden-call sentinels, all-entry RuntimeRun gate, supplemental-finding ownership, registry exposure, atomic projection activation/rerun/action ownership, run-create mismatch, `contract_integrity`, and persistence-boundary revalidation suites | T2–T4, T6–T11, T13 | M1/T2–T3: first-round ten findings plus second-round three medium persistence bypasses closed at shared profile, frozen-owner, BusinessMutation, aggregate model-validation, transaction-repair, summary, Critic/finding-linkage, execution-owner, and service/API boundaries; Schema V7, V10/V11 profiles, activation/freeze/recovery, adapter gates, and replay/diff isolation green; remaining entry/provider/product sentinels continue in T4/T6–T11/T13 |
+| R27 | Reused V10 infrastructure is isolated from V11 diagnostic semantics and every V11 artifact/entry is bound to one durable run | Current phase executor, direct orchestrator, Agent runtime, report/action paths, manifests, and latest-projection rows can execute or retain legacy semantics | Versioned-phase/profile tests, forbidden-call sentinels, all-entry RuntimeRun gate, supplemental-finding ownership, registry exposure, atomic projection activation/rerun/action ownership, run-create mismatch, `contract_integrity`, and persistence-boundary revalidation suites | T2–T4, T6–T11, T13 | M1/T2–T3: first-round ten findings plus second-round three medium persistence bypasses closed at shared profile, frozen-owner, BusinessMutation, aggregate model-validation, transaction-repair, summary, Critic/finding-linkage, execution-owner, and service/API boundaries; M3/T7–T8 adds persisted V11 phase dispatch, runtime/task/tool/evidence owner checks, V10 legacy-runtime isolation, supplemental ownership, and no report/action/fixed-loop entry; M4 closes report/action PhaseCommit atomicity, configured V11 product entry/rerun selection, active V11 rejection of V10, exact artifact owners, and shared public/evidence projections; exact T9/T10 and full gates green |
 
 ## 14. Alternatives considered
 
@@ -1554,19 +1554,289 @@ their substance; M2R-2/M2R-3 remain explicit T7 wiring prerequisites.
 | L29 | high reuse audit | Treating `AgentsRcaRuntime`, phase handlers, reports, actions, and OpenRCA modules as whole reusable units would retain deterministic hypotheses, fixed Agent loops, and CauseType authority | Closed in §5.1/O20/R27 by a primitive-level reuse allowlist and forbidden-call sentinel suite |
 | L30 | medium reuse re-review | Actions and verification suggestions participated in the latest projection and human transitions but were not bound to the owning V11 run | Closed in §5.1/§8.1/§8.6/§12/R27 with payload-only run IDs and active-owner validation on generation and transition |
 | M2R-1 | high M2 review | T6 adapter lacked the §7.8-required local slow-endpoint evidence for client cancellation, deadline enforcement, no late commit, and transport cleanup | Closed 2026-08-08: four slow-endpoint tests prove all four semantics against the real SDK/httpx stack; they passed with zero implementation change (coverage gap only, same shape as RR-M1), and focused re-review verified the assertions discriminate real cancellation/late-commit structures |
-| M2R-2 | medium M2 review | The only production wiring of `VerifiedMemoryLookup` injects no current-investigation resolver, so the self/source-ancestor memory exclusion guard is inert outside tests | Open: assigned as an M3/T7 wiring prerequisite with an integration test; the guard logic itself is fully tested |
-| M2R-3 | low M2 review | `assert_agent_callable` invocation rechecks have no production call site until V11 orchestration exists | Open: T7 must wire and forbid bypass; tracked for M3 acceptance |
+| M2R-2 | medium M2 review | The only production wiring of `VerifiedMemoryLookup` injects no current-investigation resolver, so the self/source-ancestor memory exclusion guard is inert outside tests | Closed 2026-08-08 in M3/T7: `AppContainer` injects the current/source-ancestor resolver through the shared provider registry; production wiring integration test passed |
+| M2R-3 | low M2 review | `assert_agent_callable` invocation rechecks have no production call site until V11 orchestration exists | Closed 2026-08-08 in M3/T7: V11 dispatch, retry, and resume invoke the registry assertion before model/tool dispatch; bypass regression test passed |
 | M2R-4 | low M2 review | Offline acceptance redaction rows omit the span-attribute free-text channel | Open: optional hardening, not a gate |
+
+M3 implementation evidence (2026-08-08): the M2 snapshot was committed as
+`M2_BASE_SHA=c2245ac` before implementation on isolated branch
+`codex/v11-m3`. T7 exact verification passed `53 passed` and its scoped Ruff
+gate passed; T8 exact verification passed `164 passed` and its scoped Ruff gate
+passed. M2R-2/M2R-3 focused verification passed `27 passed`; the full suite
+passed `1940 passed, 3 skipped, 1 warning`, and `uv run ruff check backend tests`
+passed. The implementation uses the existing SDK/model lifecycle and keeps
+`AgentsRcaRuntime` V10-only; no fixed loops, deterministic hypothesis/root
+assignment, legacy report/action path, M4, or M5 was started. Independent M3
+review is pending.
+
+M3 review-fix ledger (2026-08-08): independent review verdict `BLOCKING` was
+issued against base `b17da397807bacf6e155afe71062ad1c6c4fd868`. The approved
+V11 contract and milestone scope were preserved. Minimal RED regressions were
+added before each shared-boundary GREEN fix:
+
+| Finding | Closed behavior and evidence |
+| --- | --- |
+| B1 | Explicit `investigation_id` owner fencing now crosses commit, execution, budget, summary, and resume helpers; a multi-investigation repository regression proves the target run cannot cross-write. |
+| H1 | Run admission persists an ordered immutable nine-tool manifest/hash with skill/capability identity and limits; dispatch, retry, and resume reject a changed or unordered contract. |
+| H2 | One persisted retry coordinator classifies failures; only transport/rate-limit gets at most one retry, with attempts/resume metadata durable and semantic/validation failures non-retryable. |
+| H3 | V11 freezes a non-None token ceiling; input is atomically charged before request, output is capped by remaining budget, usage is checkpointed, and zero budget sends no model request across manual/SDK/provider paths. |
+| H4 | Absolute deadline preflight runs before every model/tool action, timeout is bounded by remaining time, and timeout/cancel/fence loss prevents late commit. |
+| H5 | Model/tool budgets use durable atomic reservations; concurrent Investigator, retry, resume, and cancel paths share the reservation, and transport retry reuses one logical tool action reservation. |
+| H6 | Investigator, required Critic/Lead/validator, and persistence failures terminalize `failed` with no diagnostic fallback; complete/partial require final Critic and Lead. |
+| H7 | Validator mechanically enforces same-run usable evidence, exact assessment coverage, inconclusive/partial contracts, and final actor coverage without mutating Agent-authored fields or invoking CauseType/provider semantics. |
+| M1 | All nested CausalCheck/CriticAssessment/LeadDecision summary/gap/stop text is scanned for control characters only. |
+| M2 | Critic and reconciliation success/failure update one unique durable AgentExecution audit with actor, attempt, deadline, usage, and resume metadata; final actor coverage is validated. |
+
+Final review-fix gates: T7 exact `70 passed`, T8 exact `184 passed`, M2R
+focused `83 passed/2 skipped` plus keyword focused `16 passed/33 deselected`,
+full `uv run pytest -q` `1967 passed/3 skipped/1 warning`, and full
+`uv run ruff check backend tests` clean. Current/Plan task rows now record the
+M2 baseline `c2245ac` as committed and T4/T5 as implemented/verified; T5's
+live Docker execution remains explicitly host-dependent. The fix is isolated
+to `codex/v11-m3`, with no merge/push/M4/M5 action; same-thread independent
+review remains pending.
+
+M3 second-round review-fix2 ledger (2026-08-09): independent review verdict
+`BLOCKING` was issued against base
+`629bc34e823ff9f5ff163dca5f3924a161baafd3`. The existing §6 scope and approved
+R1–R27 requirements were not changed. Every finding first received a minimal
+RED regression and then a shared-boundary GREEN fix:
+
+| Finding | RED → GREEN evidence | Resolution |
+| --- | --- | --- |
+| B1 | `test_v11_run_owner_is_explicit_when_repository_has_multiple_investigations`; `test_v11_nested_execution_contract_digest_fences_capability_and_limits` | Server-owned canonical nested execution contract/digest is created at admission; explicit investigation ownership and full contract validation cross clone, bind, dispatch, retry, resume, and persistence helpers. |
+| H1 | `test_v11_frozen_manifest_rejects_same_cardinality_tool_swap`; `test_v11_frozen_manifest_rejects_unordered_contract` | Ordered immutable nine-tool manifest/hash plus skill/capability identity and limits are the only dispatch/retry/resume contract; same-cardinality tool or nested identity/limit mutations fail closed. |
+| B2/H2 | `test_v11_sdk_provider_retry_is_only_the_persisted_outer_retry`; `test_v11_model_retry_is_one_classified_transport_attempt`; `test_v11_parse_failure_marks_latest_retry_attempt_invalid_output` | V11 SDK/provider clients use retry zero; one persisted coordinator owns at most one transport/rate-limit retry, persists attempts, and updates the latest malformed attempt. |
+| H3 | `test_v11_sdk_model_requests_reserve_decreasing_output_caps`; `test_v11_model_precharges_input_before_setting_output_cap`; `test_v11_zero_tool_budget_does_not_start_model`; `test_v11_sdk_budget_reservation_is_released_when_preflight_rejects` | Every SDK request atomically charges input and derives a descending output cap from the durable reservation; zero budget sends no request and preflight rejection releases an unstarted reservation. |
+| H4 | `test_v11_model_deadline_preflight_blocks_request_before_start`; `test_session_deadline_preflight_blocks_tool_before_provider_start`; `test_late_tool_result_is_rejected_after_execution_fence_loss` | Absolute deadline/cancel preflight runs before each model/tool action, timeout fits remaining time, and late results cannot commit. |
+| H5 | `test_v11_tool_budget_reservation_is_atomic_and_durable`; `test_v11_transport_retry_reuses_one_durable_tool_reservation`; `test_v11_investigators_share_a_bounded_concurrent_gate` | One durable reservation belongs to one logical tool action and is reused by retry/resume/cancel; concurrent Investigators share a bounded gate and cannot oversell. |
+| H6 | `test_v11_all_investigator_failure_is_terminal_failed_without_diagnostic`; `test_v11_required_critic_failure_is_failed_without_inconclusive_fallback`; `test_v11_required_lead_failure_is_failed_without_inconclusive_fallback`; `test_v11_validator_failure_is_failed_without_inconclusive_fallback`; `test_v11_required_investigator_failure_stops_before_critic_or_lead` | Required actor or persistence failure terminalizes `failed`, clears diagnostic projection, and stops later V11 phases; no pseudo-inconclusive fallback is generated. |
+| H7/M1 | `test_v11_validator_rejects_orphan_supplemental_task_ids`; `test_v11_partial_requires_usable_evidence_passing_check_and_round_two_linkage`; `test_v11_validator_scans_nested_critic_check_text_for_control_characters`; `test_v11_validator_rejects_whitespace_controls_in_nested_assessment_text` | Mechanical validation requires exact same-run round-two task linkage, enforces partial/inconclusive contracts, and scans nested result text for controls without semantic CauseType/provider validation. |
+| M2 | `test_v11_critic_success_has_one_durable_audit_execution`; `test_v11_reconciliation_has_one_durable_audit_execution`; `test_v11_critic_output_failure_updates_one_audit_execution`; `test_v11_parse_failure_marks_latest_retry_attempt_invalid_output` | Critic/reconciliation success and failure retain one unique durable execution audit, and parse failure updates the latest retry attempt with actor, attempt, deadline, usage, and resume metadata. |
+
+Final second-round gates: T7 exact `79 passed`; T8 exact `195 passed`; scoped
+T7/T8 Ruff clean; explicit M2R-2/M2R-3 and isolation focused `84 passed/3
+skipped`; full `uv run pytest -q` `1981 passed/3 skipped/1 warning`; full
+`uv run ruff check .` and `uv run ruff check backend tests` clean;
+`git diff --check 629bc34..HEAD` clean. The sole warning is the existing
+Starlette/httpx TestClient deprecation warning. T4/T5 remain
+`implemented / verified`, with only live Docker execution host-dependent and
+unavailable. The single `M3_REVIEW_FIX2_SHA` commit is isolated to
+`codex/v11-m3`; no merge/push/M4/M5 action was taken and same-thread independent
+review remains pending.
+
+M3 third-round review-fix3 ledger (2026-08-09): independent review verdict
+`BLOCKING` was issued against base
+`b8c08d8a410877ef021cde69be0ec2faac98fb28`. The approved §6 scope and R1–R27
+requirements were unchanged. Each B1/B2/H1/H2 finding first received a minimal
+RED regression and then a shared-boundary GREEN fix:
+
+| Finding | RED → GREEN evidence | Resolution |
+| --- | --- | --- |
+| B1 | `test_v11_started_model_reservation_is_durable_for_resume_reconciliation` (RED collection, GREEN); `test_v11_resume_releases_crash_window_reservation_once`; `test_v11_sdk_reservation_retry_reuses_one_durable_allocation_and_settles_once`; `test_v11_concurrent_model_reservations_cannot_oversell_token_ceiling` | Reused `RuntimeEvent`/`RuntimeWriter` MODEL lifecycle persistence for run/logical-call/reservation/attempt identity. Reservation is durable before SDK send; actual completion settles usage, cancellation/timeout releases, retry reuses the same reservation, resume releases pending reservations deterministically, and duplicate settlement is ignored. |
+| B2 | `test_v11_official_provider_contract_and_client_ignore_ambient_endpoint` (RED, GREEN); `test_v11_official_contract_survives_sqlite_reload_with_ambient_endpoint` | Official V11 uses explicit `OFFICIAL_OPENAI_BASE_URL`, includes its endpoint identity in the sealed admission digest, validates the actual client URL on provider construction, and leaves explicit compatible URLs distinct. |
+| H1 | `test_v11_round_two_required_investigator_failure_terminalizes_before_reconciliation` (RED, GREEN); `test_v11_round_two_completed_partial_batch_is_not_blanket_failed` | Required round-two assessment/task ownership or Investigator failure clears the diagnostic projection and terminalizes before round completion is persisted; phase dispatch stops later reconciliation/Critic/Lead, while valid completed supplemental work remains eligible to continue. |
+| H2 | `test_v11_inconclusive_lead_clears_candidates_before_persist_and_reload` (RED, GREEN) | Lead semantic normalization clears candidates, accepted Critic assessment IDs, and root-cause attributions before persistence for legal `INCONCLUSIVE`; mechanical validation remains read-only and preserves the stop reason through reload. |
+
+Final third-round verification: T7 exact `86 passed`; T8 exact `202 passed`;
+T7/T8 scoped Ruff clean; M2R-2/M2R-3 and isolation focused `84 passed, 3
+skipped`; full `uv run pytest -q` `1990 passed, 3 skipped, 1 warning`; full
+Ruff (`uv run ruff check .` and `uv run ruff check backend tests`) clean. The
+warning is the existing Starlette/httpx TestClient deprecation warning.
+`M2_BASE_SHA=c2245ac` remains the separate M2 snapshot. The third-round fix is
+isolated to `codex/v11-m3` with symbolic `M3_REVIEW_FIX3_SHA` pending the single
+commit and same-thread independent review; no merge, push, M4, or M5 action was
+taken.
+
+M3 fourth-round review-fix4 ledger (2026-08-09): independent review verdict
+`BLOCKING` was issued against base
+`9a7bf4a43efd313e5dcb528361dfbfbfec1c37f0`; the sole remaining finding was
+multi-request SDK retry reservation identity. The approved §6 contract, V10
+legacy boundary, and all previously closed findings remain unchanged. The
+production reproduction first went RED: after request one settled and request
+two failed with a transport retry, the outer retry replayed request one with
+the settled reservation and raised
+`V11RuntimeContractError("model reservation was already settled")` before the
+provider retry request.
+
+| Finding | RED → GREEN evidence | Contract-preserving resolution |
+| --- | --- | --- |
+| B1 | `test_v11_sdk_outer_retry_replays_success_with_new_reservation_and_reuses_failed_request` (RED, GREEN); `test_v11_sdk_replay_cursor_rehydrates_and_repeated_replay_is_idempotent` (RED, GREEN) | Reuse the existing durable MODEL `RuntimeEvent` lifecycle: persist `request_index`, rehydrate ordered request history through `PhaseInput`, assign deterministic fresh `replay-N` reservations to completed requests, and reuse the original identity only for the active failed request. If a later retry reservation holds the remaining budget, it is durably deferred and restored when its request index is reached. Production coverage proves four provider calls, new request-one identity, request-two reuse, settled usage/remaining budget, zero active reservations, released-reservation non-reuse, and repeated replay idempotence. |
+
+Final fourth-round verification: T7 exact `88 passed`; T8 exact `204 passed`;
+M2R-2/M2R-3 and isolation focused `84 passed, 3 skipped`; changed/runtime
+focused `102 passed, 2 skipped`; full `uv run pytest -q` `1992 passed, 3
+skipped, 1 warning`; both `uv run ruff check .` and `uv run ruff check backend
+tests` clean; diff-check clean. The warning is the existing Starlette/httpx
+TestClient deprecation warning. The single `M3_REVIEW_FIX4_SHA` commit remains
+isolated to `codex/v11-m3`; no approved requirement changed; no merge, push, M4,
+or M5 action was taken.
+
+M3 fifth-round review-fix5 ledger (2026-08-09): independent review verdict
+`CHANGES_REQUIRED` was issued against base
+`e52e47984c4b460ed3b06dc4147d3d3b0532345b`; only H1 remained and
+Blocking/Medium/Low were zero. The approved §6 contract, V10 legacy boundary,
+and fourth-round reservation identity/replay behavior remain unchanged.
+
+The production RED used `_call_model → Agents SDK Runner → RetryCoordinator`
+with four provider calls: request one succeeded, request two failed with
+transport, and both requests succeeded on the outer retry. The old runtime
+counter and execution audit retained only final-attempt `40/10` and the last
+failed request estimate. GREEN reuses the existing per-request MODEL event
+callback: `input_tokens` remains the reservation billed/estimate value,
+`actual_input_tokens` records provider actual input, terminal events are
+deduplicated by reservation/status/attempt, successful actual usage accumulates
+across outer attempts, AgentExecution aggregates each attempt, and the final
+RunResult is not counted again.
+
+| Finding | RED → GREEN evidence | Contract-preserving resolution |
+| --- | --- | --- |
+| H1 | `test_v11_sdk_outer_retry_replays_success_with_new_reservation_and_reuses_failed_request` (RED `summary=40/10`, GREEN `summary=60/15`); `test_v11_single_sdk_request_usage_is_not_counted_twice`; `test_v11_all_failed_sdk_retry_records_estimate_without_summary_usage`; `test_v11_sdk_retry_resume_usage_is_idempotent` | Durable MODEL events carry actual-vs-billed input distinctly. A per-logical-call accumulator counts each terminal request once, adds only successful actual usage to summary/runtime counters, writes aggregate attempt usage before AgentExecution persistence, retains failed estimates in attempt audit, and keeps duplicate retry/resume settlement idempotent. |
+
+Final fifth-round verification: T7 exact `91 passed`; T8 exact `207 passed`;
+M2R-2/M2R-3 and isolation focused `84 passed, 3 skipped`; changed/runtime
+focused `102 passed, 2 skipped`; full `uv run pytest -q` `1995 passed, 3
+skipped, 1 warning`; both `uv run ruff check .` and `uv run ruff check backend
+tests` clean; diff-check clean. The warning is the existing Starlette/httpx
+TestClient deprecation warning. The single `M3_REVIEW_FIX5_SHA` commit remains
+isolated to `codex/v11-m3`; no approved requirement changed; no merge, push, M4,
+or M5 action was taken.
+
+M4 review-fix ledger (2026-08-09): the independent review verdict was
+`CHANGES_REQUIRED` against the initial M4 implementation. The approved R1–R27
+contract and V10 historical boundary were preserved. Each finding first had a
+production-shaped RED regression and then a shared-boundary GREEN fix:
+
+| Finding | RED → GREEN evidence | Contract-preserving resolution |
+| --- | --- | --- |
+| B1 | `test_v11_report_generation_is_atomic_for_memory_and_sqlite` | Report/action handlers construct a `BusinessMutation`; the common `PhaseCommit` owns repository writes and rollback for both memory and SQLite, including checkpoint/lease fault injection. |
+| B2 | `test_runtime_api_rejects_v10_run_on_active_v11_projection`; `test_product_entries_select_v11_when_agent_runtime_is_available`; `test_runtime_api_defaults_to_v11_when_product_runtime_is_available` | Configured product entrypoints and reruns select persisted V11; explicit V10 is fenced from an active V11 projection, while unconfigured historical V10 and legacy-to-V11 linked reruns remain supported. |
+| H3 | `test_v11_workbench_uses_private_safe_public_projection` | One shared V11 public projection scrubs private markers for findings, candidates, Critic/Lead review, reports, executions, and graph seeds; the UI applies a second projection before rendering. |
+| H4 | `test_v11_report_rejects_unusable_referenced_evidence`; `test_v11_projection_rejects_unusable_evidence`; `test_v11_projection_rejects_cross_run_evidence` | Report and V11 OpenRCA paths share `validate_usable_evidence`, requiring SUCCESS/PARTIAL status and the same durable runtime owner; the V10 legacy projector/validation path is unchanged. |
+| M5 | `test_v11_inconclusive_report_does_not_activate_diagnosis_or_actions` | Inconclusive V11 output clears both diagnoses and alternatives, so no candidate output is emitted. |
+| M6 | `test_v11_human_verification_cannot_replace_persisted_candidate_refs` | Human verification requests with a persisted V11 owner must retain the original candidate references and same-run action/evidence linkage. |
+| M7 | `test_v11_action_planner_rejects_inconsistent_final_statuses` | Action/verification planning requires a legal review/run diagnostic-status pair and matching final Lead decision before producing outputs. |
+| M8 | `test_v11_projection_rejects_ownerless_business_artifacts` | Agent evidence/actions/verifications require exactly one shared non-null durable `runtime_run_id` in model validation and aggregate/public projection guards. |
+| M9 | `test_v11_product_entry_summary_preserves_safe_lead_and_critic` | Event/manual/list summaries pass the persisted coordination review through the shared V11 public projection, preserving safe Lead/Critic fields. |
+| L10 | `test_v11_markdown_renders_actual_findings_tasks_rounds_and_lead_decision` | V11 Markdown renders actual finding actor/instance/task/round/evidence data and the public Lead decision; placeholder actors and private reasoning are absent. |
+
+First-round M4 verification was green: T9 exact `276 passed/1 warning`; T10 exact
+`812 passed/3 skipped/1 warning`; full `uv run pytest -q` `2025 passed/3
+skipped/1 warning`; offline tool acceptance `rows=80 failed=0`; runtime
+acceptance exit 0; `uv run ruff check .`, `uv run ruff check backend tests`,
+frontend production build, and `git diff --check` passed. The only test
+warning is the existing Starlette/httpx TestClient deprecation; Vite emitted
+only its existing `use client` bundle notices. The review-fix is local to
+`codex/v11-m4`; no merge or push was performed and independent re-review is
+pending.
+
+M4 second-round review-fix ledger (2026-08-09): the independent re-review
+reproduced two additional V11 publication defects against the first-round M4
+commit. H1 covered the OpenRCA V11 prediction boundary: a private marker in
+`affected_entity`, `failure_mechanism`, or `summary` was present in the
+`RootCauseAttribution` and `v11-agent-predictions.csv`. The V11 projector now
+reuses `backend/services/v11_public.py::public_v11_candidate` before building
+the artifact; the V10 deterministic projector and its legacy reason output are
+unchanged. M2 covered the shared public guard: contradictory review/run status,
+an invalid Lead/status combination, missing `active_runtime_run_id`, and a
+missing or mismatched latest Agent run summary were accepted. The shared domain
+`validate_v11_final_status` is now used by action planning, reports, and the
+V11 owner guard; the guard requires one active/latest durable Agent owner and
+fails closed for API, report, graph, and workbench publication. The frontend
+mirrors the same status/owner checks as a second defense.
+
+Second-round RED→GREEN evidence includes
+`test_v11_prediction_artifact_uses_public_candidate_projection`, the memory and
+SQLite `test_v11_projection_guard_rejects_invalid_reloaded_payload` matrix,
+`test_v11_api_guard_rejects_inconsistent_review_run_and_missing_active_owner`,
+the direct report status regressions, and frontend payload regressions. Final
+verification: T9 `279 passed/1 warning`, T10 `830 passed/3 skipped/1 warning`,
+full pytest `2045 passed/3 skipped/1 warning`, offline `80/80`, runtime
+acceptance `14/14`, Ruff, frontend build, and `git diff --check` all passed.
+V10 legacy behavior, the OpenAI-compatible URL adapter, capability gates, and
+local-only/offline boundary were not changed; no merge or push was performed.
+
+M4 third-round residual review-fix ledger (2026-08-09): the independent
+review reproduced four remaining V11 publication defects. The approved final
+status matrix is now explicit and shared: complete↔completed,
+partial↔partial, and inconclusive↔completed. Action planning, report
+generation, and the public guard reject both crossed combinations before
+publishing actions or diagnoses; V10 legacy behavior remains outside this
+guard.
+
+The public guard additionally requires the durable RuntimeRun to be exactly
+`completed`; created, failed, cancelled, and lease-expired `interrupted` runs
+are fail-closed. A shared report projection validator requires diagnosis IDs
+to equal the final Lead candidate IDs, alternatives to match the remaining
+review candidates, and inconclusive reports to emit neither collection. API
+report/workbench/graph publication, memory/SQLite reloads, direct report
+projection, and frontend omitted/null/stale active-owner cases are covered by
+RED→GREEN regressions. Final verification is T9 `280 passed/1 warning`, T10
+`855 passed/3 skipped/1 warning`, full pytest `2071 passed/3 skipped/1
+warning`, offline `80/80`, runtime acceptance `14/14`, Ruff/build/diff-check
+green; the post-commit runtime artifact is bound with `git_dirty=false` in the
+implementation handoff.
+
+M4 fourth-round high-fix ledger (2026-08-10): the independent review reproduced
+three production-path High defects against the latest M4 commit. The approved
+V11/V10 boundary remains unchanged. The real OpenRCA V11 runner now computes
+the execution-contract Skill identity from its actual nine-tool agent manifest,
+so Skill admission matches the local provider registry and the real SQLite
+fixture path can complete without external telemetry. The V10 deterministic
+projector retains its existing tool/reason semantics.
+
+The V11 OpenRCA runner now enters the shared durable V11 publication guard
+before constructing prediction or CSV artifacts. Non-terminal or failed
+`RuntimeRun` states (`created`, `failed`, `cancelled`, `interrupted`) fail
+closed; only `completed` can publish. The shared guard also treats any report
+under an active V11 owner as V11-bound, regardless of its authority label, and
+rejects stale/foreign diagnosis or alternative references, status mismatches,
+owner mismatches, and invalid Lead bindings. Historical V10-only reports still
+use the legacy deterministic path.
+
+The required RED→GREEN regressions cover the real runner (`8 passed`), the
+active-V11 legacy-report boundary in memory and SQLite plus API/workbench
+publication (`4 passed`), and the combined focused source suite (`160 passed/1
+warning`). Final verification is M4 focused `124 passed/1 warning`, T9 exact
+`288 passed/1 warning`, T10 exact `868 passed/3 skipped/1 warning`, full pytest
+`2084 passed/3 skipped/1 warning`, offline `80/80`, runtime acceptance `14/14`
+with privacy scan clean, both Ruff commands, frontend build, and diff-check
+green. The post-commit runtime artifact is bound with `git_dirty=false` in the
+implementation handoff; no merge or push was performed and M5 was not started.
+
+M4 fifth-round final High-fix ledger (2026-08-10): the independent review
+reproduced the last publication bypass: the shared V11 guard validated the
+durable runtime and final Agent review but not `InvestigationRecord.status`.
+The approved publication matrix is now explicit at both lifecycle layers:
+V11 complete/partial/inconclusive output requires
+`InvestigationStatus.COMPLETED` and `RuntimeRunStatus.COMPLETED`; failed,
+cancelled, running, pending, created, or interrupted state fails closed.
+
+The lifecycle check is part of the shared V11 domain/publication contract used
+by the guard, rather than an API-only filter. Memory/SQLite reload, report,
+coordination-review, graph/workbench, and API regressions cover the public
+boundary. The OpenRCA V11 runner calls the same guard before projection, and
+its CSV writer refuses to serialize root causes for any non-success outcome,
+writing an empty prediction plus safe `failure_category` metadata. The V10
+deterministic projector/writer and V10-only legacy report behavior are
+unchanged.
+
+Required RED→GREEN evidence is guard/API `12 failed` then `12 passed`, real
+OpenRCA failed-investigation CSV `1 failed` then `1 passed`, affected
+OpenRCA runner/projection `45 passed`, M4 focused `137 passed/1 warning`, T9
+`289 passed/1 warning`, T10 `881 passed/3 skipped/1 warning`, and full pytest
+`2097 passed/3 skipped/1 warning`. Offline `80/80`, Ruff, frontend build, and
+diff-check passed; post-commit runtime acceptance is recorded in the final
+handoff with `git_dirty=false`. No merge or push was performed and M5 was not
+started.
 
 ## 16. Approval state
 
 - Requirements Brief: confirmed by user.
 - Architecture choice: scheme B confirmed by user.
-- The 2026-08-02 specification approval is invalidated by the local-first tool,
-  trace, Skill, evaluation-isolation, and OpenAI-compatible model-provider scope
-  changes. This amended specification is `review_required`; the previous
-  local-first and model-provider findings are closed, and renewed user approval
-  is required.
+- The 2026-08-02 amended specification was approved by the user after the
+  local-first tool, trace, Skill, evaluation-isolation, and OpenAI-compatible
+  model-provider scope review; its requirements remain the approved contract.
 - The legacy-reuse audit materially changes runtime phase identity, V11 entry
   requirements, supplemental-finding validation, tool exposure, projection run
   ownership, and failure contracts. The pre-audit implementation Plan is stale
@@ -1577,6 +1847,9 @@ their substance; M2R-2/M2R-3 remain explicit T7 wiring prerequisites.
   the single durable `execution_contract` JSON location and the mandatory
   round-two Critic reconciliation. Both close already-approved invariants and
   introduce no new product scope.
-- The existing implementation plan is stale and remains `review_required`. It
-  must not be amended until this specification is approved again.
-- Implementation: not authorized.
+- The implementation Plan was rewritten from this specification, independently
+  reviewed, and approved by the user on 2026-08-02 with execution authorization.
+- Implementation: M2 baseline `c2245ac` and the M3 review-fix history remain
+isolated; M4 review-fix is RED→GREEN verified in isolated branch
+`codex/v11-m4`, with its local commit SHA recorded in the implementation
+handoff. No merge or push was performed; M5 has not started.

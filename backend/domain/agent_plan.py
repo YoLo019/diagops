@@ -198,6 +198,8 @@ class AgentExecution(BaseModel):
     analysis_round: Literal[1, 2] | None = None
     step_kind: ExecutionStepKind | None = None
     attempt: int = Field(default=1, ge=1)
+    runtime_attempt_id: str | None = None
+    resume_from_execution_id: str | None = None
     failure_category: FailureCategory = FailureCategory.NONE
     result_validation_category: ResultValidationCategory | None = None
     model_provider: ModelProvider | None = None
@@ -208,6 +210,9 @@ class AgentExecution(BaseModel):
     error_message: str | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
+    deadline_at: datetime | None = None
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
     duration_ms: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
@@ -233,6 +238,15 @@ class AgentExecution(BaseModel):
     @model_serializer(mode="wrap")
     def serialize_legacy_payload(self, handler):
         data = handler(self)
-        if self.runtime_run_id is None and "runtime_run_id" not in self.model_fields_set:
-            data.pop("runtime_run_id", None)
+        if self.runtime_run_id is None:
+            for field_name in (
+                "runtime_attempt_id",
+                "resume_from_execution_id",
+                "deadline_at",
+                "input_tokens",
+                "output_tokens",
+                "runtime_run_id",
+            ):
+                if field_name not in self.model_fields_set:
+                    data.pop(field_name, None)
         return data

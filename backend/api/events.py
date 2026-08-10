@@ -9,6 +9,11 @@ from backend.domain.multi_agent import InvestigationStrategy
 from backend.safety.redaction import assert_safe_label
 from backend.services.container import get_container
 from backend.services.incident_cases import list_case_ids, load_incident_case
+from backend.services.v11_projection import (
+    V11ProjectionIntegrityError,
+    ensure_v11_projection_owner,
+)
+from backend.services.v11_public import public_v11_review
 
 router = APIRouter(prefix="/events", tags=["events"])
 
@@ -33,8 +38,12 @@ def to_summary(
     record: InvestigationRecord,
     *,
     runtime_available: bool | None = None,
+    coordination_review=None,
 ) -> InvestigationSummary:
-    summary = InvestigationSummary.from_record(record)
+    review = coordination_review
+    if review is not None and review.authority_mode.value == "agent":
+        review = public_v11_review(review)
+    summary = InvestigationSummary.from_record(record, review)
     if runtime_available is None:
         return summary
     return summary.model_copy(update={"runtime_available": runtime_available})
@@ -46,10 +55,19 @@ async def create_event(
     strategy: InvestigationStrategy | None = None,
 ) -> InvestigationSummary:
     container = get_container()
-    record = await container.run_investigation(event, strategy=strategy)
+    record = await container.run_investigation(
+        event,
+        strategy=strategy,
+        execution_contract_version=container.product_execution_contract_version(),
+    )
+    try:
+        ensure_v11_projection_owner(container.repository, container.runtime_store, record)
+    except V11ProjectionIntegrityError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return to_summary(
         record,
         runtime_available=bool(container.runtime_store.list_runs(record.id)),
+        coordination_review=container.repository.get_coordination_review(record.id),
     )
 
 
@@ -92,7 +110,13 @@ async def create_alertmanager_events(
             )
             continue
         try:
-            record = await container.run_investigation(event)
+            record = await container.run_investigation(
+                event,
+                execution_contract_version=container.product_execution_contract_version(),
+            )
+            ensure_v11_projection_owner(
+                container.repository, container.runtime_store, record
+            )
         except Exception:
             results.append(
                 AlertmanagerAlertResult(
@@ -110,6 +134,9 @@ async def create_alertmanager_events(
                 investigation=to_summary(
                     record,
                     runtime_available=bool(container.runtime_store.list_runs(record.id)),
+                    coordination_review=container.repository.get_coordination_review(
+                        record.id
+                    ),
                 ),
             )
         )
@@ -129,10 +156,18 @@ async def create_simulated_event(case_id: str) -> InvestigationSummary:
         ) from exc
 
     container = get_container()
-    record = await container.run_investigation(event)
+    record = await container.run_investigation(
+        event,
+        execution_contract_version=container.product_execution_contract_version(),
+    )
+    try:
+        ensure_v11_projection_owner(container.repository, container.runtime_store, record)
+    except V11ProjectionIntegrityError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return to_summary(
         record,
         runtime_available=bool(container.runtime_store.list_runs(record.id)),
+        coordination_review=container.repository.get_coordination_review(record.id),
     )
 
 

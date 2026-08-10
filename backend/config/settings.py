@@ -143,6 +143,7 @@ class AgentsSettings(BaseModel):
     model: str | None = None
     max_turns: int = Field(default=8, ge=1)
     timeout_seconds: int = Field(default=60, ge=1)
+    token_budget: int = Field(default=12000, ge=1, le=1_000_000)
     strategy: InvestigationStrategy = InvestigationStrategy.FIXED
     max_tool_calls_per_specialist: int = Field(default=3, ge=1, le=10)
     max_total_tool_calls: int = Field(default=8, ge=1, le=30)
@@ -214,6 +215,9 @@ def _apply_environment_overrides(settings: AppSettings) -> None:
 
     if agents_timeout_seconds := _get_env("DIAGOPS_AGENTS_TIMEOUT_SECONDS"):
         settings.agents.timeout_seconds = int(agents_timeout_seconds)
+
+    if value := _get_env("DIAGOPS_AGENTS_TOKEN_BUDGET"):
+        settings.agents.token_budget = int(value)
 
     if agents_strategy := _get_env("DIAGOPS_AGENTS_STRATEGY"):
         settings.agents.strategy = agents_strategy.strip().lower()

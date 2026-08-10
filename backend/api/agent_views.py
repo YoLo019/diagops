@@ -16,6 +16,7 @@ from backend.domain.multi_agent import (
     AdaptiveRunStatus,
     AdaptiveStopReason,
     AgentExecutionLayer,
+    AuthorityMode,
     FailureCategory,
     InvestigationStrategy,
     MultiAgentRunStatus,
@@ -25,6 +26,13 @@ from backend.domain.react_trace import ReActTrace
 from backend.domain.tool_calls import ToolCallRecord
 from backend.safety.redaction import redact_model
 from backend.services.container import get_container
+from backend.services.v11_public import (
+    public_v11_execution,
+    public_v11_finding,
+    public_v11_graph_seed,
+    public_v11_review,
+    scrub_v11_text,
+)
 
 router = APIRouter(prefix="/investigations", tags=["agent-views"])
 
@@ -35,14 +43,24 @@ def _repository() -> Any:
 
 def _list_agent_findings(investigation_id: str) -> list[AgentFinding]:
     return [
-        redact_model(item)
+        (
+            public_v11_finding(item)
+            if item.runtime_run_id is not None
+            else redact_model(item)
+        )
         for item in _repository().list_agent_findings(investigation_id)
     ]
 
 
 def _get_coordination_review(investigation_id: str) -> CoordinationReview | None:
     review = _repository().get_coordination_review(investigation_id)
-    return None if review is None else redact_model(review)
+    if review is None:
+        return None
+    return (
+        public_v11_review(review)
+        if review.authority_mode == AuthorityMode.AGENT
+        else redact_model(review)
+    )
 
 
 def _get_react_trace(investigation_id: str) -> ReActTrace | None:
@@ -63,6 +81,7 @@ _SAFE_FAILURE_LABELS = {
     FailureCategory.MISSING_SPECIALIST: "Agents runtime missed a required specialist",
     FailureCategory.UNSAFE_OUTPUT: "Agents runtime returned unsafe output",
     FailureCategory.PERSISTENCE: "Agents review persistence failed",
+    FailureCategory.CONTRACT_INTEGRITY: "Agents runtime contract integrity failed",
 }
 
 
@@ -89,22 +108,30 @@ def _multi_agent_run_summary(
     max_total_tool_calls: int = 8,
 ) -> MultiAgentRunSummary | None:
     summary: MultiAgentRunSummary | None = None
+    is_v11_review = review is not None and review.authority_mode == AuthorityMode.AGENT
     if (
         review is not None
         and review.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK
         and review.run_status
         in {MultiAgentRunStatus.COMPLETED, MultiAgentRunStatus.PARTIAL}
     ):
+        summary_values = {
+            "status": review.run_status,
+            "model_provider": review.model_provider,
+            "model_name": review.model_name,
+            "primary_stabilization_category": review.primary_stabilization_category,
+            "secondary_stabilization_categories": review.secondary_stabilization_categories,
+        }
+        if is_v11_review:
+            summary_values.update(
+                {
+                    "diagnostic_status": review.diagnostic_status,
+                    "authority_mode": review.authority_mode,
+                    "runtime_run_id": review.runtime_run_id,
+                }
+            )
         summary = MultiAgentRunSummary(
-            status=review.run_status,
-            model_provider=review.model_provider,
-            model_name=review.model_name,
-            primary_stabilization_category=(
-                review.primary_stabilization_category
-            ),
-            secondary_stabilization_categories=(
-                review.secondary_stabilization_categories
-            ),
+            **summary_values,
         )
     else:
         attempts = [
@@ -158,6 +185,10 @@ def _multi_agent_run_summary(
             else AdaptiveRunStatus.DEGRADED
         )
     )
+    if is_v11_review:
+        summary = summary.model_copy(
+            update={"failure_reason": scrub_v11_text(summary.failure_reason)}
+        )
     return summary.model_copy(
         update={
             "strategy": strategy,
@@ -275,7 +306,11 @@ def get_investigation_rca_workbench(investigation_id: str) -> dict[str, Any]:
     findings = _list_agent_findings(investigation_id)
     review = _get_coordination_review(investigation_id)
     executions = [
-        redact_model(item)
+        (
+            public_v11_execution(item)
+            if item.runtime_run_id is not None
+            else redact_model(item)
+        )
         for item in _repository().list_executions(investigation_id)
     ]
     tasks = _repository().list_tasks(investigation_id)
@@ -303,7 +338,9 @@ def get_investigation_rca_workbench(investigation_id: str) -> dict[str, Any]:
         "findings": findings,
         "candidates": candidates,
         "evidence": record.evidence,
-        "graph_seed": _build_rca_graph_seed(record.evidence, findings, candidates),
+        "graph_seed": _build_rca_graph_seed(
+            record.evidence, findings, candidates, review=review
+        ),
         "coordination_review": review,
         "agent_executions": executions,
         "tool_calls": workbench_tool_calls,
@@ -322,7 +359,20 @@ def get_investigation_rca_workbench(investigation_id: str) -> dict[str, Any]:
     }
 
 
-def _build_rca_graph_seed(evidence, findings, candidates) -> dict[str, list[dict[str, str]]]:
+def _build_rca_graph_seed(
+    evidence,
+    findings,
+    candidates,
+    *,
+    review: CoordinationReview | None = None,
+) -> dict[str, list[dict[str, str]]]:
+    if review is not None and review.authority_mode == AuthorityMode.AGENT:
+        return public_v11_graph_seed(
+            evidence,
+            findings,
+            candidates,
+            review=review,
+        )
     nodes: dict[str, dict[str, str]] = {}
     edges: list[dict[str, str]] = []
 
@@ -355,6 +405,38 @@ def _build_rca_graph_seed(evidence, findings, candidates) -> dict[str, list[dict
             {"source": finding_id, "target": candidate.id, "relation": "contradicts"}
             for finding_id in candidate.contradicting_finding_ids
         )
+
+    if review is not None and review.authority_mode == AuthorityMode.AGENT:
+        for assessment in review.critic_assessments:
+            nodes[assessment.id] = {
+                "id": assessment.id,
+                "label": assessment.summary,
+                "type": "critic_assessment",
+            }
+            if assessment.candidate_id in nodes:
+                edges.append(
+                    {
+                        "source": assessment.id,
+                        "target": assessment.candidate_id,
+                        "relation": f"critic_{assessment.verdict}",
+                    }
+                )
+        if review.lead_decision is not None:
+            lead_id = f"lead-{review.id}"
+            nodes[lead_id] = {
+                "id": lead_id,
+                "label": review.lead_decision.summary,
+                "type": "lead_decision",
+            }
+            edges.extend(
+                {
+                    "source": lead_id,
+                    "target": candidate_id,
+                    "relation": "accepted",
+                }
+                for candidate_id in review.lead_decision.candidate_ids
+                if candidate_id in nodes
+            )
 
     node_ids = set(nodes)
     return {

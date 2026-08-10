@@ -48,19 +48,27 @@ DEEPSEEK_CAPABILITIES = DeepSeekCapabilityProfile(
 class DeepSeekChatCompletionsModel(OpenAICompatibleChatCompletionsModel):
     """共享 compatible adapter 的 DeepSeek 预设；序列化身份保持 deepseek 不变。"""
 
-    def __init__(self, *, model: str, api_key: str) -> None:
+    def __init__(
+        self, *, model: str, api_key: str, max_retries: int = 2
+    ) -> None:
         super().__init__(
             model=model,
             api_key=api_key,
             base_url=DEEPSEEK_BASE_URL,
+            max_retries=max_retries,
             strict_feature_validation=True,
         )
 
     def _create_client(self) -> AsyncOpenAI:
         # DeepSeek 预设只发送官方 endpoint 支持的字段，不带超时/重试覆盖。
+        kwargs = {
+            "api_key": self._api_key.get_secret_value(),
+            "base_url": DEEPSEEK_BASE_URL,
+        }
+        if self._max_retries == 0:
+            kwargs["max_retries"] = 0
         return AsyncOpenAI(
-            api_key=self._api_key.get_secret_value(),
-            base_url=DEEPSEEK_BASE_URL,
+            **kwargs,
         )
 
     def _create_delegate(self, client: AsyncOpenAI) -> OpenAIChatCompletionsModel:
@@ -70,11 +78,17 @@ class DeepSeekChatCompletionsModel(OpenAICompatibleChatCompletionsModel):
             strict_feature_validation=True,
         )
 
-    def clone_for_model(self, model_name: str) -> "DeepSeekChatCompletionsModel":
+    def clone_for_model(
+        self,
+        model_name: str,
+        *,
+        max_retries: int | None = None,
+    ) -> "DeepSeekChatCompletionsModel":
         """为冻结 Run 创建不共享传输状态的同凭据 adapter。"""
         return type(self)(
             model=model_name,
             api_key=self._api_key.get_secret_value(),
+            max_retries=(self._max_retries if max_retries is None else max_retries),
         )
 
 

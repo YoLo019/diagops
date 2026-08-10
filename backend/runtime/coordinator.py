@@ -5,7 +5,7 @@ import logging
 import sys
 import time
 from contextlib import suppress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from backend.domain.runtime import (
     RuntimeActorType,
@@ -26,6 +26,7 @@ from backend.runtime.phases import (
     PhaseInput,
     ToolCommit,
     checkpoint_digest,
+    durable_model_reservations,
     durable_projection_digest,
     durable_token_usage,
     durable_tool_call_count,
@@ -267,6 +268,12 @@ class RuntimeCoordinator:
                     owner,
                     recovery_checkpoint_id,
                 )
+                await self._reconcile_model_reservations(run, attempt, owner)
+                if recovery_checkpoint_id is not None:
+                    recovery_state = self._effective_resume_state(
+                        run,
+                        self.store.get_checkpoint(recovery_checkpoint_id),
+                    )
             resume_state, start_index = self._resume_position(run)
             if recovery_state is not None:
                 resume_state = recovery_state
@@ -327,6 +334,11 @@ class RuntimeCoordinator:
                         tool_budget=available_tool_budget,
                         token_budget=available_token_budget,
                         timeout_seconds=run.timeout_seconds,
+                        deadline_at=(run.started_at or run.created_at)
+                        + timedelta(seconds=run.timeout_seconds),
+                        remaining_deadline_seconds=(
+                            lambda run_id=run.id: self._remaining_deadline_seconds(run_id)
+                        ),
                         check_execution=lambda: self.check_execution(
                             run.id, owner, run.lease_version
                         ),
@@ -347,6 +359,7 @@ class RuntimeCoordinator:
                         input_tokens=0,
                         output_tokens=0,
                         actor_name="CoordinatorAgent",
+                        safe_payload=None,
                         phase=phase: (
                             self._persist_model_event(
                                 run,
@@ -358,7 +371,11 @@ class RuntimeCoordinator:
                                 input_tokens,
                                 output_tokens,
                                 actor_name,
+                                safe_payload,
                             )
+                        ),
+                        model_events=tuple(
+                            self.store.list_events(run.id, limit=10_000)
                         ),
                         hit_fault=self.fault_injector.hit,
                     )
@@ -392,6 +409,22 @@ class RuntimeCoordinator:
                 self._phase_spans.pop(attempt.id, None)
                 active_phase_scope = None
                 active_phase = None
+                if (
+                    run.is_v11
+                    and self.store.investigation_repository.get(
+                        run.investigation_id
+                    ).status.value
+                    == "failed"
+                ):
+                    await self._fail_if_owned(
+                        run.id,
+                        attempt,
+                        owner,
+                        run.lease_version,
+                        phase=phase,
+                        failure_category=RuntimeFailureCategory.OUTPUT_VALIDATION,
+                    )
+                    return self.store.get_run(run.id)
             if (
                 run.is_v11
                 and self.store.investigation_repository.get(run.investigation_id).status.value
@@ -520,6 +553,7 @@ class RuntimeCoordinator:
         )
         self._tool_spans[(attempt.id, call.id)] = span
         try:
+            self.check_execution(run.id, owner, run.lease_version)
             return await self.writer.submit_tool(
                 ToolCommit(
                     run_id=run.id,
@@ -564,6 +598,7 @@ class RuntimeCoordinator:
         )
         span = self._tool_spans.pop((attempt.id, result.call.id), None)
         try:
+            self.check_execution(run.id, owner, run.lease_version)
             persisted = await self.writer.submit_tool(
                 ToolCommit(
                     run_id=run.id,
@@ -601,6 +636,7 @@ class RuntimeCoordinator:
         input_tokens: int = 0,
         output_tokens: int = 0,
         actor_name: str = "CoordinatorAgent",
+        safe_payload: dict[str, object] | None = None,
     ) -> None:
         event_type = {
             "started": RuntimeEventType.MODEL_STARTED,
@@ -637,6 +673,7 @@ class RuntimeCoordinator:
                         "status": status,
                         "input_tokens": input_tokens,
                         "output_tokens": output_tokens,
+                        **(safe_payload or {}),
                     },
                 )
             )
@@ -650,6 +687,44 @@ class RuntimeCoordinator:
                 status,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
+            )
+
+    async def _reconcile_model_reservations(
+        self,
+        run: RuntimeRun,
+        attempt: RuntimeAttempt,
+        owner: str,
+    ) -> None:
+        """恢复时释放崩溃窗口中的未结算 reservation，保证幂等续跑。"""
+        pending = durable_model_reservations(self.store.list_events(run.id), run.id)
+        for reservation_id, details in sorted(pending.items()):
+            self.check_execution(run.id, owner, run.lease_version)
+            logical_call_id = details.get("logical_call_id")
+            reserved_tokens = int(details.get("reserved_tokens", 0))
+            input_estimate = int(details.get("input_estimate", 0))
+            await self.writer.submit_event(
+                RuntimeEventCommand(
+                    run_id=run.id,
+                    attempt_id=attempt.id,
+                    lease_owner=owner,
+                    lease_version=run.lease_version,
+                    event_type=RuntimeEventType.MODEL_FAILED,
+                    actor_type=RuntimeActorType.MODEL,
+                    phase=run.current_phase,
+                    actor_name="CoordinatorAgent",
+                    execution_id=details.get("execution_id"),
+                    safe_payload={
+                        "status": "failed",
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "logical_call_id": logical_call_id,
+                        "reservation_id": reservation_id,
+                        "reservation_status": "released",
+                        "reserved_tokens": reserved_tokens,
+                        "input_estimate": input_estimate,
+                        "attempt": attempt.attempt_number,
+                    },
+                )
             )
 
     async def _persist_agent_event(
@@ -962,6 +1037,13 @@ class RuntimeCoordinator:
         started = run.started_at or run.created_at
         elapsed = max(0.0, (datetime.now(UTC) - started).total_seconds())
         return time.monotonic() + max(0.0, run.timeout_seconds - elapsed)
+
+    def _remaining_deadline_seconds(self, run_id: str) -> float:
+        deadline = self._deadlines.get(run_id)
+        if deadline is None:
+            deadline = self._deadline_for(self.store.get_run(run_id))
+            self._deadlines[run_id] = deadline
+        return max(0.0, deadline - time.monotonic())
 
     async def _renew_loop(
         self,

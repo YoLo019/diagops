@@ -90,6 +90,131 @@ def _v11_source(source):
     )
 
 
+def test_v11_tool_budget_reservation_is_atomic_and_durable(runtime_store) -> None:
+    contract = {
+        **_v11_run().execution_contract,
+        "tool_budget": 1,
+    }
+    run = runtime_store.create_run(
+        _v11_run(
+            run_id="run-tool-budget-reservation",
+            tool_budget=1,
+            execution_contract=contract,
+        )
+    )
+    leased, attempt = runtime_store.acquire_lease_and_create_attempt(
+        run.id,
+        attempt=RuntimeAttempt(
+            run_id=run.id,
+            attempt_number=1,
+            status=RuntimeAttemptStatus.RUNNING,
+        ),
+        owner="worker-tool-budget",
+        expected_status=RuntimeRunStatus.CREATED,
+    )
+    runtime_store.investigation_repository.activate_projection("inv-1", run.id)
+
+    def commit(call_id: str) -> None:
+        call = ToolCallRecord(
+            id=call_id,
+            task_id=f"task-{call_id}",
+            agent_name="InvestigatorAgent",
+            tool_name="read_logs",
+            status=ToolCallStatus.RUNNING,
+            runtime_run_id=run.id,
+            logical_call_id=call_id,
+            idempotency_key=call_id,
+            execution_id=f"execution-{call_id}",
+        )
+        runtime_store.commit_tool(
+            ToolCommit(
+                run_id=run.id,
+                attempt_id=attempt.id,
+                lease_owner="worker-tool-budget",
+                lease_version=leased.lease_version,
+                business_mutation=BusinessMutation(
+                    investigation_id="inv-1",
+                    tool_calls=(call,),
+                ),
+                call=call,
+                phase=RuntimePhase.INVESTIGATOR_ROUND_1,
+            )
+        )
+
+    commit("tool-reservation-1")
+    with pytest.raises(RuntimeConflict, match="budget"):
+        commit("tool-reservation-2")
+
+
+def test_v11_transport_retry_reuses_one_durable_tool_reservation(runtime_store) -> None:
+    contract = {
+        **_v11_run().execution_contract,
+        "tool_budget": 1,
+    }
+    run = runtime_store.create_run(
+        _v11_run(
+            run_id="run-tool-retry-reservation",
+            tool_budget=1,
+            execution_contract=contract,
+        )
+    )
+    leased, attempt = runtime_store.acquire_lease_and_create_attempt(
+        run.id,
+        attempt=RuntimeAttempt(
+            run_id=run.id,
+            attempt_number=1,
+            status=RuntimeAttemptStatus.RUNNING,
+        ),
+        owner="worker-tool-retry",
+        expected_status=RuntimeRunStatus.CREATED,
+    )
+    runtime_store.investigation_repository.activate_projection("inv-1", run.id)
+
+    def commit(
+        call_id: str,
+        logical_call_id: str,
+        status: ToolCallStatus,
+    ) -> None:
+        call = ToolCallRecord(
+            id=call_id,
+            task_id=f"task-{call_id}",
+            agent_name="InvestigatorAgent",
+            tool_name="read_logs",
+            status=status,
+            runtime_run_id=run.id,
+            logical_call_id=logical_call_id,
+            idempotency_key=call_id,
+            execution_id=f"execution-{call_id}",
+        )
+        runtime_store.commit_tool(
+            ToolCommit(
+                run_id=run.id,
+                attempt_id=attempt.id,
+                lease_owner="worker-tool-retry",
+                lease_version=leased.lease_version,
+                business_mutation=BusinessMutation(
+                    investigation_id="inv-1",
+                    tool_calls=(call,),
+                ),
+                call=call,
+                phase=RuntimePhase.INVESTIGATOR_ROUND_1,
+            )
+        )
+
+    commit("tool-retry-1", "logical-retry", ToolCallStatus.RUNNING)
+    commit("tool-retry-1", "logical-retry", ToolCallStatus.FAILED)
+    commit("tool-retry-2", "logical-retry", ToolCallStatus.RUNNING)
+
+    with pytest.raises(RuntimeConflict, match="budget"):
+        commit("tool-new", "logical-new", ToolCallStatus.RUNNING)
+
+    calls = runtime_store.investigation_repository.list_tool_calls("inv-1")
+    assert [call.id for call in calls] == ["tool-retry-1", "tool-retry-2"]
+    assert calls[0].status == ToolCallStatus.FAILED
+    assert calls[1].status == ToolCallStatus.RUNNING
+    assert {call.logical_call_id for call in calls} == {"logical-retry"}
+
+
 def test_replay_rejects_v11_phases_out_of_contract_order() -> None:
     store, _repository, source = _services()
     source = _v11_source(source)
