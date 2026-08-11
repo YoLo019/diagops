@@ -1354,14 +1354,15 @@ diff-check are green. Formal predictions/attempts/label opens remain zero;
 M5 is `review_required`/blocked at T12, with capability/endpoint/credential
 stop-gate unchanged.
 
-M5 fifth-round follow-up hardening (2026-08-12): code commit
-`071315d4be5b599e638c7b71e3d1caac0bad5086` rejects relative and
-non-canonical custodian side locators before persistence, persists the
-custodian failure intent even when direct pair invalidation meets a held
-SQLite writer lock, and checks prediction-worker source/entrypoint paths for
-absolute non-reparse identity before resolution. The focused
-ledger/isolation/evaluator/runner gate is `89 passed`; full pytest is
-`2178 passed, 3 skipped, 1 warning`; Ruff, frontend, offline/runtime
+M5 fifth-round follow-up hardening (2026-08-12): code commits
+`071315d4be5b599e638c7b71e3d1caac0bad5086` and
+`effa4cfdf44380b3d7ce9ce006acb89d51a39412` reject relative and non-canonical
+custodian side/launcher locators before persistence, persist the custodian
+failure intent even when direct pair invalidation meets a held SQLite writer
+lock, and check prediction-worker source/entrypoint paths for absolute
+non-reparse identity before resolution. The focused ledger/isolation/evaluator/
+runner gate is `90 passed`; full pytest is `2179 passed, 3 skipped, 1 warning`;
+Ruff, frontend, offline/runtime
 acceptance, wheel external-cwd smoke, and diff-check are green. Formal
 predictions, attempts and label opens remain zero. This Plan remains
 `review_required`/blocked at T12 pending fresh capability admission and
