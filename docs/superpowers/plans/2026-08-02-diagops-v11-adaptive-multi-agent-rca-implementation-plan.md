@@ -1354,6 +1354,19 @@ diff-check are green. Formal predictions/attempts/label opens remain zero;
 M5 is `review_required`/blocked at T12, with capability/endpoint/credential
 stop-gate unchanged.
 
+M5 fifth-round follow-up hardening (2026-08-12): code commit
+`071315d4be5b599e638c7b71e3d1caac0bad5086` rejects relative and
+non-canonical custodian side locators before persistence, persists the
+custodian failure intent even when direct pair invalidation meets a held
+SQLite writer lock, and checks prediction-worker source/entrypoint paths for
+absolute non-reparse identity before resolution. The focused
+ledger/isolation/evaluator/runner gate is `89 passed`; full pytest is
+`2178 passed, 3 skipped, 1 warning`; Ruff, frontend, offline/runtime
+acceptance, wheel external-cwd smoke, and diff-check are green. Formal
+predictions, attempts and label opens remain zero. This Plan remains
+`review_required`/blocked at T12 pending fresh capability admission and
+independent review.
+
 M0 review (dataset/leakage): completed on 2026-08-02 in worktree
 `agent+v11-m0`; conclusion `approve_with_followups`. Reviewer independently
 reran the focused and regression suites (39/126 passed, Ruff clean) and probed

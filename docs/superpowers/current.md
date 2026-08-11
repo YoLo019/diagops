@@ -252,6 +252,24 @@ absent; capability artifact, endpoint, model, and process-only credentials are
 absent. M5 remains blocked at T12 and awaits independent sixth-round review;
 no accuracy or completion claim is made.
 
+Verification evidence (M5 fifth-round follow-up hardening, 2026-08-12): code
+commit `071315d4be5b599e638c7b71e3d1caac0bad5086` tightens the reviewed
+contract without consuming formal data. Custodian side locators now reject
+relative/non-canonical spellings before persistence; direct invalidation under
+a held SQLite writer lock records the same durable failure intent used by
+completion paths; the packaged prediction worker rejects relative and reparse
+source/entrypoint paths before resolving them. The focused ledger/isolation/
+evaluator/runner gate is `89 passed`; the added lock-intent regression is
+green; full pytest is `2178 passed, 3 skipped, 1 warning`; Ruff, frontend
+build, offline `80/80`, runtime `14/14` with privacy, wheel external-cwd
+smoke, and `git diff --check` are green. The installed package manifest is
+`backend/services/diagops-source-manifest.json` with identity hash
+`afbc92ca9aef20078261da6add00a32972fc6f81088160a2e9bb778613bdd7d7`, file
+SHA-256 `224c0313e8100e1881904fdc9ba939efb12fdb13baabbb3da7d91b18797e1e44`,
+and 135 files. Formal predictions, paired attempts, label opens, and label
+consumption remain `0`; M5 is still blocked at T12 pending capability
+admission and the next independent review, with no accuracy claim.
+
 Allowed values:
 
 ```text

@@ -1909,6 +1909,20 @@ endpoint/model, and process-only credential are still absent, so M5 remains
 blocked at T12 and this Spec remains `review_required` pending independent
 review.
 
+M5 fifth-round follow-up hardening (2026-08-12): code commit
+`071315d4be5b599e638c7b71e3d1caac0bad5086` closes the remaining locator and
+recovery boundary details without weakening the approved contract. Side
+locators are absolute and canonical before ledger persistence; a direct
+invalidation that cannot obtain SQLite's writer lock leaves the durable
+custodian intent for automatic reconciliation; and packaged prediction
+workers reject relative or reparse source/entrypoint paths before resolving
+them. The focused ledger/isolation/evaluator/runner gate is `89 passed`; full
+pytest is `2178 passed, 3 skipped, 1 warning`; Ruff, frontend, offline/runtime
+acceptance, wheel external-cwd smoke, and diff-check are green. Formal
+predictions, attempts, and label opens remain zero. This Spec remains
+`review_required`, M5 remains blocked at T12, and no accuracy claim is made
+pending capability admission and independent review.
+
 ## 16. Approval state
 
 - Requirements Brief: confirmed by user.

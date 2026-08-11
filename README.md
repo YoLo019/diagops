@@ -541,6 +541,9 @@ All children must live under one canonical custodian root. `--pair-root` is
 only an output grouping path; the immutable `--custodian-manifest` selects the
 single SQLite ledger shared across configurations and evaluation output
 directories, so changing the output root cannot create a second pair.
+Prediction output locators are required to be absolute canonical spellings;
+relative paths, case/drive aliases, symlinks, junctions, and other reparse
+paths are rejected before a side is recorded or a freeze marker is written.
 
 ```powershell
 uv run python -m backend.benchmarks.rcaeval launch-predict `
