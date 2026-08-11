@@ -5,6 +5,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,7 +17,12 @@ from backend.benchmarks.rcaeval.isolation import (
     build_prediction_launch,
 )
 from backend.benchmarks.rcaeval.models import (
+    CandidatePrediction,
+    CasePrediction,
+    EndpointCapabilityIdentity,
+    EvaluationBudget,
     EvidenceAuditExport,
+    FrozenRunIdentity,
     LabelEntry,
     LabelManifest,
     ManualAuditArtifact,
@@ -28,6 +34,10 @@ from backend.benchmarks.rcaeval.models import (
     RuntimeManifest,
 )
 from backend.benchmarks.rcaeval.prepare import _canonical_sha256
+from backend.benchmarks.rcaeval.runner import (
+    freeze_prediction_bundle,
+    freeze_prediction_set,
+)
 
 OPAQUE_ID = "re2-" + "a" * 16
 REVISION = "0123456789abcdef0123456789abcdef01234567"
@@ -159,6 +169,200 @@ def _seed_pair_ledger(predictions_root: Path, partition: str) -> None:
         lease = ledger.record_side_started(side, str(side_dir))
         ledger.record_side_completed(side, f"{index + 1:064x}", lease_token=lease)
     ledger.bind_prediction_set_hash("a" * 64)
+
+
+def _tiny_frozen_bundle(configuration: RcaEvalConfiguration) -> PredictionBundle:
+    identity = FrozenRunIdentity(
+        source_commit="1" * 40,
+        source_manifest_hash="e" * 64,
+        runtime_manifest_hash="2" * 64,
+        capability=EndpointCapabilityIdentity(
+            provider="openai_compatible",
+            model="frozen-model",
+            api_mode="chat_completions",
+            endpoint_id="endpoint",
+            artifact_hash="3" * 64,
+        ),
+        prompt_hash="4" * 64,
+        tool_manifest_hash="5" * 64,
+        skill_catalog_hash="6" * 64,
+        prediction_schema_hash="7" * 64,
+        normalizer_hash="8" * 64,
+        scorer_dependency_hash="9" * 64,
+        dependency_lock_hash="a" * 64,
+        memory_snapshot_hash="b" * 64,
+        retry_policy_hash="c" * 64,
+    )
+    budget = EvaluationBudget(
+        configuration=configuration,
+        token_budget=4_000,
+        max_turns=8,
+        tool_budget=8,
+        timeout_seconds=120,
+        max_investigators=3 if configuration.is_multi else 1,
+        max_rounds=2 if configuration.is_multi else 1,
+    )
+    prediction = CasePrediction(
+        case_id=OPAQUE_ID,
+        configuration=configuration,
+        completed=False,
+        candidates=[
+            CandidatePrediction(
+                affected_service="service",
+                failure_mechanism="fault",
+                evidence_ids=[],
+            )
+        ],
+        runtime_run_id=f"run-{configuration.value}",
+        execution_contract_hash="d" * 64,
+    )
+    return PredictionBundle(
+        partition=RcaEvalPartition.TT90,
+        configuration=configuration,
+        identity=identity,
+        budget=budget,
+        predictions=[prediction],
+        frozen_at=datetime(2026, 8, 12, tzinfo=UTC),
+    )
+
+
+def test_freeze_set_requires_ledger_side_output_binding(tmp_path):
+    from backend.benchmarks.rcaeval.ledger import (
+        CustodianPairLedger,
+        create_custodian_manifest,
+    )
+
+    custodian_root = tmp_path / "custodian"
+    predictions_root = custodian_root / "predictions"
+    manifest = create_custodian_manifest(
+        custodian_root,
+        runtime_manifest_hash="1" * 64,
+        label_manifest_hash="2" * 64,
+    )
+    ledger = CustodianPairLedger.from_manifest(manifest)
+    configurations = {
+        RcaEvalConfiguration.SINGLE_INTENDED,
+        RcaEvalConfiguration.MULTI_INTENDED,
+    }
+    pair_identity = hashlib.sha256(
+        json.dumps(
+            {
+                "partition": "tt90",
+                "runtime_manifest_hash": "2" * 64,
+                "capability_artifact_hash": "3" * 64,
+                "source_revision": "1" * 40,
+                "source_manifest_hash": "e" * 64,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    ledger.initialize(
+        partition="tt90",
+        prediction_set_hash=pair_identity,
+        expected_sides=tuple(item.value for item in configurations),
+    )
+    for configuration in sorted(configurations, key=lambda item: item.value):
+        side_dir = predictions_root / configuration.value
+        actual_side_hash = freeze_prediction_bundle(
+            _tiny_frozen_bundle(configuration),
+            side_dir,
+        )
+        lease = ledger.record_side_started(configuration.value, str(side_dir))
+        del actual_side_hash
+        ledger.record_side_completed(
+            configuration.value,
+            "f" * 64,
+            lease_token=lease,
+        )
+
+    with pytest.raises(ValueError, match="ledger|bundle|side"):
+        freeze_prediction_set(
+            predictions_root,
+            expected_configurations=configurations,
+            expected_case_count=1,
+            ledger=ledger,
+        )
+    assert not (predictions_root / "SHA256SUMS").exists()
+
+
+def test_freeze_set_rejects_outside_root_before_first_write(tmp_path, monkeypatch):
+    from backend.benchmarks.rcaeval import __main__ as cli
+    from backend.benchmarks.rcaeval.ledger import create_custodian_manifest
+
+    custodian_root = tmp_path / "custodian"
+    manifest = create_custodian_manifest(
+        custodian_root,
+        runtime_manifest_hash="1" * 64,
+        label_manifest_hash="2" * 64,
+    )
+    outside_root = tmp_path / "outside" / "predictions"
+    marker = tmp_path / "wrote-before-reject"
+
+    def fake_freeze(*args, **kwargs):
+        marker.write_text("unexpected write", encoding="utf-8")
+        return "a" * 64
+
+    monkeypatch.setattr(
+        "backend.benchmarks.rcaeval.runner.freeze_prediction_set",
+        fake_freeze,
+    )
+    with pytest.raises(ValueError, match="canonical custodian root"):
+        cli._freeze_set(
+            SimpleNamespace(
+                root=outside_root,
+                custodian_manifest=manifest,
+                partition="tt90",
+            )
+        )
+    assert not marker.exists()
+
+
+def test_frozen_run_identity_accepts_packaged_source_without_git_and_rejects_tamper(
+    tmp_path,
+):
+    from backend.benchmarks.rcaeval.runner import frozen_run_identity
+    from backend.services.source_identity import write_source_manifest
+
+    package_root = tmp_path / "package"
+    (package_root / "backend" / "diagnosis").mkdir(parents=True)
+    (package_root / "backend" / "diagnosis" / "v11_runtime.py").write_text(
+        "PACKAGE_RUNTIME = True\n",
+        encoding="utf-8",
+    )
+    (package_root / "pyproject.toml").write_text("[project]\nname='package'\n", encoding="utf-8")
+    (package_root / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    write_source_manifest(package_root)
+
+    capability = EndpointCapabilityIdentity(
+        provider="openai_compatible",
+        model="packaged-model",
+        api_mode="chat_completions",
+        endpoint_id="endpoint",
+        artifact_hash="a" * 64,
+    )
+    identity = frozen_run_identity(
+        runtime_manifest_hash="b" * 64,
+        capability=capability,
+        tool_manifest_hash_value="c" * 64,
+        skill_catalog_hash_value="d" * 64,
+        repository_root=package_root,
+    )
+    assert len(identity.source_commit) == 40
+    assert len(identity.source_manifest_hash) == 64
+
+    (package_root / "backend" / "diagnosis" / "v11_runtime.py").write_text(
+        "PACKAGE_RUNTIME = False\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="manifest|digest|source"):
+        frozen_run_identity(
+            runtime_manifest_hash="b" * 64,
+            capability=capability,
+            tool_manifest_hash_value="c" * 64,
+            skill_catalog_hash_value="d" * 64,
+            repository_root=package_root,
+        )
 
 
 def _argv() -> list[str]:

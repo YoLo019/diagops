@@ -1868,6 +1868,27 @@ counts remain zero. Because these changes alter persisted/CLI contracts, this
 spec is `review_required` pending a new independent review; M5 remains blocked
 at capability admission and no accuracy or completion claim is made.
 
+M5 fourth-round review-fix record (2026-08-12): base
+`2e8b276ed053e6d5c87f8590954705f3f4459acd`. The custodian ledger now seals
+the provisional-to-frozen prediction identity transition and validates it on
+evaluator reopen; side records mechanically bind canonical output locators,
+checksum/bundle contents, partition/configuration identities and exact file
+sets before the root checksum is written. Authorized reauthorization lineage
+is enforced on every state transition, while reveal consumption remains
+permanent. All write paths share a bounded SQLite busy/backoff policy with
+explicit connection close; completion/evaluation lock failures attempt atomic
+pair invalidation and preserve the original failure. Root and parent reparse
+aliases are rejected before any freeze write, and packaged workers use a
+build-time source manifest/code digest rather than runtime Git. Focused M5
+regressions are `164 passed, 1 warning`; full pytest is
+`2163 passed, 3 skipped, 1 warning`; Ruff, frontend build and diff-check are
+clean. Temporary offline `80/80` and runtime `14/14` acceptance outputs were
+hashed then removed; Docker preflight is blocked by the unavailable Linux
+daemon. Formal predictions, attempts and label opens remain zero. These are
+engineering fixes only: this spec remains `review_required`, M5 remains
+blocked at capability admission, and no accuracy or completion claim is made
+pending independent re-review.
+
 ## 16. Approval state
 
 - Requirements Brief: confirmed by user.

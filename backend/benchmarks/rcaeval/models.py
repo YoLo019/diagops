@@ -303,6 +303,7 @@ class FrozenRunIdentity(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     source_commit: str = Field(pattern=_REVISION_PATTERN)
+    source_manifest_hash: str = Field(pattern=_SHA256_PATTERN)
     git_dirty: Literal[False] = False
     runtime_manifest_hash: str = Field(pattern=_SHA256_PATTERN)
     capability: EndpointCapabilityIdentity

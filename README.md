@@ -519,8 +519,11 @@ V11 runtime, SQLite persistence, the nine read-only Agent tools, a frozen
 single-Investigator control, and a capability-certified OpenAI-compatible
 endpoint. Test doubles are not accepted by the CLI.
 
-Before a scored run, certify the exact endpoint/model tuple. The API key remains
-process-only and is never written to artifacts:
+Before a scored run, certify the exact endpoint/model tuple against the clean
+source/package identity. The capability artifact also freezes the adapter/SDK
+versions, required contracts, tested parallelism, execution environment, and
+source manifest hash. The API key remains process-only and is never written to
+artifacts:
 
 ```powershell
 $env:DIAGOPS_AGENTS_API_KEY = "<process-only>"
@@ -534,13 +537,16 @@ Run each required configuration into a distinct child of one prediction root.
 SS30 requires all four configurations; TT90 requires only the two intended
 configurations. `single_intended` uses `B`, `multi_intended` uses at most `3B`,
 and both equal-token SS30 configurations use exactly `3B`.
-All children must live under one custodian-owned `--pair-root`; its SQLite
-ledger is shared across configurations and evaluation output directories.
+All children must live under one canonical custodian root. `--pair-root` is
+only an output grouping path; the immutable `--custodian-manifest` selects the
+single SQLite ledger shared across configurations and evaluation output
+directories, so changing the output root cannot create a second pair.
 
 ```powershell
 uv run python -m backend.benchmarks.rcaeval launch-predict `
   --runtime D:\data\RCAEval\prepared-v11-m0\runtime `
   --pair-root D:\data\RCAEval\v11-m5\ss30 `
+  --custodian-manifest D:\data\RCAEval\v11-m5\custodian-manifest.json `
   --label-package D:\data\RCAEval\prepared-v11-m0\labels `
   --partition ss30 `
   --configuration single_intended `
@@ -552,6 +558,7 @@ uv run python -m backend.benchmarks.rcaeval launch-predict `
 
 uv run python -m backend.benchmarks.rcaeval freeze-set `
   --root D:\data\RCAEval\v11-m5\ss30 `
+  --custodian-manifest D:\data\RCAEval\v11-m5\custodian-manifest.json `
   --partition ss30
 ```
 
@@ -576,6 +583,7 @@ uv run python -m backend.benchmarks.rcaeval.audit export `
 
 uv run python -m backend.benchmarks.rcaeval evaluate `
   --predictions-root D:\data\RCAEval\v11-m5\ss30 `
+  --custodian-manifest D:\data\RCAEval\v11-m5\custodian-manifest.json `
   --partition ss30 `
   --prediction-set-hash <sha256> `
   --label-package D:\data\RCAEval\prepared-v11-m0\labels `

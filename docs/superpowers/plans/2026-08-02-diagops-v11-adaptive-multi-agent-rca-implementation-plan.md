@@ -1257,7 +1257,7 @@ request only the missing authority.
 | T8 | implemented / verifying | R1, R4–R7, R9, R11–R13, R27 | M3 fifth-round review-fix5 preserves the already-green exact T8 validator, terminal, safe-text, supplemental-linkage, and final-actor contracts; exact gate 207 passed and scoped Ruff clean |
 | T9 | implemented / verified | R5–R12, R18–R19, R27 | M4 first/second/third-round review fixes reproduced and closed with focused RED→GREEN regressions; exact gate 280 passed/1 warning; candidate-led V11 reports/actions, active-owner/rerun fencing, additive API/UI, shared privacy-safe public projection, usable-evidence validation, actual Markdown actors/tasks/rounds, generic OpenRCA `v11-agent` projection, semantic status matrix, durable lifecycle guard, and Lead-bound report references verified |
 | T10 | implemented / verified | R8–R13, R16, R18, R21–R23, R26–R27 | Exact gate 855 passed/3 skipped/1 warning; full pytest 2071 passed/3 skipped/1 warning; offline rows=80 failed=0; runtime acceptance exit=0; Ruff/build/diff-check clean |
-| T11 | implemented / verifying | R14–R17, R24–R27 | 首轮/二轮 review-fix 与第三轮新增 contract regressions 均按 RED→GREEN 修复；132 focused review-fix tests GREEN。冻结 Single one-context、真实 V11/SQLite accounting、四配置/空 memory、exact cardinality/statistics、scorer/capability identity、canonical custodian manifest/ledger、external-cwd worker、frozen-bundle audit reconstruction、sealed RuntimeRun persistence 与 lease/invalidation guards；M0-L1 golden vector 与 M0-L2 symlink rejection closed。独立复审尚未重新 approve。 |
+| T11 | implemented / verifying | R14–R17, R24–R27 | 首轮至第四轮 review-fix 的 contract regressions 均按 RED→GREEN 修复；164 focused tests GREEN。新增冻结 prediction-set ledger identity transition、逐 side canonical output/checksum/bundle binding、authorized reauthorization lineage、统一 SQLite busy/backoff 与 completion/evaluation failure invalidation、freeze 前 reparse-path gate、exclusive root checksum 写入、无 Git packaged source manifest；保留 Single one-context、真实 V11/SQLite accounting、四配置/空 memory、exact cardinality/statistics、scorer/capability identity、external-cwd worker、frozen-bundle audit reconstruction、sealed RuntimeRun persistence 与 lease guards；M0-L1 golden vector 与 M0-L2 symlink rejection closed。独立复审尚未重新 approve。 |
 | T12 | blocked at capability admission | R14–R17, R25–R26 | 真实 runtime package 完整 checksum 复核通过：manifest `bb119fc9fe338f7cf2d6f03a82f87a0038a1a589fde0c96ad99b02504a5f3d73`/150 cases；但本 worktree capability artifact=0，`DIAGOPS_AGENTS_API_KEY/BASE_URL/MODEL` 均 absent。未执行 OB30 model run 或 SS30 四配置，未打开 SS labels，未冻结 acceptance policy。任务线程 Luna Max 配置不是 benchmark endpoint certification。 |
 | T13 | not started / protected | R1–R27 | TT90 predictions=0、formal label opens=0、paired attempts=0；未消耗 holdout。最新 clean code `094a20f2cd22066a00c32adead51b0e7b8489a63` 的仓库 gate：full pytest 2151 passed/3 skipped/1 warning，Ruff/frontend/offline/runtime/privacy/diff-check clean；production preflight 因缺少 `DIAGOPS_PRODUCTION_SCENARIO` 及 endpoint/credential 环境变量停止，未生成 artifact；Tempo claim 未发布/未运行。必须在同一 clean frozen source、passed capability identity 和已冻结 SS policy 下恢复；任何正式非可恢复失败仍按实现归档并停止。 |
 
@@ -1274,6 +1274,13 @@ independent M5 implementation review; M5 review status remains tracked below.
 | M2 | medium | Lifecycle status updates were missing at implementation start and milestone reviews | Closed in §2 with ready/implementing transitions and M0–M5 Plan/Spec/current evidence updates |
 | M5-E1 | external blocker | 正式 SS30/TT90 需要一个 exact passed capability artifact、可调用 endpoint/model 和 process-only credential；当前三者均不存在 | Open；prediction 在首个模型调用前 fail closed。不得以 Codex task 的 Luna Max 配置、FakeRuntime 或测试 double 替代；TT90 保持未消耗，等待外部 owner 提供认证端点后恢复。 |
 | M5-R1 | review pending | T11–T13 source/artifact independent review 尚未执行 | Open；首轮 M5 review（2026-08-10）为 `changes_required`，本实现线程已按 RED→GREEN 修复并记录 focused evidence，不自行给出 approve。父任务应基于最终本地提交创建独立 re-review 线程。 |
+| M5-R4-B1 | blocking | provisional pair ledger identity was not transitioned to the final frozen prediction-root identity | Closed locally with an atomic bind transition and evaluator-reopen identity checks; RED→GREEN `test_prediction_set_bind_transitions_ledger_identity_for_evaluate_reopen` plus ABA/tamper regression. Independent re-review pending. |
+| M5-R4-H1 | high | frozen side bundle hashes/output directories were not bound to the custodian records | Closed locally by checking canonical locators, exact side checksums/files, bundle content and runtime/config identity before the first root write; RED→GREEN side-binding and zero-side-effect regressions. Independent re-review pending. |
+| M5-R4-H2 | high | reauthorization identity was stored but not enforced by later transitions | Closed locally with authorized-lineage checks across initialize/bind/reserve/assert/recover/completion and one-time identity rotation; old identity/token replay regressions GREEN. Independent re-review pending. |
+| M5-R4-H3 | high | SQLite writer-lock failures could leave prediction or label-open state in flight | Closed locally with one bounded busy/backoff policy, explicit close, and completion/evaluation failure guards that attempt pair invalidation; real writer-lock RED→GREEN regressions GREEN. Independent re-review pending. |
+| M5-R4-H4 | high | packaged source identity depended on runtime Git metadata | Closed locally with a build-time immutable source manifest/code digest in the production image and runtime tamper checks; package-without-Git RED→GREEN regression GREEN. Independent re-review pending. |
+| M5-R4-M1 | medium | freeze-set canonical-root validation occurred after a marker write | Closed locally by validating root and all parent reparse paths before writing and using exclusive marker creation; zero-side-effect regression GREEN. Independent re-review pending. |
+| M5-R4-M2 | medium | ledger connections used zero timeout without explicit close | Closed locally with explicit context-managed close and centralized bounded lock acquisition; handle-release and transient-lock regressions GREEN. Independent re-review pending. |
 
 M5 review-fix record (2026-08-11): the second independent review reproduced
 three residual findings: pair-ledger crash recovery, stale scorer identity at
@@ -1304,6 +1311,28 @@ the pair; and lease token arguments have no optional default. Formal SS30/TT90
 predictions, attempts, and label opens remain zero. This plan is
 `review_required` pending independent re-review; T12 capability admission is
 still the actual execution blocker.
+
+M5 fourth-round implementation/review-fix record (2026-08-12): base
+`2e8b276ed053e6d5c87f8590954705f3f4459acd`. The ledger now performs an atomic
+prediction-set identity transition from the provisional pair lineage to the
+exact frozen root and validates that transition on evaluator reopen. Freeze
+reads custodian side records before writing, verifies canonical output
+locators, side checksum/bundle hashes, partition/configuration identity and
+exact file sets, rejects reparse aliases before the first write, and creates
+the root checksum exclusively. Reauthorization identity is checked across
+initialize/bind/reserve/assert/recover/completion; old lineage/token state is
+not replayable. All ledger writers share one bounded SQLite busy/backoff
+policy with explicit connection close; prediction/evaluation completion lock
+failures immediately attempt pair invalidation and preserve reveal
+consumption. Packaged workers use a build-time source manifest/code digest
+without `.git`, and capability/frozen identities reject stale or tampered
+packages. RED→GREEN evidence: focused M5 group `164 passed, 1 warning`, full
+pytest `2163 passed, 3 skipped, 1 warning`, full Ruff, frontend build and
+diff-check clean; temporary offline `80/80` and runtime `14/14` acceptance
+outputs were removed after hashing. Docker daemon preflight is unavailable.
+Formal predictions, paired attempts and label opens remain zero; T12 is still
+blocked on a fresh passed capability artifact/endpoint/credential and this
+Plan remains `review_required` pending independent re-review.
 
 M0 review (dataset/leakage): completed on 2026-08-02 in worktree
 `agent+v11-m0`; conclusion `approve_with_followups`. Reviewer independently

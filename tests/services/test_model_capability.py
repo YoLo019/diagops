@@ -39,6 +39,7 @@ def _artifact(**overrides):
         "capability_manifest_hash": capability_manifest_hash(),
         "required_contracts": REQUIRED_CONTRACTS,
         "code_revision": "a" * 40,
+        "source_manifest_hash": "b" * 64,
         "execution_environment": current_execution_environment(),
         "tested_at": _TESTED_AT,
         "result": "passed",
@@ -298,3 +299,30 @@ def test_git_identity_is_explicit_and_independent_of_process_cwd(tmp_path, monke
     revision, dirty = _git_identity(repository_root)
     assert len(revision) == 40
     assert isinstance(dirty, bool)
+
+
+def test_packaged_source_identity_without_git_rejects_tampering(tmp_path):
+    package_root = tmp_path / "package"
+    (package_root / "backend").mkdir(parents=True)
+    (package_root / "backend" / "worker.py").write_text(
+        "print('trusted')\n",
+        encoding="utf-8",
+    )
+
+    from backend.services.source_identity import (
+        resolve_source_identity,
+        write_source_manifest,
+    )
+
+    write_source_manifest(package_root)
+    identity = resolve_source_identity(package_root)
+    assert len(identity.revision) == 40
+    assert len(identity.manifest_hash) == 64
+    assert identity.git_dirty is False
+
+    (package_root / "backend" / "worker.py").write_text(
+        "print('tampered')\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="manifest|digest|tamper"):
+        resolve_source_identity(package_root)

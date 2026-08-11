@@ -509,6 +509,7 @@ def test_v11_certified_compatible_tuple_freezes_endpoint_identity(
             capability_manifest_hash=capability_manifest_hash(),
             required_contracts=REQUIRED_CONTRACTS,
             code_revision="a" * 40,
+            source_manifest_hash="b" * 64,
             execution_environment=current_execution_environment(),
             tested_at=datetime(2026, 8, 7, 12, 0, tzinfo=UTC),
             result="passed",

@@ -167,7 +167,10 @@ def _launch_predict(arguments) -> None:
         verify_runtime_package,
     )
     from backend.benchmarks.rcaeval.ledger import CustodianPairLedger
+    from backend.benchmarks.rcaeval.runner import _reject_reparse_path
 
+    _reject_reparse_path(arguments.output, "prediction output")
+    _reject_reparse_path(arguments.pair_root, "prediction pair root")
     output = arguments.output.resolve()
     pair_root = arguments.pair_root.resolve()
     if not _within(output, pair_root):
@@ -187,16 +190,16 @@ def _launch_predict(arguments) -> None:
     pair_root.mkdir(parents=True, exist_ok=True)
     pair_identity = _prediction_pair_identity(arguments)
     sides = _formal_configuration_names(arguments.partition)
-    ledger.initialize(
-        partition=arguments.partition,
-        prediction_set_hash=pair_identity,
-        expected_sides=sides,
-    )
     if arguments.reauthorization_token:
         ledger.reauthorize(
             arguments.reauthorization_token,
             authorized_evaluation_identity=pair_identity,
         )
+    ledger.initialize(
+        partition=arguments.partition,
+        prediction_set_hash=pair_identity,
+        expected_sides=sides,
+    )
     prediction_lease = ledger.record_side_started(arguments.configuration, str(output))
     try:
         ledger.heartbeat(prediction_lease)
@@ -246,14 +249,13 @@ def _launch_predict(arguments) -> None:
         subprocess.run(spec.argv, cwd=spec.cwd, env=spec.env, check=True)
         sums_path = output / "SHA256SUMS"
         bundle_hash = hashlib.sha256(sums_path.read_bytes()).hexdigest()
-        _record_side_completed_with_retry(
-            ledger,
+        ledger.record_side_completed(
             arguments.configuration,
             bundle_hash,
-            prediction_lease,
+            lease_token=prediction_lease,
         )
     except BaseException:
-        _invalidate_pair_with_retry(ledger, "prediction side failed or was interrupted")
+        ledger.invalidate_pair("prediction side failed or was interrupted")
         raise
     print(f"prediction completed: {bundle_hash}")
 
@@ -376,7 +378,10 @@ def _predict(arguments) -> None:
 def _freeze_set(arguments) -> None:
     from backend.benchmarks.rcaeval.ledger import CustodianPairLedger
     from backend.benchmarks.rcaeval.models import RcaEvalConfiguration
-    from backend.benchmarks.rcaeval.runner import freeze_prediction_set
+    from backend.benchmarks.rcaeval.runner import (
+        _reject_reparse_path,
+        freeze_prediction_set,
+    )
 
     if arguments.partition == "ss30":
         configurations = set(RcaEvalConfiguration)
@@ -387,14 +392,17 @@ def _freeze_set(arguments) -> None:
             RcaEvalConfiguration.MULTI_INTENDED,
         }
         count = 90
+    ledger = CustodianPairLedger.from_manifest(arguments.custodian_manifest)
+    _reject_reparse_path(arguments.root, "prediction set root")
+    root = arguments.root.resolve()
+    if not _within(root, ledger.canonical_root):
+        raise ValueError("prediction root must stay inside the canonical custodian root")
     digest = freeze_prediction_set(
-        arguments.root,
+        root,
         expected_configurations=configurations,
         expected_case_count=count,
+        ledger=ledger,
     )
-    ledger = CustodianPairLedger.from_manifest(arguments.custodian_manifest)
-    if not _within(arguments.root.resolve(), ledger.canonical_root):
-        raise ValueError("prediction root must stay inside the canonical custodian root")
     ledger.bind_prediction_set_hash(digest)
     print(f"prediction set frozen: {digest}")
 
@@ -499,17 +507,17 @@ def _evaluate(arguments) -> None:
     manual_audit = ManualAuditArtifact.model_validate_json(
         arguments.manual_audit.read_text(encoding="utf-8")
     )
+    if arguments.reauthorization_token:
+        ledger.reauthorize(
+            arguments.reauthorization_token,
+            authorized_evaluation_identity=arguments.prediction_set_hash,
+        )
     snapshot = ledger.snapshot()
     ledger.initialize(
         partition=arguments.partition,
         prediction_set_hash=str(snapshot["prediction_set_hash"]),
         expected_sides=tuple(configuration.value for configuration in configurations),
     )
-    if arguments.reauthorization_token:
-        ledger.reauthorize(
-            arguments.reauthorization_token,
-            authorized_evaluation_identity=arguments.prediction_set_hash,
-        )
     validate_prelabel_audit(
         audit_export,
         manual_audit,
@@ -644,15 +652,17 @@ def _formal_configuration_names(partition: str) -> tuple[str, ...]:
 def _prediction_pair_identity(arguments) -> str:
     from backend.benchmarks.rcaeval.isolation import verify_runtime_package
     from backend.services.model_capability import read_capability_artifact
+    from backend.services.source_identity import resolve_source_identity
 
     manifest = verify_runtime_package(arguments.runtime)
     capability = read_capability_artifact(arguments.capability_artifact)
-    source_revision = _git_revision(_repository_root())
+    source_identity = resolve_source_identity(_repository_root())
     payload = {
         "partition": arguments.partition,
         "runtime_manifest_hash": manifest.manifest_hash,
         "capability_artifact_hash": capability.artifact_hash,
-        "source_revision": source_revision,
+        "source_revision": source_identity.revision,
+        "source_manifest_hash": source_identity.manifest_hash,
     }
     return hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
@@ -669,52 +679,14 @@ def _same_path(left: Path, right: Path) -> bool:
     return os.path.normcase(str(left.resolve())) == os.path.normcase(str(right.resolve()))
 
 
-def _record_side_completed_with_retry(
-    ledger, side: str, bundle_hash: str, lease_token: str
-) -> None:
-    import sqlite3
-    import time
-
-    for attempt in range(3):
-        try:
-            ledger.record_side_completed(side, bundle_hash, lease_token=lease_token)
-            return
-        except sqlite3.OperationalError:
-            if attempt == 2:
-                raise
-            time.sleep(0.02 * (attempt + 1))
-
-
-def _invalidate_pair_with_retry(ledger, reason: str) -> None:
-    import sqlite3
-    import time
-
-    for attempt in range(3):
-        try:
-            ledger.invalidate_pair(reason)
-            return
-        except sqlite3.OperationalError:
-            if attempt == 2:
-                raise
-            time.sleep(0.02 * (attempt + 1))
-
-
 def _repository_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
 def _git_revision(repository_root: Path) -> str:
-    result = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=repository_root,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    revision = result.stdout.strip()
-    if len(revision) != 40:
-        raise ValueError("repository revision is not immutable")
-    return revision
+    from backend.services.source_identity import resolve_source_identity
+
+    return resolve_source_identity(repository_root).revision
 
 
 if __name__ == "__main__":

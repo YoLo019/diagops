@@ -14,6 +14,7 @@ import os
 import secrets
 import sqlite3
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -96,6 +97,7 @@ class CustodianPairLedger:
     """One immutable benchmark pair, shared by every output directory."""
 
     DEFAULT_LEASE_SECONDS = 900
+    SQLITE_BUSY_TIMEOUT_SECONDS = 5.0
     _IN_FLIGHT = {
         LedgerState.PREDICTING,
         LedgerState.PRELABEL_FROZEN,
@@ -179,9 +181,10 @@ class CustodianPairLedger:
             partition=partition,
             prediction_set_hash=prediction_set_hash,
             expected_sides=expected_sides,
+            lineage_identity_hash=prediction_set_hash,
         )
         with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            _begin_immediate(connection, self.SQLITE_BUSY_TIMEOUT_SECONDS)
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS pair_ledger (
@@ -206,6 +209,7 @@ class CustodianPairLedger:
                     custodian_root TEXT,
                     custodian_manifest_hash TEXT,
                     ledger_identity TEXT,
+                    lineage_identity_hash TEXT,
                     label_ever_opened INTEGER NOT NULL DEFAULT 0,
                     reveal_epoch INTEGER NOT NULL DEFAULT 0,
                     label_lineage_hash TEXT,
@@ -222,6 +226,7 @@ class CustodianPairLedger:
                 "custodian_root",
                 "custodian_manifest_hash",
                 "ledger_identity",
+                "lineage_identity_hash",
                 "label_ever_opened",
                 "reveal_epoch",
                 "label_lineage_hash",
@@ -238,11 +243,24 @@ class CustodianPairLedger:
                 CREATE TABLE IF NOT EXISTS pair_sides (
                     side TEXT PRIMARY KEY,
                     output_dir TEXT NOT NULL,
+                    output_locator TEXT NOT NULL,
                     status TEXT NOT NULL,
                     bundle_hash TEXT
                 )
                 """
             )
+            side_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(pair_sides)")
+            }
+            required_side_columns = {
+                "side",
+                "output_dir",
+                "output_locator",
+                "status",
+                "bundle_hash",
+            }
+            if not required_side_columns <= side_columns:
+                raise ValueError("pair side schema is not custodian-frozen")
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS reauthorizations (
@@ -260,7 +278,8 @@ class CustodianPairLedger:
                 raise ValueError("reauthorization schema is not custodian-frozen")
             row = connection.execute(
                 "SELECT partition, prediction_set_hash, expected_sides, lease_seconds, "
-                "custodian_root, custodian_manifest_hash, ledger_identity "
+                "custodian_root, custodian_manifest_hash, ledger_identity, "
+                "lineage_identity_hash, authorized_evaluation_identity_hash "
                 "FROM pair_ledger WHERE id = 1"
             ).fetchone()
             expected = _encode_sides(expected_sides)
@@ -269,8 +288,8 @@ class CustodianPairLedger:
                     "INSERT INTO pair_ledger("
                     "id, partition, prediction_set_hash, expected_sides, state, lease_seconds, "
                     "custodian_root, custodian_manifest_hash, ledger_identity, "
-                    "authorized_evaluation_identity_hash"
-                    ") VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "lineage_identity_hash, authorized_evaluation_identity_hash"
+                    ") VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         partition,
                         prediction_set_hash,
@@ -280,21 +299,34 @@ class CustodianPairLedger:
                         canonical_root,
                         self._manifest.manifest_hash,
                         ledger_identity,
-                        ledger_identity,
+                        prediction_set_hash,
+                        prediction_set_hash,
                     ),
                 )
-            elif tuple(row) != (
-                partition,
-                prediction_set_hash,
-                expected,
-                lease_seconds,
-                canonical_root,
-                self._manifest.manifest_hash,
-                ledger_identity,
-            ):
-                raise ValueError(
-                    "pair ledger identity or lease differs from custodian freeze"
+            else:
+                lineage_identity_hash = row[7]
+                expected_identity = _ledger_identity(
+                    canonical_root=canonical_root,
+                    manifest_hash=self._manifest.manifest_hash,
+                    partition=partition,
+                    prediction_set_hash=prediction_set_hash,
+                    expected_sides=expected_sides,
+                    lineage_identity_hash=lineage_identity_hash,
                 )
+                if tuple(row) != (
+                    partition,
+                    prediction_set_hash,
+                    expected,
+                    lease_seconds,
+                    canonical_root,
+                    self._manifest.manifest_hash,
+                    expected_identity,
+                    lineage_identity_hash,
+                    prediction_set_hash,
+                ):
+                    raise ValueError(
+                        "pair ledger identity or authorized lineage differs from custodian freeze"
+                    )
             connection.commit()
 
     def bind_prediction_set_hash(self, prediction_set_hash: str) -> None:
@@ -302,20 +334,44 @@ class CustodianPairLedger:
         if not _valid_hash(prediction_set_hash):
             raise ValueError("prediction set identity must be sha256")
         with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            _begin_immediate(connection, self.SQLITE_BUSY_TIMEOUT_SECONDS)
             row = self._require_pair(connection)
             row = self._recover_if_expired(connection, row, now=_now())
+            self._require_authorized_lineage(row)
             if LedgerState(row["state"]) != LedgerState.PREDICTIONS_FROZEN:
                 raise ValueError("prediction set is not frozen by the custodian")
             if row["prediction_set_bound"]:
                 if row["prediction_set_hash"] != prediction_set_hash:
                     raise ValueError("prediction set hash differs from custodian freeze")
+                expected_identity = _ledger_identity(
+                    canonical_root=self._manifest.canonical_root,
+                    manifest_hash=self._manifest.manifest_hash,
+                    partition=row["partition"],
+                    prediction_set_hash=prediction_set_hash,
+                    expected_sides=_decode_sides(row["expected_sides"]),
+                    lineage_identity_hash=row["lineage_identity_hash"],
+                )
+                if row["ledger_identity"] != expected_identity:
+                    raise ValueError("bound prediction lineage identity is tampered")
+                if row["authorized_evaluation_identity_hash"] != prediction_set_hash:
+                    raise ValueError("bound evaluation identity is stale")
                 connection.commit()
                 return
+            if row["authorized_evaluation_identity_hash"] != row["prediction_set_hash"]:
+                raise ValueError("prediction lineage authorization is stale")
+            next_identity = _ledger_identity(
+                canonical_root=self._manifest.canonical_root,
+                manifest_hash=self._manifest.manifest_hash,
+                partition=row["partition"],
+                prediction_set_hash=prediction_set_hash,
+                expected_sides=_decode_sides(row["expected_sides"]),
+                lineage_identity_hash=row["lineage_identity_hash"],
+            )
             connection.execute(
                 "UPDATE pair_ledger SET prediction_set_hash = ?, "
-                "prediction_set_bound = 1 WHERE id = 1",
-                (prediction_set_hash,),
+                "prediction_set_bound = 1, authorized_evaluation_identity_hash = ?, "
+                "ledger_identity = ? WHERE id = 1",
+                (prediction_set_hash, prediction_set_hash, next_identity),
             )
             connection.commit()
 
@@ -324,9 +380,10 @@ class CustodianPairLedger:
     ) -> PrelabelReservation:
         """Atomically freeze the exact pre-label audit identity."""
         with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            _begin_immediate(connection, self.SQLITE_BUSY_TIMEOUT_SECONDS)
             row = self._require_pair(connection)
             row = self._recover_if_expired(connection, row, now=_now())
+            self._require_authorized_lineage(row)
             state = LedgerState(row["state"])
             if state != LedgerState.PREDICTIONS_FROZEN:
                 raise ValueError(
@@ -373,9 +430,10 @@ class CustodianPairLedger:
     ) -> LabelOpenReservation:
         """Perform the sole atomic label-open transition."""
         with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            _begin_immediate(connection, self.SQLITE_BUSY_TIMEOUT_SECONDS)
             row = self._require_pair(connection)
             row = self._recover_if_expired(connection, row, now=_now())
+            self._require_authorized_lineage(row)
             state = LedgerState(row["state"])
             if state != LedgerState.PRELABEL_FROZEN:
                 raise ValueError(
@@ -435,6 +493,7 @@ class CustodianPairLedger:
         """Read-only child-process fence immediately before labels are read."""
         with self._connection() as connection:
             row = self._require_pair(connection)
+            self._require_authorized_lineage(row)
             if LedgerState(row["state"]) != LedgerState.LABELS_OPEN:
                 raise ValueError(
                     "custodian ledger labels are closed; reauthorization is required"
@@ -458,7 +517,7 @@ class CustodianPairLedger:
     ) -> float:
         """Extend one live custodian lease; stale holders cannot revive it."""
         with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            _begin_immediate(connection, self.SQLITE_BUSY_TIMEOUT_SECONDS)
             row = self._require_pair(connection)
             current = _coerce_now(now)
             if LedgerState(row["state"]) not in self._IN_FLIGHT:
@@ -480,12 +539,28 @@ class CustodianPairLedger:
     def mark_evaluation_completed(
         self, evaluation_artifact_hash: str, *, lease_token: str
     ) -> None:
+        try:
+            self._mark_evaluation_completed(
+                evaluation_artifact_hash,
+                lease_token=lease_token,
+            )
+        except sqlite3.OperationalError as exc:
+            self._invalidate_after_write_error(
+                "label-side evaluation completion failed or was interrupted",
+                exc,
+            )
+            raise
+
+    def _mark_evaluation_completed(
+        self, evaluation_artifact_hash: str, *, lease_token: str
+    ) -> None:
         if not _valid_hash(evaluation_artifact_hash):
             raise ValueError("evaluation artifact hash must be sha256")
         with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            _begin_immediate(connection, self.SQLITE_BUSY_TIMEOUT_SECONDS)
             row = self._require_pair(connection)
             row = self._recover_if_expired(connection, row, now=_now())
+            self._require_authorized_lineage(row)
             if LedgerState(row["state"]) != LedgerState.LABELS_OPEN:
                 raise ValueError("pair is not open for evaluation completion")
             self._require_lease(row, token=lease_token, kind="label_open")
@@ -499,9 +574,10 @@ class CustodianPairLedger:
 
     def record_side_started(self, side: str, output_dir: str) -> str:
         with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            _begin_immediate(connection, self.SQLITE_BUSY_TIMEOUT_SECONDS)
             row = self._require_pair(connection)
             row = self._recover_if_expired(connection, row, now=_now())
+            self._require_authorized_lineage(row)
             state = LedgerState(row["state"])
             if state not in {LedgerState.NEW, LedgerState.PREDICTING}:
                 raise ValueError("pair is blocked; explicit reauthorization is required")
@@ -523,8 +599,9 @@ class CustodianPairLedger:
             token = secrets.token_urlsafe(32)
             expires_at = _now() + float(row["lease_seconds"])
             connection.execute(
-                "INSERT INTO pair_sides(side, output_dir, status) VALUES (?, ?, 'started')",
-                (side, str(Path(output_dir).resolve())),
+                "INSERT INTO pair_sides(side, output_dir, output_locator, status) "
+                "VALUES (?, ?, ?, 'started')",
+                (side, str(Path(output_dir).resolve()), str(Path(output_dir))),
             )
             connection.execute(
                 "UPDATE pair_ledger SET state = ?, lease_kind = ?, "
@@ -543,10 +620,23 @@ class CustodianPairLedger:
     def record_side_completed(
         self, side: str, bundle_hash: str, *, lease_token: str
     ) -> None:
+        try:
+            self._record_side_completed(side, bundle_hash, lease_token=lease_token)
+        except sqlite3.OperationalError as exc:
+            self._invalidate_after_write_error(
+                "prediction side completion failed or was interrupted",
+                exc,
+            )
+            raise
+
+    def _record_side_completed(
+        self, side: str, bundle_hash: str, *, lease_token: str
+    ) -> None:
         with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            _begin_immediate(connection, self.SQLITE_BUSY_TIMEOUT_SECONDS)
             row = self._require_pair(connection)
             row = self._recover_if_expired(connection, row, now=_now())
+            self._require_authorized_lineage(row)
             if LedgerState(row["state"]) != LedgerState.PREDICTING:
                 raise ValueError("pair is not accepting prediction completions")
             self._require_lease(
@@ -583,7 +673,7 @@ class CustodianPairLedger:
 
     def invalidate_pair(self, reason: str) -> None:
         with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            _begin_immediate(connection, self.SQLITE_BUSY_TIMEOUT_SECONDS)
             self._require_pair(connection)
             self._fail_pair(connection, reason)
             connection.commit()
@@ -599,9 +689,10 @@ class CustodianPairLedger:
         """
         current = _coerce_now(now)
         with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            _begin_immediate(connection, self.SQLITE_BUSY_TIMEOUT_SECONDS)
             row = self._require_pair(connection)
             row = self._recover_if_expired(connection, row, now=current)
+            self._require_authorized_lineage(row)
             connection.commit()
             return LedgerState(row["state"])
 
@@ -614,7 +705,7 @@ class CustodianPairLedger:
             raise ValueError("authorized evaluation identity must be sha256")
         token_hash = _token_hash(owner_token)
         with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            _begin_immediate(connection, self.SQLITE_BUSY_TIMEOUT_SECONDS)
             row = self._require_pair(connection)
             row = self._recover_if_expired(connection, row, now=_now())
             if LedgerState(row["state"]) != LedgerState.FAILED_NON_RESUMABLE:
@@ -626,17 +717,32 @@ class CustodianPairLedger:
             ).fetchone()
             if used is not None:
                 raise ValueError("reauthorization token was already consumed")
+            next_identity = _ledger_identity(
+                canonical_root=self._manifest.canonical_root,
+                manifest_hash=self._manifest.manifest_hash,
+                partition=row["partition"],
+                prediction_set_hash=authorized_evaluation_identity,
+                expected_sides=_decode_sides(row["expected_sides"]),
+                lineage_identity_hash=authorized_evaluation_identity,
+            )
             connection.execute(
-                "UPDATE pair_ledger SET state = ?, prediction_set_bound = 0, "
+                "UPDATE pair_ledger SET state = ?, prediction_set_hash = ?, "
+                "prediction_set_bound = 0, ledger_identity = ?, "
                 "prelabel_reservation_hash = NULL, audit_export_hash = NULL, "
                 "manual_audit_hash = NULL, label_open_count = 0, "
                 "label_lineage_hash = NULL, "
-                "authorized_evaluation_identity_hash = ?, "
+                "lineage_identity_hash = ?, authorized_evaluation_identity_hash = ?, "
                 "evaluation_artifact_hash = NULL, failure_reason = NULL, "
                 "lease_kind = NULL, lease_token_hash = NULL, lease_side = NULL, "
                 "lease_expires_at = NULL, reauthorization_epoch = reauthorization_epoch + 1 "
                 "WHERE id = 1",
-                (LedgerState.NEW.value, authorized_evaluation_identity),
+                (
+                    LedgerState.NEW.value,
+                    authorized_evaluation_identity,
+                    next_identity,
+                    authorized_evaluation_identity,
+                    authorized_evaluation_identity,
+                ),
             )
             connection.execute("DELETE FROM pair_sides")
             connection.execute(
@@ -658,6 +764,24 @@ class CustodianPairLedger:
                 "SELECT side, status FROM pair_sides ORDER BY side"
             ).fetchall()
             return {row["side"]: row["status"] for row in rows}
+
+    def side_records(self) -> dict[str, dict[str, str | None]]:
+        """Return the custodian-frozen output binding for every prediction side."""
+        with self._connection() as connection:
+            self._require_pair(connection)
+            rows = connection.execute(
+                "SELECT side, output_dir, output_locator, status, bundle_hash "
+                "FROM pair_sides ORDER BY side"
+            ).fetchall()
+            return {
+                row["side"]: {
+                    "output_dir": row["output_dir"],
+                    "output_locator": row["output_locator"],
+                    "status": row["status"],
+                    "bundle_hash": row["bundle_hash"],
+                }
+                for row in rows
+            }
 
     def _recover_if_expired(
         self, connection: sqlite3.Connection, row: sqlite3.Row, *, now: float
@@ -686,6 +810,19 @@ class CustodianPairLedger:
         )
         connection.execute("UPDATE pair_sides SET status = 'invalidated'")
 
+    def _invalidate_after_write_error(
+        self, reason: str, original: sqlite3.OperationalError
+    ) -> None:
+        try:
+            self.invalidate_pair(reason)
+        except BaseException as cleanup_error:
+            raise original from cleanup_error
+
+    @staticmethod
+    def _require_authorized_lineage(row: sqlite3.Row) -> None:
+        if row["authorized_evaluation_identity_hash"] != row["prediction_set_hash"]:
+            raise ValueError("authorized evaluation identity is stale")
+
     @staticmethod
     def _require_lease(
         row: sqlite3.Row,
@@ -705,12 +842,25 @@ class CustodianPairLedger:
         if not token or _token_hash(token) != row["lease_token_hash"]:
             raise ValueError("custodian lease token/reservation is invalid")
 
-    def _connection(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connection(self):
         if self._manifest is None:
             raise ValueError("custodian manifest is required for pair ledger access")
-        connection = sqlite3.connect(self.path, timeout=0, isolation_level=None)
+        connection = sqlite3.connect(
+            self.path,
+            timeout=0,
+            isolation_level=None,
+        )
         connection.row_factory = sqlite3.Row
-        return connection
+        connection.execute("PRAGMA busy_timeout = 0")
+        try:
+            yield connection
+        except BaseException:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     @staticmethod
     def _require_pair(connection: sqlite3.Connection) -> sqlite3.Row:
@@ -799,6 +949,7 @@ def _ledger_identity(
     partition: str,
     prediction_set_hash: str,
     expected_sides: tuple[str, ...],
+    lineage_identity_hash: str,
 ) -> str:
     payload = {
         "canonical_root": canonical_root,
@@ -806,6 +957,7 @@ def _ledger_identity(
         "partition": partition,
         "prediction_set_hash": prediction_set_hash,
         "expected_sides": sorted(expected_sides),
+        "lineage_identity_hash": lineage_identity_hash,
     }
     return _canonical_hash(payload)
 
@@ -821,6 +973,25 @@ def _lineage_hash(audit_export_hash: str, manual_audit_hash: str) -> str:
 
 def _token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _begin_immediate(connection: sqlite3.Connection, timeout_seconds: float) -> None:
+    """Acquire the pair write lock with one bounded, shared backoff policy."""
+    deadline = time.monotonic() + timeout_seconds
+    delay = 0.01
+    while True:
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            return
+        except sqlite3.OperationalError as exc:
+            message = str(exc).lower()
+            if "locked" not in message and "busy" not in message:
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            time.sleep(min(delay, remaining))
+            delay = min(delay * 2, 0.25)
 
 
 def _now() -> float:

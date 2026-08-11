@@ -16,7 +16,6 @@ import importlib.metadata
 import json
 import os
 import platform
-import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,6 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from backend.config.settings import canonicalize_endpoint, endpoint_id
 from backend.diagnosis.openai_compatible_model import COMPATIBLE_ADAPTER_VERSION
 from backend.safety.redaction import redact_text
+from backend.services.source_identity import resolve_source_identity
 
 CAPABILITY_SCHEMA_VERSION = "model-capability-v1"
 CAPABILITY_API_MODE = "chat_completions"
@@ -96,6 +96,7 @@ class ModelCapabilityArtifact(BaseModel):
     capability_manifest_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     required_contracts: tuple[str, ...] = Field(min_length=len(REQUIRED_CONTRACTS))
     code_revision: str = Field(pattern=r"^[0-9a-f]{40}$")
+    source_manifest_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     git_dirty: bool = False
     execution_environment: CapabilityExecutionEnvironment
     tested_at: datetime
@@ -221,30 +222,8 @@ def _repository_root() -> Path:
 
 
 def _git_identity(repository_root: Path) -> tuple[str, bool]:
-    repository_root = repository_root.resolve()
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=repository_root,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-        revision = result.stdout.strip()
-        if result.returncode == 0 and revision:
-            status = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=repository_root,
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=False,
-            )
-            return revision, bool(status.stdout.strip())
-    except (OSError, subprocess.SubprocessError):
-        pass
-    return "0" * 40, True
+    identity = resolve_source_identity(repository_root)
+    return identity.revision, identity.git_dirty
 
 
 def _code_revision(repository_root: Path) -> str:
@@ -267,8 +246,13 @@ def validate_capability_for_prediction(
         raise ValueError("capability provider/model identity is stale")
     if artifact.endpoint_id != endpoint_id_value:
         raise ValueError("capability endpoint identity is stale")
-    revision, dirty = _git_identity(repository_root)
-    if artifact.git_dirty or dirty or artifact.code_revision != revision:
+    source_identity = resolve_source_identity(repository_root)
+    if (
+        artifact.git_dirty
+        or source_identity.git_dirty
+        or artifact.code_revision != source_identity.revision
+        or artifact.source_manifest_hash != source_identity.manifest_hash
+    ):
         raise ValueError("capability code revision is stale or dirty")
     openai_version, agents_version = _sdk_versions()
     if artifact.adapter_version != COMPATIBLE_ADAPTER_VERSION:
@@ -434,7 +418,7 @@ async def certify_endpoint_async(
     finally:
         await client.close()
     openai_version, agents_version = _sdk_versions()
-    code_revision, git_dirty = _git_identity(
+    source_identity = resolve_source_identity(
         _repository_root() if repository_root is None else repository_root
     )
     return ModelCapabilityArtifact(
@@ -448,8 +432,9 @@ async def certify_endpoint_async(
         tested_parallelism=parallelism,
         capability_manifest_hash=capability_manifest_hash(),
         required_contracts=REQUIRED_CONTRACTS,
-        code_revision=code_revision,
-        git_dirty=git_dirty,
+        code_revision=source_identity.revision,
+        source_manifest_hash=source_identity.manifest_hash,
+        git_dirty=source_identity.git_dirty,
         execution_environment=current_execution_environment(),
         tested_at=datetime.now(UTC),
         result=(

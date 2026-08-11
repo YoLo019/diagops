@@ -267,6 +267,7 @@ def _identity() -> FrozenRunIdentity:
     dependency_hash = scorer_dependency_hash()
     return FrozenRunIdentity(
         source_commit="1" * 40,
+        source_manifest_hash="c" * 64,
         runtime_manifest_hash="2" * 64,
         capability=EndpointCapabilityIdentity(
             provider="deepseek",
@@ -439,23 +440,61 @@ def test_frozen_bundle_evaluation_and_acceptance_policy(tmp_path: Path):
     with pytest.raises(ValueError, match="mixed|changed"):
         evaluate_bundles([single, tampered], labels)
 
+    from backend.benchmarks.rcaeval.ledger import (
+        CustodianPairLedger,
+        create_custodian_manifest,
+    )
+
+    manifest = create_custodian_manifest(
+        tmp_path.parent,
+        runtime_manifest_hash="2" * 64,
+        label_manifest_hash="2" * 64,
+    )
+    ledger = CustodianPairLedger.from_manifest(manifest)
+    expected_configurations = {
+        RcaEvalConfiguration.SINGLE_INTENDED,
+        RcaEvalConfiguration.MULTI_INTENDED,
+    }
+    pair_identity = hashlib.sha256(
+        json.dumps(
+            {
+                "partition": "tt90",
+                "runtime_manifest_hash": "2" * 64,
+                "capability_artifact_hash": "3" * 64,
+                "source_revision": "1" * 40,
+                "source_manifest_hash": "c" * 64,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    ledger.initialize(
+        partition="tt90",
+        prediction_set_hash=pair_identity,
+        expected_sides=tuple(item.value for item in expected_configurations),
+    )
+    for configuration in sorted(expected_configurations, key=lambda item: item.value):
+        side_dir = tmp_path / configuration.value
+        lease = ledger.record_side_started(configuration.value, str(side_dir))
+        ledger.record_side_completed(
+            configuration.value,
+            hashlib.sha256((side_dir / "SHA256SUMS").read_bytes()).hexdigest(),
+            lease_token=lease,
+        )
+
     set_hash = freeze_prediction_set(
         tmp_path,
-        expected_configurations={
-            RcaEvalConfiguration.SINGLE_INTENDED,
-            RcaEvalConfiguration.MULTI_INTENDED,
-        },
+        expected_configurations=expected_configurations,
         expected_case_count=90,
+        ledger=ledger,
     )
     assert len(set_hash) == 64
     with pytest.raises(ValueError, match="already frozen"):
         freeze_prediction_set(
             tmp_path,
-            expected_configurations={
-                RcaEvalConfiguration.SINGLE_INTENDED,
-                RcaEvalConfiguration.MULTI_INTENDED,
-            },
+            expected_configurations=expected_configurations,
             expected_case_count=90,
+            ledger=ledger,
         )
 
 
