@@ -1,6 +1,6 @@
 # DiagOps V11 Adaptive Multi-Agent RCA Design
 
-Status: `approved`
+Status: `review_required`
 
 Date: 2026-08-02
 
@@ -1852,6 +1852,21 @@ claim is made. Repository verification counts and artifact paths are recorded
 in the current/plan handoff after this repair.
 Production acceptance was environment-blocked before any scenario artifact;
 Tempo was not run because no Tempo claim is published.
+
+M5 third-round review-fix record (2026-08-12): the independent review found
+four blocking/high boundary defects and two medium ledger/API defects. The
+local implementation commit `094a20f2cd22066a00c32adead51b0e7b8489a63` adds a
+custodian-root manifest whose canonical path and ledger identity cannot be
+replaced by `--pair-root`, an explicit-source trusted worker and Git identity,
+permanent reveal epoch/consumed state with one-time authorized reauthorization,
+mechanical frozen-bundle candidate/evidence audit reconstruction, persisted
+RuntimeRun deserialization fail-closed for missing/null remaining turns,
+bounded completion retry plus pair invalidation, and non-optional lease tokens.
+RED→GREEN evidence is recorded in the implementation handoff: 91 targeted
+passes and 2151 full passes/3 skips/1 warning. Formal prediction/attempt/label
+counts remain zero. Because these changes alter persisted/CLI contracts, this
+spec is `review_required` pending a new independent review; M5 remains blocked
+at capability admission and no accuracy or completion claim is made.
 
 ## 16. Approval state
 

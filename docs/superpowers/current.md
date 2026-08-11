@@ -4,7 +4,7 @@ This file is the mutable routing and status entry point for the current version.
 
 It does not override an approved spec or plan, current code contracts, or the long-term product goal and production safety boundary in `AGENT.md`.
 
-Updated: 2026-08-11
+Updated: 2026-08-12
 
 ## Implemented Baseline
 
@@ -37,11 +37,11 @@ provider contracts.
 
 Iteration status: `blocked`
 
-Spec status: `approved`
+Spec status: `review_required` (third-round persisted/CLI contract fixes await independent re-review)
 
-Plan status: `approved`
+Plan status: `review_required` (third-round persisted/CLI contract fixes await independent re-review)
 
-Implementation status: `blocked`
+Implementation status: `blocked` (M5 engineering fixes implemented/verifying; capability and independent-review gates remain open)
 
 Completion commit: `none`（M5 尚未完成正式 SS30/TT90）
 
@@ -168,6 +168,31 @@ offline matrix is `output/offline_tool_acceptance/matrix.json` (SHA-256
 required lab/Docker environment variables were absent, so no production
 scenario artifact was generated. Tempo acceptance was not run because no
 Tempo claim is being published.
+
+Verification evidence (M5 third-round review-fix, 2026-08-12): base was the
+second-round clean code `977a040a`; code fix commit is
+`094a20f2cd22066a00c32adead51b0e7b8489a63` on `codex/v11-m5`. RED→GREEN
+regressions close canonical custodian-root/manifest ledger binding (including
+alternate-root rejection), an external-cwd trusted prediction worker with
+explicit source/Git root, permanent label reveal epoch and one-time
+reauthorization identity, frozen-bundle candidate/evidence audit reconstruction,
+sealed persisted RuntimeRun turn-state rejection, completion-failure pair
+invalidation, and required lease-token APIs. Targeted M5 regression gate is
+`91 passed`; full pytest is `2151 passed, 3 skipped, 1 warning`; Ruff and
+`git diff --check` are clean; frontend production build passed; offline tool
+acceptance is `80/80`; runtime acceptance is `14/14` with privacy passed at
+`output/runtime-acceptance/runtime-20260811T180307749157Z-fcf30999/result.json`
+(SHA-256
+`37ff2eece9e2feb14d00d4622d13acc00f0ef21d64a6e064633bf82d7f4094ff`,
+`git_commit=094a20f2cd22066a00c32adead51b0e7b8489a63`, `git_dirty=false`);
+offline matrix is `output/offline_tool_acceptance/matrix.json` (SHA-256
+`8c5e150a9e07923528a5c1d6a0f7016739ffaaeb07b7b21f10faf16458659c9d`).
+Formal SS30/TT90 predictions, paired attempts, and label opens remain `0`.
+Production acceptance stopped before scenario creation because
+`DIAGOPS_PRODUCTION_SCENARIO` and the required production/endpoint environment
+are absent; no Tempo claim was published or run. M5 remains blocked and awaits
+fresh capability admission plus independent re-review; no accuracy claim is
+made.
 
 Blocker: `T12 capability admission：缺少 exact passed model-capability artifact、
 可调用 endpoint/model 与 process-only credential；SS30/TT90 不得以任务线程模型
