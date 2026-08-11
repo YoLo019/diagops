@@ -158,11 +158,12 @@ Verification evidence (M5 review-fix repository gates, 2026-08-11): `uv run
 pytest -q` → `2141 passed, 3 skipped, 1 warning`; `uv run ruff check .` clean;
 frontend production build passed; offline tool acceptance `rows=80 failed=0`;
 runtime acceptance produced a passed 14-scenario artifact (privacy scan
-passed) at `output/runtime-acceptance/runtime-20260811T155036944009Z-6b3759d3/result.json`
-(SHA-256 `fa8de62512f8031efc438aab7280d5d8f7b120a55748e9b2927b165397a5c95e`,
-engineering run recorded before the final local commit with `git_dirty=true`);
+passed) at `output/runtime-acceptance/runtime-20260811T155221149309Z-6cd0f67e/result.json`
+(SHA-256 `45165e1453004e8f2a6afbbdf6a41b99eb850bb23b3ff1502770d1db47da6c4d`,
+clean engineering run bound to code commit `b591e40df5569cd53c40e9984b9d056f2ceb57f5`,
+`git_dirty=false`);
 offline matrix is `output/offline_tool_acceptance/matrix.json` (SHA-256
-`94f15b5d040a9ff4b21ca532f52c12a4811582f397148983a53b274a451864e1`);
+`d85e162d0cba644c09397b38c6756eb41bbf8b58c61120c98a72f0617d674540`);
 `git diff --check` clean. Production acceptance was attempted but the
 required lab/Docker environment variables were absent, so no production
 scenario artifact was generated. Tempo acceptance was not run because no
