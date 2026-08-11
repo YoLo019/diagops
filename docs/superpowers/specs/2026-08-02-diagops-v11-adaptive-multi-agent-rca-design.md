@@ -1407,7 +1407,7 @@ historical replay—not because the old benchmark score is unchanged.
 | R11 | No production writes or unsafe tool escalation | Current read-only allowlist exists | Safety and injection suites | T4, T6–T10, T13 | M3/T7–T8: all model tool calls use the frozen registry manifest with invocation-time callable/read-only checks; no report/action/fixed specialist path is entered; full safety/privacy suite remains in T10/T13 |
 | R12 | No private reasoning or secrets are persisted/exposed | Current ReAct trace can store assistant text | Payload privacy scans | T6–T10, T13 | M3/T7–T8: only bounded structured outputs/summaries and committed evidence references are persisted; M4 adds one shared V11 public projection across findings, candidates, Critic/Lead, summaries, reports, and graph seeds, with API/UI end-to-end private-marker regressions; T10 green |
 | R13 | Production run is bounded to 3 Investigators, 2 rounds, and 120s | Current parallel/budget primitives exist | Boundary, timeout, and race tests | T3, T6–T8, T10, T13 | M1/T3: V11 absolute deadline/phase budget monotonicity and timeout ownership checks; second-round M3/T7–T8 covers 1–3 bounded concurrent Investigators, two rounds, per-request model/tool/turn reservations, timeout, cancellation, late results, and cleanup; final acceptance remains in T10 |
-| R14 | Frozen V11 single-Agent control is reproducible and Multi-Agent tokens are ≤3x in primary evaluation | No current paired V11 single-Agent path | Control-contract tests and artifact/hash verifier | T11–T13 | engineering verified / scored evidence blocked：T11 frozen control、四配置与 ≤3x contract 76 focused GREEN；SS/TT paired run 未执行 |
+| R14 | Frozen V11 single-Agent control is reproducible and Multi-Agent tokens are ≤3x in primary evaluation | No current paired V11 single-Agent path | Control-contract tests and artifact/hash verifier | T11–T13 | engineering verified / scored evidence blocked：T11 one-context control、四配置与 ≤3x contract、run-level pair ledger 和 fresh capability admission regressions GREEN；SS/TT paired run 未执行 |
 | R15 | Primary locally held-out exact score meets frozen formula and gains ≥10pp | V10.1 OpenRCA delta was zero; no independent external custodian is available | One frozen RCAEval final paired gate with prediction/label process isolation | T1, T11–T13 | blocked：无 capability-certified endpoint；TT90 未执行/未揭盲，不声称准确率提升 |
 | R16 | Reference integrity 100%, single-reviewer evidence-support rubric pass rate ≥95%, P95 ≤120s, read-only/leakage zero | Existing acceptance measures only reference existence | Runtime integrity tests plus frozen label-input-isolated support/latency/safety gate | T10–T13 | engineering verified / metric blocked：reference、latency、violations 与不可伪造 manual-audit gate 已实现；无 SS/TT 实测分母 |
 | R17 | Equal-token ablation is published with bounded claim language | Not currently measured | Artifact presence and claim checker | T1, T11–T13 | blocked：四配置合同已验证，SS30 equal-token runs 未执行，因而无结果可发布 |
@@ -1418,7 +1418,7 @@ historical replay—not because the old benchmark score is unchanged.
 | R22 | Every V11 tool is verifiable offline on one host without credentials, Docker, or external services | Local OpenRCA metrics/logs/traces exist but there is no complete incident-package gate | Nine-tool offline acceptance and artifact hash check | T4, T10, T13 | verified：既有 offline acceptance 80/80；T11 OB30 单 case 九工具真实 package smoke 均返回 success/skipped 合法结果；最终全仓 gate 待本提交复跑 |
 | R23 | Tempo is the only V11 real trace backend and is reproducibly testable through local Docker and OTLP replay | Docker/Compose client exists locally but the daemon may be unavailable; no Tempo Provider or replay gate exists | Pinned-image preflight, unique-project Compose, replay, parity, bounded polling, blocked-state, and scoped cleanup acceptance | T5, T10, T13 | host-dependent live Docker gate 仍按既有记录 blocked；M5 不发布 Tempo claim，故不运行 tempo_acceptance |
 | R24 | Four versioned data-only diagnostic skills are selectable without adding executable plugins or MCP | Strategies are prose only; no Skill/MCP subsystem exists | Catalog schema/hash, required-tool, prompt, and no-dynamic-load checks | T4, T7, T11–T13 | engineering verified：T11 single/Multi 共享 catalog、planning schema、持久 selected_skills 与正常 model/token 计费；focused GREEN |
-| R25 | Formal scoring uses offline evidence and locally isolates runtime inputs from labels until prediction freeze | Current spec assumed an unavailable external custodian | Mount/path/environment denial tests and evaluator ordering/hash checks | T1, T11–T13 | engineering verified / execution blocked：formal `launch-predict` 是唯一 worker 入口，最小 env/argv 不传 label/scorer；evaluator 在 prediction-set freeze 后单次打开 labels；SS/TT 未启动 |
+| R25 | Formal scoring uses offline evidence and locally isolates runtime inputs from labels until prediction freeze | Current spec assumed an unavailable external custodian | Mount/path/environment denial tests and evaluator ordering/hash checks | T1, T11–T13 | engineering verified / execution blocked：formal `launch-predict` 是唯一 worker 入口，最小 env/argv 不传 label/scorer；custodian pair ledger 绑定 exact prediction/audit identity 并以 one-shot reservation 只允许一次 label open；evaluator 在 prediction-set freeze 后单次打开 labels；SS/TT 未启动 |
 | R26 | Official OpenAI, existing DeepSeek, and certified OpenAI-compatible Chat Completions endpoints share one safe model boundary without vendor lock-in | Current settings expose only OpenAI/DeepSeek; the DeepSeek adapter hardcodes its URL/key and runtime treats every non-OpenAI provider as DeepSeek | Generic-adapter contract tests, fake-endpoint failure matrix, secret/tracing scans, live capability certification, and paired-run identity checks | T6, T10–T13 | product boundary verified by T6/T10；M5 live certification blocked（capability artifact/endpoint/credential absent），正式 paired identity 未生成 |
 | R27 | Reused V10 infrastructure is isolated from V11 diagnostic semantics and every V11 artifact/entry is bound to one durable run | Current phase executor, direct orchestrator, Agent runtime, report/action paths, manifests, and latest-projection rows can execute or retain legacy semantics | Versioned-phase/profile tests, forbidden-call sentinels, all-entry RuntimeRun gate, supplemental-finding ownership, registry exposure, atomic projection activation/rerun/action ownership, run-create mismatch, `contract_integrity`, and persistence-boundary revalidation suites | T2–T4, T6–T11, T13 | M1–M4 evidence preserved；T11 RCAEval now creates/reloads real SQLite V11 RuntimeRun, checks execution-contract digest and shared publication owner before output, and persists an immutable replay locator；formal T13 artifact evidence blocked |
 
@@ -1830,6 +1830,28 @@ diff-check passed; post-commit runtime acceptance is recorded in the final
 handoff with `git_dirty=false`. No merge or push was performed and M5 was not
 started.
 
+M5 review-fix ledger (2026-08-11): the first independent M5 review was
+`changes_required`. Its seven findings were reproduced with RED regressions and
+fixed locally without opening formal labels. The custodian-owned SQLite pair
+ledger now spans prediction/evaluation output directories, binds the exact
+frozen prediction-set plus pre-label export/manual-audit hashes, uses a
+one-shot reservation token, and invalidates both sides on in-flight crash,
+concurrent attempt, or child/artifact failure. Capability admission binds
+clean source revision, adapter/SDK versions, required contracts/manifest,
+tested parallelism, endpoint/model/provider, and execution environment.
+Single now has one model context and persists its planning/skill-selection
+action before tools. Formal cardinality is exact (SS30=30, TT90=90), scorer
+dependency closure is hashed before label open, and placement-only runtime
+state is unknown rather than healthy/ready. Review-fix focused tests are
+green; formal SS30/TT90 predictions, attempts, and label opens remain zero.
+M5 is still blocked at T12 pending a fresh passed capability artifact and
+endpoint/credential, and independent re-review is pending; no accuracy claim
+is made. Repository verification after the fixes is full pytest `2132 passed,
+3 skipped, 1 warning`, Ruff clean, frontend build passed, offline acceptance
+`80/80`, runtime acceptance `14/14` with privacy scan, and diff-check clean.
+Production acceptance was environment-blocked before any scenario artifact;
+Tempo was not run because no Tempo claim is published.
+
 ## 16. Approval state
 
 - Requirements Brief: confirmed by user.
@@ -1852,4 +1874,6 @@ started.
 - Implementation: M2 baseline `c2245ac` and the M3 review-fix history remain
 isolated; M4 review-fix is RED→GREEN verified in isolated branch
 `codex/v11-m4`, with its local commit SHA recorded in the implementation
-handoff. No merge or push was performed; M5 has not started.
+handoff. No merge or push was performed; M5 review-fix is isolated on
+`codex/v11-m5`, with formal SS30/TT90 still protected and independent
+re-review pending.

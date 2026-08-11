@@ -79,6 +79,7 @@ class RuntimeKind(StrEnum):
 
 
 class RuntimeStateValue(StrEnum):
+    UNKNOWN = "unknown"
     RESTARTING = "restarting"
     CRASH_LOOP = "crash_loop"
     OOM_KILLED = "oom_killed"

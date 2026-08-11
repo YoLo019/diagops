@@ -39,6 +39,13 @@ def main() -> None:
     )
     _add_prediction_arguments(launch_predict)
     launch_predict.add_argument(
+        "--pair-root",
+        type=Path,
+        required=True,
+        help="custodian-owned root shared by every prediction side",
+    )
+    launch_predict.add_argument("--reauthorization-token")
+    launch_predict.add_argument(
         "--label-package",
         type=Path,
         required=True,
@@ -64,6 +71,9 @@ def main() -> None:
     evaluate.add_argument("--label-package", type=Path, required=True)
     evaluate.add_argument("--runtime-manifest-hash", required=True)
     evaluate.add_argument("--label-manifest-hash", required=True)
+    evaluate.add_argument("--audit-export", type=Path, required=True)
+    evaluate.add_argument("--manual-audit", type=Path, required=True)
+    evaluate.add_argument("--reauthorization-token")
     evaluate.add_argument("--output-dir", type=Path, required=True)
 
     freeze_policy = commands.add_parser(
@@ -144,77 +154,77 @@ def _add_prediction_arguments(parser) -> None:
 
 def _launch_predict(arguments) -> None:
     from backend.benchmarks.rcaeval.isolation import build_prediction_launch
+    from backend.benchmarks.rcaeval.ledger import CustodianPairLedger
 
     output = arguments.output.resolve()
-    attempt_path = output.parent / f"{output.name}-attempt.json"
-    if output.exists() or attempt_path.exists():
-        raise ValueError("prediction output or attempt already exists")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    child_argv = [
-        sys.executable,
-        "-m",
-        "backend.benchmarks.rcaeval",
-        "predict",
-        "--runtime",
-        str(arguments.runtime),
-        "--partition",
-        arguments.partition,
-        "--configuration",
-        arguments.configuration,
-        "--base-url",
-        arguments.base_url,
-        "--capability-artifact",
-        str(arguments.capability_artifact),
-        "--database",
-        str(arguments.database),
-        "--output",
-        str(output),
-        "--token-budget",
-        str(arguments.token_budget),
-        "--max-turns",
-        str(arguments.max_turns),
-        "--tool-budget",
-        str(arguments.tool_budget),
-        "--timeout-seconds",
-        str(arguments.timeout_seconds),
-    ]
-    child_environ = dict(os.environ)
-    child_environ["RCAEVAL_PREDICTION_CHILD"] = "1"
-    evaluator_path = Path(__file__).with_name("evaluator.py").resolve()
-    spec = build_prediction_launch(
-        runtime_package=arguments.runtime,
-        predictions_dir=output,
-        argv=child_argv,
-        forbidden_locators=(
-            str(arguments.label_package.resolve()),
-            str(evaluator_path),
-        ),
-        cwd=arguments.runtime,
-        environ=child_environ,
+    pair_root = arguments.pair_root.resolve()
+    if not _within(output, pair_root):
+        raise ValueError("prediction output must stay inside the custodian pair root")
+    if output.exists():
+        raise ValueError("prediction output already exists")
+    pair_root.mkdir(parents=True, exist_ok=True)
+    ledger = CustodianPairLedger(_pair_ledger_path(pair_root))
+    pair_identity = _prediction_pair_identity(arguments)
+    sides = _formal_configuration_names(arguments.partition)
+    ledger.initialize(
+        partition=arguments.partition,
+        prediction_set_hash=pair_identity,
+        expected_sides=sides,
     )
-    attempt = {
-        "schema_version": "rcaeval-prediction-attempt-v1",
-        "partition": arguments.partition,
-        "configuration": arguments.configuration,
-        "status": "started",
-        "started_at": datetime.now(UTC).isoformat(),
-    }
-    _write_attempt(attempt_path, attempt)
+    if arguments.reauthorization_token:
+        ledger.reauthorize(arguments.reauthorization_token)
+    ledger.record_side_started(arguments.configuration, str(output))
     try:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        child_argv = [
+            sys.executable,
+            "-m",
+            "backend.benchmarks.rcaeval",
+            "predict",
+            "--runtime",
+            str(arguments.runtime),
+            "--partition",
+            arguments.partition,
+            "--configuration",
+            arguments.configuration,
+            "--base-url",
+            arguments.base_url,
+            "--capability-artifact",
+            str(arguments.capability_artifact),
+            "--database",
+            str(arguments.database),
+            "--output",
+            str(output),
+            "--token-budget",
+            str(arguments.token_budget),
+            "--max-turns",
+            str(arguments.max_turns),
+            "--tool-budget",
+            str(arguments.tool_budget),
+            "--timeout-seconds",
+            str(arguments.timeout_seconds),
+        ]
+        child_environ = dict(os.environ)
+        child_environ["RCAEVAL_PREDICTION_CHILD"] = "1"
+        evaluator_path = Path(__file__).with_name("evaluator.py").resolve()
+        spec = build_prediction_launch(
+            runtime_package=arguments.runtime,
+            predictions_dir=output,
+            argv=child_argv,
+            forbidden_locators=(
+                str(arguments.label_package.resolve()),
+                str(evaluator_path),
+            ),
+            cwd=arguments.runtime,
+            environ=child_environ,
+        )
         subprocess.run(spec.argv, cwd=spec.cwd, env=spec.env, check=True)
         sums_path = output / "SHA256SUMS"
         bundle_hash = hashlib.sha256(sums_path.read_bytes()).hexdigest()
     except BaseException:
-        attempt["status"] = (
-            "failed_non_resumable" if arguments.partition == "tt90" else "failed"
-        )
-        attempt["completed_at"] = datetime.now(UTC).isoformat()
-        _write_attempt(attempt_path, attempt)
+        ledger.invalidate_pair("prediction side failed or was interrupted")
         raise
-    attempt["status"] = "completed"
-    attempt["completed_at"] = datetime.now(UTC).isoformat()
-    attempt["prediction_bundle_hash"] = bundle_hash
-    _write_attempt(attempt_path, attempt)
+    ledger.record_side_completed(arguments.configuration, bundle_hash)
     print(f"prediction completed: {bundle_hash}")
 
 
@@ -242,17 +252,21 @@ def _predict(arguments) -> None:
         create_openai_compatible_model,
     )
     from backend.runtime.sqlite_store import SQLiteRuntimeStore
-    from backend.services.model_capability import read_capability_artifact
+    from backend.services.model_capability import (
+        read_capability_artifact,
+        validate_capability_for_prediction,
+    )
 
     manifest = verify_runtime_package(arguments.runtime)
     artifact = read_capability_artifact(arguments.capability_artifact)
     canonical_endpoint = canonicalize_endpoint(arguments.base_url)
-    if (
-        artifact.result != "passed"
-        or artifact.provider != "openai_compatible"
-        or artifact.endpoint_id != endpoint_id(canonical_endpoint)
-    ):
-        raise ValueError("prediction endpoint lacks the exact passed capability identity")
+    validate_capability_for_prediction(
+        artifact,
+        provider="openai_compatible",
+        model=artifact.model,
+        endpoint_id_value=endpoint_id(canonical_endpoint),
+        expected_parallelism=3,
+    )
     api_key = os.environ.get("DIAGOPS_AGENTS_API_KEY", "").strip()
     if not api_key:
         raise ValueError("DIAGOPS_AGENTS_API_KEY is required for prediction")
@@ -328,6 +342,7 @@ def _predict(arguments) -> None:
 
 
 def _freeze_set(arguments) -> None:
+    from backend.benchmarks.rcaeval.ledger import CustodianPairLedger
     from backend.benchmarks.rcaeval.models import RcaEvalConfiguration
     from backend.benchmarks.rcaeval.runner import freeze_prediction_set
 
@@ -345,13 +360,20 @@ def _freeze_set(arguments) -> None:
         expected_configurations=configurations,
         expected_case_count=count,
     )
+    ledger = CustodianPairLedger(_pair_ledger_path(arguments.root.resolve()))
+    ledger.bind_prediction_set_hash(digest)
     print(f"prediction set frozen: {digest}")
 
 
 def _evaluate(arguments) -> None:
+    from backend.benchmarks.rcaeval.audit import validate_prelabel_audit
     from backend.benchmarks.rcaeval.isolation import build_evaluator_launch
+    from backend.benchmarks.rcaeval.ledger import CustodianPairLedger
     from backend.benchmarks.rcaeval.models import (
         EvaluationArtifact,
+        EvidenceAuditExport,
+        ManualAuditArtifact,
+        PredictionBundle,
         RcaEvalConfiguration,
     )
 
@@ -364,9 +386,13 @@ def _evaluate(arguments) -> None:
         ]
     )
     output_dir = arguments.output_dir.resolve()
-    output_dir.mkdir(parents=True, exist_ok=False)
-    attempt_path = output_dir / "evaluation-attempt.json"
+    prediction_root = arguments.predictions_root.resolve()
+    if output_dir.exists():
+        raise ValueError("evaluation output already exists; labels will not be reopened")
+    if _within(output_dir, prediction_root):
+        raise ValueError("evaluation output must stay outside the frozen prediction root")
     evaluation_path = output_dir / "evaluation.json"
+    ledger = CustodianPairLedger(_pair_ledger_path(prediction_root))
     argv = [sys.executable, "-m", "backend.benchmarks.rcaeval.evaluator"]
     for configuration in configurations:
         argv.extend(
@@ -385,6 +411,16 @@ def _evaluate(arguments) -> None:
             str(arguments.label_package / "labels.json"),
             "--output",
             str(evaluation_path),
+            "--ledger",
+            str(ledger.path),
+            "--partition",
+            arguments.partition,
+            "--prediction-set-hash",
+            arguments.prediction_set_hash,
+            "--audit-export",
+            str(arguments.audit_export),
+            "--manual-audit",
+            str(arguments.manual_audit),
         ]
     )
     spec = build_evaluator_launch(
@@ -396,20 +432,51 @@ def _evaluate(arguments) -> None:
         expected_label_manifest_hash=arguments.label_manifest_hash,
         cwd=Path(__file__).resolve().parents[3],
     )
-    attempt = {
-        "schema_version": "rcaeval-evaluation-attempt-v1",
-        "partition": arguments.partition,
-        "prediction_set_hash": spec.predictions_hash,
-        "runtime_manifest_hash": arguments.runtime_manifest_hash,
-        "label_manifest_hash": spec.labels_manifest_hash,
-        "status": "started",
-        "started_at": datetime.now(UTC).isoformat(),
+    bundles = {
+        configuration: PredictionBundle.model_validate_json(
+            (prediction_root / configuration.value / "predictions.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        for configuration in configurations
     }
-    attempt_path.write_text(
-        json.dumps(attempt, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+    expected_bundle_hashes = {
+        configuration: bundle.bundle_hash
+        for configuration, bundle in bundles.items()
+    }
+    audit_export = EvidenceAuditExport.model_validate_json(
+        arguments.audit_export.read_text(encoding="utf-8")
     )
+    manual_audit = ManualAuditArtifact.model_validate_json(
+        arguments.manual_audit.read_text(encoding="utf-8")
+    )
+    snapshot = ledger.snapshot()
+    ledger.initialize(
+        partition=arguments.partition,
+        prediction_set_hash=str(snapshot["prediction_set_hash"]),
+        expected_sides=tuple(configuration.value for configuration in configurations),
+    )
+    if arguments.reauthorization_token:
+        ledger.reauthorize(arguments.reauthorization_token)
+    validate_prelabel_audit(
+        audit_export,
+        manual_audit,
+        expected_bundle_hashes=expected_bundle_hashes,
+    )
+    ledger.bind_prediction_set_hash(spec.predictions_hash)
+    evaluation_reserved = False
     try:
+        reservation = ledger.reserve_evaluation(
+            audit_export_hash=audit_export.export_hash,
+            manual_audit_hash=manual_audit.artifact_hash,
+        )
+        evaluation_reserved = True
+        ledger.reserve_label_open(
+            audit_export_hash=audit_export.export_hash,
+            manual_audit_hash=manual_audit.artifact_hash,
+            reservation_token=reservation.reservation_token,
+        )
+        output_dir.mkdir(parents=True, exist_ok=False)
         subprocess.run(spec.argv, cwd=spec.cwd, env=spec.env, check=True)
         artifact = EvaluationArtifact.model_validate_json(
             evaluation_path.read_text(encoding="utf-8")
@@ -422,21 +489,11 @@ def _evaluate(arguments) -> None:
             raise ValueError("formal evaluator returned the wrong runtime binding")
         if artifact.labels_manifest_hash != spec.labels_manifest_hash:
             raise ValueError("formal evaluator returned the wrong label binding")
+        ledger.mark_evaluation_completed(artifact.artifact_hash)
     except BaseException:
-        attempt["status"] = "failed_non_resumable"
-        attempt["completed_at"] = datetime.now(UTC).isoformat()
-        attempt_path.write_text(
-            json.dumps(attempt, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        if evaluation_reserved:
+            ledger.invalidate_pair("label-side evaluation failed or was interrupted")
         raise
-    attempt["status"] = "completed"
-    attempt["completed_at"] = datetime.now(UTC).isoformat()
-    attempt["evaluation_artifact_hash"] = artifact.artifact_hash
-    attempt_path.write_text(
-        json.dumps(attempt, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
     print(f"evaluation completed: {artifact.artifact_hash}")
 
 
@@ -498,11 +555,47 @@ def _write_new_artifact(path: Path, artifact) -> None:
     )
 
 
-def _write_attempt(path: Path, value: dict[str, object]) -> None:
-    path.write_text(
-        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+def _pair_ledger_path(pair_root: Path) -> Path:
+    return pair_root.parent / f".{pair_root.name}-custodian-pair-ledger.sqlite3"
+
+
+def _formal_configuration_names(partition: str) -> tuple[str, ...]:
+    from backend.benchmarks.rcaeval.models import RcaEvalConfiguration
+
+    if partition == "ss30":
+        return tuple(item.value for item in RcaEvalConfiguration)
+    if partition == "tt90":
+        return ("single_intended", "multi_intended")
+    return ("single_intended",)
+
+
+def _prediction_pair_identity(arguments) -> str:
+    from backend.benchmarks.rcaeval.isolation import verify_runtime_package
+    from backend.services.model_capability import read_capability_artifact
+
+    manifest = verify_runtime_package(arguments.runtime)
+    capability = read_capability_artifact(arguments.capability_artifact)
+    source_revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    payload = {
+        "partition": arguments.partition,
+        "runtime_manifest_hash": manifest.manifest_hash,
+        "capability_artifact_hash": capability.artifact_hash,
+        "source_revision": source_revision,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+
+
+def _within(path: Path, root: Path) -> bool:
+    return path == root or root in path.parents
 
 
 if __name__ == "__main__":

@@ -13,8 +13,12 @@ from backend.benchmarks.rcaeval.isolation import (
     build_prediction_launch,
 )
 from backend.benchmarks.rcaeval.models import (
+    EvidenceAuditExport,
     LabelEntry,
     LabelManifest,
+    ManualAuditArtifact,
+    PredictionBundle,
+    RcaEvalConfiguration,
     RcaEvalPartition,
     RcaEvalSystem,
     RuntimeCaseEntry,
@@ -121,6 +125,30 @@ def _bundle_hash(predictions_dir: Path) -> str:
 
 def _runtime_hash() -> str:
     return _runtime_manifest().manifest_hash
+
+
+def _seed_pair_ledger(predictions_root: Path, partition: str) -> None:
+    from backend.benchmarks.rcaeval.__main__ import _pair_ledger_path
+    from backend.benchmarks.rcaeval.ledger import CustodianPairLedger
+
+    configurations = (
+        tuple(item.value for item in RcaEvalConfiguration)
+        if partition == "ss30"
+        else ("single_intended", "multi_intended")
+    )
+    ledger = CustodianPairLedger(_pair_ledger_path(predictions_root.resolve()))
+    ledger.initialize(
+        partition=partition,
+        prediction_set_hash="a" * 64,
+        expected_sides=configurations,
+    )
+    for index, side in enumerate(configurations):
+        side_dir = predictions_root / side
+        side_dir.mkdir(parents=True, exist_ok=True)
+        (side_dir / "predictions.json").write_text("{}", encoding="utf-8")
+        ledger.record_side_started(side, str(side_dir))
+        ledger.record_side_completed(side, f"{index + 1:064x}")
+    ledger.bind_prediction_set_hash("a" * 64)
 
 
 def _argv() -> list[str]:
@@ -517,26 +545,66 @@ def test_formal_evaluation_marks_post_child_artifact_failure_non_resumable(
         ),
     )
     monkeypatch.setattr("subprocess.run", lambda *_, **__: None)
+    predictions_root = tmp_path / "predictions"
+    _seed_pair_ledger(predictions_root, "tt90")
+    bundles = {
+        RcaEvalConfiguration.SINGLE_INTENDED: SimpleNamespace(
+            configuration=RcaEvalConfiguration.SINGLE_INTENDED,
+            bundle_hash="1" * 64,
+        ),
+        RcaEvalConfiguration.MULTI_INTENDED: SimpleNamespace(
+            configuration=RcaEvalConfiguration.MULTI_INTENDED,
+            bundle_hash="2" * 64,
+        ),
+    }
+    monkeypatch.setattr(
+        PredictionBundle,
+        "model_validate_json",
+        lambda path: bundles[RcaEvalConfiguration.MULTI_INTENDED]
+        if "multi_intended" in str(path)
+        else bundles[RcaEvalConfiguration.SINGLE_INTENDED],
+    )
+    monkeypatch.setattr(
+        EvidenceAuditExport,
+        "model_validate_json",
+        lambda _: SimpleNamespace(export_hash="3" * 64),
+    )
+    monkeypatch.setattr(
+        ManualAuditArtifact,
+        "model_validate_json",
+        lambda _: SimpleNamespace(artifact_hash="4" * 64),
+    )
+    monkeypatch.setattr(
+        "backend.benchmarks.rcaeval.audit.validate_prelabel_audit",
+        lambda *_, **__: None,
+    )
+    (tmp_path / "audit.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "manual.json").write_text("{}", encoding="utf-8")
     output_dir = tmp_path / "evaluation-attempt"
 
     with pytest.raises(FileNotFoundError):
         _evaluate(
             SimpleNamespace(
-                predictions_root=tmp_path / "predictions",
+                predictions_root=predictions_root,
                 partition="tt90",
                 prediction_set_hash="a" * 64,
                 label_package=tmp_path / "labels",
                 runtime_manifest_hash="c" * 64,
                 label_manifest_hash="b" * 64,
                 output_dir=output_dir,
+                audit_export=tmp_path / "audit.json",
+                    manual_audit=tmp_path / "manual.json",
+                    reauthorization_token=None,
             )
         )
 
-    attempt = json.loads(
-        (output_dir / "evaluation-attempt.json").read_text(encoding="utf-8")
-    )
-    assert attempt["status"] == "failed_non_resumable"
-    assert "completed_at" in attempt
+    from backend.benchmarks.rcaeval.__main__ import _pair_ledger_path
+    from backend.benchmarks.rcaeval.ledger import CustodianPairLedger, LedgerState
+
+    snapshot = CustodianPairLedger(
+        _pair_ledger_path(predictions_root)
+    ).snapshot()
+    assert snapshot["state"] == LedgerState.FAILED_NON_RESUMABLE.value
 
 
 def test_prediction_worker_rejects_direct_unisolated_entry(monkeypatch):
@@ -559,17 +627,24 @@ def test_prediction_launcher_sanitizes_child_and_never_passes_label_locator(
         return SimpleNamespace(argv=tuple(kwargs["argv"]), cwd=str(tmp_path), env={})
 
     output = tmp_path / "single_intended"
+    pair_root = tmp_path / "pair-root"
+    output = pair_root / "single_intended"
     def run_child(*_, **__):
         output.mkdir()
         (output / "SHA256SUMS").write_text("frozen\n", encoding="utf-8")
 
     monkeypatch.setattr(isolation, "build_prediction_launch", build_spec)
     monkeypatch.setattr("subprocess.run", run_child)
+    monkeypatch.setattr(
+        "backend.benchmarks.rcaeval.__main__._prediction_pair_identity",
+        lambda _: "a" * 64,
+    )
     label_path = tmp_path / "private-labels"
 
     _launch_predict(
         SimpleNamespace(
-            runtime=tmp_path / "runtime",
+                runtime=tmp_path / "runtime",
+                pair_root=pair_root,
             partition="ss30",
             configuration="single_intended",
             base_url="https://endpoint.invalid/v1",
@@ -580,7 +655,8 @@ def test_prediction_launcher_sanitizes_child_and_never_passes_label_locator(
             max_turns=8,
             tool_budget=8,
             timeout_seconds=120,
-            label_package=label_path,
+                label_package=label_path,
+                reauthorization_token=None,
         )
     )
 
@@ -609,6 +685,41 @@ def test_formal_evaluation_rejects_child_artifact_with_wrong_label_binding(
         ),
     )
     output_dir = tmp_path / "evaluation-attempt"
+    predictions_root = tmp_path / "predictions"
+    _seed_pair_ledger(predictions_root, "tt90")
+    bundles = {
+        RcaEvalConfiguration.SINGLE_INTENDED: SimpleNamespace(
+            configuration=RcaEvalConfiguration.SINGLE_INTENDED,
+            bundle_hash="1" * 64,
+        ),
+        RcaEvalConfiguration.MULTI_INTENDED: SimpleNamespace(
+            configuration=RcaEvalConfiguration.MULTI_INTENDED,
+            bundle_hash="2" * 64,
+        ),
+    }
+    monkeypatch.setattr(
+        PredictionBundle,
+        "model_validate_json",
+        lambda path: bundles[RcaEvalConfiguration.MULTI_INTENDED]
+        if "multi_intended" in str(path)
+        else bundles[RcaEvalConfiguration.SINGLE_INTENDED],
+    )
+    monkeypatch.setattr(
+        EvidenceAuditExport,
+        "model_validate_json",
+        lambda _: SimpleNamespace(export_hash="3" * 64),
+    )
+    monkeypatch.setattr(
+        ManualAuditArtifact,
+        "model_validate_json",
+        lambda _: SimpleNamespace(artifact_hash="4" * 64),
+    )
+    monkeypatch.setattr(
+        "backend.benchmarks.rcaeval.audit.validate_prelabel_audit",
+        lambda *_, **__: None,
+    )
+    (tmp_path / "audit.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "manual.json").write_text("{}", encoding="utf-8")
 
     def run_child(*_, **__):
         (output_dir / "evaluation.json").write_text("{}", encoding="utf-8")
@@ -629,17 +740,23 @@ def test_formal_evaluation_rejects_child_artifact_with_wrong_label_binding(
     with pytest.raises(ValueError, match="label.*binding"):
         _evaluate(
             SimpleNamespace(
-                predictions_root=tmp_path / "predictions",
+                predictions_root=predictions_root,
                 partition="tt90",
                 prediction_set_hash="a" * 64,
                 label_package=tmp_path / "labels",
                 runtime_manifest_hash="c" * 64,
                 label_manifest_hash="b" * 64,
                 output_dir=output_dir,
+                audit_export=tmp_path / "audit.json",
+                    manual_audit=tmp_path / "manual.json",
+                    reauthorization_token=None,
             )
         )
 
-    attempt = json.loads(
-        (output_dir / "evaluation-attempt.json").read_text(encoding="utf-8")
-    )
-    assert attempt["status"] == "failed_non_resumable"
+    from backend.benchmarks.rcaeval.__main__ import _pair_ledger_path
+    from backend.benchmarks.rcaeval.ledger import CustodianPairLedger, LedgerState
+
+    snapshot = CustodianPairLedger(
+        _pair_ledger_path(predictions_root)
+    ).snapshot()
+    assert snapshot["state"] == LedgerState.FAILED_NON_RESUMABLE.value

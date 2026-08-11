@@ -311,6 +311,7 @@ class FrozenRunIdentity(BaseModel):
     skill_catalog_hash: str = Field(pattern=_SHA256_PATTERN)
     prediction_schema_hash: str = Field(pattern=_SHA256_PATTERN)
     normalizer_hash: str = Field(pattern=_SHA256_PATTERN)
+    scorer_dependency_hash: str = Field(pattern=_SHA256_PATTERN)
     dependency_lock_hash: str = Field(pattern=_SHA256_PATTERN)
     memory_snapshot_hash: str = Field(pattern=_SHA256_PATTERN)
     retry_policy_hash: str = Field(pattern=_SHA256_PATTERN)

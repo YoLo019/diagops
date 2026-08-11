@@ -534,10 +534,13 @@ Run each required configuration into a distinct child of one prediction root.
 SS30 requires all four configurations; TT90 requires only the two intended
 configurations. `single_intended` uses `B`, `multi_intended` uses at most `3B`,
 and both equal-token SS30 configurations use exactly `3B`.
+All children must live under one custodian-owned `--pair-root`; its SQLite
+ledger is shared across configurations and evaluation output directories.
 
 ```powershell
 uv run python -m backend.benchmarks.rcaeval launch-predict `
   --runtime D:\data\RCAEval\prepared-v11-m0\runtime `
+  --pair-root D:\data\RCAEval\v11-m5\ss30 `
   --label-package D:\data\RCAEval\prepared-v11-m0\labels `
   --partition ss30 `
   --configuration single_intended `
@@ -554,13 +557,18 @@ uv run python -m backend.benchmarks.rcaeval freeze-set `
 
 Export and finish the four-part, single-reviewer evidence audit before labels
 are opened. Then launch the evaluator with the frozen prediction-set hash and
-custodian manifest hashes. The formal launcher leaves the only label-file open
-to the evaluator child process and makes a failed attempt non-resumable in its
-output directory.
+custodian manifest hashes. Supply both frozen audit artifacts; the custodian
+ledger binds their exact hashes to one atomic label-open reservation. The
+formal launcher leaves the only label-file open to the evaluator child
+process. A crash, concurrent attempt, or post-child artifact failure leaves
+the pair non-resumable and requires explicit reauthorization; changing the
+evaluation output directory cannot bypass that ledger.
 
 ```powershell
+# Repeat --bundle for every frozen configuration in the partition.
 uv run python -m backend.benchmarks.rcaeval.audit export `
-  --bundle <configuration-predictions.json> `
+  --bundle <single-predictions.json> `
+  --bundle <multi-predictions.json> `
   --output <evidence-audit-export.json>
 
 uv run python -m backend.benchmarks.rcaeval evaluate `
@@ -570,6 +578,8 @@ uv run python -m backend.benchmarks.rcaeval evaluate `
   --label-package D:\data\RCAEval\prepared-v11-m0\labels `
   --runtime-manifest-hash <sha256> `
   --label-manifest-hash <sha256> `
+  --audit-export <evidence-audit-export.json> `
+  --manual-audit <manual-audit.json> `
   --output-dir D:\data\RCAEval\v11-m5\ss30-evaluation
 
 uv run python -m backend.benchmarks.rcaeval freeze-policy `

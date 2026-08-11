@@ -136,6 +136,21 @@ def validate_manual_audit(
     return measured
 
 
+def validate_prelabel_audit(
+    export: EvidenceAuditExport,
+    artifact: ManualAuditArtifact,
+    *,
+    expected_bundle_hashes: dict,
+) -> tuple[str, str]:
+    """Validate the complete pre-label export and bind it to frozen bundles."""
+    validate_manual_audit(export, artifact)
+    actual = {str(key): value for key, value in export.prediction_bundle_hashes.items()}
+    expected = {str(key): value for key, value in expected_bundle_hashes.items()}
+    if actual != expected:
+        raise ValueError("pre-label audit belongs to a different prediction bundle set")
+    return export.export_hash, artifact.artifact_hash
+
+
 def _validate_export_hash(export: EvidenceAuditExport) -> None:
     actual = _canonical_hash(
         {

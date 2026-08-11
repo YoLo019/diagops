@@ -69,7 +69,9 @@ class _Telemetry:
     @property
     def pod_files(self) -> tuple[Path, ...]:
         return tuple(
-            path for path, header in self._headers.items() if header == ["POD", "NODE_NAME"]
+            path
+            for path, header in self._headers.items()
+            if {"POD", "NODE_NAME"} <= set(header)
         )
 
     @property
@@ -431,13 +433,21 @@ class RcaEvalRuntimeStateProvider(_RcaEvalProvider):
                     node = (row.get("NODE_NAME") or "").strip()[:128]
                     if not pod or (query and query.entity_ids and pod not in query.entity_ids):
                         continue
+                    state = _runtime_state_value(row)
+                    ready = _runtime_ready_value(row)
+                    placement = f"scheduled on {node or 'unknown'}"
+                    reason = placement
+                    if state != RuntimeStateValue.UNKNOWN or ready is not None:
+                        reason = (
+                            f"{placement}; health/readiness observed from telemetry"
+                        )
                     payload = RuntimeStatePayload(
                         entity_id=pod,
                         runtime_kind=RuntimeKind.POD,
-                        state=RuntimeStateValue.HEALTHY,
-                        reason=f"scheduled on {node or 'unknown'}",
+                        state=state,
+                        reason=reason,
                         observed_at=event.started_at,
-                        ready=True,
+                        ready=ready,
                     )
                     evidence.append(
                         self._evidence(
@@ -452,6 +462,43 @@ class RcaEvalRuntimeStateProvider(_RcaEvalProvider):
                     if len(evidence) >= limit:
                         break
         return _result(self.provider, evidence)
+
+
+def _runtime_state_value(row: dict[str, str]) -> RuntimeStateValue:
+    raw = next(
+        (
+            row.get(name)
+            for name in ("STATE", "STATUS", "HEALTH", "RUNTIME_STATE")
+            if row.get(name)
+        ),
+        None,
+    )
+    if not raw:
+        return RuntimeStateValue.UNKNOWN
+    normalized = raw.strip().casefold().replace(" ", "_")
+    try:
+        return RuntimeStateValue(normalized)
+    except ValueError:
+        return RuntimeStateValue.UNKNOWN
+
+
+def _runtime_ready_value(row: dict[str, str]) -> bool | None:
+    raw = next(
+        (
+            row.get(name)
+            for name in ("READY", "READINESS", "READY_STATUS")
+            if row.get(name)
+        ),
+        None,
+    )
+    if not raw:
+        return None
+    normalized = raw.strip().casefold()
+    if normalized in {"true", "1", "yes", "ready"}:
+        return True
+    if normalized in {"false", "0", "no", "not_ready", "unready"}:
+        return False
+    return None
 
 
 def build_rcaeval_providers(

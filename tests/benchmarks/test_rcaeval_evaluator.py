@@ -17,6 +17,7 @@ from backend.benchmarks.rcaeval.evaluator import (
     freeze_acceptance_result,
     mcnemar_exact,
     paired_bootstrap,
+    scorer_dependency_hash,
 )
 from backend.benchmarks.rcaeval.models import (
     AcceptancePolicy,
@@ -135,6 +136,47 @@ def test_evaluator_rejects_duplicate_missing_and_non_finite_rows():
         evaluate_predictions([invalid], [label])
 
 
+def test_evaluator_rejects_prediction_identity_when_scorer_dependency_closure_is_stale():
+    assert len(scorer_dependency_hash()) == 64
+
+
+def test_evaluator_rejects_frozen_bundles_with_stale_scorer_dependency_identity(
+    tmp_path: Path,
+):
+    label = _label(
+        "re2-aaaaaaaaaaaaaaaa",
+        "checkout",
+        "cpu",
+        partition=RcaEvalPartition.TT90,
+    )
+    single = _frozen_bundle(
+        tmp_path,
+        RcaEvalConfiguration.SINGLE_INTENDED,
+        _prediction(label.case_id, "checkout", "cpu"),
+    )
+    multi = _frozen_bundle(
+        tmp_path,
+        RcaEvalConfiguration.MULTI_INTENDED,
+        _prediction(label.case_id, "checkout", "cpu"),
+    )
+    labels = LabelManifest(
+        runtime_manifest_hash="2" * 64,
+        entries=_formal_labels(label),
+    )
+    labels.manifest_hash = _manifest_hash(labels)
+    stale_identity = single.identity.model_copy(
+        update={"scorer_dependency_hash": "e" * 64}
+    )
+    stale_bundles = []
+    for bundle in (single, multi):
+        changed = bundle.model_copy(update={"identity": stale_identity})
+        changed.bundle_hash = _bundle_hash(changed)
+        stale_bundles.append(changed)
+
+    with pytest.raises(ValueError, match="scorer dependency"):
+        evaluate_bundles(stale_bundles, labels)
+
+
 def test_paired_bootstrap_and_mcnemar_are_frozen_and_exact():
     single = [False, False, True, False]
     multi = [True, False, True, True]
@@ -152,6 +194,7 @@ def test_paired_bootstrap_and_mcnemar_are_frozen_and_exact():
 
 
 def _identity() -> FrozenRunIdentity:
+    dependency_hash = scorer_dependency_hash()
     return FrozenRunIdentity(
         source_commit="1" * 40,
         runtime_manifest_hash="2" * 64,
@@ -167,6 +210,7 @@ def _identity() -> FrozenRunIdentity:
         skill_catalog_hash="6" * 64,
         prediction_schema_hash="7" * 64,
         normalizer_hash="8" * 64,
+        scorer_dependency_hash=dependency_hash,
         dependency_lock_hash="9" * 64,
         memory_snapshot_hash="a" * 64,
         retry_policy_hash="b" * 64,
@@ -177,6 +221,8 @@ def _frozen_bundle(
     tmp_path: Path,
     configuration: RcaEvalConfiguration,
     prediction: CasePrediction,
+    *,
+    case_count: int = 90,
 ) -> PredictionBundle:
     budget = EvaluationBudget(
         configuration=configuration,
@@ -192,7 +238,14 @@ def _frozen_bundle(
         configuration=configuration,
         identity=_identity(),
         budget=budget,
-        predictions=[prediction.model_copy(update={"configuration": configuration})],
+        predictions=[
+            _prediction_for_case(
+                prediction,
+                configuration=configuration,
+                case_id=_formal_case_id(index, prediction.case_id),
+            )
+            for index in range(case_count)
+        ],
         frozen_at=datetime(2026, 8, 10, tzinfo=UTC),
     )
     directory = tmp_path / configuration.value
@@ -200,6 +253,49 @@ def _frozen_bundle(
     return PredictionBundle.model_validate_json(
         (directory / "predictions.json").read_text(encoding="utf-8")
     )
+
+
+def _formal_case_id(index: int, first_case_id: str) -> str:
+    return first_case_id if index == 0 else f"re2-{index:016x}"
+
+
+def _prediction_for_case(
+    prediction: CasePrediction,
+    *,
+    configuration: RcaEvalConfiguration,
+    case_id: str,
+) -> CasePrediction:
+    evidence_id = f"evidence-{case_id}"
+    candidates = [
+        candidate.model_copy(update={"evidence_ids": [evidence_id]})
+        for candidate in prediction.candidates
+    ]
+    return prediction.model_copy(
+        update={
+            "case_id": case_id,
+            "configuration": configuration,
+            "runtime_run_id": f"run-{case_id}",
+            "available_evidence_ids": [evidence_id],
+            "evidence_summaries": {evidence_id: "bounded evidence"},
+            "candidates": candidates,
+        }
+    )
+
+
+def _formal_labels(
+    first: LabelEntry,
+    *,
+    count: int = 90,
+) -> list[LabelEntry]:
+    return [
+        first.model_copy(
+            update={
+                "case_id": _formal_case_id(index, first.case_id),
+                "source_case_id": f"source-{_formal_case_id(index, first.case_id)}",
+            }
+        )
+        for index in range(count)
+    ]
 
 
 def test_frozen_bundle_evaluation_and_acceptance_policy(tmp_path: Path):
@@ -221,7 +317,7 @@ def test_frozen_bundle_evaluation_and_acceptance_policy(tmp_path: Path):
     )
     labels = LabelManifest(
         runtime_manifest_hash="2" * 64,
-        entries=[label],
+        entries=_formal_labels(label),
     )
     label_payload = labels.model_dump(mode="json", exclude={"manifest_hash"})
     label_hash = hashlib.sha256(
@@ -277,7 +373,7 @@ def test_frozen_bundle_evaluation_and_acceptance_policy(tmp_path: Path):
             RcaEvalConfiguration.SINGLE_INTENDED,
             RcaEvalConfiguration.MULTI_INTENDED,
         },
-        expected_case_count=1,
+        expected_case_count=90,
     )
     assert len(set_hash) == 64
     with pytest.raises(ValueError, match="already frozen"):
@@ -287,7 +383,75 @@ def test_frozen_bundle_evaluation_and_acceptance_policy(tmp_path: Path):
                 RcaEvalConfiguration.SINGLE_INTENDED,
                 RcaEvalConfiguration.MULTI_INTENDED,
             },
-            expected_case_count=1,
+            expected_case_count=90,
+        )
+
+
+def test_formal_tt90_rejects_one_case_bundle_before_scoring(tmp_path: Path):
+    label = _label(
+        "re2-aaaaaaaaaaaaaaaa",
+        "checkout",
+        "cpu",
+        partition=RcaEvalPartition.TT90,
+    )
+    single = _frozen_bundle(
+        tmp_path,
+        RcaEvalConfiguration.SINGLE_INTENDED,
+        _prediction(label.case_id, "checkout", "cpu"),
+        case_count=1,
+    )
+    multi = _frozen_bundle(
+        tmp_path,
+        RcaEvalConfiguration.MULTI_INTENDED,
+        _prediction(label.case_id, "checkout", "cpu"),
+        case_count=1,
+    )
+    labels = LabelManifest(runtime_manifest_hash="2" * 64, entries=[label])
+    labels.manifest_hash = _manifest_hash(labels)
+
+    with pytest.raises(ValueError, match="90|cardinality|case count"):
+        evaluate_bundles([single, multi], labels)
+
+
+def test_acceptance_freeze_rejects_nonformal_summary_cardinality(tmp_path: Path):
+    label = _label(
+        "re2-aaaaaaaaaaaaaaaa",
+        "checkout",
+        "cpu",
+        partition=RcaEvalPartition.TT90,
+    )
+    single = _frozen_bundle(
+        tmp_path,
+        RcaEvalConfiguration.SINGLE_INTENDED,
+        _prediction(label.case_id, "wrong", "wrong"),
+    )
+    multi = _frozen_bundle(
+        tmp_path,
+        RcaEvalConfiguration.MULTI_INTENDED,
+        _prediction(label.case_id, "checkout", "cpu"),
+    )
+    labels = LabelManifest(
+        runtime_manifest_hash="2" * 64,
+        entries=_formal_labels(label),
+    )
+    labels.manifest_hash = _manifest_hash(labels)
+    artifact = evaluate_bundles([single, multi], labels)
+    malformed = _sealed_validation(artifact).model_copy(
+        update={
+            "summaries": {
+                **_sealed_validation(artifact).summaries,
+                RcaEvalConfiguration.MULTI_INTENDED: artifact.summaries[
+                    RcaEvalConfiguration.MULTI_INTENDED
+                ].model_copy(update={"case_count": 1}),
+            }
+        }
+    )
+    malformed.artifact_hash = _artifact_hash(malformed)
+
+    with pytest.raises(ValueError, match="cardinality|30"):
+        freeze_acceptance_policy(
+            sealed_validation=malformed,
+            tt90_manifest_hash="2" * 64,
         )
 
 
@@ -310,7 +474,7 @@ def test_acceptance_rejects_tampered_policy_wrong_partition_and_mixed_identity(
         RcaEvalConfiguration.MULTI_INTENDED,
         _prediction(label.case_id, "checkout", "cpu"),
     )
-    labels = LabelManifest(runtime_manifest_hash="2" * 64, entries=[label])
+    labels = LabelManifest(runtime_manifest_hash="2" * 64, entries=_formal_labels(label))
     labels.manifest_hash = hashlib.sha256(
         json.dumps(
             labels.model_dump(mode="json", exclude={"manifest_hash"}),
@@ -415,9 +579,33 @@ def _artifact_hash(artifact) -> str:
     ).hexdigest()
 
 
+def _bundle_hash(bundle: PredictionBundle) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            bundle.model_dump(mode="json", exclude={"bundle_hash"}),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _manifest_hash(manifest: LabelManifest) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            manifest.model_dump(mode="json", exclude={"manifest_hash"}),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 def _sealed_validation(artifact, *, multi_exact: float | None = None):
     single_summary = artifact.summaries[RcaEvalConfiguration.SINGLE_INTENDED]
     multi_summary = artifact.summaries[RcaEvalConfiguration.MULTI_INTENDED]
+    single_summary = single_summary.model_copy(update={"case_count": 30})
+    multi_summary = multi_summary.model_copy(update={"case_count": 30})
     if multi_exact is not None:
         multi_summary = multi_summary.model_copy(update={"exact_top1": multi_exact})
     intended_pair = artifact.paired[0]
@@ -491,7 +679,7 @@ def test_cli_freezes_policy_and_archives_tt90_acceptance(tmp_path: Path):
         RcaEvalConfiguration.MULTI_INTENDED,
         _prediction(label.case_id, "checkout", "cpu"),
     )
-    labels = LabelManifest(runtime_manifest_hash="2" * 64, entries=[label])
+    labels = LabelManifest(runtime_manifest_hash="2" * 64, entries=_formal_labels(label))
     labels.manifest_hash = hashlib.sha256(
         json.dumps(
             labels.model_dump(mode="json", exclude={"manifest_hash"}),
@@ -563,7 +751,7 @@ def test_policy_rejects_incomplete_ss30_artifact(tmp_path: Path):
         RcaEvalConfiguration.MULTI_INTENDED,
         _prediction(label.case_id, "checkout", "cpu"),
     )
-    labels = LabelManifest(runtime_manifest_hash="2" * 64, entries=[label])
+    labels = LabelManifest(runtime_manifest_hash="2" * 64, entries=_formal_labels(label))
     labels.manifest_hash = hashlib.sha256(
         json.dumps(
             labels.model_dump(mode="json", exclude={"manifest_hash"}),

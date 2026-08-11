@@ -4,7 +4,7 @@ This file is the mutable routing and status entry point for the current version.
 
 It does not override an approved spec or plan, current code contracts, or the long-term product goal and production safety boundary in `AGENT.md`.
 
-Updated: 2026-08-10
+Updated: 2026-08-11
 
 ## Implemented Baseline
 
@@ -121,7 +121,7 @@ Verification evidence (M5 engineering and stop gate, 2026-08-10): `T11/M0-L1/
 M0-L2 RED→GREEN；frozen SingleInvestigatorAgent、真实 V11/SQLite runner、RCAEval
 offline providers、四 SS30 配置、exact/统计 evaluator、pre-label manual audit、
 controlled prediction/evaluator launch、policy/acceptance archive 均已实现；T11
-focused 79 passed，benchmark Ruff clean；真实 26 GB runtime package 再校验为
+initial T11 focused 79 passed，benchmark Ruff clean；真实 26 GB runtime package 再校验为
 manifest bb119fc9…、150 cases。正式 capability admission 在首个 OB30 model
 call 前失败：本 worktree 无 passed model-capability artifact，且
 DIAGOPS_AGENTS_API_KEY/BASE_URL/MODEL 均未配置。因此 SS30 未执行、SS/TT
@@ -137,6 +137,29 @@ SHA 2a980b25…）；git diff --check clean。production gate 的 Compose config
 通过，但正式脚本 preflight 因 Docker Desktop Linux daemon unavailable 阻断，
 未生成或伪造 7-scenario result。未发布 Tempo claim，故按 Plan 不运行
 tempo_acceptance。独立 review 仍 pending。`
+
+Verification evidence (M5 review-fix, 2026-08-11): the first independent M5
+review's blocking/high findings were reproduced with RED regressions and fixed
+locally. The custodian pair ledger is shared across output directories,
+requires an exact frozen prediction-set hash and exact pre-label audit/manual
+artifact identities, uses a one-shot reservation token, and invalidates both
+sides on crash/failure. Prediction admission now binds clean source revision,
+adapter/SDK/environment identity, capability contracts, and tested
+parallelism. Formal SS30/TT90 cardinality is exact (30/90), scorer dependency
+closure is hashed before label open, placement-only runtime state is unknown,
+and Single uses one model context with a durable pre-tool planning action.
+Review-fix focused tests are green; formal predictions, attempts, and label
+opens remain zero. Independent re-review is still pending, so M5 remains
+blocked and no accuracy claim is made.
+
+Verification evidence (M5 review-fix repository gates, 2026-08-11): `uv run
+pytest -q` → `2132 passed, 3 skipped, 1 warning`; `uv run ruff check .` clean;
+frontend production build passed; offline tool acceptance `rows=80 failed=0`;
+runtime acceptance produced a passed 14-scenario artifact (privacy scan
+passed); `git diff --check` clean. Production acceptance was attempted but
+the required lab/Docker environment variables were absent, so no production
+scenario artifact was generated. Tempo acceptance was not run because no
+Tempo claim is being published.
 
 Blocker: `T12 capability admission：缺少 exact passed model-capability artifact、
 可调用 endpoint/model 与 process-only credential；SS30/TT90 不得以任务线程模型
@@ -192,10 +215,10 @@ produce empty prediction/CSV output with an explicit failure category; V10
 legacy output remains unchanged. M4 focused 137, T9 289, T10 881, and full
 pytest 2097 passed with only the recorded skips/warning.
 
-Current phase: Full iteration / M5 engineering implemented，T12 capability stop
-gate blocked；等待独立 M5 source/artifact review 与可调用认证端点
+Current phase: Full iteration / M5 review-fix verifying，T12 capability stop
+gate blocked；等待独立 M5 source/artifact re-review 与可调用认证端点
 
-Next action: 父任务先创建独立 M5 review；若后续提供 exact passed capability
+Next action: 父任务先创建独立 M5 re-review；若后续提供 exact passed capability
 artifact、endpoint/model 与 process-only credential，再从 OB30/SS30 继续；保持
 当前 worktree/branch，不 merge、push，不打开 TT90 labels。
 
@@ -211,7 +234,7 @@ artifact、endpoint/model 与 process-only credential，再从 OB30/SS30 继续�
 | M2/T4–T6 | Execute | 九工具离线事件包与 data-only skills、File/Tempo trace 平价、模型边界与能力认证 | implemented / verified | 独立复审重跑：T4 336 passed + 离线验收 rows=80 failed=0；T5 17 passed + Docker gate blocked（daemon 不可用）；T6 106→110 passed（M2R-1 补 4 条 slow-endpoint 测试）；全量 1927 passed/3 skipped、Ruff clean、runtime acceptance exit=0；复审 approve_with_followups，M2R-1 closed；M2 基线 `c2245ac` 已单独提交，M2R-2/3 在 M3 T7 中关闭，M2R-4 跟踪 | 保持基线提交，不修改 dirty main |
 | M3/T7–T8 | Execute / Verify | Lead/Investigators/Critic/Lead V11 authority runtime | implemented / verifying | fifth-round base `e52e47984c4b460ed3b06dc4147d3d3b0532345b`; T7 91 passed、T8 207 passed；M2R/隔离 84 passed/3 skipped；变更相关 102 passed/2 skipped；全量 1995 passed/3 skipped/1 warning；两套全仓 Ruff clean；H1 usage/audit RED→GREEN | 等待同一审查线程复审；不 merge/push，不进入 M4/M5 |
 | M4/T9–T10 | Execute / Verify | Reports/actions, human transitions, API/UI, OpenRCA compatibility, recovery/privacy/offline gates | implemented / verified | 最终提交 `7539c7fd8b707fc54cf2ed75a7d9fcba13d7618c` 已获独立 review approve；第五轮 High RED→GREEN 与 focused/full/offline/runtime/frontend/Ruff/diff-check 证据沿用 M4 handoff | M5 worktree 精确从该提交创建；不 merge/push |
-| M5/T11–T13 | Execute / Verify | Frozen RCAEval control, sealed validation, one TT90 paired result | blocked at T12 capability admission | T11 + M0-L1/L2：79 focused passed、benchmark Ruff clean；真实 runtime checksum bb119fc9…/150；受控 prediction/evaluator、policy、manual audit 与 non-resumable archive 已覆盖。SS30/TT90 无模型结果，labels 未正式打开 | 缺 passed capability artifact/endpoint/credential；T13 未开始、TT90 未消耗；等待独立 M5 review |
+| M5/T11–T13 | Execute / Verify | Frozen RCAEval control, sealed validation, one TT90 paired result | blocked at T12 capability admission | T11 + M0-L1/L2：review-fix focused 99 passed、benchmark Ruff clean；custodian pair/one-shot label reservation、fresh capability admission、exact SS30/TT90 cardinality、scorer closure、placement-only unknown、Single one-context regressions GREEN；真实 runtime checksum bb119fc9…/150。SS30/TT90 无模型结果，labels 未正式打开 | 缺 passed capability artifact/endpoint/credential；T13 未开始、TT90 未消耗；等待独立 M5 re-review |
 
 M1 review-fix record (2026-08-06): High 1–6 and Medium 7–10 were reproduced
 with focused regressions, fixed at shared profile/ownership/transaction/entry

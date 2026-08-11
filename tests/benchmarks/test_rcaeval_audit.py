@@ -5,6 +5,7 @@ import pytest
 from backend.benchmarks.rcaeval.audit import (
     export_evidence_pairs,
     freeze_manual_audit,
+    validate_prelabel_audit,
 )
 from backend.benchmarks.rcaeval.models import (
     CandidatePrediction,
@@ -102,3 +103,32 @@ def test_audit_rejects_export_or_manual_artifact_changed_after_freeze():
     )
     with pytest.raises(ValueError, match="export changed"):
         freeze_manual_audit(changed_export, [decision])
+
+
+def test_prelabel_audit_binds_exact_prediction_bundle_hashes():
+    export = export_evidence_pairs(
+        [_prediction()],
+        labels_visible=False,
+        prediction_bundle_hashes={RcaEvalConfiguration.MULTI_INTENDED: "a" * 64},
+    )
+    decisions = [
+        EvidenceAuditDecision(
+            pair_id=pair.pair_id,
+            entity_supported=True,
+            temporally_compatible=True,
+            mechanism_relevant=True,
+            not_contradicted=True,
+            reason_code="supported",
+            reviewer_id="reviewer-project-owner",
+            reviewed_at=datetime(2026, 8, 10, tzinfo=UTC),
+        )
+        for pair in export.pairs
+    ]
+    manual = freeze_manual_audit(export, decisions)
+
+    with pytest.raises(ValueError, match="bundle|pre-label|audit"):
+        validate_prelabel_audit(
+            export,
+            manual,
+            expected_bundle_hashes={RcaEvalConfiguration.MULTI_INTENDED: "b" * 64},
+        )

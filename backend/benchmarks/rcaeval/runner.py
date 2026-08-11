@@ -12,6 +12,9 @@ from time import perf_counter
 from typing import Any
 from uuid import uuid4
 
+from pydantic import BaseModel, ConfigDict
+
+from backend.benchmarks.rcaeval.dependency import scorer_dependency_hash
 from backend.benchmarks.rcaeval.models import (
     CandidatePrediction,
     CasePrediction,
@@ -28,17 +31,34 @@ from backend.benchmarks.rcaeval.providers import (
     incident_event_for_case,
 )
 from backend.db.models import InvestigationRecord, InvestigationStatus
+from backend.diagnosis.adaptive_tools import AdaptiveToolSession
 from backend.diagnosis.coordinator import DiagnosisCoordinator
 from backend.diagnosis.diagnostic_skills import skill_catalog_identity
 from backend.diagnosis.orchestrator import DiagnosisOrchestrator
-from backend.diagnosis.v11_runtime import V11Runtime, V11RuntimeContractError
+from backend.diagnosis.v11_runtime import (
+    InvestigatorOutput,
+    LeadPlanningOutput,
+    LeadTaskDraft,
+    V11Runtime,
+    V11RuntimeContractError,
+    _InvestigatorResult,
+)
 from backend.domain.agent_findings import CoordinationReview
-from backend.domain.agent_plan import LeadDecision
+from backend.domain.agent_plan import (
+    AgentExecution,
+    AgentExecutionStatus,
+    DiagnosisTask,
+    DiagnosisTaskType,
+    LeadDecision,
+)
 from backend.domain.evidence import EvidenceStatus
 from backend.domain.multi_agent import (
+    AgentExecutionLayer,
     AuthorityMode,
     DiagnosticStatus,
+    ExecutionActor,
     ExecutionContractVersion,
+    ExecutionStepKind,
     InvestigationStrategy,
     LeadAction,
     ModelProvider,
@@ -76,6 +96,15 @@ RETRY_POLICY = {
 }
 
 
+class SingleControlOutput(BaseModel):
+    """Single control's planning and investigation result in one model context."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    planning: LeadPlanningOutput
+    investigator: InvestigatorOutput
+
+
 class EmptyRunOwnedMemory(VerifiedMemoryLookup):
     """正式对照两侧共享的显式空 memory，不接历史 incident repository。"""
 
@@ -88,10 +117,238 @@ class EmptyRunOwnedMemory(VerifiedMemoryLookup):
 
 
 class SingleInvestigatorAgent(V11Runtime):
-    """冻结单上下文对照；复用 Lead planning、工具会话与模型计费。"""
+    """冻结单上下文对照；planning 与 investigation 共用一次模型调用。"""
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(max_investigators=1, max_rounds=1, **kwargs)
+
+    async def plan_lead(
+        self,
+        *,
+        repository,
+        investigation_id: str,
+        event,
+        runtime_run_id: str,
+        remaining_tool_budget: int,
+        remaining_token_budget: int | None,
+    ):
+        """保留可审计 phase；唯一模型调用在下一 phase 的单一 context 内完成。"""
+        del event, remaining_tool_budget
+        self.runtime_run_id = runtime_run_id
+        self._remaining_token_budget = remaining_token_budget
+        self._agent_manifest()
+        self._update_summary(repository, investigation_id)
+        return None
+
+    async def investigator_round_1(self, *, repository, investigation_id: str, event):
+        manifest = self._agent_manifest()
+        base_evidence = list(repository.get(investigation_id).evidence)
+        task_id = f"single-control-task-{self.runtime_run_id}"
+        task = DiagnosisTask(
+            id=task_id,
+            title="Single control investigation",
+            description="Plan and investigate the incident in one model context.",
+            task_type=DiagnosisTaskType.GENERAL_INVESTIGATION,
+            agent_name=ExecutionActor.INVESTIGATOR.value,
+            tool_names=list(manifest),
+            execution_layer=AgentExecutionLayer.OPENAI_AGENTS_SDK,
+            analysis_round=1,
+            information_gap="identify the affected service and failure mechanism",
+            runtime_run_id=self.runtime_run_id,
+        )
+        instance_id = "single-investigator"
+        selected_skills = [
+            f"{skill.name}@{skill.version}" for skill in self.skills
+        ]
+        # 先写入唯一 owned planning action，确保 skill selection 与 task
+        # identity 在首个 tool call 前已经进入 durable runtime projection；
+        # 后续同一模型 context 的结构化 planning 会覆盖这份 provisional plan。
+        provisional = LeadPlanningOutput(
+            decision=LeadDecision(
+                action=LeadAction.INVESTIGATE,
+                summary="Single control planning action reserved.",
+                task_ids=[task_id],
+                selected_skills=selected_skills,
+            ),
+            tasks=[
+                LeadTaskDraft(
+                    id=task_id,
+                    title=task.title,
+                    description=task.description,
+                    tool_names=list(manifest),
+                    information_gap=task.information_gap,
+                )
+            ],
+        )
+        repository.save_plan(
+            self._build_plan(
+                provisional,
+                investigation_id=investigation_id,
+                runtime_run_id=self.runtime_run_id or "",
+                manifest=manifest,
+            )
+        )
+        session = AdaptiveToolSession(
+            event=event,
+            seed_evidence=base_evidence,
+            registry=self.tool_registry,
+            task_ids={instance_id: task.id},
+            max_tool_calls_per_specialist=self.max_tool_calls_per_specialist,
+            max_total_tool_calls=self._remaining_tool_budget_for(
+                repository, investigation_id
+            ),
+            tool_timeout_seconds=self.tool_timeout_seconds,
+            runtime_run_id=self.runtime_run_id,
+            resolve_tool_result=self._resolve_tool_result,
+            persist_tool_start=self._persist_tool_start,
+            persist_tool_result=self._persist_tool_result,
+            check_execution=self._check_execution,
+            max_parallel_steps_per_run=1,
+            hit_fault=self._hit_fault,
+            parallel_limit=self._parallel_limit,
+            agent_manifest=manifest,
+            remaining_deadline_seconds=self._remaining_deadline_seconds,
+        )
+        self._active_sessions.add(session)
+        try:
+            prompt = json.dumps(
+                {
+                    "role": "single investigator control",
+                    "incident": event.model_dump(mode="json"),
+                    "task": task.model_dump(mode="json"),
+                    "tool_manifest": manifest,
+                    "skills": selected_skills,
+                    "committed_evidence": [item.id for item in base_evidence],
+                    "rule": (
+                        "Return planning and investigator fields from this one context. "
+                        f"The only task id is {task_id!r}; do not use sibling agents."
+                    ),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            turn = await self._call_model(
+                actor=ExecutionActor.INVESTIGATOR.value,
+                prompt=prompt,
+                output_type=SingleControlOutput,
+                context={
+                    "incident": event.model_dump(mode="json"),
+                    "task": task.model_dump(mode="json"),
+                    "tool_manifest": manifest,
+                    "selected_skills": selected_skills,
+                    "remaining_tool_budget": self._remaining_tool_budget_for(
+                        repository, investigation_id
+                    ),
+                    "single_context": True,
+                },
+                tools=session.tools_for(instance_id, 1),
+                remaining_token_budget=self._remaining_token_budget,
+                remaining_tool_budget=self._remaining_tool_budget_for(
+                    repository, investigation_id
+                ),
+                repository=repository,
+                investigation_id=investigation_id,
+                task_id=task.id,
+                step_kind=ExecutionStepKind.INVESTIGATOR_ANALYSIS,
+                analysis_round=1,
+            )
+            await self._commit_session(repository, investigation_id, session)
+            output = self._parse_output(turn.output, SingleControlOutput)
+            if output.planning.tasks:
+                if len(output.planning.tasks) != 1:
+                    raise V11RuntimeContractError(
+                        "single control planning must contain its one owned task"
+                    )
+                output = output.model_copy(
+                    update={
+                        "planning": output.planning.model_copy(
+                            update={
+                                "tasks": [
+                                    output.planning.tasks[0].model_copy(
+                                        update={"id": task_id}
+                                    )
+                                ],
+                                "decision": output.planning.decision.model_copy(
+                                    update={"task_ids": [task_id]}
+                                ),
+                            }
+                        )
+                    }
+                )
+            plan = self._build_plan(
+                output.planning,
+                investigation_id=investigation_id,
+                runtime_run_id=self.runtime_run_id or "",
+                manifest=manifest,
+            )
+            repository.save_plan(plan)
+            findings = tuple(
+                self._finding_from_draft(
+                    draft,
+                    investigation_id=investigation_id,
+                    task=task,
+                    instance_id=instance_id,
+                    round_number=1,
+                    assessment=None,
+                    evidence=repository.get(investigation_id).evidence,
+                )
+                for draft in output.investigator.findings
+            )
+            candidates = tuple(output.investigator.candidates)
+            execution = next(
+                (
+                    item
+                    for item in repository.list_executions(investigation_id)
+                    if item.id == turn.execution_id
+                ),
+                AgentExecution(
+                    task_id=task.id,
+                    agent_name=instance_id,
+                    runtime_run_id=self.runtime_run_id,
+                    status=AgentExecutionStatus.COMPLETED,
+                    execution_layer=AgentExecutionLayer.OPENAI_AGENTS_SDK,
+                    analysis_round=1,
+                    step_kind=ExecutionStepKind.INVESTIGATOR_ANALYSIS,
+                    model_provider=self.model_provider,
+                    model_name=self.model_name,
+                ),
+            )
+            execution = execution.model_copy(
+                update={
+                    "task_id": task.id,
+                    "agent_name": instance_id,
+                    "tool_call_ids": [call.id for call in session.tool_calls],
+                    "evidence_ids": sorted(session.evidence_ids_for(instance_id, 1)),
+                    "summary": output.investigator.summary or "Single control completed.",
+                }
+            )
+            result = _InvestigatorResult(findings, candidates, execution)
+            self._persist_investigator_result(repository, investigation_id, result)
+            self._persist_candidate_projection(repository, investigation_id, candidates)
+            self._completed_rounds = 1
+            self._update_summary(repository, investigation_id)
+            return findings
+        except asyncio.CancelledError:
+            self._cleanup_session(session)
+            raise
+        except Exception as exc:
+            self._failures.append(type(exc).__name__)
+            failed = self._failed_execution(
+                task_id=task.id,
+                actor=instance_id,
+                step_kind=ExecutionStepKind.INVESTIGATOR_ANALYSIS,
+                message="single control failed",
+                analysis_round=1,
+            )
+            self._persist_investigator_result(
+                repository,
+                investigation_id,
+                _InvestigatorResult((), (), failed),
+            )
+            self._mark_terminal_failure(repository, investigation_id, "single control failed")
+            return ()
+        finally:
+            self._cleanup_session(session)
 
     async def critic_review(self, *, repository, investigation_id: str, event):
         del event
@@ -551,6 +808,7 @@ def frozen_run_identity(
         skill_catalog_hash=skill_catalog_hash_value,
         prediction_schema_hash=_canonical_hash(CasePrediction.model_json_schema()),
         normalizer_hash=_hash_files([Path(__file__).with_name("evaluator.py")]),
+        scorer_dependency_hash=scorer_dependency_hash(),
         dependency_lock_hash=_hash_files(
             [repository_root / "uv.lock", repository_root / "pyproject.toml"]
         ),

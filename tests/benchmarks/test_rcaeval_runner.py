@@ -106,18 +106,48 @@ def _write_runtime_package(root: Path) -> RuntimeCaseEntry:
 
 def _single_turn(**kwargs):
     output_type = kwargs["output_type"].__name__
+    if output_type == "SingleControlOutput":
+        return {
+            "planning": {
+                "decision": {
+                    "action": "investigate",
+                    "summary": "Inspect bounded offline evidence.",
+                    "task_ids": ["single-control-task"],
+                    "candidate_ids": [],
+                    "selected_skills": ["first_failure_timeline@1.0.0"],
+                },
+                "tasks": [
+                    {
+                        "id": "single-control-task",
+                        "title": "Inspect evidence",
+                        "description": "Use the frozen read-only tools.",
+                        "tool_names": ["read_logs"],
+                        "information_gap": "affected service and mechanism",
+                    }
+                ],
+            },
+            "investigator": {
+                "summary": "No supported candidate.",
+                "findings": [],
+                "candidates": [],
+            },
+        }
+    raise AssertionError(f"unexpected single output type: {output_type}")
+
+
+def _multi_turn(**kwargs):
+    output_type = kwargs["output_type"].__name__
     if output_type == "LeadPlanningOutput":
         return {
             "decision": {
                 "action": "investigate",
                 "summary": "Inspect bounded offline evidence.",
-                "task_ids": ["single-task"],
+                "task_ids": ["multi-task"],
                 "candidate_ids": [],
-                "selected_skills": ["first_failure_timeline@1.0.0"],
             },
             "tasks": [
                 {
-                    "id": "single-task",
+                    "id": "multi-task",
                     "title": "Inspect evidence",
                     "description": "Use the frozen read-only tools.",
                     "tool_names": ["read_logs"],
@@ -125,12 +155,7 @@ def _single_turn(**kwargs):
                 }
             ],
         }
-    assert output_type == "InvestigatorOutput"
-    return {"summary": "No supported candidate.", "findings": [], "candidates": []}
-
-
-def _multi_turn(**kwargs):
-    if kwargs["output_type"].__name__ == "LeadAdjudicationOutput":
+    if output_type == "LeadAdjudicationOutput":
         return {
             "decision": {
                 "action": "inconclusive",
@@ -138,7 +163,8 @@ def _multi_turn(**kwargs):
                 "stop_reason": "insufficient_evidence",
             }
         }
-    return _single_turn(**kwargs)
+    assert output_type == "InvestigatorOutput"
+    return {"summary": "No supported candidate.", "findings": [], "candidates": []}
 
 
 def test_single_control_runs_through_persisted_sqlite_v11_runtime(tmp_path: Path):
@@ -187,7 +213,7 @@ def test_single_control_runs_through_persisted_sqlite_v11_runtime(tmp_path: Path
         if event.event_type == RuntimeEventType.MODEL_COMPLETED
     ]
     assert "CriticAgent" not in actors
-    assert len(actors) == 2
+    assert len(actors) == 1
     plan = repository.get_plan(persisted.investigation_id)
     assert plan is not None
     assert plan.lead_decision is not None

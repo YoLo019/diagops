@@ -486,8 +486,10 @@ def test_v11_certified_compatible_tuple_freezes_endpoint_identity(
 ) -> None:
     from backend.config.settings import endpoint_id
     from backend.services.model_capability import (
+        REQUIRED_CONTRACTS,
         ModelCapabilityArtifact,
         capability_manifest_hash,
+        current_execution_environment,
         write_capability_artifact,
     )
 
@@ -505,7 +507,9 @@ def test_v11_certified_compatible_tuple_freezes_endpoint_identity(
             agents_sdk_version="0.18.1",
             tested_parallelism=2,
             capability_manifest_hash=capability_manifest_hash(),
-            code_revision="abc123",
+            required_contracts=REQUIRED_CONTRACTS,
+            code_revision="a" * 40,
+            execution_environment=current_execution_environment(),
             tested_at=datetime(2026, 8, 7, 12, 0, tzinfo=UTC),
             result="passed",
             observations=[],

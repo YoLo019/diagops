@@ -11,7 +11,11 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 
-from backend.benchmarks.rcaeval.audit import validate_manual_audit
+from backend.benchmarks.rcaeval.audit import validate_manual_audit, validate_prelabel_audit
+from backend.benchmarks.rcaeval.dependency import (
+    scorer_dependency_hash as _scorer_dependency_hash,
+)
+from backend.benchmarks.rcaeval.ledger import CustodianPairLedger
 from backend.benchmarks.rcaeval.models import (
     AcceptanceDecision,
     AcceptancePolicy,
@@ -32,6 +36,12 @@ from backend.benchmarks.rcaeval.models import (
 
 BOOTSTRAP_SEED = 20260802
 BOOTSTRAP_SAMPLES = 10_000
+FORMAL_CASE_COUNTS = {"ss30": 30, "tt90": 90}
+
+
+def scorer_dependency_hash() -> str:
+    """Return the exact hash frozen into prediction and policy identities."""
+    return _scorer_dependency_hash()
 
 
 def normalize_label(value: str) -> str:
@@ -192,9 +202,17 @@ def evaluate_bundles(
     for bundle in bundles:
         _validate_frozen_bundle(bundle)
     identity = bundles[0].identity
+    _validate_scorer_dependency_identity(bundles)
     if label_manifest.runtime_manifest_hash != identity.runtime_manifest_hash:
         raise ValueError("evaluation label/runtime binding mismatch")
     labels = [item for item in label_manifest.entries if item.partition == partition]
+    expected_case_count = FORMAL_CASE_COUNTS[partition.value]
+    if len(labels) != expected_case_count or len(
+        {item.case_id for item in labels}
+    ) != expected_case_count:
+        raise ValueError("formal evaluation label cardinality is not frozen")
+    for bundle in by_configuration.values():
+        _validate_formal_bundle_cardinality(bundle, expected_case_count)
     summaries = {
         configuration: evaluate_predictions(bundle.predictions, labels)
         for configuration, bundle in by_configuration.items()
@@ -260,6 +278,11 @@ def freeze_acceptance_policy(
         or set(sealed_validation.prediction_bundle_hashes) != expected_configurations
     ):
         raise ValueError("acceptance policy requires all four configurations")
+    if any(
+        summary.case_count != FORMAL_CASE_COUNTS["ss30"]
+        for summary in sealed_validation.summaries.values()
+    ):
+        raise ValueError("acceptance policy SS30 cardinality is not frozen at 30")
     expected_pairs = {
         (
             RcaEvalConfiguration.SINGLE_INTENDED,
@@ -291,7 +314,7 @@ def freeze_acceptance_policy(
         final_exact_gate=max(0.60, sealed_validation_multi_exact - 0.10),
         frozen_identity=sealed_validation.frozen_identity,
         tt90_manifest_hash=tt90_manifest_hash,
-        evaluator_hash=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        evaluator_hash=scorer_dependency_hash(),
     )
     policy.policy_hash = _canonical_hash(
         policy.model_dump(mode="json", exclude={"policy_hash"})
@@ -329,11 +352,16 @@ def evaluate_acceptance(
         ]
     ):
         raise ValueError("TT90 acceptance requires only the intended configurations")
+    if any(
+        summary.case_count != FORMAL_CASE_COUNTS["tt90"]
+        for summary in artifact.summaries.values()
+    ):
+        raise ValueError("TT90 acceptance cardinality is not frozen at 90")
     if artifact.frozen_identity != policy.frozen_identity:
         raise ValueError("acceptance artifact identity differs from frozen policy")
     if artifact.runtime_manifest_hash != policy.tt90_manifest_hash:
         raise ValueError("acceptance artifact uses the wrong TT90 manifest")
-    if policy.evaluator_hash != hashlib.sha256(Path(__file__).read_bytes()).hexdigest():
+    if policy.evaluator_hash != scorer_dependency_hash():
         raise ValueError("acceptance evaluator changed after policy freeze")
     evidence_support = validate_manual_audit(audit_export, manual_audit)
     expected_audit_binding = {
@@ -407,6 +435,11 @@ def main() -> None:
     parser.add_argument("--bundle", type=Path, action="append", required=True)
     parser.add_argument("--labels", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--ledger", type=Path, required=True)
+    parser.add_argument("--partition", choices=("ss30", "tt90"), required=True)
+    parser.add_argument("--prediction-set-hash", required=True)
+    parser.add_argument("--audit-export", type=Path, required=True)
+    parser.add_argument("--manual-audit", type=Path, required=True)
     arguments = parser.parse_args()
     if arguments.output.exists():
         raise ValueError("evaluation output already exists; labels will not be reopened")
@@ -414,6 +447,38 @@ def main() -> None:
         PredictionBundle.model_validate_json(path.read_text(encoding="utf-8"))
         for path in arguments.bundle
     ]
+    _validate_scorer_dependency_identity(bundles)
+    export = EvidenceAuditExport.model_validate_json(
+        arguments.audit_export.read_text(encoding="utf-8")
+    )
+    manual = ManualAuditArtifact.model_validate_json(
+        arguments.manual_audit.read_text(encoding="utf-8")
+    )
+    expected_bundle_hashes = {
+        bundle.configuration: bundle.bundle_hash for bundle in bundles
+    }
+    validate_prelabel_audit(
+        export,
+        manual,
+        expected_bundle_hashes=expected_bundle_hashes,
+    )
+    if any(bundle.partition.value != arguments.partition for bundle in bundles):
+        raise ValueError("evaluator partition differs from frozen pair")
+    by_configuration = {bundle.configuration: bundle for bundle in bundles}
+    _validate_formal_configuration_set(arguments.partition, by_configuration)
+    for bundle in bundles:
+        _validate_frozen_bundle(bundle)
+        _validate_formal_bundle_cardinality(
+            bundle,
+            FORMAL_CASE_COUNTS[arguments.partition],
+        )
+    ledger = CustodianPairLedger(arguments.ledger)
+    ledger.assert_label_open(
+        partition=arguments.partition,
+        prediction_set_hash=arguments.prediction_set_hash,
+        audit_export_hash=export.export_hash,
+        manual_audit_hash=manual.artifact_hash,
+    )
     # 标签文件在 evaluator 进程中只打开这一次。
     label_bytes = arguments.labels.read_bytes()
     labels = LabelManifest.model_validate_json(label_bytes)
@@ -474,6 +539,28 @@ def _validate_frozen_bundle(bundle: PredictionBundle) -> None:
     actual = _canonical_hash(bundle.model_dump(mode="json", exclude={"bundle_hash"}))
     if actual != bundle.bundle_hash:
         raise ValueError("prediction bundle changed after freeze")
+
+
+def _validate_formal_bundle_cardinality(
+    bundle: PredictionBundle, expected_case_count: int
+) -> None:
+    if len(bundle.predictions) != expected_case_count:
+        raise ValueError("formal prediction bundle case count is not frozen")
+    ids = [item.case_id for item in bundle.predictions]
+    if len(ids) != len(set(ids)):
+        raise ValueError("formal prediction bundle contains duplicate cases")
+    if any(item.configuration != bundle.configuration for item in bundle.predictions):
+        raise ValueError("formal prediction bundle contains mixed configurations")
+    if any(not math.isfinite(item.duration_ms) for item in bundle.predictions):
+        raise ValueError("formal prediction bundle contains non-finite metrics")
+
+
+def _validate_scorer_dependency_identity(
+    bundles: list[PredictionBundle],
+) -> None:
+    current = scorer_dependency_hash()
+    if any(bundle.identity.scorer_dependency_hash != current for bundle in bundles):
+        raise ValueError("scorer dependency closure changed after prediction freeze")
 
 
 def _validate_artifact_hash(artifact: EvaluationArtifact) -> None:

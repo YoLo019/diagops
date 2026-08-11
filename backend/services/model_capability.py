@@ -12,9 +12,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import importlib.metadata
 import json
 import os
+import platform
 import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -38,7 +41,15 @@ CAPABILITY_MANIFEST = (
     "configured_parallelism",
 )
 DEFAULT_CERTIFICATION_DEADLINE_SECONDS = 30.0
-DEFAULT_CERTIFICATION_PARALLELISM = 2
+DEFAULT_CERTIFICATION_PARALLELISM = 3
+REQUIRED_CONTRACTS = (
+    "chat_completions.non_streaming",
+    "chat_completions.tool_calls",
+    "chat_completions.json_object_output",
+    "chat_completions.token_usage",
+    "chat_completions.bounded_response_deadline",
+    "chat_completions.configured_parallelism",
+)
 
 
 def capability_manifest_hash() -> str:
@@ -56,6 +67,18 @@ class CapabilityObservation(BaseModel):
     detail: str | None = Field(default=None, max_length=128)
 
 
+class CapabilityExecutionEnvironment(BaseModel):
+    """非敏感执行环境身份；不包含主机名、路径、凭据或响应内容。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    implementation: str = Field(min_length=1, max_length=32)
+    python_version: str = Field(min_length=1, max_length=32)
+    platform_system: str = Field(min_length=1, max_length=32)
+    platform_machine: str = Field(min_length=1, max_length=64)
+    platform_release: str = Field(min_length=1, max_length=128)
+
+
 class ModelCapabilityArtifact(BaseModel):
     """model-capability-v1；artifact_hash 字段不参与自身哈希 preimage。"""
 
@@ -71,7 +94,10 @@ class ModelCapabilityArtifact(BaseModel):
     agents_sdk_version: str = Field(min_length=1, max_length=32)
     tested_parallelism: int = Field(ge=1, le=16)
     capability_manifest_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    code_revision: str = Field(min_length=1, max_length=64)
+    required_contracts: tuple[str, ...] = Field(min_length=len(REQUIRED_CONTRACTS))
+    code_revision: str = Field(pattern=r"^[0-9a-f]{40}$")
+    git_dirty: bool = False
+    execution_environment: CapabilityExecutionEnvironment
     tested_at: datetime
     result: Literal["passed", "failed"]
     observations: list[CapabilityObservation] = Field(default_factory=list, max_length=32)
@@ -173,12 +199,24 @@ def capability_certification_status(
 
 
 def _sdk_versions() -> tuple[str, str]:
-    import agents
+    try:
+        agents_version = importlib.metadata.version("openai-agents")
+    except importlib.metadata.PackageNotFoundError:
+        agents_version = "unknown"
+    return openai.__version__, agents_version
 
-    return openai.__version__, getattr(agents, "__version__", "unknown")
+
+def current_execution_environment() -> CapabilityExecutionEnvironment:
+    return CapabilityExecutionEnvironment(
+        implementation=sys.implementation.name,
+        python_version=platform.python_version(),
+        platform_system=platform.system(),
+        platform_machine=platform.machine(),
+        platform_release=platform.release(),
+    )
 
 
-def _code_revision() -> str:
+def _git_identity() -> tuple[str, bool]:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -189,10 +227,60 @@ def _code_revision() -> str:
         )
         revision = result.stdout.strip()
         if result.returncode == 0 and revision:
-            return revision
+            status = subprocess.run(
+                ["git", "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            return revision, bool(status.stdout.strip())
     except (OSError, subprocess.SubprocessError):
         pass
-    return "unknown"
+    return "0" * 40, True
+
+
+def _code_revision() -> str:
+    return _git_identity()[0]
+
+
+def validate_capability_for_prediction(
+    artifact: ModelCapabilityArtifact,
+    *,
+    provider: str,
+    model: str,
+    endpoint_id_value: str,
+    expected_parallelism: int,
+) -> None:
+    """Admission gate for formal prediction; every identity is current-bound."""
+    if artifact.result != "passed":
+        raise ValueError("capability result is not passed")
+    if artifact.provider != provider or artifact.model != model:
+        raise ValueError("capability provider/model identity is stale")
+    if artifact.endpoint_id != endpoint_id_value:
+        raise ValueError("capability endpoint identity is stale")
+    revision, dirty = _git_identity()
+    if artifact.git_dirty or dirty or artifact.code_revision != revision:
+        raise ValueError("capability code revision is stale or dirty")
+    openai_version, agents_version = _sdk_versions()
+    if artifact.adapter_version != COMPATIBLE_ADAPTER_VERSION:
+        raise ValueError("capability adapter version is stale")
+    if (artifact.openai_sdk_version, artifact.agents_sdk_version) != (
+        openai_version,
+        agents_version,
+    ):
+        raise ValueError("capability SDK versions are stale")
+    if artifact.capability_manifest_hash != capability_manifest_hash():
+        raise ValueError("capability manifest is stale")
+    if artifact.required_contracts != REQUIRED_CONTRACTS:
+        raise ValueError("capability required contracts are stale")
+    if artifact.tested_parallelism < expected_parallelism:
+        raise ValueError("capability tested parallelism is insufficient")
+    if artifact.execution_environment != current_execution_environment():
+        raise ValueError("capability execution environment is stale")
+    observations = {item.capability: item.passed for item in artifact.observations}
+    if set(observations) != set(CAPABILITY_MANIFEST) or not all(observations.values()):
+        raise ValueError("capability observations are incomplete or failed")
 
 
 async def _probe_capabilities(
@@ -337,6 +425,7 @@ async def certify_endpoint_async(
     finally:
         await client.close()
     openai_version, agents_version = _sdk_versions()
+    code_revision, git_dirty = _git_identity()
     return ModelCapabilityArtifact(
         provider="openai_compatible",
         model=model,
@@ -347,7 +436,10 @@ async def certify_endpoint_async(
         agents_sdk_version=agents_version,
         tested_parallelism=parallelism,
         capability_manifest_hash=capability_manifest_hash(),
-        code_revision=_code_revision(),
+        required_contracts=REQUIRED_CONTRACTS,
+        code_revision=code_revision,
+        git_dirty=git_dirty,
+        execution_environment=current_execution_environment(),
         tested_at=datetime.now(UTC),
         result=(
             "passed" if all(item.passed for item in observations) else "failed"

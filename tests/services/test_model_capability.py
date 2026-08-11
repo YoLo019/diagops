@@ -8,13 +8,16 @@ import pytest
 from backend.config.settings import endpoint_id
 from backend.services.model_capability import (
     CAPABILITY_MANIFEST,
+    REQUIRED_CONTRACTS,
     ModelCapabilityArtifact,
     capability_certification_status,
     capability_manifest_hash,
     certify_endpoint_async,
     compute_artifact_hash,
+    current_execution_environment,
     main,
     read_capability_artifact,
+    validate_capability_for_prediction,
     write_capability_artifact,
 )
 
@@ -33,7 +36,9 @@ def _artifact(**overrides):
         "agents_sdk_version": "0.18.1",
         "tested_parallelism": 2,
         "capability_manifest_hash": capability_manifest_hash(),
-        "code_revision": "abc123",
+        "required_contracts": REQUIRED_CONTRACTS,
+        "code_revision": "a" * 40,
+        "execution_environment": current_execution_environment(),
         "tested_at": _TESTED_AT,
         "result": "passed",
         "observations": [],
@@ -267,3 +272,17 @@ def test_main_writes_artifact_without_persisting_key(monkeypatch, tmp_path):
     assert exit_code == 0
     persisted = next(tmp_path.glob("*/result.json")).read_text(encoding="utf-8")
     assert "local-secret" not in persisted
+
+
+def test_prediction_admission_rejects_stale_revision_and_insufficient_parallelism(
+    monkeypatch,
+):
+    artifact = _artifact(code_revision="0" * 40, tested_parallelism=1)
+    with pytest.raises(ValueError, match="code revision|parallelism|stale"):
+        validate_capability_for_prediction(
+            artifact,
+            provider="openai_compatible",
+            model="compat-model",
+            endpoint_id_value=_ENDPOINT_ID,
+            expected_parallelism=3,
+        )
