@@ -1831,24 +1831,25 @@ handoff with `git_dirty=false`. No merge or push was performed and M5 was not
 started.
 
 M5 review-fix ledger (2026-08-11): the first independent M5 review was
-`changes_required`. Its seven findings were reproduced with RED regressions and
-fixed locally without opening formal labels. The custodian-owned SQLite pair
-ledger now spans prediction/evaluation output directories, binds the exact
-frozen prediction-set plus pre-label export/manual-audit hashes, uses a
-one-shot reservation token, and invalidates both sides on in-flight crash,
-concurrent attempt, or child/artifact failure. Capability admission binds
-clean source revision, adapter/SDK versions, required contracts/manifest,
-tested parallelism, endpoint/model/provider, and execution environment.
-Single now has one model context and persists its planning/skill-selection
-action before tools. Formal cardinality is exact (SS30=30, TT90=90), scorer
-dependency closure is hashed before label open, and placement-only runtime
-state is unknown rather than healthy/ready. Review-fix focused tests are
-green; formal SS30/TT90 predictions, attempts, and label opens remain zero.
+`changes_required`; the second review reproduced three residual findings with
+RED regressions. They were fixed locally without opening formal labels. The
+custodian-owned SQLite pair ledger now spans prediction/evaluation output
+directories, binds the exact frozen prediction-set plus pre-label export/manual-
+audit hashes, uses a one-shot reservation token, and converts expired
+prediction/pre-label/label-open leases to pair-level FAILED_NON_RESUMABLE before
+explicit reauthorization. Capability admission binds clean source revision,
+adapter/SDK versions, required contracts/manifest, tested parallelism,
+endpoint/model/provider, and execution environment. Single has one model
+context and persists its planning/skill-selection action before tools. Formal
+cardinality is exact (SS30=30, TT90=90), current scorer dependency closure is
+checked at policy freeze and final acceptance, placement-only runtime state is
+unknown rather than healthy/ready, and V11 model turns use a durable
+run-level remaining budget across checkpoints and retries. Engineering tests
+are green; formal SS30/TT90 predictions, attempts, and label opens remain zero.
 M5 is still blocked at T12 pending a fresh passed capability artifact and
-endpoint/credential, and independent re-review is pending; no accuracy claim
-is made. Repository verification after the fixes is full pytest `2132 passed,
-3 skipped, 1 warning`, Ruff clean, frontend build passed, offline acceptance
-`80/80`, runtime acceptance `14/14` with privacy scan, and diff-check clean.
+endpoint/credential, and a new independent re-review is pending; no accuracy
+claim is made. Repository verification counts and artifact paths are recorded
+in the current/plan handoff after this repair.
 Production acceptance was environment-blocked before any scenario artifact;
 Tempo was not run because no Tempo claim is published.
 

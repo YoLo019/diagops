@@ -449,6 +449,7 @@ class AppContainer:
                 },
                 "limits": {
                     "max_turns": self.settings.agents.max_turns,
+                    "model_turn_budget_scope": "run",
                     "max_investigators": 3,
                     "max_rounds": 2,
                     "token_budget": self.settings.agents.token_budget,

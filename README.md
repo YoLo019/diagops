@@ -560,9 +560,12 @@ are opened. Then launch the evaluator with the frozen prediction-set hash and
 custodian manifest hashes. Supply both frozen audit artifacts; the custodian
 ledger binds their exact hashes to one atomic label-open reservation. The
 formal launcher leaves the only label-file open to the evaluator child
-process. A crash, concurrent attempt, or post-child artifact failure leaves
-the pair non-resumable and requires explicit reauthorization; changing the
-evaluation output directory cannot bypass that ledger.
+process. A crash or lease loss is recovered by the custodian ledger into a
+pair-level non-resumable state; concurrent attempts and post-child artifact
+failures invalidate the pair immediately and require explicit reauthorization.
+Changing the evaluation output directory cannot bypass that ledger. V11 model
+turns are also a durable run-level budget carried through checkpoint, retry,
+and recovery rather than an SDK-invocation-local ceiling.
 
 ```powershell
 # Repeat --bundle for every frozen configuration in the partition.

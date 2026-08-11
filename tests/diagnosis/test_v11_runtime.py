@@ -298,6 +298,60 @@ async def test_v11_run_owner_is_explicit_when_repository_has_multiple_investigat
 
 
 @pytest.mark.anyio
+async def test_v11_model_turn_budget_is_shared_by_multiple_model_invocations():
+    registry = build_provider_tool_registry(build_mock_provider_registry())
+    remaining = [1]
+
+    async def reserve_turn() -> int:
+        if remaining[0] <= 0:
+            raise V11RuntimeContractError("V11 model turn budget exhausted")
+        remaining[0] -= 1
+        return remaining[0]
+
+    async def turn(**_kwargs):
+        return {"value": "ok"}
+
+    class Output(BaseModel):
+        value: str
+
+    runtime = V11Runtime(
+        model="fake",
+        model_provider=ModelProvider.OPENAI,
+        model_name="fake",
+        tool_registry=registry,
+        turn=turn,
+    )
+    runtime.bind_phase(
+        PhaseInput(
+            run_id="run-v11-turn-budget",
+            attempt_id="attempt-v11-turn-budget",
+            phase=RuntimePhase.LEAD_PLANNING,
+            resume_state=RuntimeResumeState(
+                remaining_model_turns=1,
+                remaining_token_budget=1000,
+            ),
+            execution_contract_version="v11",
+            execution_contract=_complete_contract(registry),
+            model_provider=ModelProvider.OPENAI,
+            model_name="fake",
+            reserve_model_turn=reserve_turn,
+        )
+    )
+    kwargs = {
+        "actor": "LeadAgent",
+        "prompt": "bounded",
+        "output_type": Output,
+        "context": {},
+        "tools": [],
+        "remaining_token_budget": 1000,
+    }
+    await runtime._call_model(**kwargs)
+    assert runtime.remaining_model_turns == 0
+    with pytest.raises(V11RuntimeContractError, match="exhausted"):
+        await runtime._call_model(**kwargs)
+
+
+@pytest.mark.anyio
 async def test_lead_planning_rejects_conclude_and_duplicate_or_infeasible_work():
     repository, record = _repository()
 

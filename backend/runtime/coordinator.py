@@ -374,6 +374,15 @@ class RuntimeCoordinator:
                                 safe_payload,
                             )
                         ),
+                        reserve_model_turn=(
+                            lambda run_id=run.id,
+                            owner=owner,
+                            lease_version=run.lease_version: self.store.reserve_model_turn(
+                                run_id,
+                                owner=owner,
+                                lease_version=lease_version,
+                            )
+                        ),
                         model_events=tuple(
                             self.store.list_events(run.id, limit=10_000)
                         ),
@@ -1180,6 +1189,7 @@ class RuntimeCoordinator:
             else RuntimeResumeState(
                 remaining_tool_budget=run.tool_budget or 0,
                 remaining_token_budget=run.token_budget,
+                remaining_model_turns=run.remaining_model_turns,
             )
         )
         consumed_tools = durable_tool_call_count(
@@ -1201,10 +1211,22 @@ class RuntimeCoordinator:
                 remaining_token_budget if remaining_token_budget is not None else 0,
                 max(0, run.token_budget - consumed_tokens),
             )
+        remaining_model_turns = resume_state.remaining_model_turns
+        if run.is_v11:
+            if run.remaining_model_turns is None:
+                raise RuntimeConflict("V11 run lacks durable model turn budget")
+            if remaining_model_turns is None:
+                remaining_model_turns = run.remaining_model_turns
+            else:
+                remaining_model_turns = min(
+                    remaining_model_turns,
+                    run.remaining_model_turns,
+                )
         return resume_state.model_copy(
             update={
                 "remaining_tool_budget": remaining_tool_budget,
                 "remaining_token_budget": remaining_token_budget,
+                "remaining_model_turns": remaining_model_turns,
             }
         )
 
@@ -1243,10 +1265,25 @@ class RuntimeCoordinator:
             and state.remaining_token_budget > run.token_budget
         ):
             raise RuntimeConflict("checkpoint token budget exceeds frozen run config")
+        if run.is_v11 and (
+            state.remaining_model_turns is None
+            or run.remaining_model_turns is None
+            or state.remaining_model_turns < run.remaining_model_turns
+        ):
+            raise RuntimeConflict(
+                "checkpoint model turn budget is below durable run state"
+            )
 
     def _resume_position(self, run: RuntimeRun) -> tuple[RuntimeResumeState, int]:
         if run.latest_checkpoint_id is None:
-            return RuntimeResumeState(), 0
+            return (
+                RuntimeResumeState(
+                    remaining_tool_budget=run.tool_budget or 0,
+                    remaining_token_budget=run.token_budget,
+                    remaining_model_turns=run.remaining_model_turns,
+                ),
+                0,
+            )
         checkpoint = self._validated_checkpoint(run)
         order = phase_profile_for(run.execution_contract_version).order
         if checkpoint.completed_phase not in order:

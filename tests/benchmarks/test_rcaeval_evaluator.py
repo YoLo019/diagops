@@ -177,6 +177,75 @@ def test_evaluator_rejects_frozen_bundles_with_stale_scorer_dependency_identity(
         evaluate_bundles(stale_bundles, labels)
 
 
+def test_acceptance_policy_rejects_self_consistent_stale_scorer_identity(
+    tmp_path: Path,
+):
+    sealed = _synthetic_ss30_artifact(tmp_path)
+    stale_identity = sealed.frozen_identity.model_copy(
+        update={"scorer_dependency_hash": "e" * 64}
+    )
+    stale = sealed.model_copy(update={"frozen_identity": stale_identity})
+    stale.artifact_hash = _artifact_hash(stale)
+    with pytest.raises(ValueError, match="scorer dependency"):
+        freeze_acceptance_policy(
+            sealed_validation=stale,
+            tt90_manifest_hash="f" * 64,
+        )
+
+
+def test_final_acceptance_rejects_self_consistent_stale_scorer_identity(
+    tmp_path: Path,
+):
+    label = _label(
+        "re2-aaaaaaaaaaaaaaaa",
+        "checkout",
+        "cpu",
+        partition=RcaEvalPartition.TT90,
+    )
+    single = _frozen_bundle(
+        tmp_path,
+        RcaEvalConfiguration.SINGLE_INTENDED,
+        _prediction(label.case_id, "wrong", "wrong"),
+    )
+    multi = _frozen_bundle(
+        tmp_path,
+        RcaEvalConfiguration.MULTI_INTENDED,
+        _prediction(label.case_id, "checkout", "cpu"),
+    )
+    labels = LabelManifest(
+        runtime_manifest_hash="2" * 64,
+        entries=_formal_labels(label),
+    )
+    labels.manifest_hash = _manifest_hash(labels)
+    artifact = evaluate_bundles([single, multi], labels)
+    policy = freeze_acceptance_policy(
+        sealed_validation=_sealed_validation(artifact),
+        tt90_manifest_hash="2" * 64,
+    )
+    stale_identity = artifact.frozen_identity.model_copy(
+        update={"scorer_dependency_hash": "e" * 64}
+    )
+    stale_artifact = artifact.model_copy(update={"frozen_identity": stale_identity})
+    stale_artifact.artifact_hash = _artifact_hash(stale_artifact)
+    stale_policy = policy.model_copy(update={"frozen_identity": stale_identity})
+    stale_policy.policy_hash = hashlib.sha256(
+        json.dumps(
+            stale_policy.model_dump(mode="json", exclude={"policy_hash"}),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    audit_export, manual_audit = _passing_audit(multi)
+    with pytest.raises(ValueError, match="scorer dependency"):
+        evaluate_acceptance(
+            stale_artifact,
+            stale_policy,
+            audit_export=audit_export,
+            manual_audit=manual_audit,
+        )
+
+
 def test_paired_bootstrap_and_mcnemar_are_frozen_and_exact():
     single = [False, False, True, False]
     multi = [True, False, True, True]
@@ -660,6 +729,31 @@ def _passing_audit(bundle: PredictionBundle):
         for pair in export.pairs
     ]
     return export, freeze_manual_audit(export, decisions)
+
+
+def _synthetic_ss30_artifact(tmp_path: Path):
+    label = _label(
+        "re2-aaaaaaaaaaaaaaaa",
+        "checkout",
+        "cpu",
+        partition=RcaEvalPartition.TT90,
+    )
+    single = _frozen_bundle(
+        tmp_path,
+        RcaEvalConfiguration.SINGLE_INTENDED,
+        _prediction(label.case_id, "checkout", "cpu"),
+    )
+    multi = _frozen_bundle(
+        tmp_path,
+        RcaEvalConfiguration.MULTI_INTENDED,
+        _prediction(label.case_id, "checkout", "cpu"),
+    )
+    labels = LabelManifest(
+        runtime_manifest_hash="2" * 64,
+        entries=_formal_labels(label),
+    )
+    labels.manifest_hash = _manifest_hash(labels)
+    return _sealed_validation(evaluate_bundles([single, multi], labels))
 
 
 def test_cli_freezes_policy_and_archives_tt90_acceptance(tmp_path: Path):

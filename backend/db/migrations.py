@@ -57,6 +57,7 @@ _V7_RUNTIME_COLUMNS = {
     "execution_contract_version",
     "authority_mode",
     "execution_contract",
+    "remaining_model_turns",
 }
 
 
@@ -201,6 +202,10 @@ def _migrate_legacy_v6_runtime_timeout(connection: Connection) -> None:
     if "benchmark_replay_locator" not in columns:
         connection.exec_driver_sql(
             "ALTER TABLE runtime_runs ADD COLUMN benchmark_replay_locator JSON"
+        )
+    if "remaining_model_turns" not in columns:
+        connection.exec_driver_sql(
+            "ALTER TABLE runtime_runs ADD COLUMN remaining_model_turns INTEGER"
         )
 
 

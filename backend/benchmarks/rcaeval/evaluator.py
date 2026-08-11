@@ -272,6 +272,9 @@ def freeze_acceptance_policy(
     if sealed_validation.partition.value != "ss30":
         raise ValueError("acceptance policy requires the sealed SS30 evaluation")
     _validate_artifact_hash(sealed_validation)
+    _validate_scorer_dependency_identity(
+        sealed_validation.frozen_identity.scorer_dependency_hash
+    )
     expected_configurations = set(RcaEvalConfiguration)
     if (
         set(sealed_validation.summaries) != expected_configurations
@@ -331,6 +334,9 @@ def evaluate_acceptance(
 ) -> AcceptanceDecision:
     _validate_policy_hash(policy)
     _validate_artifact_hash(artifact)
+    _validate_scorer_dependency_identity(
+        artifact.frozen_identity.scorer_dependency_hash
+    )
     if artifact.partition.value != "tt90":
         raise ValueError("acceptance evaluation requires the TT90 artifact")
     intended_configurations = {
@@ -363,6 +369,7 @@ def evaluate_acceptance(
         raise ValueError("acceptance artifact uses the wrong TT90 manifest")
     if policy.evaluator_hash != scorer_dependency_hash():
         raise ValueError("acceptance evaluator changed after policy freeze")
+    _validate_scorer_dependency_identity(policy.frozen_identity.scorer_dependency_hash)
     evidence_support = validate_manual_audit(audit_export, manual_audit)
     expected_audit_binding = {
         RcaEvalConfiguration.MULTI_INTENDED: artifact.prediction_bundle_hashes[
@@ -440,6 +447,7 @@ def main() -> None:
     parser.add_argument("--prediction-set-hash", required=True)
     parser.add_argument("--audit-export", type=Path, required=True)
     parser.add_argument("--manual-audit", type=Path, required=True)
+    parser.add_argument("--label-open-token", required=True)
     arguments = parser.parse_args()
     if arguments.output.exists():
         raise ValueError("evaluation output already exists; labels will not be reopened")
@@ -478,6 +486,7 @@ def main() -> None:
         prediction_set_hash=arguments.prediction_set_hash,
         audit_export_hash=export.export_hash,
         manual_audit_hash=manual.artifact_hash,
+        lease_token=arguments.label_open_token,
     )
     # 标签文件在 evaluator 进程中只打开这一次。
     label_bytes = arguments.labels.read_bytes()
@@ -555,11 +564,13 @@ def _validate_formal_bundle_cardinality(
         raise ValueError("formal prediction bundle contains non-finite metrics")
 
 
-def _validate_scorer_dependency_identity(
-    bundles: list[PredictionBundle],
-) -> None:
+def _validate_scorer_dependency_identity(value: str | list[PredictionBundle]) -> None:
     current = scorer_dependency_hash()
-    if any(bundle.identity.scorer_dependency_hash != current for bundle in bundles):
+    if isinstance(value, str):
+        stale = value != current
+    else:
+        stale = any(bundle.identity.scorer_dependency_hash != current for bundle in value)
+    if stale:
         raise ValueError("scorer dependency closure changed after prediction freeze")
 
 

@@ -7,6 +7,7 @@ from sqlalchemy import event, select
 from backend.db.schema import runtime_runs
 from backend.domain.runtime import (
     RuntimeActorType,
+    RuntimeAttempt,
     RuntimeAttemptStatus,
     RuntimeEventType,
     RuntimePhase,
@@ -16,10 +17,46 @@ from backend.domain.runtime import (
 from backend.runtime.phases import BusinessMutation, PhaseCommit
 from backend.runtime.sqlite_store import SQLiteRuntimeStore
 from backend.runtime.store import (
+    RuntimeConflict,
     RuntimeLeaseLost,
     RuntimeTerminalCommit,
     RuntimeTerminalEvent,
 )
+
+
+def test_sqlite_v11_model_turn_budget_survives_store_reload(runtime_store) -> None:
+    if not isinstance(runtime_store, SQLiteRuntimeStore):
+        return
+
+    from tests.runtime.test_v11_isolation_red import _v11_run
+
+    run = runtime_store.create_run(_v11_run("run-sqlite-model-turn-budget"))
+    leased, _attempt = runtime_store.acquire_lease_and_create_attempt(
+        run.id,
+        attempt=RuntimeAttempt(
+            run_id=run.id,
+            attempt_number=1,
+            status=RuntimeAttemptStatus.RUNNING,
+        ),
+        owner="worker-a",
+        expected_status=RuntimeRunStatus.CREATED,
+    )
+
+    assert runtime_store.reserve_model_turn(
+        run.id, owner="worker-a", lease_version=leased.lease_version
+    ) == 7
+    assert runtime_store.get_run(run.id).remaining_model_turns == 7
+    for _ in range(6):
+        runtime_store.reserve_model_turn(
+            run.id, owner="worker-a", lease_version=leased.lease_version
+        )
+    assert runtime_store.reserve_model_turn(
+        run.id, owner="worker-a", lease_version=leased.lease_version
+    ) == 0
+    with pytest.raises(RuntimeConflict, match="exhausted"):
+        runtime_store.reserve_model_turn(
+            run.id, owner="worker-a", lease_version=leased.lease_version
+        )
 
 
 def test_sqlite_store_persists_run_in_typed_columns(runtime_store) -> None:

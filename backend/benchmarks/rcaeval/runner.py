@@ -677,6 +677,7 @@ def build_execution_contract(
         },
         "limits": {
             "max_turns": budget.max_turns,
+            "model_turn_budget_scope": "run",
             "max_investigators": budget.max_investigators,
             "max_rounds": budget.max_rounds,
             "token_budget": budget.token_budget,

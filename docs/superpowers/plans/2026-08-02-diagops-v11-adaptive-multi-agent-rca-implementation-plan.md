@@ -1257,13 +1257,13 @@ request only the missing authority.
 | T8 | implemented / verifying | R1, R4–R7, R9, R11–R13, R27 | M3 fifth-round review-fix5 preserves the already-green exact T8 validator, terminal, safe-text, supplemental-linkage, and final-actor contracts; exact gate 207 passed and scoped Ruff clean |
 | T9 | implemented / verified | R5–R12, R18–R19, R27 | M4 first/second/third-round review fixes reproduced and closed with focused RED→GREEN regressions; exact gate 280 passed/1 warning; candidate-led V11 reports/actions, active-owner/rerun fencing, additive API/UI, shared privacy-safe public projection, usable-evidence validation, actual Markdown actors/tasks/rounds, generic OpenRCA `v11-agent` projection, semantic status matrix, durable lifecycle guard, and Lead-bound report references verified |
 | T10 | implemented / verified | R8–R13, R16, R18, R21–R23, R26–R27 | Exact gate 855 passed/3 skipped/1 warning; full pytest 2071 passed/3 skipped/1 warning; offline rows=80 failed=0; runtime acceptance exit=0; Ruff/build/diff-check clean |
-| T11 | implemented / locally verified | R14–R17, R24–R27 | Review-fix focused gate `99 passed`; benchmark Ruff clean。冻结 single control 复用真实 V11 planning/tool/model accounting 与显式空 run-owned memory；四配置、公平预算、真实 SQLite RuntimeRun/publication guard/replay locator、offline RCAEval providers、prediction/evaluator isolation、exact SS30/TT90 cardinality/statistics、scorer dependency closure、custodian pair ledger/one-shot label reservation、pre-label manual audit、policy/acceptance archive 均已落地；M0-L1 golden vector 与 M0-L2 symlink rejection closed。首轮 M5 review 的 changes_required 已修复，独立 re-review pending。 |
+| T11 | implemented / locally verified | R14–R17, R24–R27 | Review-fix regressions and focused gates GREEN; benchmark Ruff clean。冻结 single control 复用真实 V11 planning/tool/model accounting 与显式空 run-owned memory；四配置、公平预算、真实 SQLite RuntimeRun/publication guard/replay locator、offline RCAEval providers、prediction/evaluator isolation、exact SS30/TT90 cardinality/statistics、scorer dependency closure、custodian pair ledger/one-shot label reservation、pre-label manual audit、policy/acceptance archive 均已落地；M0-L1 golden vector 与 M0-L2 symlink rejection closed。首轮 M5 review 的 changes_required 已修复，独立 re-review pending。 |
 | T12 | blocked at capability admission | R14–R17, R25–R26 | 真实 runtime package 完整 checksum 复核通过：manifest `bb119fc9fe338f7cf2d6f03a82f87a0038a1a589fde0c96ad99b02504a5f3d73`/150 cases；但本 worktree capability artifact=0，`DIAGOPS_AGENTS_API_KEY/BASE_URL/MODEL` 均 absent。未执行 OB30 model run 或 SS30 四配置，未打开 SS labels，未冻结 acceptance policy。任务线程 Luna Max 配置不是 benchmark endpoint certification。 |
 | T13 | not started / protected | R1–R27 | TT90 predictions=0、formal label opens=0、paired attempts=0；未消耗 holdout。仓库 gate：Ruff clean，full pytest 2121 passed/3 skipped/1 warning，frontend build passed，offline 80/80，runtime 14/14 + privacy passed，diff-check clean；production gate 因 Docker daemon unavailable 在正式 preflight 阻断，Tempo claim 未发布/未运行。必须在同一 clean frozen source、passed capability identity 和已冻结 SS policy 下恢复；任何正式非可恢复失败仍按实现归档并停止。 |
 
 Independent Plan review: completed on 2026-08-02; initial review found three
-high and two medium issues. Focused re-review confirmed H1–H3/M1–M2 closed and
-found no remaining blocking, high, or medium issue.
+high and two medium issues. That plan review does not substitute for the
+independent M5 implementation review; M5 review status remains tracked below.
 
 | ID | Severity | Finding | Resolution |
 | --- | --- | --- | --- |
@@ -1275,21 +1275,17 @@ found no remaining blocking, high, or medium issue.
 | M5-E1 | external blocker | 正式 SS30/TT90 需要一个 exact passed capability artifact、可调用 endpoint/model 和 process-only credential；当前三者均不存在 | Open；prediction 在首个模型调用前 fail closed。不得以 Codex task 的 Luna Max 配置、FakeRuntime 或测试 double 替代；TT90 保持未消耗，等待外部 owner 提供认证端点后恢复。 |
 | M5-R1 | review pending | T11–T13 source/artifact independent review 尚未执行 | Open；首轮 M5 review（2026-08-10）为 `changes_required`，本实现线程已按 RED→GREEN 修复并记录 focused evidence，不自行给出 approve。父任务应基于最终本地提交创建独立 re-review 线程。 |
 
-M5 review-fix record (2026-08-11): the first independent review reproduced seven
-findings. B1 (cross-output one-time reveal) is closed locally by a custodian
-SQLite pair ledger with immutable pair identity, exact pre-label export/manual
-hashes, one-shot reservation token, atomic label-open count, crash/concurrency
-fail-closed behavior, and explicit reauthorization after invalidation. B2
-(capability freshness) is closed by binding clean source revision,
-adapter/SDK versions, capability contracts/manifest, endpoint/model/provider,
-tested parallelism, and execution environment. B3 (Single fairness) is closed
-by one combined model context with a durable pre-tool planning action and
-shared run-owned budget. H1 exact 30/90 cardinality, H2 scorer dependency
-closure, H3 placement-only runtime state, and the TT90 pair-level launcher
-ledger are covered by focused RED→GREEN tests. Formal SS30/TT90 predictions,
-attempts, and labels remain untouched; T12 remains blocked on a fresh passed
-capability artifact/endpoint/credential and independent re-review.
-Repository verification after the fixes: full pytest `2132 passed/3 skipped/1
+M5 review-fix record (2026-08-11): the second independent review reproduced
+three residual findings: pair-ledger crash recovery, stale scorer identity at
+acceptance, and invocation-local model-turn ceilings. They are fixed locally
+with RED→GREEN tests: custodian lease expiry atomically invalidates the pair
+before reauthorization; policy freeze and final acceptance verify the current
+scorer dependency closure; and V11 model turns are atomically persisted at the
+RuntimeRun boundary and carried through checkpoint/resume/retry. Formal
+SS30/TT90 predictions, attempts, and labels remain untouched; T12 remains
+blocked on a fresh passed capability artifact/endpoint/credential and a new
+independent re-review.
+Repository verification after the fixes: full pytest `2141 passed/3 skipped/1
 warning`, full Ruff clean, frontend build passed, offline acceptance `80/80`,
 runtime acceptance `14/14` with privacy scan, and diff-check clean. Production
 acceptance was environment-blocked before any scenario artifact; Tempo was not

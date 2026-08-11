@@ -173,8 +173,9 @@ def _launch_predict(arguments) -> None:
     )
     if arguments.reauthorization_token:
         ledger.reauthorize(arguments.reauthorization_token)
-    ledger.record_side_started(arguments.configuration, str(output))
+    prediction_lease = ledger.record_side_started(arguments.configuration, str(output))
     try:
+        ledger.heartbeat(prediction_lease)
         output.parent.mkdir(parents=True, exist_ok=True)
         child_argv = [
             sys.executable,
@@ -224,7 +225,11 @@ def _launch_predict(arguments) -> None:
     except BaseException:
         ledger.invalidate_pair("prediction side failed or was interrupted")
         raise
-    ledger.record_side_completed(arguments.configuration, bundle_hash)
+    ledger.record_side_completed(
+        arguments.configuration,
+        bundle_hash,
+        lease_token=prediction_lease,
+    )
     print(f"prediction completed: {bundle_hash}")
 
 
@@ -367,7 +372,10 @@ def _freeze_set(arguments) -> None:
 
 def _evaluate(arguments) -> None:
     from backend.benchmarks.rcaeval.audit import validate_prelabel_audit
-    from backend.benchmarks.rcaeval.isolation import build_evaluator_launch
+    from backend.benchmarks.rcaeval.isolation import (
+        EvaluatorLaunchSpec,
+        build_evaluator_launch,
+    )
     from backend.benchmarks.rcaeval.ledger import CustodianPairLedger
     from backend.benchmarks.rcaeval.models import (
         EvaluationArtifact,
@@ -471,10 +479,18 @@ def _evaluate(arguments) -> None:
             manual_audit_hash=manual_audit.artifact_hash,
         )
         evaluation_reserved = True
-        ledger.reserve_label_open(
+        label_open = ledger.reserve_label_open(
             audit_export_hash=audit_export.export_hash,
             manual_audit_hash=manual_audit.artifact_hash,
             reservation_token=reservation.reservation_token,
+        )
+        ledger.heartbeat(label_open.lease_token)
+        spec = EvaluatorLaunchSpec(
+            argv=(*spec.argv, "--label-open-token", label_open.lease_token),
+            env=spec.env,
+            cwd=spec.cwd,
+            predictions_hash=spec.predictions_hash,
+            labels_manifest_hash=spec.labels_manifest_hash,
         )
         output_dir.mkdir(parents=True, exist_ok=False)
         subprocess.run(spec.argv, cwd=spec.cwd, env=spec.env, check=True)
@@ -489,7 +505,10 @@ def _evaluate(arguments) -> None:
             raise ValueError("formal evaluator returned the wrong runtime binding")
         if artifact.labels_manifest_hash != spec.labels_manifest_hash:
             raise ValueError("formal evaluator returned the wrong label binding")
-        ledger.mark_evaluation_completed(artifact.artifact_hash)
+        ledger.mark_evaluation_completed(
+            artifact.artifact_hash,
+            lease_token=label_open.lease_token,
+        )
     except BaseException:
         if evaluation_reserved:
             ledger.invalidate_pair("label-side evaluation failed or was interrupted")

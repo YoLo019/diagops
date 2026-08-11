@@ -240,6 +240,8 @@ def validate_v11_execution_contract(contract: dict[str, Any]) -> None:
         raise ValueError("V11 execution contract capability identity is incomplete")
     if not isinstance(limits, dict) or not _V11_LIMIT_KEYS <= limits.keys():
         raise ValueError("V11 execution contract limits are incomplete")
+    if limits.get("model_turn_budget_scope", "run") != "run":
+        raise ValueError("V11 model turn budget scope must be run")
     if not isinstance(skill_catalog, dict):
         raise ValueError("V11 execution contract skill catalog is incomplete")
     if not isinstance(retry_policy, dict):
@@ -341,6 +343,7 @@ class RuntimeRun(RuntimeModel):
     prompt_version: str | None = Field(default=None, max_length=160)
     tool_budget: int | None = Field(default=None, ge=0)
     token_budget: int | None = Field(default=None, ge=0)
+    remaining_model_turns: int | None = Field(default=None, ge=0)
     timeout_seconds: float = Field(
         default=60.0, ge=1, allow_inf_nan=False
     )
@@ -411,6 +414,29 @@ class RuntimeRun(RuntimeModel):
                 raise ValueError("V11 execution contract is incomplete")
             if self.timeout_seconds > 120:
                 raise ValueError("V11 timeout_seconds exceeds the hard deadline")
+            limits = self.execution_contract.get("limits")
+            model_turn_budget = (
+                limits.get("max_turns")
+                if isinstance(limits, dict)
+                else self.execution_contract.get("max_turns", 8)
+            )
+            if not isinstance(model_turn_budget, int) or model_turn_budget < 1:
+                if _EXECUTION_CONTRACT_DIGEST in self.execution_contract:
+                    raise ValueError(
+                        "V11 execution contract model-turn budget is missing"
+                    )
+                model_turn_budget = 8
+            if self.remaining_model_turns is None:
+                if (
+                    _EXECUTION_CONTRACT_DIGEST in self.execution_contract
+                    and "remaining_model_turns" in self.model_fields_set
+                ):
+                    raise ValueError(
+                        "V11 persisted remaining model turns are missing"
+                    )
+                self.remaining_model_turns = model_turn_budget
+            elif self.remaining_model_turns > model_turn_budget:
+                raise ValueError("V11 remaining model turns exceed frozen run budget")
             if _EXECUTION_CONTRACT_DIGEST in self.execution_contract:
                 try:
                     validate_v11_execution_contract(self.execution_contract)
@@ -482,6 +508,7 @@ class RuntimeResumeState(RuntimeModel):
     completed_report_ids: list[str] = Field(default_factory=list)
     remaining_tool_budget: int = Field(default=0, ge=0)
     remaining_token_budget: int | None = Field(default=None, ge=0)
+    remaining_model_turns: int | None = Field(default=None, ge=0)
     successful_tool_keys: list[str] = Field(default_factory=list)
 
 
@@ -541,6 +568,8 @@ for _event_type in (
             "actual_input_tokens",
             "attempt",
             "request_index",
+            "model_turn_budget",
+            "remaining_model_turns",
         }
     )
 for _event_type in (

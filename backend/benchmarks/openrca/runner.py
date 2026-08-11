@@ -393,6 +393,7 @@ class OpenRcaDiagnosisRunner:
             },
             "limits": {
                 "max_turns": runtime.max_turns,
+                "model_turn_budget_scope": "run",
                 "max_investigators": runtime.max_investigators,
                 "max_rounds": runtime.max_rounds,
                 "token_budget": 10_000,

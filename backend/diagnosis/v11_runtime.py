@@ -490,6 +490,9 @@ class V11Runtime:
         self.runtime_run_id: str | None = None
         self._remaining_token_budget = token_budget
         self._token_budget_lock = asyncio.Lock()
+        self._remaining_model_turns: int | None = None
+        self._reserve_model_turn_callback: Callable[[], Any] | None = None
+        self._model_turn_budget_enabled = False
         self._model_reservations: dict[str, _ModelReservation] = {}
         self._settled_model_reservations: set[str] = set()
         self._model_request_history: dict[
@@ -552,6 +555,9 @@ class V11Runtime:
         runtime.model_name = model_name or self.model_name
         runtime._remaining_token_budget = token_budget
         runtime._token_budget_lock = asyncio.Lock()
+        runtime._remaining_model_turns = None
+        runtime._reserve_model_turn_callback = None
+        runtime._model_turn_budget_enabled = False
         runtime._model_reservations = {}
         runtime._settled_model_reservations = set()
         runtime._model_request_history = {}
@@ -624,8 +630,26 @@ class V11Runtime:
         )
         self._hit_fault = phase_input.hit_fault or (lambda _point: None)
         self._phase_tool_budget = phase_input.tool_budget
+        self._remaining_model_turns = getattr(
+            phase_input.resume_state, "remaining_model_turns", None
+        )
+        self._reserve_model_turn_callback = getattr(
+            phase_input, "reserve_model_turn", None
+        )
         self._execution_contract = copy.deepcopy(phase_input.execution_contract)
         if getattr(phase_input, "execution_contract_version", None) == "v11":
+            # 正式 RuntimeCoordinator 总是注入 Store CAS；无 Store 的单元 phase
+            # 只测试模型协议，不能把非持久化计数器冒充正式预算。
+            self._model_turn_budget_enabled = (
+                self._reserve_model_turn_callback is not None
+            )
+            if (
+                self._reserve_model_turn_callback is None
+                and phase_input.persist_model_event is not None
+            ):
+                raise V11RuntimeContractError(
+                    "V11 durable model turn reservation is not wired"
+                )
             if self._execution_contract is None:
                 raise V11RuntimeContractError("V11 phase lacks execution contract")
             self._validate_execution_contract(
@@ -661,6 +685,37 @@ class V11Runtime:
     @property
     def remaining_token_budget(self) -> int | None:
         return self._remaining_token_budget
+
+    @property
+    def remaining_model_turns(self) -> int | None:
+        return self._remaining_model_turns
+
+    async def _reserve_run_model_turn(self) -> None:
+        if not self._model_turn_budget_enabled:
+            return
+        callback = self._reserve_model_turn_callback
+        if callback is None:
+            raise V11RuntimeContractError(
+                "V11 durable model turn reservation is not wired"
+            )
+        remaining = await _maybe_await(callback())
+        if isinstance(remaining, bool) or not isinstance(remaining, int) or remaining < 0:
+            raise V11RuntimeContractError(
+                "V11 durable model turn reservation returned an invalid remainder"
+            )
+        self._remaining_model_turns = remaining
+
+    def _model_turn_audit_payload(self) -> dict[str, int]:
+        if not self._model_turn_budget_enabled:
+            return {}
+        if self._remaining_model_turns is None:
+            raise V11RuntimeContractError(
+                "V11 durable model turn budget is missing"
+            )
+        return {
+            "model_turn_budget": self.max_turns,
+            "remaining_model_turns": self._remaining_model_turns,
+        }
 
     async def run_phase(
         self,
@@ -2630,6 +2685,7 @@ class V11Runtime:
                         "reserved_tokens": released_tokens,
                         "input_estimate": reservation.input_estimate,
                         "attempt": attempt,
+                        **self._model_turn_audit_payload(),
                         **self._request_index_payload(later_index),
                     },
                 )
@@ -2676,6 +2732,7 @@ class V11Runtime:
             )
             if existing is not None:
                 if existing.status == "retrying":
+                    await self._reserve_run_model_turn()
                     await self._emit_model(
                         execution_id or logical_call_id or reservation_id,
                         "started",
@@ -2687,6 +2744,7 @@ class V11Runtime:
                             "reserved_tokens": existing.reserved_total,
                             "input_estimate": existing.input_estimate,
                             "attempt": attempt,
+                            **self._model_turn_audit_payload(),
                             **self._request_index_payload(request_index),
                         },
                     )
@@ -2726,6 +2784,7 @@ class V11Runtime:
             output_cap = available - input_estimate
             if output_cap <= 0:
                 raise V11RuntimeContractError("model token budget exhausted")
+            await self._reserve_run_model_turn()
             if current is not None:
                 self._remaining_token_budget = current - available
             else:
@@ -2748,6 +2807,7 @@ class V11Runtime:
                             "reserved_tokens": available,
                             "input_estimate": input_estimate,
                             "attempt": attempt,
+                            **self._model_turn_audit_payload(),
                             **self._request_index_payload(request_index),
                         },
                     )
@@ -2799,6 +2859,7 @@ class V11Runtime:
                             "reserved_tokens": reservation.reserved_total,
                             "input_estimate": reservation.input_estimate,
                             "attempt": attempt,
+                            **self._model_turn_audit_payload(),
                             **self._request_index_payload(request_index),
                         },
                     )
@@ -2820,6 +2881,7 @@ class V11Runtime:
                         "input_estimate": reservation.input_estimate,
                         "attempt": attempt,
                         **self._actual_input_payload(actual_input_tokens),
+                        **self._model_turn_audit_payload(),
                         **self._request_index_payload(request_index),
                     },
                 )
@@ -2876,6 +2938,13 @@ class V11Runtime:
             raise V11RuntimeContractError("model token budget exhausted")
         if remaining_tool_budget is not None and remaining_tool_budget <= 0:
             raise V11RuntimeContractError("model tool budget exhausted")
+        if self._model_turn_budget_enabled:
+            if self._remaining_model_turns is None:
+                raise V11RuntimeContractError(
+                    "V11 durable model turn budget is missing"
+                )
+            if self._remaining_model_turns <= 0:
+                raise V11RuntimeContractError("V11 model turn budget exhausted")
         self._model_timeout()
         model_event_id = f"v11-model-{uuid4().hex}"
         reservation_id = self._model_reservation_id(model_event_id, 0)
@@ -3022,6 +3091,10 @@ class V11Runtime:
                             else MultiProvider()
                         )
                         try:
+                            sdk_turn_ceiling = self.max_turns
+                            if self._model_turn_budget_enabled:
+                                assert self._remaining_model_turns is not None
+                                sdk_turn_ceiling = self._remaining_model_turns
                             raw_result = await asyncio.wait_for(
                                 _run_with_model_lifecycle(
                                     agent,
@@ -3031,7 +3104,7 @@ class V11Runtime:
                                         sort_keys=True,
                                     ),
                                     persist_model_event=None,
-                                    max_turns=self.max_turns,
+                                    max_turns=sdk_turn_ceiling,
                                     run_config=RunConfig(
                                         workflow_name="DiagOps V11 Agent RCA",
                                         tracing_disabled=True,

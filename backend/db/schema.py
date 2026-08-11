@@ -216,6 +216,7 @@ runtime_runs = Table(
     Column("prompt_version", String, nullable=True),
     Column("tool_budget", Integer, nullable=True),
     Column("token_budget", Integer, nullable=True),
+    Column("remaining_model_turns", Integer, nullable=True),
     Column("timeout_seconds", Float, nullable=False, server_default="60"),
     Column("latest_checkpoint_id", ForeignKey("runtime_checkpoints.id"), nullable=True),
     Column("failure_category", String, nullable=True),

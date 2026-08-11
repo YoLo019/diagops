@@ -146,8 +146,8 @@ def _seed_pair_ledger(predictions_root: Path, partition: str) -> None:
         side_dir = predictions_root / side
         side_dir.mkdir(parents=True, exist_ok=True)
         (side_dir / "predictions.json").write_text("{}", encoding="utf-8")
-        ledger.record_side_started(side, str(side_dir))
-        ledger.record_side_completed(side, f"{index + 1:064x}")
+        lease = ledger.record_side_started(side, str(side_dir))
+        ledger.record_side_completed(side, f"{index + 1:064x}", lease_token=lease)
     ledger.bind_prediction_set_hash("a" * 64)
 
 

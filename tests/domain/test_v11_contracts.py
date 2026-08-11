@@ -36,7 +36,13 @@ from backend.domain.multi_agent import (
 )
 from backend.domain.react_trace import ReActTraceStep
 from backend.domain.reports import IncidentReport
-from backend.domain.runtime import RuntimeRun, RuntimeRunKind, RuntimeRunReason, RuntimeRunStatus
+from backend.domain.runtime import (
+    RuntimeRun,
+    RuntimeRunKind,
+    RuntimeRunReason,
+    RuntimeRunStatus,
+    seal_v11_execution_contract,
+)
 
 
 def _contract() -> dict:
@@ -117,6 +123,70 @@ def test_v11_run_requires_a_frozen_token_ceiling() -> None:
             execution_contract_version=ExecutionContractVersion.V11,
             authority_mode=AuthorityMode.AGENT,
             execution_contract={**_contract(), "token_budget": None},
+        )
+
+
+def test_v11_sealed_run_without_persisted_model_turns_fails_closed() -> None:
+    contract = seal_v11_execution_contract(
+        {
+            "execution_contract_version": "v11",
+            "authority_mode": "agent",
+            "model_provider": "openai",
+            "model_name": "gpt-test",
+            "prompt_version": "v11-test",
+            "api_mode": "responses",
+            "endpoint_id": "endpoint-test",
+            "capability_artifact_hash": "artifact-test",
+            "tool_manifest": ["tool-a"],
+            "tool_manifest_hash": "tool-manifest-test",
+            "skill_catalog": {
+                "catalog_version": "skills-v1",
+                "catalog_hash": "skill-catalog-test",
+                "skill_names": "skill-a@v1",
+            },
+            "capability_identity": {
+                "provider": "openai",
+                "model": "gpt-test",
+                "api_mode": "responses",
+                "endpoint_id": "endpoint-test",
+                "artifact_hash": "artifact-test",
+            },
+            "limits": {
+                "max_turns": 8,
+                "max_investigators": 3,
+                "max_rounds": 2,
+                "token_budget": 1000,
+                "max_tool_calls_per_specialist": 3,
+                "tool_timeout_seconds": 10,
+            },
+            "retry_policy": {
+                "max_retries": 1,
+                "retryable_categories": ["transport", "rate_limit"],
+                "provider_max_retries": 0,
+                "sdk_max_retries": 0,
+            },
+            "tool_budget": 8,
+            "token_budget": 1000,
+            "timeout_seconds": 120.0,
+        }
+    )
+    with pytest.raises(ValueError, match="remaining model turns"):
+        RuntimeRun(
+            id="run-v11-missing-turn-state",
+            investigation_id="inv-1",
+            run_kind=RuntimeRunKind.LIVE,
+            strategy="adaptive",
+            run_reason=RuntimeRunReason.INITIAL,
+            model_provider=ModelProvider.OPENAI,
+            model_name="gpt-test",
+            prompt_version="v11-test",
+            tool_budget=8,
+            token_budget=1000,
+            timeout_seconds=120.0,
+            execution_contract_version="v11",
+            authority_mode="agent",
+            execution_contract=contract,
+            remaining_model_turns=None,
         )
 
 

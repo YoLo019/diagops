@@ -860,6 +860,11 @@ class DiagnosisPhaseExecutor:
                     )
                 )
             ),
+            remaining_model_turns=(
+                getattr(runtime_owner, "remaining_model_turns", None)
+                if self._execution_contract_version == ExecutionContractVersion.V11
+                else None
+            ),
             successful_tool_keys=sorted(
                 {
                     call.idempotency_key
