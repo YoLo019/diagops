@@ -11,13 +11,21 @@ def main(argv: list[str] | None = None) -> None:
     raw = list(sys.argv[1:] if argv is None else argv)
     if len(raw) < 2 or raw[0] != "--source-root":
         raise ValueError("prediction worker requires an explicit --source-root")
-    source_root = Path(raw[1]).resolve()
-    worker_path = Path(__file__).resolve()
+    raw_source_root = Path(raw[1]).expanduser()
+    worker_path = Path(__file__).expanduser()
+    if not raw_source_root.is_absolute() or not worker_path.is_absolute():
+        raise ValueError("prediction worker source and entrypoint must be absolute")
+    trusted_root = worker_path.parents[3]
+    sys.path.insert(0, str(trusted_root))
+    from backend.services.source_identity import reject_reparse_path, resolve_source_identity
+
+    reject_reparse_path(worker_path, "prediction worker entrypoint")
+    reject_reparse_path(raw_source_root, "prediction worker source root")
+    source_root = raw_source_root.resolve()
+    worker_path = worker_path.resolve()
     trusted_root = worker_path.parents[3]
     if source_root != trusted_root:
         raise ValueError("prediction worker source root does not match immutable entrypoint")
-    sys.path.insert(0, str(source_root))
-    from backend.services.source_identity import resolve_source_identity
 
     resolve_source_identity(source_root)
     expected_worker = source_root / "backend" / "benchmarks" / "rcaeval" / "prediction_worker.py"

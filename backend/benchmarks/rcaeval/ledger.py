@@ -675,11 +675,9 @@ class CustodianPairLedger:
             ).fetchone()
             if existing is not None:
                 raise ValueError("prediction side already attempted; pair is non-resumable")
-            raw_output_path = Path(output_dir).expanduser()
-            if raw_output_path.is_absolute():
-                output_locator = canonical_locator(raw_output_path)
-            else:
-                output_locator = canonical_locator(raw_output_path.resolve(strict=False))
+            # 调用方 locator 会作为身份字段持久化；若按当前 cwd 解析相对路径，
+            # ledger 就会依赖进程 cwd，并允许同一 side 以另一种 custodian 拼写重放。
+            output_locator = canonical_locator(Path(output_dir).expanduser())
             output_volume = volume_identity(Path(output_locator))
             token = secrets.token_urlsafe(32)
             expires_at = _now() + float(row["lease_seconds"])
@@ -757,6 +755,15 @@ class CustodianPairLedger:
             self._commit(connection, "complete_prediction_side")
 
     def invalidate_pair(self, reason: str) -> None:
+        try:
+            self._invalidate_pair(reason)
+        except sqlite3.OperationalError as exc:
+            # 观察到失败边界的进程也可能被同一 SQLite writer lock 阻塞；此时先
+            # 持久化 custodian recovery intent，交由下一次 custodian 入口收敛状态。
+            self._write_failure_intent(reason)
+            raise exc
+
+    def _invalidate_pair(self, reason: str) -> None:
         with self._connection() as connection:
             _begin_immediate(connection, self.SQLITE_BUSY_TIMEOUT_SECONDS)
             self._require_pair(connection)

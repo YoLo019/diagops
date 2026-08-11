@@ -35,7 +35,9 @@ def _freeze_and_open(ledger):
         ("single_intended", "d" * 64),
         ("multi_intended", "e" * 64),
     ):
-        lease = ledger.record_side_started(side, f"prediction-{side}")
+        lease = ledger.record_side_started(
+            side, str(ledger.canonical_root / f"prediction-{side}")
+        )
         ledger.record_side_completed(side, bundle_hash, lease_token=lease)
     ledger.prepare_prediction_set_freeze(
         prediction_set_hash="a" * 64,
@@ -92,7 +94,9 @@ def test_prediction_set_bind_transitions_ledger_identity_for_evaluate_reopen(tmp
         ("single_intended", "d" * 64),
         ("multi_intended", "e" * 64),
     ):
-        lease = ledger.record_side_started(side, f"prediction-{side}")
+        lease = ledger.record_side_started(
+            side, str(ledger.canonical_root / f"prediction-{side}")
+        )
         ledger.record_side_completed(side, bundle_hash, lease_token=lease)
 
     ledger.prepare_prediction_set_freeze(
@@ -136,13 +140,22 @@ def test_prediction_freeze_intent_reconciles_after_materialization_before_bind(t
     assert reopened.snapshot()["prediction_set_bound"] == 1
 
 
+def test_record_side_started_rejects_relative_output_locator(tmp_path):
+    ledger = _new_ledger(tmp_path)
+    with pytest.raises(ValueError, match="absolute|canonical|locator"):
+        ledger.record_side_started("single_intended", "relative-output")
+    assert ledger.side_snapshot() == {}
+
+
 def test_prediction_set_identity_transition_rejects_aba_and_tamper(tmp_path):
     ledger = _new_ledger(tmp_path)
     for side, bundle_hash in (
         ("single_intended", "d" * 64),
         ("multi_intended", "e" * 64),
     ):
-        lease = ledger.record_side_started(side, f"prediction-{side}")
+        lease = ledger.record_side_started(
+            side, str(ledger.canonical_root / f"prediction-{side}")
+        )
         ledger.record_side_completed(side, bundle_hash, lease_token=lease)
 
     ledger.prepare_prediction_set_freeze(
@@ -197,7 +210,9 @@ def test_ledger_connection_is_closed_after_context(tmp_path):
 
 def test_side_completion_waits_for_a_transient_sqlite_writer_lock(tmp_path):
     ledger = _new_ledger(tmp_path)
-    lease = ledger.record_side_started("single_intended", "output-a")
+    lease = ledger.record_side_started(
+        "single_intended", str(ledger.canonical_root / "output-a")
+    )
     blocker = sqlite3.connect(
         ledger.path,
         timeout=0,
@@ -289,7 +304,9 @@ def test_evaluation_completion_lock_failure_invalidates_label_lineage(
 
 def test_long_writer_lock_has_durable_recovery_for_prediction_completion(tmp_path):
     ledger = _new_ledger(tmp_path, lease_seconds=30)
-    lease = ledger.record_side_started("single_intended", "output-a")
+    lease = ledger.record_side_started(
+        "single_intended", str(ledger.canonical_root / "output-a")
+    )
     ledger.SQLITE_BUSY_TIMEOUT_SECONDS = 0.05
     blocker = sqlite3.connect(
         ledger.path,
@@ -315,6 +332,22 @@ def test_long_writer_lock_has_durable_recovery_for_prediction_completion(tmp_pat
     # A deterministic custodian read/recovery entry must converge the durable
     # failure intent without another prediction business operation.
     assert ledger.snapshot()["state"] == LedgerState.FAILED_NON_RESUMABLE.value
+
+
+def test_direct_invalidation_lock_failure_persists_custodian_intent(tmp_path):
+    ledger = _new_ledger(tmp_path)
+    ledger.SQLITE_BUSY_TIMEOUT_SECONDS = 0.05
+    blocker = sqlite3.connect(ledger.path, timeout=0, isolation_level=None)
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="locked|busy"):
+            ledger.invalidate_pair("freeze boundary failed")
+        assert ledger.failure_intent_path.is_file()
+    finally:
+        blocker.rollback()
+        blocker.close()
+    assert ledger.snapshot()["state"] == LedgerState.FAILED_NON_RESUMABLE.value
+    assert not ledger.failure_intent_path.exists()
 
 
 def test_long_writer_lock_has_durable_recovery_for_evaluation_completion(tmp_path):
@@ -349,7 +382,9 @@ def test_long_writer_lock_has_durable_recovery_for_evaluation_completion(tmp_pat
 
 def test_heartbeat_rejects_tampered_authorized_lineage(tmp_path):
     ledger = _new_ledger(tmp_path)
-    token = ledger.record_side_started("single_intended", "output-a")
+    token = ledger.record_side_started(
+        "single_intended", str(ledger.canonical_root / "output-a")
+    )
     with sqlite3.connect(ledger.path) as connection:
         connection.execute(
             "UPDATE pair_ledger SET authorized_evaluation_identity_hash = ? WHERE id = 1",
@@ -397,7 +432,9 @@ def test_reauthorization_token_is_one_time_and_reveal_epoch_monotonic(tmp_path):
     _reauthorize(ledger, "owner-once")
     with pytest.raises(ValueError, match="already consumed|failed pair"):
         _reauthorize(ledger, "owner-once")
-    ledger.record_side_started("single_intended", "output")
+    ledger.record_side_started(
+        "single_intended", str(ledger.canonical_root / "output")
+    )
     ledger.invalidate_pair("second failure")
     with pytest.raises(ValueError, match="already consumed|failed pair"):
         _reauthorize(ledger, "owner-once")
@@ -407,9 +444,13 @@ def test_label_open_is_bound_to_one_pair_across_output_directories(tmp_path):
     ledger = _new_ledger(tmp_path)
     ledger.invalidate_pair("reset fixture")
     _reauthorize(ledger, "fixture-retry")
-    single_lease = ledger.record_side_started("single_intended", "prediction-a")
+    single_lease = ledger.record_side_started(
+        "single_intended", str(ledger.canonical_root / "prediction-a")
+    )
     ledger.record_side_completed("single_intended", "d" * 64, lease_token=single_lease)
-    multi_lease = ledger.record_side_started("multi_intended", "prediction-b")
+    multi_lease = ledger.record_side_started(
+        "multi_intended", str(ledger.canonical_root / "prediction-b")
+    )
     ledger.record_side_completed("multi_intended", "e" * 64, lease_token=multi_lease)
     ledger.prepare_prediction_set_freeze(
         prediction_set_hash="a" * 64,
@@ -452,7 +493,9 @@ def test_label_open_requires_frozen_audit_identity_and_fail_closed_after_crash(t
         ("single_intended", "d" * 64),
         ("multi_intended", "e" * 64),
     ):
-        lease = ledger.record_side_started(side, f"prediction-{side}")
+        lease = ledger.record_side_started(
+            side, str(ledger.canonical_root / f"prediction-{side}")
+        )
         ledger.record_side_completed(side, bundle_hash, lease_token=lease)
     ledger.prepare_prediction_set_freeze(
         prediction_set_hash="a" * 64,
@@ -496,31 +539,41 @@ def test_failed_pair_needs_explicit_reauthorization_for_both_sides(tmp_path):
     ledger = _new_ledger(tmp_path)
     ledger.invalidate_pair("reset fixture")
     _reauthorize(ledger, "fixture-retry")
-    ledger.record_side_started("single_intended", "output-a")
+    ledger.record_side_started(
+        "single_intended", str(ledger.canonical_root / "output-a")
+    )
     ledger.invalidate_pair("transport failure")
 
     with pytest.raises(ValueError, match="reauthor"):
         ledger.record_side_started(
-            "multi_intended", "output-b"
+            "multi_intended", str(ledger.canonical_root / "output-b")
         )
     _reauthorize(ledger, "owner-token")
     ledger2 = ledger
-    ledger2.record_side_started("single_intended", "output-c")
+    ledger2.record_side_started(
+        "single_intended", str(ledger2.canonical_root / "output-c")
+    )
     with pytest.raises(ValueError, match="both|pair"):
-        ledger2.record_side_started("single_intended", "output-d")
+        ledger2.record_side_started(
+            "single_intended", str(ledger2.canonical_root / "output-d")
+        )
 
 
 def test_inflight_prediction_crash_blocks_the_other_side(tmp_path):
     ledger = _new_ledger(tmp_path)
     ledger.invalidate_pair("reset fixture")
     _reauthorize(ledger, "fixture-retry")
-    ledger.record_side_started("single_intended", "output-a")
+    ledger.record_side_started(
+        "single_intended", str(ledger.canonical_root / "output-a")
+    )
 
     with pytest.raises(TypeError):
         ledger.record_side_completed("single_intended", "d" * 64)
 
     with pytest.raises(ValueError, match="in-flight|reauthorization"):
-        ledger.record_side_started("multi_intended", "output-b")
+        ledger.record_side_started(
+            "multi_intended", str(ledger.canonical_root / "output-b")
+        )
 
 
 def _seed_pair_for_recovery(tmp_path, *, lease_seconds=1):
@@ -529,7 +582,9 @@ def _seed_pair_for_recovery(tmp_path, *, lease_seconds=1):
 
 def test_prediction_lease_expiry_recovers_both_sides_after_completion_lock(tmp_path):
     ledger = _seed_pair_for_recovery(tmp_path)
-    lease = ledger.record_side_started("single_intended", "output-a")
+    lease = ledger.record_side_started(
+        "single_intended", str(ledger.canonical_root / "output-a")
+    )
 
     blocker = sqlite3.connect(
         ledger.path,
@@ -560,7 +615,9 @@ def test_prediction_completion_lock_failure_invalidates_without_future_recovery(
     tmp_path,
 ):
     ledger = _seed_pair_for_recovery(tmp_path, lease_seconds=30)
-    lease = ledger.record_side_started("single_intended", "output-a")
+    lease = ledger.record_side_started(
+        "single_intended", str(ledger.canonical_root / "output-a")
+    )
     ledger.SQLITE_BUSY_TIMEOUT_SECONDS = 0.05
     blocker = sqlite3.connect(
         ledger.path,
@@ -597,7 +654,9 @@ def test_label_open_lease_expiry_requires_explicit_reauthorization(tmp_path):
         ("single_intended", "d" * 64),
         ("multi_intended", "e" * 64),
     ):
-        lease = ledger.record_side_started(side, f"output-{side}")
+        lease = ledger.record_side_started(
+            side, str(ledger.canonical_root / f"output-{side}")
+        )
         ledger.record_side_completed(side, bundle_hash, lease_token=lease)
     ledger.prepare_prediction_set_freeze(
         prediction_set_hash="a" * 64,
