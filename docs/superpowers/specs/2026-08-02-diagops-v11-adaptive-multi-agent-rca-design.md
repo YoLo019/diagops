@@ -1869,7 +1869,8 @@ spec is `review_required` pending a new independent review; M5 remains blocked
 at capability admission and no accuracy or completion claim is made.
 
 M5 fourth-round review-fix record (2026-08-12): base
-`2e8b276ed053e6d5c87f8590954705f3f4459acd`. The custodian ledger now seals
+`2e8b276ed053e6d5c87f8590954705f3f4459acd`; implementation head
+`da9dbb8496835bc1a2cca60a4d1b9764ad9bc822`. The custodian ledger now seals
 the provisional-to-frozen prediction identity transition and validates it on
 evaluator reopen; side records mechanically bind canonical output locators,
 checksum/bundle contents, partition/configuration identities and exact file

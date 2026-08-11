@@ -1259,7 +1259,7 @@ request only the missing authority.
 | T10 | implemented / verified | R8–R13, R16, R18, R21–R23, R26–R27 | Exact gate 855 passed/3 skipped/1 warning; full pytest 2071 passed/3 skipped/1 warning; offline rows=80 failed=0; runtime acceptance exit=0; Ruff/build/diff-check clean |
 | T11 | implemented / verifying | R14–R17, R24–R27 | 首轮至第四轮 review-fix 的 contract regressions 均按 RED→GREEN 修复；164 focused tests GREEN。新增冻结 prediction-set ledger identity transition、逐 side canonical output/checksum/bundle binding、authorized reauthorization lineage、统一 SQLite busy/backoff 与 completion/evaluation failure invalidation、freeze 前 reparse-path gate、exclusive root checksum 写入、无 Git packaged source manifest；保留 Single one-context、真实 V11/SQLite accounting、四配置/空 memory、exact cardinality/statistics、scorer/capability identity、external-cwd worker、frozen-bundle audit reconstruction、sealed RuntimeRun persistence 与 lease guards；M0-L1 golden vector 与 M0-L2 symlink rejection closed。独立复审尚未重新 approve。 |
 | T12 | blocked at capability admission | R14–R17, R25–R26 | 真实 runtime package 完整 checksum 复核通过：manifest `bb119fc9fe338f7cf2d6f03a82f87a0038a1a589fde0c96ad99b02504a5f3d73`/150 cases；但本 worktree capability artifact=0，`DIAGOPS_AGENTS_API_KEY/BASE_URL/MODEL` 均 absent。未执行 OB30 model run 或 SS30 四配置，未打开 SS labels，未冻结 acceptance policy。任务线程 Luna Max 配置不是 benchmark endpoint certification。 |
-| T13 | not started / protected | R1–R27 | TT90 predictions=0、formal label opens=0、paired attempts=0；未消耗 holdout。最新 clean code `094a20f2cd22066a00c32adead51b0e7b8489a63` 的仓库 gate：full pytest 2151 passed/3 skipped/1 warning，Ruff/frontend/offline/runtime/privacy/diff-check clean；production preflight 因缺少 `DIAGOPS_PRODUCTION_SCENARIO` 及 endpoint/credential 环境变量停止，未生成 artifact；Tempo claim 未发布/未运行。必须在同一 clean frozen source、passed capability identity 和已冻结 SS policy 下恢复；任何正式非可恢复失败仍按实现归档并停止。 |
+| T13 | not started / protected | R1–R27 | TT90 predictions=0、formal label opens=0、paired attempts=0；未消耗 holdout。最新 clean code `da9dbb8496835bc1a2cca60a4d1b9764ad9bc822` 的仓库 gate：focused 164 passed/1 warning，full pytest 2163 passed/3 skipped/1 warning，Ruff/frontend/offline/runtime/privacy/diff-check clean；production preflight 因 Docker Linux daemon unavailable 及缺少 endpoint/credential 环境变量停止，未生成 artifact；Tempo claim 未发布/未运行。必须在同一 clean frozen source、passed capability identity 和已冻结 SS policy 下恢复；任何正式非可恢复失败仍按实现归档并停止。 |
 
 Independent Plan review: completed on 2026-08-02; initial review found three
 high and two medium issues. That plan review does not substitute for the
@@ -1313,7 +1313,8 @@ predictions, attempts, and label opens remain zero. This plan is
 still the actual execution blocker.
 
 M5 fourth-round implementation/review-fix record (2026-08-12): base
-`2e8b276ed053e6d5c87f8590954705f3f4459acd`. The ledger now performs an atomic
+`2e8b276ed053e6d5c87f8590954705f3f4459acd`; implementation head
+`da9dbb8496835bc1a2cca60a4d1b9764ad9bc822`. The ledger now performs an atomic
 prediction-set identity transition from the provisional pair lineage to the
 exact frozen root and validates that transition on evaluator reopen. Freeze
 reads custodian side records before writing, verifies canonical output

@@ -195,7 +195,8 @@ fresh capability admission plus independent re-review; no accuracy claim is
 made.
 
 Verification evidence (M5 fourth-round review-fix, 2026-08-12): base was
-`2e8b276ed053e6d5c87f8590954705f3f4459acd`. RED→GREEN regressions now close
+`2e8b276ed053e6d5c87f8590954705f3f4459acd`; implementation head is
+`da9dbb8496835bc1a2cca60a4d1b9764ad9bc822`. RED→GREEN regressions now close
 the frozen prediction-set ledger-identity transition, exact side
 output/checksum/bundle binding, authorized reauthorization lineage, and
 completion/evaluation SQLite-lock failure convergence. The ledger uses one
