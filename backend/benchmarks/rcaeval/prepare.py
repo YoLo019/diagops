@@ -18,6 +18,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from backend.benchmarks.rcaeval.ledger import create_custodian_manifest
 from backend.benchmarks.rcaeval.models import (
     SYSTEM_TO_PARTITION,
     LabelEntry,
@@ -160,6 +161,11 @@ def prepare_partitions(source_root: Path, pin_path: Path, output_dir: Path) -> P
     _write_checksums(runtime_dir)
     _write_json(labels_dir / "labels.json", label_manifest.model_dump(mode="json"))
     _write_checksums(labels_dir)
+    create_custodian_manifest(
+        output_dir,
+        runtime_manifest_hash=runtime_manifest.manifest_hash,
+        label_manifest_hash=label_manifest.manifest_hash,
+    )
     return PrepareResult(
         runtime_manifest=runtime_manifest,
         label_manifest=label_manifest,

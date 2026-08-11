@@ -11,6 +11,7 @@ from backend.benchmarks.rcaeval.models import (
     CandidatePrediction,
     CasePrediction,
     EvidenceAuditDecision,
+    PredictionBundle,
     RcaEvalConfiguration,
 )
 
@@ -131,4 +132,44 @@ def test_prelabel_audit_binds_exact_prediction_bundle_hashes():
             export,
             manual,
             expected_bundle_hashes={RcaEvalConfiguration.MULTI_INTENDED: "b" * 64},
+            frozen_bundles={
+                RcaEvalConfiguration.MULTI_INTENDED: PredictionBundle.model_construct(
+                    configuration=RcaEvalConfiguration.MULTI_INTENDED,
+                    predictions=[
+                        _prediction().model_copy(
+                            update={
+                                "candidates": [
+                                    _prediction().candidates[0].model_copy(
+                                        update={"affected_service": "forged"}
+                                    )
+                                ]
+                            }
+                        )
+                    ],
+                    bundle_hash="a" * 64,
+                )
+            },
+        )
+
+    forged_bundle = PredictionBundle.model_construct(
+        configuration=RcaEvalConfiguration.MULTI_INTENDED,
+        predictions=[
+            _prediction().model_copy(
+                update={
+                    "candidates": [
+                        _prediction().candidates[0].model_copy(
+                            update={"affected_service": "forged"}
+                        )
+                    ]
+                }
+            )
+        ],
+        bundle_hash="a" * 64,
+    )
+    with pytest.raises(ValueError, match="frozen prediction bundle|candidates/evidence"):
+        validate_prelabel_audit(
+            export,
+            manual,
+            expected_bundle_hashes={RcaEvalConfiguration.MULTI_INTENDED: "a" * 64},
+            frozen_bundles={RcaEvalConfiguration.MULTI_INTENDED: forged_bundle},
         )

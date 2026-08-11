@@ -635,7 +635,7 @@ class ReplayService:
         external_call_count: int = 0,
     ) -> ReplayReport:
         replay_run = self.dependencies.store.create_run(
-            RuntimeRun(
+            RuntimeRun.create_new(
                 investigation_id=source.investigation_id,
                 run_kind=RuntimeRunKind.REPLAY,
                 strategy=source.strategy,

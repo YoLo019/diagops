@@ -59,6 +59,23 @@ def test_sqlite_v11_model_turn_budget_survives_store_reload(runtime_store) -> No
         )
 
 
+def test_sqlite_persisted_v11_missing_model_turns_fails_closed(runtime_store) -> None:
+    if not isinstance(runtime_store, SQLiteRuntimeStore):
+        return
+
+    from tests.runtime.test_v11_isolation_red import _v11_run
+
+    run = runtime_store.create_run(_v11_run("run-sqlite-missing-model-turns"))
+    with runtime_store.engine.begin() as connection:
+        connection.execute(
+            runtime_runs.update()
+            .where(runtime_runs.c.id == run.id)
+            .values(remaining_model_turns=None)
+        )
+    with pytest.raises(ValueError, match="persisted remaining model turns"):
+        runtime_store.get_run(run.id)
+
+
 def test_sqlite_store_persists_run_in_typed_columns(runtime_store) -> None:
     if not isinstance(runtime_store, SQLiteRuntimeStore):
         return

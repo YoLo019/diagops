@@ -331,7 +331,10 @@ def evaluate_acceptance(
     *,
     audit_export: EvidenceAuditExport,
     manual_audit: ManualAuditArtifact,
+    frozen_bundles: list[PredictionBundle] | None = None,
 ) -> AcceptanceDecision:
+    if frozen_bundles is None:
+        raise ValueError("frozen prediction bundles are required for acceptance")
     _validate_policy_hash(policy)
     _validate_artifact_hash(artifact)
     _validate_scorer_dependency_identity(
@@ -370,6 +373,26 @@ def evaluate_acceptance(
     if policy.evaluator_hash != scorer_dependency_hash():
         raise ValueError("acceptance evaluator changed after policy freeze")
     _validate_scorer_dependency_identity(policy.frozen_identity.scorer_dependency_hash)
+    by_configuration = {bundle.configuration: bundle for bundle in frozen_bundles}
+    if set(by_configuration) != {RcaEvalConfiguration.MULTI_INTENDED}:
+        raise ValueError("TT90 acceptance requires the frozen multi intended bundle")
+    multi_bundle = by_configuration[RcaEvalConfiguration.MULTI_INTENDED]
+    _validate_frozen_bundle(multi_bundle)
+    actual_bundle_hash = _canonical_hash(
+        multi_bundle.model_dump(mode="json", exclude={"bundle_hash"})
+    )
+    if multi_bundle.bundle_hash != actual_bundle_hash:
+        raise ValueError("frozen acceptance bundle hash changed")
+    validate_prelabel_audit(
+        audit_export,
+        manual_audit,
+        expected_bundle_hashes={
+            RcaEvalConfiguration.MULTI_INTENDED: artifact.prediction_bundle_hashes[
+                RcaEvalConfiguration.MULTI_INTENDED
+            ]
+        },
+        frozen_bundles=by_configuration,
+    )
     evidence_support = validate_manual_audit(audit_export, manual_audit)
     expected_audit_binding = {
         RcaEvalConfiguration.MULTI_INTENDED: artifact.prediction_bundle_hashes[
@@ -417,12 +440,14 @@ def freeze_acceptance_result(
     *,
     audit_export: EvidenceAuditExport,
     manual_audit: ManualAuditArtifact,
+    frozen_bundles: list[PredictionBundle] | None = None,
 ) -> AcceptanceResultArtifact:
     decision = evaluate_acceptance(
         artifact,
         policy,
         audit_export=audit_export,
         manual_audit=manual_audit,
+        frozen_bundles=frozen_bundles,
     )
     result = AcceptanceResultArtifact(
         evaluation_artifact_hash=artifact.artifact_hash,
@@ -443,6 +468,7 @@ def main() -> None:
     parser.add_argument("--labels", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--ledger", type=Path, required=True)
+    parser.add_argument("--custodian-manifest", type=Path, required=True)
     parser.add_argument("--partition", choices=("ss30", "tt90"), required=True)
     parser.add_argument("--prediction-set-hash", required=True)
     parser.add_argument("--audit-export", type=Path, required=True)
@@ -469,6 +495,7 @@ def main() -> None:
         export,
         manual,
         expected_bundle_hashes=expected_bundle_hashes,
+        frozen_bundles={bundle.configuration: bundle for bundle in bundles},
     )
     if any(bundle.partition.value != arguments.partition for bundle in bundles):
         raise ValueError("evaluator partition differs from frozen pair")
@@ -480,7 +507,9 @@ def main() -> None:
             bundle,
             FORMAL_CASE_COUNTS[arguments.partition],
         )
-    ledger = CustodianPairLedger(arguments.ledger)
+    ledger = CustodianPairLedger.from_manifest(arguments.custodian_manifest)
+    if ledger.path != arguments.ledger.resolve():
+        raise ValueError("evaluator ledger path is not the custodian canonical ledger")
     ledger.assert_label_open(
         partition=arguments.partition,
         prediction_set_hash=arguments.prediction_set_hash,

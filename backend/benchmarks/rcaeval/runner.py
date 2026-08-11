@@ -526,7 +526,7 @@ class RcaEvalCaseRunner:
             token_budget=budget.token_budget,
         )
         contract = build_execution_contract(runtime, budget, self.capability)
-        run = RuntimeRun(
+        run = RuntimeRun.create_new(
             id=run_id,
             investigation_id=record.id,
             run_kind=RuntimeRunKind.LIVE,
@@ -784,18 +784,27 @@ def frozen_run_identity(
     capability: EndpointCapabilityIdentity,
     tool_manifest_hash_value: str,
     skill_catalog_hash_value: str,
+    repository_root: Path,
 ) -> FrozenRunIdentity:
+    repository_root = repository_root.resolve()
     source_commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+        ["git", "rev-parse", "HEAD"],
+        cwd=repository_root,
+        check=True,
+        capture_output=True,
+        text=True,
     ).stdout.strip()
     dirty = bool(
         subprocess.run(
-            ["git", "status", "--porcelain"], check=True, capture_output=True, text=True
+            ["git", "status", "--porcelain"],
+            cwd=repository_root,
+            check=True,
+            capture_output=True,
+            text=True,
         ).stdout.strip()
     )
     if dirty:
         raise ValueError("formal prediction source must be clean")
-    repository_root = Path(__file__).resolve().parents[3]
     backend_root = repository_root / "backend"
     return FrozenRunIdentity(
         source_commit=source_commit,

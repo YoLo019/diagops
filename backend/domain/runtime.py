@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from copy import deepcopy
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -359,6 +360,33 @@ class RuntimeRun(RuntimeModel):
     execution_contract_version: ExecutionContractVersion = ExecutionContractVersion.V10_LEGACY
     authority_mode: AuthorityMode = AuthorityMode.LEGACY_DETERMINISTIC
     execution_contract: dict[str, Any] = Field(default_factory=dict)
+
+    @classmethod
+    def create_new(cls, **data: Any) -> RuntimeRun:
+        """Construct one new run and initialize its V11 budget exactly once."""
+        version = data.get("execution_contract_version")
+        if version == ExecutionContractVersion.V11 or version == ExecutionContractVersion.V11.value:
+            contract = data.get("execution_contract") or {}
+            limits = contract.get("limits") if isinstance(contract, dict) else None
+            budget = (
+                limits.get("max_turns")
+                if isinstance(limits, dict)
+                else contract.get("max_turns", 8)
+            )
+            if not isinstance(budget, int) or budget < 1:
+                budget = 8
+            if data.get("remaining_model_turns") is None:
+                data["remaining_model_turns"] = budget
+        return cls(**data)
+
+    @classmethod
+    def from_persisted(cls, payload: Mapping[str, Any]) -> RuntimeRun:
+        """Deserialize a persisted run; sealed V11 payloads may not omit budget state."""
+        version = payload.get("execution_contract_version")
+        if version == ExecutionContractVersion.V11 or version == ExecutionContractVersion.V11.value:
+            if "remaining_model_turns" not in payload or payload["remaining_model_turns"] is None:
+                raise ValueError("persisted remaining model turns are missing")
+        return cls.model_validate(payload)
 
     @field_validator("model_name", "prompt_version")
     @classmethod

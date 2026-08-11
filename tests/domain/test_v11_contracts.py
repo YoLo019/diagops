@@ -190,6 +190,17 @@ def test_v11_sealed_run_without_persisted_model_turns_fails_closed() -> None:
         )
 
 
+def test_v11_persisted_deserialization_rejects_missing_or_null_model_turns() -> None:
+    payload = _run().model_dump(mode="python")
+    payload["execution_contract"] = seal_v11_execution_contract(_contract())
+    payload.pop("remaining_model_turns", None)
+    with pytest.raises(ValueError, match="persisted remaining model turns"):
+        RuntimeRun.from_persisted(payload)
+    payload["remaining_model_turns"] = None
+    with pytest.raises(ValueError, match="persisted remaining model turns"):
+        RuntimeRun.from_persisted(payload)
+
+
 def test_v11_lead_decision_rejects_unbounded_or_invalid_action() -> None:
     with pytest.raises(ValidationError):
         LeadDecision(action=LeadAction.INVESTIGATE, summary="x", task_ids=[])

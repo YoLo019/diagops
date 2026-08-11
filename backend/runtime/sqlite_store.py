@@ -1678,7 +1678,7 @@ class SQLiteRuntimeStore:
         data.pop("frozen_business_projection", None)
         data.pop("benchmark_replay_locator", None)
         try:
-            return RuntimeRun.model_validate(data)
+            return RuntimeRun.from_persisted(data)
         except ValidationError:
             if not self._has_contract_projection_mismatch(data):
                 raise
@@ -1709,7 +1709,7 @@ class SQLiteRuntimeStore:
             data.pop("next_event_sequence", None)
             data.pop("frozen_business_projection", None)
             data["execution_contract"] = self._safe_contract_projection(data)
-            return RuntimeRun.model_validate(data)
+            return RuntimeRun.from_persisted(data)
 
     def _repair_contract_integrity(
         self,

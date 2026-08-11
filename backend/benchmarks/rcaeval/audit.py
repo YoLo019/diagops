@@ -119,9 +119,8 @@ def validate_manual_audit(
     if artifact.rubric_hash != _canonical_hash(RUBRIC):
         raise ValueError("manual audit rubric changed after freeze")
     pair_ids = [item.pair_id for item in artifact.decisions]
-    if len(pair_ids) != len(set(pair_ids)) or set(pair_ids) != {
-        item.pair_id for item in export.pairs
-    }:
+    expected_pair_ids = sorted(item.pair_id for item in export.pairs)
+    if pair_ids != expected_pair_ids:
         raise ValueError("manual audit decisions do not match the frozen export")
     reviewers = {item.reviewer_id for item in artifact.decisions}
     if reviewers != {artifact.reviewer_id}:
@@ -141,13 +140,42 @@ def validate_prelabel_audit(
     artifact: ManualAuditArtifact,
     *,
     expected_bundle_hashes: dict,
+    frozen_bundles: dict | None = None,
 ) -> tuple[str, str]:
     """Validate the complete pre-label export and bind it to frozen bundles."""
-    validate_manual_audit(export, artifact)
+    if frozen_bundles is None:
+        raise ValueError("frozen prediction bundles are required for pre-label audit")
     actual = {str(key): value for key, value in export.prediction_bundle_hashes.items()}
     expected = {str(key): value for key, value in expected_bundle_hashes.items()}
     if actual != expected:
         raise ValueError("pre-label audit belongs to a different prediction bundle set")
+    frozen = {
+        str(key): value for key, value in frozen_bundles.items()
+    }
+    if set(frozen) != set(expected) or any(
+        frozen[key].bundle_hash != expected[key] for key in expected
+    ):
+        raise ValueError("frozen prediction bundles do not match the expected identities")
+    for bundle in frozen.values():
+        actual_bundle_hash = _canonical_hash(
+            bundle.model_dump(mode="json", exclude={"bundle_hash"})
+        )
+        if bundle.bundle_hash != actual_bundle_hash:
+            raise ValueError("frozen prediction bundle changed after freeze")
+    expected_export = export_evidence_pairs(
+        [
+            prediction
+            for key in sorted(frozen)
+            for prediction in frozen[key].predictions
+        ],
+        labels_visible=False,
+        prediction_bundle_hashes={
+            key: frozen[key].bundle_hash for key in sorted(frozen)
+        },
+    )
+    if export.model_dump(mode="json") != expected_export.model_dump(mode="json"):
+        raise ValueError("pre-label audit pairs do not match frozen prediction candidates/evidence")
+    validate_manual_audit(export, artifact)
     return export.export_hash, artifact.artifact_hash
 
 

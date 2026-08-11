@@ -219,6 +219,9 @@ def test_prepare_is_byte_equivalent_on_repeat(source_root, pin_path, tmp_path):
 
     first_files = _package_files(first.output_dir)
     second_files = _package_files(second.output_dir)
+    # custodian 锚点刻意绑定绝对 canonical root；runtime/label 包字节仍须跨输出根稳定。
+    first_files.pop("custodian-manifest.json")
+    second_files.pop("custodian-manifest.json")
     assert first_files == second_files
     assert first.runtime_manifest.manifest_hash == second.runtime_manifest.manifest_hash
     assert first.label_manifest.manifest_hash == second.label_manifest.manifest_hash

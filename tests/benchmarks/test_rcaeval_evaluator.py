@@ -243,6 +243,7 @@ def test_final_acceptance_rejects_self_consistent_stale_scorer_identity(
             stale_policy,
             audit_export=audit_export,
             manual_audit=manual_audit,
+            frozen_bundles=[multi],
         )
 
 
@@ -411,6 +412,7 @@ def test_frozen_bundle_evaluation_and_acceptance_policy(tmp_path: Path):
         policy,
         audit_export=audit_export,
         manual_audit=manual_audit,
+        frozen_bundles=[multi],
     )
 
     assert artifact.summaries[RcaEvalConfiguration.MULTI_INTENDED].exact_top1 == 1
@@ -424,6 +426,7 @@ def test_frozen_bundle_evaluation_and_acceptance_policy(tmp_path: Path):
         policy,
         audit_export=audit_export,
         manual_audit=manual_audit,
+        frozen_bundles=[multi],
     )
     assert result.decision == decision
     assert result.evaluation_artifact_hash == artifact.artifact_hash
@@ -565,6 +568,7 @@ def test_acceptance_rejects_tampered_policy_wrong_partition_and_mixed_identity(
             policy.model_copy(update={"final_exact_gate": 0.95}),
             audit_export=_passing_audit(multi)[0],
             manual_audit=_passing_audit(multi)[1],
+            frozen_bundles=[multi],
         )
     wrong_partition = artifact.model_copy(update={"partition": RcaEvalPartition.SS30})
     wrong_partition.artifact_hash = _artifact_hash(wrong_partition)
@@ -574,6 +578,7 @@ def test_acceptance_rejects_tampered_policy_wrong_partition_and_mixed_identity(
             policy,
             audit_export=_passing_audit(multi)[0],
             manual_audit=_passing_audit(multi)[1],
+            frozen_bundles=[multi],
         )
     wrong_identity = artifact.model_copy(
         update={
@@ -589,6 +594,7 @@ def test_acceptance_rejects_tampered_policy_wrong_partition_and_mixed_identity(
             policy,
             audit_export=_passing_audit(multi)[0],
             manual_audit=_passing_audit(multi)[1],
+            frozen_bundles=[multi],
         )
 
     wrong_configuration_set = artifact.model_copy(
@@ -612,6 +618,7 @@ def test_acceptance_rejects_tampered_policy_wrong_partition_and_mixed_identity(
             policy,
             audit_export=_passing_audit(multi)[0],
             manual_audit=_passing_audit(multi)[1],
+            frozen_bundles=[multi],
         )
 
     audit_export, manual_audit = _passing_audit(multi)
@@ -621,6 +628,7 @@ def test_acceptance_rejects_tampered_policy_wrong_partition_and_mixed_identity(
             policy,
             audit_export=audit_export,
             manual_audit=manual_audit.model_copy(update={"pass_rate": 0.5}),
+            frozen_bundles=[multi],
         )
     wrong_export = export_evidence_pairs(
         multi.predictions,
@@ -634,6 +642,7 @@ def test_acceptance_rejects_tampered_policy_wrong_partition_and_mixed_identity(
             policy,
             audit_export=wrong_export,
             manual_audit=wrong_manual,
+            frozen_bundles=[multi],
         )
 
 
@@ -817,6 +826,7 @@ def test_cli_freezes_policy_and_archives_tt90_acceptance(tmp_path: Path):
             policy=paths["policy"],
             audit_export=paths["export"],
             manual_audit=paths["audit"],
+            bundle=[tmp_path / "bundles" / "multi_intended" / "predictions.json"],
             output=paths["result"],
         )
     )

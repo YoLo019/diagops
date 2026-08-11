@@ -216,10 +216,16 @@ def current_execution_environment() -> CapabilityExecutionEnvironment:
     )
 
 
-def _git_identity() -> tuple[str, bool]:
+def _repository_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _git_identity(repository_root: Path) -> tuple[str, bool]:
+    repository_root = repository_root.resolve()
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
+            cwd=repository_root,
             capture_output=True,
             text=True,
             timeout=10,
@@ -229,6 +235,7 @@ def _git_identity() -> tuple[str, bool]:
         if result.returncode == 0 and revision:
             status = subprocess.run(
                 ["git", "status", "--porcelain"],
+                cwd=repository_root,
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -240,8 +247,8 @@ def _git_identity() -> tuple[str, bool]:
     return "0" * 40, True
 
 
-def _code_revision() -> str:
-    return _git_identity()[0]
+def _code_revision(repository_root: Path) -> str:
+    return _git_identity(repository_root)[0]
 
 
 def validate_capability_for_prediction(
@@ -251,6 +258,7 @@ def validate_capability_for_prediction(
     model: str,
     endpoint_id_value: str,
     expected_parallelism: int,
+    repository_root: Path,
 ) -> None:
     """Admission gate for formal prediction; every identity is current-bound."""
     if artifact.result != "passed":
@@ -259,7 +267,7 @@ def validate_capability_for_prediction(
         raise ValueError("capability provider/model identity is stale")
     if artifact.endpoint_id != endpoint_id_value:
         raise ValueError("capability endpoint identity is stale")
-    revision, dirty = _git_identity()
+    revision, dirty = _git_identity(repository_root)
     if artifact.git_dirty or dirty or artifact.code_revision != revision:
         raise ValueError("capability code revision is stale or dirty")
     openai_version, agents_version = _sdk_versions()
@@ -402,6 +410,7 @@ async def certify_endpoint_async(
     parallelism: int = DEFAULT_CERTIFICATION_PARALLELISM,
     deadline_seconds: float = DEFAULT_CERTIFICATION_DEADLINE_SECONDS,
     client_factory=None,
+    repository_root: Path | None = None,
 ) -> ModelCapabilityArtifact:
     """对真实 compatible endpoint 运行 live 认证；只证明协议能力不证明准确性。"""
     canonical = canonicalize_endpoint(base_url)
@@ -425,7 +434,9 @@ async def certify_endpoint_async(
     finally:
         await client.close()
     openai_version, agents_version = _sdk_versions()
-    code_revision, git_dirty = _git_identity()
+    code_revision, git_dirty = _git_identity(
+        _repository_root() if repository_root is None else repository_root
+    )
     return ModelCapabilityArtifact(
         provider="openai_compatible",
         model=model,

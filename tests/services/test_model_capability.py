@@ -2,6 +2,7 @@
 
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
@@ -285,4 +286,15 @@ def test_prediction_admission_rejects_stale_revision_and_insufficient_parallelis
             model="compat-model",
             endpoint_id_value=_ENDPOINT_ID,
             expected_parallelism=3,
+            repository_root=Path(__file__).resolve().parents[2],
         )
+
+
+def test_git_identity_is_explicit_and_independent_of_process_cwd(tmp_path, monkeypatch):
+    from backend.services.model_capability import _git_identity
+
+    repository_root = Path(__file__).resolve().parents[2]
+    monkeypatch.chdir(tmp_path)
+    revision, dirty = _git_identity(repository_root)
+    assert len(revision) == 40
+    assert isinstance(dirty, bool)

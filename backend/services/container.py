@@ -469,7 +469,7 @@ class AppContainer:
                 "timeout_seconds": float(self.settings.agents.timeout_seconds),
             }
             contract = seal_v11_execution_contract(contract)
-        run = RuntimeRun(
+        run = RuntimeRun.create_new(
             investigation_id=investigation_id,
             run_kind=RuntimeRunKind.LIVE,
             strategy=strategy,

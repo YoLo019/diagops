@@ -42,7 +42,13 @@ def main() -> None:
         "--pair-root",
         type=Path,
         required=True,
-        help="custodian-owned root shared by every prediction side",
+        help="output grouping root; it must be inside the frozen custodian root",
+    )
+    launch_predict.add_argument(
+        "--custodian-manifest",
+        type=Path,
+        required=True,
+        help="immutable custodian-owned root manifest produced by prepare",
     )
     launch_predict.add_argument("--reauthorization-token")
     launch_predict.add_argument(
@@ -60,12 +66,14 @@ def main() -> None:
         "freeze-set", help="在所有 prediction 配置完成后冻结 evaluator 输入根"
     )
     freeze_set.add_argument("--root", type=Path, required=True)
+    freeze_set.add_argument("--custodian-manifest", type=Path, required=True)
     freeze_set.add_argument("--partition", choices=("ss30", "tt90"), required=True)
 
     evaluate = commands.add_parser(
         "evaluate", help="在隔离子进程中只打开一次 labels 并评估冻结 prediction set"
     )
     evaluate.add_argument("--predictions-root", type=Path, required=True)
+    evaluate.add_argument("--custodian-manifest", type=Path, required=True)
     evaluate.add_argument("--partition", choices=("ss30", "tt90"), required=True)
     evaluate.add_argument("--prediction-set-hash", required=True)
     evaluate.add_argument("--label-package", type=Path, required=True)
@@ -88,6 +96,7 @@ def main() -> None:
     )
     accept.add_argument("--evaluation", type=Path, required=True)
     accept.add_argument("--policy", type=Path, required=True)
+    accept.add_argument("--bundle", type=Path, action="append", required=True)
     accept.add_argument("--audit-export", type=Path, required=True)
     accept.add_argument("--manual-audit", type=Path, required=True)
     accept.add_argument("--output", type=Path, required=True)
@@ -153,7 +162,10 @@ def _add_prediction_arguments(parser) -> None:
 
 
 def _launch_predict(arguments) -> None:
-    from backend.benchmarks.rcaeval.isolation import build_prediction_launch
+    from backend.benchmarks.rcaeval.isolation import (
+        build_prediction_launch,
+        verify_runtime_package,
+    )
     from backend.benchmarks.rcaeval.ledger import CustodianPairLedger
 
     output = arguments.output.resolve()
@@ -162,8 +174,17 @@ def _launch_predict(arguments) -> None:
         raise ValueError("prediction output must stay inside the custodian pair root")
     if output.exists():
         raise ValueError("prediction output already exists")
+    ledger = CustodianPairLedger.from_manifest(arguments.custodian_manifest)
+    canonical_root = ledger.canonical_root
+    if not _same_path(arguments.runtime, canonical_root / "runtime"):
+        raise ValueError("runtime package is not the custodian-frozen runtime root")
+    if verify_runtime_package(arguments.runtime).manifest_hash != ledger.runtime_manifest_hash:
+        raise ValueError("runtime manifest differs from the custodian root manifest")
+    if not _same_path(arguments.label_package, canonical_root / "labels"):
+        raise ValueError("label package is not the custodian-frozen label root")
+    if not _within(pair_root, canonical_root):
+        raise ValueError("pair root must stay inside the canonical custodian root")
     pair_root.mkdir(parents=True, exist_ok=True)
-    ledger = CustodianPairLedger(_pair_ledger_path(pair_root))
     pair_identity = _prediction_pair_identity(arguments)
     sides = _formal_configuration_names(arguments.partition)
     ledger.initialize(
@@ -172,16 +193,19 @@ def _launch_predict(arguments) -> None:
         expected_sides=sides,
     )
     if arguments.reauthorization_token:
-        ledger.reauthorize(arguments.reauthorization_token)
+        ledger.reauthorize(
+            arguments.reauthorization_token,
+            authorized_evaluation_identity=pair_identity,
+        )
     prediction_lease = ledger.record_side_started(arguments.configuration, str(output))
     try:
         ledger.heartbeat(prediction_lease)
         output.parent.mkdir(parents=True, exist_ok=True)
         child_argv = [
             sys.executable,
-            "-m",
-            "backend.benchmarks.rcaeval",
-            "predict",
+            str(Path(__file__).with_name("prediction_worker.py").resolve()),
+            "--source-root",
+            str(_repository_root()),
             "--runtime",
             str(arguments.runtime),
             "--partition",
@@ -222,14 +246,15 @@ def _launch_predict(arguments) -> None:
         subprocess.run(spec.argv, cwd=spec.cwd, env=spec.env, check=True)
         sums_path = output / "SHA256SUMS"
         bundle_hash = hashlib.sha256(sums_path.read_bytes()).hexdigest()
+        _record_side_completed_with_retry(
+            ledger,
+            arguments.configuration,
+            bundle_hash,
+            prediction_lease,
+        )
     except BaseException:
-        ledger.invalidate_pair("prediction side failed or was interrupted")
+        _invalidate_pair_with_retry(ledger, "prediction side failed or was interrupted")
         raise
-    ledger.record_side_completed(
-        arguments.configuration,
-        bundle_hash,
-        lease_token=prediction_lease,
-    )
     print(f"prediction completed: {bundle_hash}")
 
 
@@ -271,6 +296,7 @@ def _predict(arguments) -> None:
         model=artifact.model,
         endpoint_id_value=endpoint_id(canonical_endpoint),
         expected_parallelism=3,
+        repository_root=_repository_root(),
     )
     api_key = os.environ.get("DIAGOPS_AGENTS_API_KEY", "").strip()
     if not api_key:
@@ -333,6 +359,7 @@ def _predict(arguments) -> None:
         capability=capability,
         tool_manifest_hash_value=contract["tool_manifest_hash"],
         skill_catalog_hash_value=contract["skill_catalog"]["catalog_hash"],
+        repository_root=_repository_root(),
     )
     bundle = PredictionBundle(
         partition=partition,
@@ -365,7 +392,9 @@ def _freeze_set(arguments) -> None:
         expected_configurations=configurations,
         expected_case_count=count,
     )
-    ledger = CustodianPairLedger(_pair_ledger_path(arguments.root.resolve()))
+    ledger = CustodianPairLedger.from_manifest(arguments.custodian_manifest)
+    if not _within(arguments.root.resolve(), ledger.canonical_root):
+        raise ValueError("prediction root must stay inside the canonical custodian root")
     ledger.bind_prediction_set_hash(digest)
     print(f"prediction set frozen: {digest}")
 
@@ -400,7 +429,17 @@ def _evaluate(arguments) -> None:
     if _within(output_dir, prediction_root):
         raise ValueError("evaluation output must stay outside the frozen prediction root")
     evaluation_path = output_dir / "evaluation.json"
-    ledger = CustodianPairLedger(_pair_ledger_path(prediction_root))
+    ledger = CustodianPairLedger.from_manifest(arguments.custodian_manifest)
+    if not _same_path(prediction_root.parent, ledger.canonical_root):
+        raise ValueError("prediction root is not mapped to the canonical custodian root")
+    if not _same_path(arguments.label_package, ledger.canonical_root / "labels"):
+        raise ValueError("label package is not the custodian-frozen label root")
+    if arguments.runtime_manifest_hash != ledger.runtime_manifest_hash:
+        raise ValueError("runtime manifest differs from the custodian root manifest")
+    if arguments.label_manifest_hash != ledger.label_manifest_hash:
+        raise ValueError("label manifest differs from the custodian root manifest")
+    if not _within(prediction_root, ledger.canonical_root):
+        raise ValueError("prediction root must stay inside the canonical custodian root")
     argv = [sys.executable, "-m", "backend.benchmarks.rcaeval.evaluator"]
     for configuration in configurations:
         argv.extend(
@@ -421,6 +460,8 @@ def _evaluate(arguments) -> None:
             str(evaluation_path),
             "--ledger",
             str(ledger.path),
+            "--custodian-manifest",
+            str(arguments.custodian_manifest),
             "--partition",
             arguments.partition,
             "--prediction-set-hash",
@@ -465,11 +506,15 @@ def _evaluate(arguments) -> None:
         expected_sides=tuple(configuration.value for configuration in configurations),
     )
     if arguments.reauthorization_token:
-        ledger.reauthorize(arguments.reauthorization_token)
+        ledger.reauthorize(
+            arguments.reauthorization_token,
+            authorized_evaluation_identity=arguments.prediction_set_hash,
+        )
     validate_prelabel_audit(
         audit_export,
         manual_audit,
         expected_bundle_hashes=expected_bundle_hashes,
+        frozen_bundles=bundles,
     )
     ledger.bind_prediction_set_hash(spec.predictions_hash)
     evaluation_reserved = False
@@ -538,6 +583,7 @@ def _accept(arguments) -> None:
         EvaluationArtifact,
         EvidenceAuditExport,
         ManualAuditArtifact,
+        PredictionBundle,
     )
 
     result = freeze_acceptance_result(
@@ -553,6 +599,10 @@ def _accept(arguments) -> None:
         manual_audit=ManualAuditArtifact.model_validate_json(
             arguments.manual_audit.read_text(encoding="utf-8")
         ),
+        frozen_bundles=[
+            PredictionBundle.model_validate_json(path.read_text(encoding="utf-8"))
+            for path in arguments.bundle
+        ],
     )
     _write_new_artifact(arguments.output, result)
     print(f"TT90 acceptance archived: {result.artifact_hash}")
@@ -574,8 +624,11 @@ def _write_new_artifact(path: Path, artifact) -> None:
     )
 
 
-def _pair_ledger_path(pair_root: Path) -> Path:
-    return pair_root.parent / f".{pair_root.name}-custodian-pair-ledger.sqlite3"
+def _pair_ledger_path(custodian_manifest: Path) -> Path:
+    """Resolve only the immutable custodian manifest, never an output directory."""
+    from backend.benchmarks.rcaeval.ledger import CustodianPairLedger
+
+    return CustodianPairLedger.from_manifest(custodian_manifest).path
 
 
 def _formal_configuration_names(partition: str) -> tuple[str, ...]:
@@ -594,12 +647,7 @@ def _prediction_pair_identity(arguments) -> str:
 
     manifest = verify_runtime_package(arguments.runtime)
     capability = read_capability_artifact(arguments.capability_artifact)
-    source_revision = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    source_revision = _git_revision(_repository_root())
     payload = {
         "partition": arguments.partition,
         "runtime_manifest_hash": manifest.manifest_hash,
@@ -615,6 +663,58 @@ def _prediction_pair_identity(arguments) -> str:
 
 def _within(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    return os.path.normcase(str(left.resolve())) == os.path.normcase(str(right.resolve()))
+
+
+def _record_side_completed_with_retry(
+    ledger, side: str, bundle_hash: str, lease_token: str
+) -> None:
+    import sqlite3
+    import time
+
+    for attempt in range(3):
+        try:
+            ledger.record_side_completed(side, bundle_hash, lease_token=lease_token)
+            return
+        except sqlite3.OperationalError:
+            if attempt == 2:
+                raise
+            time.sleep(0.02 * (attempt + 1))
+
+
+def _invalidate_pair_with_retry(ledger, reason: str) -> None:
+    import sqlite3
+    import time
+
+    for attempt in range(3):
+        try:
+            ledger.invalidate_pair(reason)
+            return
+        except sqlite3.OperationalError:
+            if attempt == 2:
+                raise
+            time.sleep(0.02 * (attempt + 1))
+
+
+def _repository_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def _git_revision(repository_root: Path) -> str:
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repository_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    revision = result.stdout.strip()
+    if len(revision) != 40:
+        raise ValueError("repository revision is not immutable")
+    return revision
 
 
 if __name__ == "__main__":

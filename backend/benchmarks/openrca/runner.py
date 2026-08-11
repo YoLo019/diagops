@@ -201,7 +201,7 @@ class OpenRcaDiagnosisRunner:
             else {}
         )
         runtime_run = self.runtime_store.create_run(
-            RuntimeRun(
+            RuntimeRun.create_new(
                 investigation_id=record.id,
                 run_kind=RuntimeRunKind.LIVE,
                 strategy=strategy,

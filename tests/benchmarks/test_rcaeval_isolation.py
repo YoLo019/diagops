@@ -2,6 +2,9 @@ import ast
 import hashlib
 import json
 import os
+import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -128,15 +131,22 @@ def _runtime_hash() -> str:
 
 
 def _seed_pair_ledger(predictions_root: Path, partition: str) -> None:
-    from backend.benchmarks.rcaeval.__main__ import _pair_ledger_path
-    from backend.benchmarks.rcaeval.ledger import CustodianPairLedger
+    from backend.benchmarks.rcaeval.ledger import (
+        CustodianPairLedger,
+        create_custodian_manifest,
+    )
 
     configurations = (
         tuple(item.value for item in RcaEvalConfiguration)
         if partition == "ss30"
         else ("single_intended", "multi_intended")
     )
-    ledger = CustodianPairLedger(_pair_ledger_path(predictions_root.resolve()))
+    manifest = create_custodian_manifest(
+        predictions_root.parent,
+        runtime_manifest_hash="c" * 64,
+        label_manifest_hash="b" * 64,
+    )
+    ledger = CustodianPairLedger.from_manifest(manifest)
     ledger.initialize(
         partition=partition,
         prediction_set_hash="a" * 64,
@@ -595,14 +605,15 @@ def test_formal_evaluation_marks_post_child_artifact_failure_non_resumable(
                 audit_export=tmp_path / "audit.json",
                     manual_audit=tmp_path / "manual.json",
                     reauthorization_token=None,
+                    custodian_manifest=tmp_path / "custodian-manifest.json",
             )
         )
 
-    from backend.benchmarks.rcaeval.__main__ import _pair_ledger_path
     from backend.benchmarks.rcaeval.ledger import CustodianPairLedger, LedgerState
 
     snapshot = CustodianPairLedger(
-        _pair_ledger_path(predictions_root)
+        predictions_root.parent / "pair-ledger.sqlite3",
+        custodian_manifest=tmp_path / "custodian-manifest.json",
     ).snapshot()
     assert snapshot["state"] == LedgerState.FAILED_NON_RESUMABLE.value
 
@@ -614,11 +625,26 @@ def test_prediction_worker_rejects_direct_unisolated_entry(monkeypatch):
         _predict(SimpleNamespace())
 
 
+def test_prediction_worker_imports_from_external_cwd_without_editable_install(tmp_path):
+    source_root = Path(__file__).resolve().parents[2]
+    worker = source_root / "backend" / "benchmarks" / "rcaeval" / "prediction_worker.py"
+    result = subprocess.run(
+        [sys.executable, str(worker), "--source-root", str(source_root), "--help"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "--runtime" in result.stdout
+
+
 def test_prediction_launcher_sanitizes_child_and_never_passes_label_locator(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
     from backend.benchmarks.rcaeval import isolation
+    from backend.benchmarks.rcaeval.ledger import create_custodian_manifest
 
     captured = {}
 
@@ -634,12 +660,22 @@ def test_prediction_launcher_sanitizes_child_and_never_passes_label_locator(
         (output / "SHA256SUMS").write_text("frozen\n", encoding="utf-8")
 
     monkeypatch.setattr(isolation, "build_prediction_launch", build_spec)
+    monkeypatch.setattr(
+        isolation,
+        "verify_runtime_package",
+        lambda _: SimpleNamespace(manifest_hash="1" * 64),
+    )
     monkeypatch.setattr("subprocess.run", run_child)
     monkeypatch.setattr(
         "backend.benchmarks.rcaeval.__main__._prediction_pair_identity",
         lambda _: "a" * 64,
     )
-    label_path = tmp_path / "private-labels"
+    label_path = tmp_path / "labels"
+    custodian_manifest = create_custodian_manifest(
+        tmp_path,
+        runtime_manifest_hash="1" * 64,
+        label_manifest_hash="2" * 64,
+    )
 
     _launch_predict(
         SimpleNamespace(
@@ -657,6 +693,7 @@ def test_prediction_launcher_sanitizes_child_and_never_passes_label_locator(
             timeout_seconds=120,
                 label_package=label_path,
                 reauthorization_token=None,
+                custodian_manifest=custodian_manifest,
         )
     )
 
@@ -664,6 +701,75 @@ def test_prediction_launcher_sanitizes_child_and_never_passes_label_locator(
     assert str(label_path) not in child_argv
     assert captured["environ"]["RCAEVAL_PREDICTION_CHILD"] == "1"
     assert str(label_path) in captured["forbidden_locators"]
+
+
+def test_prediction_completion_failure_invalidates_pair_without_future_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from backend.benchmarks.rcaeval import isolation
+    from backend.benchmarks.rcaeval.ledger import (
+        CustodianPairLedger,
+        LedgerState,
+        create_custodian_manifest,
+    )
+
+    pair_root = tmp_path / "pair-root"
+    output = pair_root / "single_intended"
+    label_path = tmp_path / "labels"
+    manifest = create_custodian_manifest(
+        tmp_path,
+        runtime_manifest_hash="1" * 64,
+        label_manifest_hash="2" * 64,
+    )
+
+    monkeypatch.setattr(
+        isolation,
+        "build_prediction_launch",
+        lambda **kwargs: SimpleNamespace(argv=tuple(kwargs["argv"]), cwd=str(tmp_path), env={}),
+    )
+    monkeypatch.setattr(
+        isolation,
+        "verify_runtime_package",
+        lambda _: SimpleNamespace(manifest_hash="1" * 64),
+    )
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *_, **__: (
+            output.mkdir(parents=True),
+            (output / "SHA256SUMS").write_text("frozen\n", encoding="utf-8"),
+        ),
+    )
+    monkeypatch.setattr(
+        "backend.benchmarks.rcaeval.__main__._prediction_pair_identity",
+        lambda _: "a" * 64,
+    )
+
+    def locked_completion(self, *args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(CustodianPairLedger, "record_side_completed", locked_completion)
+    with pytest.raises(sqlite3.OperationalError):
+        _launch_predict(
+            SimpleNamespace(
+                runtime=tmp_path / "runtime",
+                pair_root=pair_root,
+                custodian_manifest=manifest,
+                partition="ss30",
+                configuration="single_intended",
+                base_url="https://endpoint.invalid/v1",
+                capability_artifact=tmp_path / "capability.json",
+                database=tmp_path / "runtime.db",
+                output=output,
+                token_budget=4_000,
+                max_turns=8,
+                tool_budget=8,
+                timeout_seconds=120,
+                label_package=label_path,
+                reauthorization_token=None,
+            )
+        )
+    snapshot = CustodianPairLedger.from_manifest(manifest).snapshot()
+    assert snapshot["state"] == LedgerState.FAILED_NON_RESUMABLE.value
 
 
 def test_formal_evaluation_rejects_child_artifact_with_wrong_label_binding(
@@ -750,13 +856,14 @@ def test_formal_evaluation_rejects_child_artifact_with_wrong_label_binding(
                 audit_export=tmp_path / "audit.json",
                     manual_audit=tmp_path / "manual.json",
                     reauthorization_token=None,
+                    custodian_manifest=tmp_path / "custodian-manifest.json",
             )
         )
 
-    from backend.benchmarks.rcaeval.__main__ import _pair_ledger_path
     from backend.benchmarks.rcaeval.ledger import CustodianPairLedger, LedgerState
 
     snapshot = CustodianPairLedger(
-        _pair_ledger_path(predictions_root)
+        predictions_root.parent / "pair-ledger.sqlite3",
+        custodian_manifest=tmp_path / "custodian-manifest.json",
     ).snapshot()
     assert snapshot["state"] == LedgerState.FAILED_NON_RESUMABLE.value
