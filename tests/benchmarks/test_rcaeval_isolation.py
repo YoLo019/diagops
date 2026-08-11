@@ -946,6 +946,16 @@ def test_prediction_worker_rejects_direct_unisolated_entry(monkeypatch):
         _predict(SimpleNamespace())
 
 
+def test_prediction_launcher_rejects_relative_persisted_locator_before_setup(tmp_path):
+    with pytest.raises(ValueError, match="absolute|canonical|locator"):
+        _launch_predict(
+            SimpleNamespace(
+                output=Path("relative-output"),
+                pair_root=tmp_path / "pair-root",
+            )
+        )
+
+
 def test_prediction_worker_imports_from_external_cwd_without_editable_install(tmp_path):
     source_root = Path(__file__).resolve().parents[2]
     worker = source_root / "backend" / "benchmarks" / "rcaeval" / "prediction_worker.py"

@@ -166,11 +166,15 @@ def _launch_predict(arguments) -> None:
         build_prediction_launch,
         verify_runtime_package,
     )
-    from backend.benchmarks.rcaeval.ledger import CustodianPairLedger
+    from backend.benchmarks.rcaeval.ledger import CustodianPairLedger, canonical_locator
     from backend.benchmarks.rcaeval.runner import _reject_reparse_path
 
     _reject_reparse_path(arguments.output, "prediction output")
     _reject_reparse_path(arguments.pair_root, "prediction pair root")
+    # 两个调用方 root 都会成为持久化身份输入；先拒绝相对/别名拼写，
+    # 再禁止按进程 cwd 解析。
+    canonical_locator(arguments.output)
+    canonical_locator(arguments.pair_root)
     output = arguments.output.resolve()
     pair_root = arguments.pair_root.resolve()
     if not _within(output, pair_root):
