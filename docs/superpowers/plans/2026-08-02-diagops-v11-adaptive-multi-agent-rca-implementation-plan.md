@@ -1361,7 +1361,7 @@ custodian side/launcher locators before persistence, persist the custodian
 failure intent even when direct pair invalidation meets a held SQLite writer
 lock, and check prediction-worker source/entrypoint paths for absolute
 non-reparse identity before resolution. The focused ledger/isolation/evaluator/
-runner gate is `90 passed`; full pytest is `2179 passed, 3 skipped, 1 warning`;
+runner gate is `91 passed`; full pytest is `2179 passed, 3 skipped, 1 warning`;
 Ruff, frontend, offline/runtime
 acceptance, wheel external-cwd smoke, and diff-check are green. Formal
 predictions, attempts and label opens remain zero. This Plan remains

@@ -1917,7 +1917,7 @@ launcher locators are absolute and canonical before ledger persistence; a
 direct invalidation that cannot obtain SQLite's writer lock leaves the durable
 custodian intent for automatic reconciliation; and packaged prediction
 workers reject relative or reparse source/entrypoint paths before resolving
-them. The focused ledger/isolation/evaluator/runner gate is `90 passed`; full
+them. The focused ledger/isolation/evaluator/runner gate is `91 passed`; full
 pytest is `2179 passed, 3 skipped, 1 warning`; Ruff, frontend, offline/runtime
 acceptance, wheel external-cwd smoke, and diff-check are green. Formal
 predictions, attempts, and label opens remain zero. This Spec remains

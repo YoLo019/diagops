@@ -260,7 +260,7 @@ relative/non-canonical spellings before persistence; direct invalidation under
 a held SQLite writer lock records the same durable failure intent used by
 completion paths; the packaged prediction worker and launcher reject relative
 and reparse source/entrypoint roots before resolving them. The focused
-ledger/isolation/evaluator/runner gate is `90 passed`; the added lock-intent
+ledger/isolation/evaluator/runner gate is `91 passed`; the added lock-intent
 and launcher-locator regressions are green; full pytest is `2179 passed, 3 skipped, 1 warning`; Ruff, frontend
 build, offline `80/80`, runtime `14/14` with privacy, wheel external-cwd
 smoke, and `git diff --check` are green. The installed package manifest is
