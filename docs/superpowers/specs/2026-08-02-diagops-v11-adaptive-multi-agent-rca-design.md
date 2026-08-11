@@ -1862,7 +1862,7 @@ permanent reveal epoch/consumed state with one-time authorized reauthorization,
 mechanical frozen-bundle candidate/evidence audit reconstruction, persisted
 RuntimeRun deserialization fail-closed for missing/null remaining turns,
 bounded completion retry plus pair invalidation, and non-optional lease tokens.
-RED→GREEN evidence is recorded in the implementation handoff: 91 targeted
+RED→GREEN evidence is recorded in the implementation handoff: 132 focused
 passes and 2151 full passes/3 skips/1 warning. Formal prediction/attempt/label
 counts remain zero. Because these changes alter persisted/CLI contracts, this
 spec is `review_required` pending a new independent review; M5 remains blocked

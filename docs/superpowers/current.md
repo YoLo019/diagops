@@ -178,7 +178,7 @@ explicit source/Git root, permanent label reveal epoch and one-time
 reauthorization identity, frozen-bundle candidate/evidence audit reconstruction,
 sealed persisted RuntimeRun turn-state rejection, completion-failure pair
 invalidation, and required lease-token APIs. Targeted M5 regression gate is
-`91 passed`; full pytest is `2151 passed, 3 skipped, 1 warning`; Ruff and
+`132 passed`; full pytest is `2151 passed, 3 skipped, 1 warning`; Ruff and
 `git diff --check` are clean; frontend production build passed; offline tool
 acceptance is `80/80`; runtime acceptance is `14/14` with privacy passed at
 `output/runtime-acceptance/runtime-20260811T180307749157Z-fcf30999/result.json`
