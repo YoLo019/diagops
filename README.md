@@ -568,8 +568,11 @@ custodian manifest hashes. Supply both frozen audit artifacts; the custodian
 ledger binds their exact hashes to one atomic label-open reservation. The
 formal launcher leaves the only label-file open to the evaluator child
 process. A crash or lease loss is recovered by the custodian ledger into a
-pair-level non-resumable state; concurrent attempts and post-child artifact
-failures invalidate the pair immediately and require explicit reauthorization.
+pair-level non-resumable state. Completion-write failures leave a durable
+custodian recovery intent when a SQLite writer lock prevents immediate
+invalidation; the next explicit custodian recovery entry converges it before
+business work continues. Concurrent attempts and post-child artifact failures
+invalidate the pair and require explicit reauthorization.
 Changing the evaluation output directory cannot bypass that ledger. V11 model
 turns are also a durable run-level budget carried through checkpoint, retry,
 and recovery rather than an SDK-invocation-local ceiling.
@@ -622,7 +625,10 @@ uv run python -m backend.benchmarks.rcaeval accept `
 
 `launch-predict` is the supported formal entry. Its child receives only the
 verified runtime package, the exact capability identity, and a minimal
-environment; calling the internal `predict` worker directly is rejected.
+environment; calling the internal `predict` worker directly is rejected. A
+packaged deployment carries `backend/services/diagops-source-manifest.json`,
+so source identity is verified after wheel relocation without relying on Git,
+editable installs, or the caller's cwd.
 
 ## Runtime Operations
 

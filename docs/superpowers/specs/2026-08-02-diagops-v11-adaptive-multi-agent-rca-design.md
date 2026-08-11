@@ -1890,6 +1890,25 @@ engineering fixes only: this spec remains `review_required`, M5 remains
 blocked at capability admission, and no accuracy or completion claim is made
 pending independent re-review.
 
+M5 fifth-round review-fix record (2026-08-12): independent review remained
+`changes_required` against `75f964495d6e6f391ebd8eef4c2170ba982d53ea`. Local
+commit `0bb9c4e2b0dd37068380bc07d32aeb9d7838a901` adds the remaining mechanical
+boundaries without changing the approved R1–R27 contract: the trusted
+evaluator receives the custodian label hash and reads a stable label handle
+once, rejecting replacement/reparse/mismatch before any result artifact;
+freeze intent, marker materialization, and SQLite bind are retry-safe; ledger
+snapshots are append-only sealed across every transition and durable lock
+failure reconciliation preserves reveal consumption; package/source identity
+uses a relocatable manifest rather than runtime Git/cwd; formal topology,
+candidate onset semantics, and checksum serialization are exact. RED→GREEN
+RCAEval focused evidence is `123 passed`; full pytest is `2176 passed, 3
+skipped, 1 warning`; Ruff/frontend/offline/runtime/diff-check are green. Wheel
+external-cwd smoke passed. Formal SS30/TT90 predictions, attempts, and label
+opens remain zero, and no accuracy claim is made. Capability artifact,
+endpoint/model, and process-only credential are still absent, so M5 remains
+blocked at T12 and this Spec remains `review_required` pending independent
+review.
+
 ## 16. Approval state
 
 - Requirements Brief: confirmed by user.

@@ -1335,6 +1335,25 @@ Formal predictions, paired attempts and label opens remain zero; T12 is still
 blocked on a fresh passed capability artifact/endpoint/credential and this
 Plan remains `review_required` pending independent re-review.
 
+M5 fifth-round implementation/review-fix record (2026-08-12): base
+`75f964495d6e6f391ebd8eef4c2170ba982d53ea`; code commit
+`0bb9c4e2b0dd37068380bc07d32aeb9d7838a901`. The evaluator now receives the
+custodian label hash and performs one stable descriptor read, validating bytes
+and identity before constructing an evaluation artifact; replacement,
+symlink/junction, and mismatch paths produce no artifact. Freeze uses a
+durable intent before marker materialization and accepts exact retries after
+bind. The custodian ledger has append-only sealed snapshots and a durable
+failure intent for bounded SQLite-lock recovery; reveal history cannot be
+cleared. Reparse checks cover source roots, parents, fixed files, and recursive
+entries. The installed wheel carries the package manifest and the trusted
+worker succeeds from an external cwd without Git or editable-install state.
+Formal topology limits, onset semantics, and checksum serialization are
+mechanically frozen. RED→GREEN evidence is RCAEval focused `123 passed`; full
+pytest `2176 passed, 3 skipped, 1 warning`; Ruff/frontend/offline/runtime and
+diff-check are green. Formal predictions/attempts/label opens remain zero;
+M5 is `review_required`/blocked at T12, with capability/endpoint/credential
+stop-gate unchanged.
+
 M0 review (dataset/leakage): completed on 2026-08-02 in worktree
 `agent+v11-m0`; conclusion `approve_with_followups`. Reviewer independently
 reran the focused and regression suites (39/126 passed, Ruff clean) and probed

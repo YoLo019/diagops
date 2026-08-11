@@ -227,6 +227,31 @@ Blocker: `T12 capability admission：缺少 exact passed model-capability artifa
 可调用 endpoint/model 与 process-only credential；SS30/TT90 不得以任务线程模型
 或 test double 替代。外部 owner：父任务/用户提供已认证本机端点后另行恢复。`
 
+Verification evidence (M5 fifth-round review-fix, 2026-08-12): base was
+`75f964495d6e6f391ebd8eef4c2170ba982d53ea`; code commit is
+`0bb9c4e2b0dd37068380bc07d32aeb9d7838a901` on `codex/v11-m5`. RED→GREEN
+regressions now cover the trusted evaluator's single stable label-file read
+(hash/identity is checked before result construction and replacement races
+leave no evaluator artifact), an idempotent freeze-intent/materialize/bind
+recovery path, append-only sealed ledger state across all transitions, durable
+writer-lock failure reconciliation, Windows reparse/junction rejection,
+relocated wheel/package manifests without Git or cwd dependence, exact formal
+topology limits, candidate onset semantics, and strict checksum parsing. The
+RCAEval focused group is `123 passed`; full pytest is `2176 passed, 3 skipped,
+1 warning`; full Ruff, frontend build, `git diff --check`, offline `80/80`, and
+runtime `14/14` with privacy scan are green. A wheel installed into a clean
+target and invoked from an external cwd passed the trusted worker help smoke.
+The package manifest is
+`backend/services/diagops-source-manifest.json` (package identity hash
+`56cca55981f24aa03f02b21d20eb931649bf65ecd5ef0ba31bf9ad2f51722448`, file
+SHA-256
+`841af38222554f8652291ef5e5df0cd430c050ad16ef85803d1aa8e587a56085`, 135
+files). These are engineering gates only: formal SS30/TT90 predictions,
+paired attempts, and label opens remain `0`; `D:\data\RCAEval\v11-m5` is
+absent; capability artifact, endpoint, model, and process-only credentials are
+absent. M5 remains blocked at T12 and awaits independent sixth-round review;
+no accuracy or completion claim is made.
+
 Allowed values:
 
 ```text
@@ -296,7 +321,7 @@ artifact、endpoint/model 与 process-only credential，再从 OB30/SS30 继续�
 | M2/T4–T6 | Execute | 九工具离线事件包与 data-only skills、File/Tempo trace 平价、模型边界与能力认证 | implemented / verified | 独立复审重跑：T4 336 passed + 离线验收 rows=80 failed=0；T5 17 passed + Docker gate blocked（daemon 不可用）；T6 106→110 passed（M2R-1 补 4 条 slow-endpoint 测试）；全量 1927 passed/3 skipped、Ruff clean、runtime acceptance exit=0；复审 approve_with_followups，M2R-1 closed；M2 基线 `c2245ac` 已单独提交，M2R-2/3 在 M3 T7 中关闭，M2R-4 跟踪 | 保持基线提交，不修改 dirty main |
 | M3/T7–T8 | Execute / Verify | Lead/Investigators/Critic/Lead V11 authority runtime | implemented / verifying | fifth-round base `e52e47984c4b460ed3b06dc4147d3d3b0532345b`; T7 91 passed、T8 207 passed；M2R/隔离 84 passed/3 skipped；变更相关 102 passed/2 skipped；全量 1995 passed/3 skipped/1 warning；两套全仓 Ruff clean；H1 usage/audit RED→GREEN | 等待同一审查线程复审；不 merge/push，不进入 M4/M5 |
 | M4/T9–T10 | Execute / Verify | Reports/actions, human transitions, API/UI, OpenRCA compatibility, recovery/privacy/offline gates | implemented / verified | 最终提交 `7539c7fd8b707fc54cf2ed75a7d9fcba13d7618c` 已获独立 review approve；第五轮 High RED→GREEN 与 focused/full/offline/runtime/frontend/Ruff/diff-check 证据沿用 M4 handoff | M5 worktree 精确从该提交创建；不 merge/push |
-| M5/T11–T13 | Execute / Verify | Frozen RCAEval control, sealed validation, one TT90 paired result | blocked at T12 capability admission | T11 + M0-L1/L2：第四轮 review-fix 的 ledger identity transition、side bundle/output checksum binding、reauthorization lineage、SQLite lock convergence、pre-write path gate、packaged source manifest 均 RED→GREEN；focused 164、full 2163/3 skip/1 warning；SS30/TT90 无模型结果，labels 未正式打开 | 缺 passed capability artifact/endpoint/credential；T13 未开始、TT90 未消耗；等待独立 M5 re-review |
+| M5/T11–T13 | Execute / Verify | Frozen RCAEval control, sealed validation, one TT90 paired result | blocked at T12 capability admission | 第五轮 review-fix 提交 `0bb9c4e2`：稳定单次 label read/替换竞态零 artifact、freeze intent 幂等恢复、sealed ledger/lock reconciliation、reparse/junction 防护、wheel manifest relocation、topology/onset/checksum 机械校验均 RED→GREEN；RCAEval focused 123、full 2176/3 skip/1 warning；SS30/TT90 无模型结果，labels 未正式打开 | 缺 passed capability artifact/endpoint/credential；T13 未开始、TT90 未消耗；等待独立 M5 re-review |
 
 M1 review-fix record (2026-08-06): High 1–6 and Medium 7–10 were reproduced
 with focused regressions, fixed at shared profile/ownership/transaction/entry
