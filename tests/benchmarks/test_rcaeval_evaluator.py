@@ -177,6 +177,36 @@ def test_evaluator_rejects_frozen_bundles_with_stale_scorer_dependency_identity(
         evaluate_bundles(stale_bundles, labels)
 
 
+def test_formal_configuration_contract_rejects_swapped_topology_limits(tmp_path: Path):
+    from backend.benchmarks.rcaeval.evaluator import _validate_formal_configuration_set
+
+    single = _frozen_bundle(
+        tmp_path,
+        RcaEvalConfiguration.SINGLE_INTENDED,
+        _prediction("re2-aaaaaaaaaaaaaaaa", "checkout", "cpu"),
+    )
+    multi = _frozen_bundle(
+        tmp_path,
+        RcaEvalConfiguration.MULTI_INTENDED,
+        _prediction("re2-aaaaaaaaaaaaaaaa", "checkout", "cpu"),
+    )
+    swapped = multi.model_copy(
+        update={
+            "budget": multi.budget.model_copy(
+                update={"max_investigators": 1, "max_rounds": 1}
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="topology|investigator|round"):
+        _validate_formal_configuration_set(
+            "tt90",
+            {
+                RcaEvalConfiguration.SINGLE_INTENDED: single,
+                RcaEvalConfiguration.MULTI_INTENDED: swapped,
+            },
+        )
+
+
 def test_acceptance_policy_rejects_self_consistent_stale_scorer_identity(
     tmp_path: Path,
 ):
@@ -190,6 +220,64 @@ def test_acceptance_policy_rejects_self_consistent_stale_scorer_identity(
         freeze_acceptance_policy(
             sealed_validation=stale,
             tt90_manifest_hash="f" * 64,
+        )
+
+
+def test_prelabel_audit_binds_candidate_onset_window(tmp_path: Path):
+    prediction = _prediction("re2-aaaaaaaaaaaaaaaa", "checkout", "cpu")
+    with_onset = prediction.model_copy(
+        update={
+            "candidates": [
+                prediction.candidates[0].model_copy(
+                    update={
+                        "onset_window_start": datetime(2026, 8, 1, tzinfo=UTC),
+                        "onset_window_end": datetime(2026, 8, 2, tzinfo=UTC),
+                    }
+                )
+            ]
+        }
+    )
+    frozen = _frozen_bundle(tmp_path, RcaEvalConfiguration.MULTI_INTENDED, with_onset)
+    forged_prediction = with_onset.model_copy(
+        update={
+            "candidates": [
+                with_onset.candidates[0].model_copy(
+                    update={"onset_window_start": None, "onset_window_end": None}
+                )
+            ]
+        }
+    )
+    forged = frozen.model_copy(update={"predictions": [forged_prediction]})
+    forged.bundle_hash = _bundle_hash(forged)
+    export = export_evidence_pairs(
+        [with_onset],
+        labels_visible=False,
+        prediction_bundle_hashes={RcaEvalConfiguration.MULTI_INTENDED: forged.bundle_hash},
+    )
+    decisions = [
+        EvidenceAuditDecision(
+            pair_id=pair.pair_id,
+            entity_supported=True,
+            temporally_compatible=True,
+            mechanism_relevant=True,
+            not_contradicted=True,
+            reason_code="supported",
+            reviewer_id="reviewer-project-owner",
+            reviewed_at=datetime(2026, 8, 10, tzinfo=UTC),
+        )
+        for pair in export.pairs
+    ]
+    manual = freeze_manual_audit(export, decisions)
+    with pytest.raises(ValueError, match="candidate|onset|evidence"):
+        from backend.benchmarks.rcaeval.audit import validate_prelabel_audit
+
+        validate_prelabel_audit(
+            export,
+            manual,
+            expected_bundle_hashes={
+                RcaEvalConfiguration.MULTI_INTENDED: forged.bundle_hash
+            },
+            frozen_bundles={RcaEvalConfiguration.MULTI_INTENDED: forged},
         )
 
 
@@ -489,13 +577,19 @@ def test_frozen_bundle_evaluation_and_acceptance_policy(tmp_path: Path):
         ledger=ledger,
     )
     assert len(set_hash) == 64
-    with pytest.raises(ValueError, match="already frozen"):
-        freeze_prediction_set(
-            tmp_path,
-            expected_configurations=expected_configurations,
-            expected_case_count=90,
-            ledger=ledger,
-        )
+    assert freeze_prediction_set(
+        tmp_path,
+        expected_configurations=expected_configurations,
+        expected_case_count=90,
+        ledger=ledger,
+    ) == set_hash
+    ledger.bind_prediction_set_hash(set_hash)
+    assert freeze_prediction_set(
+        tmp_path,
+        expected_configurations=expected_configurations,
+        expected_case_count=90,
+        ledger=ledger,
+    ) == set_hash
 
 
 def test_formal_tt90_rejects_one_case_bundle_before_scoring(tmp_path: Path):

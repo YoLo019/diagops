@@ -12,10 +12,17 @@ def main(argv: list[str] | None = None) -> None:
     if len(raw) < 2 or raw[0] != "--source-root":
         raise ValueError("prediction worker requires an explicit --source-root")
     source_root = Path(raw[1]).resolve()
-    trusted_root = Path(__file__).resolve().parents[3]
+    worker_path = Path(__file__).resolve()
+    trusted_root = worker_path.parents[3]
     if source_root != trusted_root:
         raise ValueError("prediction worker source root does not match immutable entrypoint")
     sys.path.insert(0, str(source_root))
+    from backend.services.source_identity import resolve_source_identity
+
+    resolve_source_identity(source_root)
+    expected_worker = source_root / "backend" / "benchmarks" / "rcaeval" / "prediction_worker.py"
+    if not expected_worker.is_file() or expected_worker.read_bytes() != worker_path.read_bytes():
+        raise ValueError("prediction worker source does not match immutable package")
     from backend.benchmarks.rcaeval.__main__ import _add_prediction_arguments, _predict
 
     parser = argparse.ArgumentParser(prog="rcaeval-prediction-worker")

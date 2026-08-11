@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from backend.benchmarks.rcaeval.models import LabelManifest, RuntimeManifest
+from backend.services.source_identity import reject_reparse_path
 
 # prediction 进程只允许这组最小环境变量穿过；其余环境一律不带入。
 PREDICTION_ENV_ALLOWLIST = (
@@ -175,7 +176,7 @@ def build_evaluator_launch(
     label_package: Path,
     argv: list[str],
     expected_runtime_manifest_hash: str,
-    expected_label_manifest_hash: str | None = None,
+    expected_label_manifest_hash: str,
     cwd: Path | None = None,
 ) -> EvaluatorLaunchSpec:
     """构造 evaluator 进程启动规格；只接受已冻结的 prediction bundle。
@@ -200,25 +201,9 @@ def build_evaluator_launch(
     labels_path = labels_root / "labels.json"
     if not labels_path.is_file():
         raise ValueError("label package has no labels.json")
-    if expected_label_manifest_hash is None:
-        # M0 兼容路径；正式 TT90 传 custodian 冻结 hash，避免 launcher 预读后
-        # evaluator 再读而违反「标签只打开一次」。
-        label_manifest = LabelManifest.model_validate(
-            json.loads(labels_path.read_bytes().decode("utf-8"))
-        )
-        recomputed = _manifest_hash(label_manifest)
-        if recomputed != label_manifest.manifest_hash:
-            raise ValueError("label manifest hash mismatch: label package fails closed")
-        if label_manifest.runtime_manifest_hash != expected_runtime_manifest_hash:
-            raise ValueError(
-                "label/runtime binding mismatch: label package is not paired "
-                "with the expected runtime manifest"
-            )
-        labels_manifest_hash = label_manifest.manifest_hash
-    else:
-        if not _SHA256_PATTERN.fullmatch(expected_label_manifest_hash):
-            raise ValueError("expected label manifest hash must be a sha256 hex digest")
-        labels_manifest_hash = expected_label_manifest_hash
+    if not _SHA256_PATTERN.fullmatch(expected_label_manifest_hash):
+        raise ValueError("expected label manifest hash must be a sha256 hex digest")
+    labels_manifest_hash = expected_label_manifest_hash
 
     if not argv or not any(_module_token_in(EVALUATOR_ENTRY_PREFIX, item) for item in argv):
         raise ValueError("evaluator entry must stay inside backend.benchmarks.rcaeval")
@@ -255,6 +240,7 @@ def _resolve_no_traversal(path: Path | None, what: str) -> Path:
     raw = str(path)
     if ".." in Path(raw).parts:
         raise ValueError(f"path traversal rejected in {what}: {raw!r}")
+    reject_reparse_path(Path(raw), what)
     return Path(raw).resolve()
 
 
@@ -283,21 +269,56 @@ def verify_runtime_package(runtime_root: Path) -> RuntimeManifest:
 
 def _verify_checksums(package_root: Path) -> None:
     """按 SHA256SUMS 逐文件复核：缺失、多余或哈希不符一律 fail closed。"""
+    reject_reparse_path(package_root, "package root")
     sums_path = package_root / "SHA256SUMS"
     if not sums_path.is_file():
         raise ValueError(f"package has no SHA256SUMS checksum file: {package_root}")
+    reject_reparse_path(sums_path, "checksum manifest")
+    raw = sums_path.read_bytes()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("checksum manifest is not UTF-8") from exc
     expected: dict[str, str] = {}
-    for line in sums_path.read_text(encoding="utf-8").splitlines():
-        digest, _, relative = line.partition("  ")
-        if not digest or not relative:
-            raise ValueError(f"malformed checksum line: {line!r}")
-        if ".." in Path(relative).parts or Path(relative).is_absolute():
-            raise ValueError(f"checksum path traversal rejected: {relative!r}")
+    seen_casefold: set[str] = set()
+    previous: str | None = None
+    lines = text.splitlines(keepends=True)
+    if not lines or any(not line.endswith(("\n", "\r\n")) for line in lines):
+        raise ValueError("checksum manifest serialization is not canonical")
+    newline = "\r\n" if "\r\n" in raw.decode("utf-8") else "\n"
+    if "\r" in text.replace("\r\n", ""):
+        raise ValueError("checksum manifest serialization is not canonical")
+    for line in lines:
+        content = line[: -len(newline)]
+        digest, separator, relative = content.partition("  ")
+        if not separator or not _SHA256_PATTERN.fullmatch(digest):
+            raise ValueError(f"malformed checksum line: {content!r}")
+        relative_path = Path(relative)
+        if (
+            not relative
+            or "\\" in relative
+            or relative_path.is_absolute()
+            or relative_path.drive
+            or relative_path.parts != tuple(relative_path.parts)
+            or any(part in {"", ".", ".."} for part in relative_path.parts)
+            or relative_path.as_posix() != relative
+        ):
+            raise ValueError(f"checksum path is not canonical: {relative!r}")
+        if previous is not None and relative <= previous:
+            raise ValueError("checksum manifest paths must be strictly sorted and unique")
+        if relative in expected or relative.casefold() in seen_casefold:
+            raise ValueError("checksum manifest contains duplicate or aliased paths")
+        previous = relative
+        seen_casefold.add(relative.casefold())
         expected[relative] = digest
+    canonical = "".join(
+        f"{digest}  {relative}{newline}" for relative, digest in sorted(expected.items())
+    )
+    if raw != canonical.encode("utf-8"):
+        raise ValueError("checksum manifest serialization is not canonical")
     actual: dict[str, str] = {}
     for path in sorted(package_root.rglob("*")):
-        if path.is_symlink():
-            raise ValueError(f"package checksum symlink rejected: {path}")
+        reject_reparse_path(path, "package checksum entry")
         if path.is_file() and path != sums_path:
             relative = path.relative_to(package_root).as_posix()
             actual[relative] = hashlib.sha256(path.read_bytes()).hexdigest()

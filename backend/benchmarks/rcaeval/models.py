@@ -461,6 +461,9 @@ class EvidenceAuditPair(BaseModel):
     affected_service: str = Field(min_length=1, max_length=128)
     failure_mechanism: str = Field(min_length=1, max_length=256)
     evidence_summary: str = Field(default="", max_length=512)
+    onset_window_start: datetime | None = None
+    onset_window_end: datetime | None = None
+    onset_window_semantics: Literal["missing", "bounded_utc"]
 
 
 class EvidenceAuditExport(BaseModel):

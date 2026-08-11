@@ -37,6 +37,10 @@ def _freeze_and_open(ledger):
     ):
         lease = ledger.record_side_started(side, f"prediction-{side}")
         ledger.record_side_completed(side, bundle_hash, lease_token=lease)
+    ledger.prepare_prediction_set_freeze(
+        prediction_set_hash="a" * 64,
+        root_locator=str(ledger.canonical_root / "predictions"),
+    )
     ledger.bind_prediction_set_hash("a" * 64)
     reservation = ledger.reserve_evaluation(
         audit_export_hash="b" * 64,
@@ -91,6 +95,10 @@ def test_prediction_set_bind_transitions_ledger_identity_for_evaluate_reopen(tmp
         lease = ledger.record_side_started(side, f"prediction-{side}")
         ledger.record_side_completed(side, bundle_hash, lease_token=lease)
 
+    ledger.prepare_prediction_set_freeze(
+        prediction_set_hash="b" * 64,
+        root_locator=str(ledger.canonical_root / "predictions"),
+    )
     ledger.bind_prediction_set_hash("b" * 64)
     reopened = CustodianPairLedger.from_manifest(
         tmp_path / "custodian-root" / "custodian-manifest.json"
@@ -106,6 +114,28 @@ def test_prediction_set_bind_transitions_ledger_identity_for_evaluate_reopen(tmp
     assert reopened.snapshot()["prediction_set_hash"] == "b" * 64
 
 
+def test_prediction_freeze_intent_reconciles_after_materialization_before_bind(tmp_path):
+    ledger = _new_ledger(tmp_path)
+    for side, bundle_hash in (
+        ("single_intended", "d" * 64),
+        ("multi_intended", "e" * 64),
+    ):
+        lease = ledger.record_side_started(side, str(ledger.canonical_root / side))
+        ledger.record_side_completed(side, bundle_hash, lease_token=lease)
+    root = ledger.canonical_root / "predictions"
+    root.mkdir()
+    digest = "b" * 64
+    ledger.prepare_prediction_set_freeze(prediction_set_hash=digest, root_locator=str(root))
+    (root / "SHA256SUMS").write_text("materialized\n", encoding="utf-8")
+
+    reopened = CustodianPairLedger.from_manifest(
+        tmp_path / "custodian-root" / "custodian-manifest.json"
+    )
+    reopened.prepare_prediction_set_freeze(prediction_set_hash=digest, root_locator=str(root))
+    reopened.bind_prediction_set_hash(digest)
+    assert reopened.snapshot()["prediction_set_bound"] == 1
+
+
 def test_prediction_set_identity_transition_rejects_aba_and_tamper(tmp_path):
     ledger = _new_ledger(tmp_path)
     for side, bundle_hash in (
@@ -115,6 +145,10 @@ def test_prediction_set_identity_transition_rejects_aba_and_tamper(tmp_path):
         lease = ledger.record_side_started(side, f"prediction-{side}")
         ledger.record_side_completed(side, bundle_hash, lease_token=lease)
 
+    ledger.prepare_prediction_set_freeze(
+        prediction_set_hash="b" * 64,
+        root_locator=str(ledger.canonical_root / "predictions"),
+    )
     ledger.bind_prediction_set_hash("b" * 64)
     with pytest.raises(ValueError, match="differs|identity|stale"):
         ledger.bind_prediction_set_hash("c" * 64)
@@ -253,6 +287,90 @@ def test_evaluation_completion_lock_failure_invalidates_label_lineage(
     assert snapshot["label_ever_opened"] == 1
 
 
+def test_long_writer_lock_has_durable_recovery_for_prediction_completion(tmp_path):
+    ledger = _new_ledger(tmp_path, lease_seconds=30)
+    lease = ledger.record_side_started("single_intended", "output-a")
+    ledger.SQLITE_BUSY_TIMEOUT_SECONDS = 0.05
+    blocker = sqlite3.connect(
+        ledger.path,
+        timeout=0,
+        isolation_level=None,
+        check_same_thread=False,
+    )
+    blocker.execute("BEGIN IMMEDIATE")
+
+    def release_lock() -> None:
+        time.sleep(0.30)
+        blocker.rollback()
+        blocker.close()
+
+    releaser = threading.Thread(target=release_lock)
+    releaser.start()
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            ledger.record_side_completed("single_intended", "d" * 64, lease_token=lease)
+    finally:
+        releaser.join(timeout=2)
+
+    # A deterministic custodian read/recovery entry must converge the durable
+    # failure intent without another prediction business operation.
+    assert ledger.snapshot()["state"] == LedgerState.FAILED_NON_RESUMABLE.value
+
+
+def test_long_writer_lock_has_durable_recovery_for_evaluation_completion(tmp_path):
+    ledger = _new_ledger(tmp_path, lease_seconds=30)
+    opened = _freeze_and_open(ledger)
+    ledger.SQLITE_BUSY_TIMEOUT_SECONDS = 0.05
+    blocker = sqlite3.connect(
+        ledger.path,
+        timeout=0,
+        isolation_level=None,
+        check_same_thread=False,
+    )
+    blocker.execute("BEGIN IMMEDIATE")
+
+    def release_lock() -> None:
+        time.sleep(0.30)
+        blocker.rollback()
+        blocker.close()
+
+    releaser = threading.Thread(target=release_lock)
+    releaser.start()
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            ledger.mark_evaluation_completed("a" * 64, lease_token=opened.lease_token)
+    finally:
+        releaser.join(timeout=2)
+
+    snapshot = ledger.snapshot()
+    assert snapshot["state"] == LedgerState.FAILED_NON_RESUMABLE.value
+    assert snapshot["label_ever_opened"] == 1
+
+
+def test_heartbeat_rejects_tampered_authorized_lineage(tmp_path):
+    ledger = _new_ledger(tmp_path)
+    token = ledger.record_side_started("single_intended", "output-a")
+    with sqlite3.connect(ledger.path) as connection:
+        connection.execute(
+            "UPDATE pair_ledger SET authorized_evaluation_identity_hash = ? WHERE id = 1",
+            ("f" * 64,),
+        )
+    with pytest.raises(ValueError, match="tamper|seal|identity|authorized"):
+        ledger.heartbeat(token)
+
+
+def test_reauthorization_rejects_cleared_reveal_history(tmp_path):
+    ledger = _new_ledger(tmp_path)
+    _freeze_and_open(ledger)
+    with sqlite3.connect(ledger.path) as connection:
+        connection.execute(
+            "UPDATE pair_ledger SET state = ?, label_ever_opened = 0 WHERE id = 1",
+            (LedgerState.FAILED_NON_RESUMABLE.value,),
+        )
+    with pytest.raises(ValueError, match="tamper|seal|revealed|reauthor"):
+        ledger.reauthorize("replay-owner", authorized_evaluation_identity="f" * 64)
+
+
 def test_label_reveal_is_consumed_forever_across_reauthorization(tmp_path):
     ledger = _new_ledger(tmp_path)
     _freeze_and_open(ledger)
@@ -293,6 +411,10 @@ def test_label_open_is_bound_to_one_pair_across_output_directories(tmp_path):
     ledger.record_side_completed("single_intended", "d" * 64, lease_token=single_lease)
     multi_lease = ledger.record_side_started("multi_intended", "prediction-b")
     ledger.record_side_completed("multi_intended", "e" * 64, lease_token=multi_lease)
+    ledger.prepare_prediction_set_freeze(
+        prediction_set_hash="a" * 64,
+        root_locator=str(ledger.canonical_root / "predictions"),
+    )
     ledger.bind_prediction_set_hash("a" * 64)
     reservation = ledger.reserve_evaluation(
         audit_export_hash="b" * 64,
@@ -332,6 +454,10 @@ def test_label_open_requires_frozen_audit_identity_and_fail_closed_after_crash(t
     ):
         lease = ledger.record_side_started(side, f"prediction-{side}")
         ledger.record_side_completed(side, bundle_hash, lease_token=lease)
+    ledger.prepare_prediction_set_freeze(
+        prediction_set_hash="a" * 64,
+        root_locator=str(ledger.canonical_root / "predictions"),
+    )
     ledger.bind_prediction_set_hash("a" * 64)
     reservation = ledger.reserve_evaluation(
         audit_export_hash="b" * 64,
@@ -473,6 +599,10 @@ def test_label_open_lease_expiry_requires_explicit_reauthorization(tmp_path):
     ):
         lease = ledger.record_side_started(side, f"output-{side}")
         ledger.record_side_completed(side, bundle_hash, lease_token=lease)
+    ledger.prepare_prediction_set_freeze(
+        prediction_set_hash="a" * 64,
+        root_locator=str(ledger.canonical_root / "predictions"),
+    )
     ledger.bind_prediction_set_hash("a" * 64)
     reservation = ledger.reserve_evaluation(
         audit_export_hash="b" * 64,

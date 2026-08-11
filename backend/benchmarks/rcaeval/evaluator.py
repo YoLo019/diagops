@@ -6,8 +6,10 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import random
 import re
+import stat
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -37,6 +39,7 @@ from backend.benchmarks.rcaeval.models import (
 BOOTSTRAP_SEED = 20260802
 BOOTSTRAP_SAMPLES = 10_000
 FORMAL_CASE_COUNTS = {"ss30": 30, "tt90": 90}
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 def scorer_dependency_hash() -> str:
@@ -474,6 +477,8 @@ def main() -> None:
     parser.add_argument("--audit-export", type=Path, required=True)
     parser.add_argument("--manual-audit", type=Path, required=True)
     parser.add_argument("--label-open-token", required=True)
+    parser.add_argument("--expected-label-manifest-hash", required=True)
+    parser.add_argument("--expected-runtime-manifest-hash", required=True)
     arguments = parser.parse_args()
     if arguments.output.exists():
         raise ValueError("evaluation output already exists; labels will not be reopened")
@@ -517,20 +522,101 @@ def main() -> None:
         manual_audit_hash=manual.artifact_hash,
         lease_token=arguments.label_open_token,
     )
-    # 标签文件在 evaluator 进程中只打开这一次。
-    label_bytes = arguments.labels.read_bytes()
-    labels = LabelManifest.model_validate_json(label_bytes)
-    artifact = evaluate_bundles(bundles, labels)
-    arguments.output.write_text(
-        json.dumps(
-            artifact.model_dump(mode="json"),
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n",
-        encoding="utf-8",
+    # 标签文件在 evaluator 进程中只打开这一次；custodian 身份匹配前不构造
+    # scorer 结果，也不写任何 evaluator artifact。
+    labels = read_label_manifest_once(
+        arguments.labels,
+        expected_manifest_hash=arguments.expected_label_manifest_hash,
+        expected_runtime_manifest_hash=arguments.expected_runtime_manifest_hash,
     )
+    artifact = evaluate_bundles(bundles, labels)
+    arguments.output.parent.mkdir(parents=True, exist_ok=True)
+    with arguments.output.open("x", encoding="utf-8", newline="\n") as output:
+        output.write(
+            json.dumps(
+                artifact.model_dump(mode="json"),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+
+
+def read_label_manifest_once(
+    path: Path,
+    *,
+    expected_manifest_hash: str,
+    expected_runtime_manifest_hash: str,
+) -> LabelManifest:
+    """Read and bind the sole label bytes before any result construction."""
+    if not _SHA256_PATTERN.fullmatch(expected_manifest_hash):
+        raise ValueError("expected label manifest hash must be a sha256 hex digest")
+    if not _SHA256_PATTERN.fullmatch(expected_runtime_manifest_hash):
+        raise ValueError("expected runtime manifest hash must be a sha256 hex digest")
+    label_bytes = _read_label_bytes_once(path)
+    try:
+        labels = LabelManifest.model_validate_json(label_bytes)
+    except (ValueError, TypeError) as exc:
+        raise ValueError("label manifest is invalid") from exc
+    if labels.runtime_manifest_hash != expected_runtime_manifest_hash:
+        raise ValueError("label/runtime binding mismatch")
+    if labels.manifest_hash != expected_manifest_hash:
+        raise ValueError("label manifest identity differs from custodian freeze")
+    if (
+        _canonical_hash(labels.model_dump(mode="json", exclude={"manifest_hash"}))
+        != labels.manifest_hash
+    ):
+        raise ValueError("label manifest hash mismatch")
+    return labels
+
+
+def _reject_label_reparse(path: Path) -> None:
+    candidate = path.expanduser()
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+    for ancestor in (candidate, *candidate.parents):
+        try:
+            stat = ancestor.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ValueError("label manifest path cannot be inspected safely") from exc
+        if ancestor.is_symlink() or bool(
+            getattr(stat, "st_file_attributes", 0) & 0x400
+        ):
+            raise ValueError("label manifest path contains a symlink/junction/reparse point")
+
+
+def _read_label_bytes_once(path: Path) -> bytes:
+    """Read one stable regular-file handle, rejecting replacement races."""
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+    _reject_label_reparse(candidate)
+    try:
+        before = candidate.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError("label manifest path is not a regular file")
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        with os.fdopen(os.open(candidate, flags), "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if not stat.S_ISREG(opened.st_mode) or bool(
+                getattr(opened, "st_file_attributes", 0) & 0x400
+            ):
+                raise ValueError("label manifest handle is not a regular file")
+            if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+                raise ValueError("label manifest was replaced before it was read")
+            content = handle.read()
+        _reject_label_reparse(candidate)
+        after = candidate.lstat()
+        if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
+            raise ValueError("label manifest was replaced while it was read")
+        return content
+    except ValueError:
+        raise
+    except OSError as exc:
+        raise ValueError("label manifest could not be read safely") from exc
 
 
 def _unique_by_case(items, kind: str):
@@ -637,6 +723,15 @@ def _validate_formal_configuration_set(
     }
     if len(common) != 1:
         raise ValueError("formal evaluation contains mixed tool/turn/deadline limits")
+    expected_topology = {
+        RcaEvalConfiguration.SINGLE_INTENDED: (1, 1),
+        RcaEvalConfiguration.SINGLE_EQUAL_TOKEN: (1, 1),
+        RcaEvalConfiguration.MULTI_INTENDED: (3, 2),
+        RcaEvalConfiguration.MULTI_EQUAL_TOKEN: (3, 2),
+    }
+    for configuration, budget in budgets.items():
+        if (budget.max_investigators, budget.max_rounds) != expected_topology[configuration]:
+            raise ValueError("formal evaluation topology limits are not frozen")
     if partition == "ss30":
         single_equal = budgets[RcaEvalConfiguration.SINGLE_EQUAL_TOKEN]
         multi_equal = budgets[RcaEvalConfiguration.MULTI_EQUAL_TOKEN]

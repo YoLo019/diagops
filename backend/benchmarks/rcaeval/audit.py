@@ -38,6 +38,7 @@ def export_evidence_pairs(
     pairs: list[EvidenceAuditPair] = []
     for prediction in sorted(predictions, key=lambda item: item.case_id):
         for rank, candidate in enumerate(prediction.candidates, start=1):
+            onset = _candidate_onset(candidate.onset_window_start, candidate.onset_window_end)
             for evidence_id in candidate.evidence_ids:
                 payload = {
                     "case_id": prediction.case_id,
@@ -46,6 +47,7 @@ def export_evidence_pairs(
                     "evidence_id": evidence_id,
                     "affected_service": candidate.affected_service,
                     "failure_mechanism": candidate.failure_mechanism,
+                    **onset,
                 }
                 pairs.append(
                     EvidenceAuditPair(
@@ -191,6 +193,24 @@ def _validate_export_hash(export: EvidenceAuditExport) -> None:
     )
     if export.export_hash != actual:
         raise ValueError("evidence audit export changed after freeze")
+
+
+def _candidate_onset(start, end) -> dict[str, object]:
+    if (start is None) != (end is None):
+        raise ValueError("candidate onset window must be complete or explicitly missing")
+    if start is None:
+        return {
+            "onset_window_start": None,
+            "onset_window_end": None,
+            "onset_window_semantics": "missing",
+        }
+    if start.tzinfo is None or end.tzinfo is None or start > end:
+        raise ValueError("candidate onset window must be ordered UTC timestamps")
+    return {
+        "onset_window_start": start.isoformat(),
+        "onset_window_end": end.isoformat(),
+        "onset_window_semantics": "bounded_utc",
+    }
 
 
 def _canonical_hash(value: object) -> str:

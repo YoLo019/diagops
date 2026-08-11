@@ -15,6 +15,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict
 
 from backend.benchmarks.rcaeval.dependency import scorer_dependency_hash
+from backend.benchmarks.rcaeval.ledger import canonical_locator, volume_identity
 from backend.benchmarks.rcaeval.models import (
     CandidatePrediction,
     CasePrediction,
@@ -685,6 +686,17 @@ def build_execution_contract(
             "max_tool_calls_per_specialist": min(3, budget.tool_budget),
             "tool_timeout_seconds": runtime.tool_timeout_seconds,
         },
+        "topology": {
+            "mode": (
+                "multi_lead_investigators_critic"
+                if budget.configuration.is_multi
+                else "single_one_context"
+            ),
+            "one_context": not budget.configuration.is_multi,
+            "critic": budget.configuration.is_multi,
+            "subagent": False,
+            "hidden_model_calls": False,
+        },
         "retry_policy": RETRY_POLICY,
         "tool_budget": budget.tool_budget,
         "token_budget": budget.token_budget,
@@ -724,9 +736,8 @@ def freeze_prediction_set(
     """在全部配置完成后冻结 evaluator 的单一输入根。"""
     raw_root = Path(root).expanduser()
     _reject_reparse_path(raw_root, "prediction set root")
+    root_locator = canonical_locator(raw_root)
     root = raw_root.resolve()
-    if (root / "SHA256SUMS").exists():
-        raise ValueError("prediction set is already frozen")
     canonical_root = Path(ledger.canonical_root).resolve()
     if canonical_root not in root.parents:
         raise ValueError("prediction set root is outside the canonical custodian root")
@@ -736,12 +747,12 @@ def freeze_prediction_set(
     snapshot = ledger.snapshot()
     if snapshot["state"] != "predictions_frozen":
         raise ValueError("prediction set is not frozen by the custodian ledger")
-    if snapshot["prediction_set_bound"]:
-        raise ValueError("prediction set is already bound by the custodian ledger")
     records = ledger.side_records()
     if set(records) != expected_sides:
         raise ValueError("prediction set side records are incomplete or extra")
-    actual_children = {path.name for path in root.iterdir()}
+    actual_children = {
+        path.name for path in root.iterdir() if path.name != "SHA256SUMS"
+    }
     if actual_children != expected_sides:
         raise ValueError("prediction set contains extra or missing side directories")
     bundles: dict[RcaEvalConfiguration, PredictionBundle] = {}
@@ -753,23 +764,18 @@ def freeze_prediction_set(
         expected_dir = (root / configuration.value).resolve()
         if side["status"] != "completed":
             raise ValueError("prediction set side is not completed in custodian ledger")
-        expected_canonical = _canonical_path(expected_dir)
+        expected_canonical = canonical_locator(expected_dir)
         if (
             not side["output_dir"]
-            or _canonical_path(Path(side["output_dir"])) != expected_canonical
+            or side["output_dir"] != expected_canonical
         ):
             raise ValueError("prediction set side output path differs from ledger")
         locator = side.get("output_locator")
-        raw_locator = (
-            os.path.normcase(os.path.normpath(str(Path(locator))))
-            if locator
-            else ""
-        )
         if (
             not locator
             or not Path(locator).is_absolute()
-            or _canonical_path(Path(locator)) != expected_canonical
-            or raw_locator != expected_canonical
+            or locator != expected_canonical
+            or side.get("output_volume") != volume_identity(expected_dir)
         ):
             raise ValueError("prediction set side output alias is not canonical")
         _verify_side_directory(expected_dir, side["bundle_hash"])
@@ -811,7 +817,12 @@ def freeze_prediction_set(
             "source_manifest_hash": bundle_identity.source_manifest_hash,
         }
     )
-    if snapshot["prediction_set_hash"] != expected_pair_identity:
+    lineage_identity = (
+        snapshot["lineage_identity_hash"]
+        if snapshot["prediction_set_bound"]
+        else snapshot["prediction_set_hash"]
+    )
+    if lineage_identity != expected_pair_identity:
         raise ValueError("prediction set bundle identity differs from ledger lineage")
     case_ids = next(iter(case_sets))
     if len(case_ids) != expected_case_count:
@@ -820,16 +831,37 @@ def freeze_prediction_set(
     for path in sorted(root.rglob("*")):
         if path.is_symlink():
             raise ValueError("prediction set rejects symlink entries")
-        if path.is_file():
+        if path.is_file() and path != root / "SHA256SUMS":
             relative = path.relative_to(root).as_posix()
             lines.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {relative}")
+    checksum_bytes = ("\n".join(lines) + "\n").encode("utf-8")
+    digest = hashlib.sha256(checksum_bytes).hexdigest()
+    ledger.prepare_prediction_set_freeze(
+        prediction_set_hash=digest,
+        root_locator=root_locator,
+    )
     sums_path = root / "SHA256SUMS"
-    try:
-        with sums_path.open("x", encoding="utf-8", newline="\n") as handle:
-            handle.write("\n".join(lines) + "\n")
-    except FileExistsError as exc:
-        raise ValueError("prediction set freeze raced with another custodian") from exc
-    return hashlib.sha256(sums_path.read_bytes()).hexdigest()
+    if sums_path.exists():
+        if not sums_path.is_file() or sums_path.read_bytes() != checksum_bytes:
+            ledger.invalidate_pair("prediction freeze materialization is inconsistent")
+            try:
+                sums_path.unlink()
+            except OSError:
+                pass
+            raise ValueError("prediction set checksum marker differs from freeze intent")
+    else:
+        try:
+            with sums_path.open("x", encoding="utf-8", newline="\n") as handle:
+                handle.write(checksum_bytes.decode("utf-8"))
+        except FileExistsError as exc:
+            if not sums_path.is_file() or sums_path.read_bytes() != checksum_bytes:
+                ledger.invalidate_pair("prediction freeze materialization raced or changed")
+                try:
+                    sums_path.unlink()
+                except OSError:
+                    pass
+                raise ValueError("prediction set freeze raced with another custodian") from exc
+    return digest
 
 
 def _verify_side_directory(path: Path, expected_bundle_hash: str | None) -> None:
@@ -927,6 +959,12 @@ def frozen_run_identity(
     if source_identity.git_dirty:
         raise ValueError("formal prediction source must be clean")
     backend_root = repository_root / "backend"
+    lock_paths = [repository_root / "uv.lock", repository_root / "pyproject.toml"]
+    dependency_lock_hash = (
+        _hash_files(lock_paths)
+        if all(path.is_file() for path in lock_paths)
+        else source_identity.manifest_hash
+    )
     return FrozenRunIdentity(
         source_commit=source_identity.revision,
         source_manifest_hash=source_identity.manifest_hash,
@@ -941,9 +979,7 @@ def frozen_run_identity(
         prediction_schema_hash=_canonical_hash(CasePrediction.model_json_schema()),
         normalizer_hash=_hash_files([Path(__file__).with_name("evaluator.py")]),
         scorer_dependency_hash=scorer_dependency_hash(),
-        dependency_lock_hash=_hash_files(
-            [repository_root / "uv.lock", repository_root / "pyproject.toml"]
-        ),
+        dependency_lock_hash=dependency_lock_hash,
         memory_snapshot_hash=_canonical_hash(EMPTY_MEMORY_IDENTITY),
         retry_policy_hash=_canonical_hash(RETRY_POLICY),
     )

@@ -155,6 +155,12 @@ class CustodianPairLedger:
             raise ValueError("custodian manifest is required")
         return self._manifest.label_manifest_hash
 
+    @property
+    def failure_intent_path(self) -> Path:
+        if self._manifest is None:
+            raise ValueError("custodian manifest is required")
+        return self.canonical_root / "pair-ledger-failure-intent.json"
+
     def initialize(
         self,
         *,
@@ -213,7 +219,9 @@ class CustodianPairLedger:
                     label_ever_opened INTEGER NOT NULL DEFAULT 0,
                     reveal_epoch INTEGER NOT NULL DEFAULT 0,
                     label_lineage_hash TEXT,
-                    authorized_evaluation_identity_hash TEXT
+                    authorized_evaluation_identity_hash TEXT,
+                    freeze_intent_hash TEXT,
+                    freeze_intent_locator TEXT
                 )
                 """
             )
@@ -231,6 +239,8 @@ class CustodianPairLedger:
                 "reveal_epoch",
                 "label_lineage_hash",
                 "authorized_evaluation_identity_hash",
+                "freeze_intent_hash",
+                "freeze_intent_locator",
             }
             columns = {
                 row[1]
@@ -244,6 +254,7 @@ class CustodianPairLedger:
                     side TEXT PRIMARY KEY,
                     output_dir TEXT NOT NULL,
                     output_locator TEXT NOT NULL,
+                    output_volume TEXT NOT NULL,
                     status TEXT NOT NULL,
                     bundle_hash TEXT
                 )
@@ -256,6 +267,7 @@ class CustodianPairLedger:
                 "side",
                 "output_dir",
                 "output_locator",
+                "output_volume",
                 "status",
                 "bundle_hash",
             }
@@ -276,6 +288,31 @@ class CustodianPairLedger:
             }
             if not {"epoch", "token_hash", "evaluation_identity_hash"} <= reauthorization_columns:
                 raise ValueError("reauthorization schema is not custodian-frozen")
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ledger_events (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_kind TEXT NOT NULL,
+                    snapshot TEXT NOT NULL,
+                    prev_hash TEXT NOT NULL,
+                    event_hash TEXT NOT NULL UNIQUE
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS ledger_events_no_update
+                BEFORE UPDATE ON ledger_events
+                BEGIN SELECT RAISE(ABORT, 'ledger event history is append-only'); END
+                """
+            )
+            connection.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS ledger_events_no_delete
+                BEFORE DELETE ON ledger_events
+                BEGIN SELECT RAISE(ABORT, 'ledger event history is append-only'); END
+                """
+            )
             row = connection.execute(
                 "SELECT partition, prediction_set_hash, expected_sides, lease_seconds, "
                 "custodian_root, custodian_manifest_hash, ledger_identity, "
@@ -304,6 +341,7 @@ class CustodianPairLedger:
                     ),
                 )
             else:
+                self._assert_sealed(connection)
                 lineage_identity_hash = row[7]
                 expected_identity = _ledger_identity(
                     canonical_root=canonical_root,
@@ -327,7 +365,7 @@ class CustodianPairLedger:
                     raise ValueError(
                         "pair ledger identity or authorized lineage differs from custodian freeze"
                     )
-            connection.commit()
+            self._commit(connection, "initialize")
 
     def bind_prediction_set_hash(self, prediction_set_hash: str) -> None:
         """Bind the exact frozen prediction-root hash once both sides exist."""
@@ -355,10 +393,14 @@ class CustodianPairLedger:
                     raise ValueError("bound prediction lineage identity is tampered")
                 if row["authorized_evaluation_identity_hash"] != prediction_set_hash:
                     raise ValueError("bound evaluation identity is stale")
-                connection.commit()
+                if row["freeze_intent_hash"] is not None:
+                    raise ValueError("bound prediction set retains an unfinished freeze intent")
+                self._commit(connection, "bind_prediction_set_idempotent")
                 return
             if row["authorized_evaluation_identity_hash"] != row["prediction_set_hash"]:
                 raise ValueError("prediction lineage authorization is stale")
+            if row["freeze_intent_hash"] != prediction_set_hash:
+                raise ValueError("prediction set hash was not custodian-prepared for binding")
             next_identity = _ledger_identity(
                 canonical_root=self._manifest.canonical_root,
                 manifest_hash=self._manifest.manifest_hash,
@@ -370,10 +412,47 @@ class CustodianPairLedger:
             connection.execute(
                 "UPDATE pair_ledger SET prediction_set_hash = ?, "
                 "prediction_set_bound = 1, authorized_evaluation_identity_hash = ?, "
-                "ledger_identity = ? WHERE id = 1",
+                "ledger_identity = ?, freeze_intent_hash = NULL, "
+                "freeze_intent_locator = NULL WHERE id = 1",
                 (prediction_set_hash, prediction_set_hash, next_identity),
             )
-            connection.commit()
+            self._commit(connection, "bind_prediction_set")
+
+    def prepare_prediction_set_freeze(
+        self, *, prediction_set_hash: str, root_locator: str
+    ) -> None:
+        """Persist the freeze intent before materializing the filesystem marker."""
+        if not _valid_hash(prediction_set_hash):
+            raise ValueError("prediction set identity must be sha256")
+        canonical_locator = _canonical_locator(Path(root_locator))
+        with self._connection() as connection:
+            _begin_immediate(connection, self.SQLITE_BUSY_TIMEOUT_SECONDS)
+            row = self._require_pair(connection)
+            row = self._recover_if_expired(connection, row, now=_now())
+            self._require_authorized_lineage(row)
+            if LedgerState(row["state"]) != LedgerState.PREDICTIONS_FROZEN:
+                raise ValueError("prediction set is not frozen by the custodian")
+            if row["prediction_set_bound"]:
+                if row["prediction_set_hash"] != prediction_set_hash:
+                    raise ValueError("bound prediction set identity differs")
+                if row["freeze_intent_hash"] is not None:
+                    raise ValueError("bound prediction set has an unfinished freeze intent")
+                self._commit(connection, "prepare_freeze_idempotent")
+                return
+            if row["freeze_intent_hash"] is not None:
+                if (
+                    row["freeze_intent_hash"] != prediction_set_hash
+                    or row["freeze_intent_locator"] != canonical_locator
+                ):
+                    raise ValueError("prediction freeze intent differs from custodian freeze")
+                self._commit(connection, "prepare_freeze_idempotent")
+                return
+            connection.execute(
+                "UPDATE pair_ledger SET freeze_intent_hash = ?, "
+                "freeze_intent_locator = ? WHERE id = 1",
+                (prediction_set_hash, canonical_locator),
+            )
+            self._commit(connection, "prepare_freeze")
 
     def reserve_evaluation(
         self, *, audit_export_hash: str, manual_audit_hash: str
@@ -413,7 +492,7 @@ class CustodianPairLedger:
                     expires_at,
                 ),
             )
-            connection.commit()
+            self._commit(connection, "reserve_prelabel")
             return PrelabelReservation(
                 LedgerState.PRELABEL_FROZEN,
                 token,
@@ -473,7 +552,7 @@ class CustodianPairLedger:
                     expires_at,
                 ),
             )
-            connection.commit()
+            self._commit(connection, "reserve_label_open")
             return LabelOpenReservation(
                 LedgerState.LABELS_OPEN,
                 1,
@@ -533,7 +612,7 @@ class CustodianPairLedger:
                 "UPDATE pair_ledger SET lease_expires_at = ? WHERE id = 1",
                 (expires_at,),
             )
-            connection.commit()
+            self._commit(connection, "heartbeat")
             return expires_at
 
     def mark_evaluation_completed(
@@ -570,7 +649,7 @@ class CustodianPairLedger:
                 "lease_expires_at = NULL WHERE id = 1",
                 (LedgerState.COMPLETED.value, evaluation_artifact_hash),
             )
-            connection.commit()
+            self._commit(connection, "complete_evaluation")
 
     def record_side_started(self, side: str, output_dir: str) -> str:
         with self._connection() as connection:
@@ -596,12 +675,18 @@ class CustodianPairLedger:
             ).fetchone()
             if existing is not None:
                 raise ValueError("prediction side already attempted; pair is non-resumable")
+            raw_output_path = Path(output_dir).expanduser()
+            if raw_output_path.is_absolute():
+                output_locator = canonical_locator(raw_output_path)
+            else:
+                output_locator = canonical_locator(raw_output_path.resolve(strict=False))
+            output_volume = volume_identity(Path(output_locator))
             token = secrets.token_urlsafe(32)
             expires_at = _now() + float(row["lease_seconds"])
             connection.execute(
-                "INSERT INTO pair_sides(side, output_dir, output_locator, status) "
-                "VALUES (?, ?, ?, 'started')",
-                (side, str(Path(output_dir).resolve()), str(Path(output_dir))),
+                "INSERT INTO pair_sides(side, output_dir, output_locator, output_volume, status) "
+                "VALUES (?, ?, ?, ?, 'started')",
+                (side, output_locator, output_locator, output_volume),
             )
             connection.execute(
                 "UPDATE pair_ledger SET state = ?, lease_kind = ?, "
@@ -614,7 +699,7 @@ class CustodianPairLedger:
                     expires_at,
                 ),
             )
-            connection.commit()
+            self._commit(connection, "start_prediction_side")
             return token
 
     def record_side_completed(
@@ -669,14 +754,14 @@ class CustodianPairLedger:
                     else LedgerState.PREDICTING.value,
                 ),
             )
-            connection.commit()
+            self._commit(connection, "complete_prediction_side")
 
     def invalidate_pair(self, reason: str) -> None:
         with self._connection() as connection:
             _begin_immediate(connection, self.SQLITE_BUSY_TIMEOUT_SECONDS)
             self._require_pair(connection)
             self._fail_pair(connection, reason)
-            connection.commit()
+            self._commit(connection, "invalidate_pair")
 
     def recover_expired(
         self, *, now: float | datetime | None = None
@@ -693,7 +778,13 @@ class CustodianPairLedger:
             row = self._require_pair(connection)
             row = self._recover_if_expired(connection, row, now=current)
             self._require_authorized_lineage(row)
-            connection.commit()
+            self._commit(connection, "recover_expired")
+            return LedgerState(row["state"])
+
+    def reconcile_pending_failure(self) -> LedgerState:
+        """Custodian startup recovery entry for durable completion failures."""
+        with self._connection() as connection:
+            row = self._require_pair(connection)
             return LedgerState(row["state"])
 
     def reauthorize(
@@ -731,6 +822,7 @@ class CustodianPairLedger:
                 "prelabel_reservation_hash = NULL, audit_export_hash = NULL, "
                 "manual_audit_hash = NULL, label_open_count = 0, "
                 "label_lineage_hash = NULL, "
+                "freeze_intent_hash = NULL, freeze_intent_locator = NULL, "
                 "lineage_identity_hash = ?, authorized_evaluation_identity_hash = ?, "
                 "evaluation_artifact_hash = NULL, failure_reason = NULL, "
                 "lease_kind = NULL, lease_token_hash = NULL, lease_side = NULL, "
@@ -750,7 +842,7 @@ class CustodianPairLedger:
                 "VALUES (?, ?, ?)",
                 (row["reauthorization_epoch"] + 1, token_hash, authorized_evaluation_identity),
             )
-            connection.commit()
+            self._commit(connection, "reauthorize")
 
     def snapshot(self) -> dict[str, object]:
         with self._connection() as connection:
@@ -770,13 +862,14 @@ class CustodianPairLedger:
         with self._connection() as connection:
             self._require_pair(connection)
             rows = connection.execute(
-                "SELECT side, output_dir, output_locator, status, bundle_hash "
+                "SELECT side, output_dir, output_locator, output_volume, status, bundle_hash "
                 "FROM pair_sides ORDER BY side"
             ).fetchall()
             return {
                 row["side"]: {
                     "output_dir": row["output_dir"],
                     "output_locator": row["output_locator"],
+                    "output_volume": row["output_volume"],
                     "status": row["status"],
                     "bundle_hash": row["bundle_hash"],
                 }
@@ -799,7 +892,7 @@ class CustodianPairLedger:
         if expires_at is not None and float(expires_at) > now:
             return row
         self._fail_pair(connection, "custodian lease expired; pair is non-resumable")
-        return self._require_pair(connection)
+        return connection.execute("SELECT * FROM pair_ledger WHERE id = 1").fetchone()
 
     def _fail_pair(self, connection: sqlite3.Connection, reason: str) -> None:
         connection.execute(
@@ -816,7 +909,72 @@ class CustodianPairLedger:
         try:
             self.invalidate_pair(reason)
         except BaseException as cleanup_error:
+            self._write_failure_intent(reason)
             raise original from cleanup_error
+
+    def _write_failure_intent(self, reason: str) -> None:
+        path = self.failure_intent_path
+        payload = {
+            "schema_version": "rcaeval-pair-failure-intent-v1",
+            "ledger_path": _canonical_path(self.path),
+            "custodian_manifest_hash": self.custodian_manifest_hash,
+            "reason": reason[:256],
+        }
+        sealed = dict(payload, intent_hash=_canonical_hash(payload))
+        encoded = _canonical_json(sealed)
+        if path.exists():
+            try:
+                existing = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError) as exc:
+                raise ValueError("pair failure intent is unreadable") from exc
+            if existing != sealed:
+                raise ValueError("pair failure intent belongs to a different ledger")
+            return
+        temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+        try:
+            temporary.write_text(encoded, encoding="utf-8", newline="\n")
+            temporary.replace(path)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+
+    def _reconcile_failure_intent(self, connection: sqlite3.Connection) -> None:
+        path = self.failure_intent_path
+        if not path.exists():
+            return
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError) as exc:
+            raise ValueError("pair failure intent is unreadable") from exc
+        required = {
+            "schema_version",
+            "ledger_path",
+            "custodian_manifest_hash",
+            "reason",
+            "intent_hash",
+        }
+        if not isinstance(payload, dict) or set(payload) != required:
+            raise ValueError("pair failure intent schema is not frozen")
+        identity = {key: payload[key] for key in required if key != "intent_hash"}
+        if payload["schema_version"] != "rcaeval-pair-failure-intent-v1":
+            raise ValueError("pair failure intent schema is not frozen")
+        if payload["ledger_path"] != _canonical_path(self.path):
+            raise ValueError("pair failure intent ledger identity differs")
+        if payload["custodian_manifest_hash"] != self.custodian_manifest_hash:
+            raise ValueError("pair failure intent custodian identity differs")
+        if _canonical_hash(identity) != payload["intent_hash"]:
+            raise ValueError("pair failure intent hash is invalid")
+        _begin_immediate(connection, self.SQLITE_BUSY_TIMEOUT_SECONDS)
+        row = self._require_pair(connection)
+        if LedgerState(row["state"]) != LedgerState.FAILED_NON_RESUMABLE:
+            self._fail_pair(connection, str(payload["reason"]))
+            self._commit(connection, "failure_intent_reconcile")
+        else:
+            connection.rollback()
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
 
     @staticmethod
     def _require_authorized_lineage(row: sqlite3.Row) -> None:
@@ -854,6 +1012,7 @@ class CustodianPairLedger:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout = 0")
         try:
+            self._reconcile_failure_intent(connection)
             yield connection
         except BaseException:
             if connection.in_transaction:
@@ -862,11 +1021,74 @@ class CustodianPairLedger:
         finally:
             connection.close()
 
+    def _commit(self, connection: sqlite3.Connection, event_kind: str) -> None:
+        self._append_seal(connection, event_kind)
+        connection.commit()
+
+    def _append_seal(self, connection: sqlite3.Connection, event_kind: str) -> None:
+        snapshot = _canonical_json(self._sealed_snapshot(connection))
+        previous = connection.execute(
+            "SELECT event_hash FROM ledger_events ORDER BY seq DESC LIMIT 1"
+        ).fetchone()
+        previous_hash = "" if previous is None else str(previous[0])
+        event_hash = _event_hash(event_kind, snapshot, previous_hash)
+        connection.execute(
+            "INSERT INTO ledger_events(event_kind, snapshot, prev_hash, event_hash) "
+            "VALUES (?, ?, ?, ?)",
+            (event_kind, snapshot, previous_hash, event_hash),
+        )
+
+    def _assert_sealed(self, connection: sqlite3.Connection) -> None:
+        events = connection.execute(
+            "SELECT seq, event_kind, snapshot, prev_hash, event_hash "
+            "FROM ledger_events ORDER BY seq"
+        ).fetchall()
+        if not events:
+            raise ValueError("pair ledger seal history is missing")
+        previous_hash = ""
+        for event in events:
+            if event["prev_hash"] != previous_hash:
+                raise ValueError("pair ledger seal history is tampered")
+            if (
+                _event_hash(event["event_kind"], event["snapshot"], event["prev_hash"])
+                != event["event_hash"]
+            ):
+                raise ValueError("pair ledger seal history hash is invalid")
+            try:
+                json.loads(event["snapshot"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError("pair ledger seal snapshot is invalid") from exc
+            previous_hash = event["event_hash"]
+        current = _canonical_json(self._sealed_snapshot(connection))
+        if events[-1]["snapshot"] != current:
+            raise ValueError("pair ledger sealed state is tampered")
+
     @staticmethod
-    def _require_pair(connection: sqlite3.Connection) -> sqlite3.Row:
+    def _sealed_snapshot(connection: sqlite3.Connection) -> dict[str, object]:
+        pair = connection.execute("SELECT * FROM pair_ledger WHERE id = 1").fetchone()
+        if pair is None:
+            raise ValueError("pair ledger has not been initialized by the custodian")
+        sides = connection.execute(
+            "SELECT side, output_dir, output_locator, output_volume, status, bundle_hash "
+            "FROM pair_sides ORDER BY side"
+        ).fetchall()
+        reauthorizations = connection.execute(
+            "SELECT epoch, token_hash, evaluation_identity_hash "
+            "FROM reauthorizations ORDER BY epoch"
+        ).fetchall()
+        return {
+            "pair": {key: pair[key] for key in pair.keys()},
+            "sides": [{key: row[key] for key in row.keys()} for row in sides],
+            "reauthorizations": [
+                {key: row[key] for key in row.keys()} for row in reauthorizations
+            ],
+        }
+
+    def _require_pair(self, connection: sqlite3.Connection) -> sqlite3.Row:
         row = connection.execute("SELECT * FROM pair_ledger WHERE id = 1").fetchone()
         if row is None:
             raise ValueError("pair ledger has not been initialized by the custodian")
+        self._assert_sealed(connection)
         return row
 
 
@@ -887,12 +1109,54 @@ def _canonical_path(path: Path) -> str:
     return os.path.normcase(os.path.normpath(str(Path(path).expanduser().resolve(strict=False))))
 
 
+def canonical_locator(path: Path) -> str:
+    raw = Path(path).expanduser()
+    if not raw.is_absolute() or any(part in {".", ".."} for part in raw.parts):
+        raise ValueError("ledger locator must be absolute and traversal-free")
+    resolved = raw.resolve(strict=False)
+    raw_text = os.path.normpath(str(raw))
+    resolved_text = os.path.normpath(str(resolved))
+    if os.name == "nt":
+        raw_text = raw_text[:2].upper() + raw_text[2:] if len(raw_text) >= 2 else raw_text
+        resolved_text = (
+            resolved_text[:2].upper() + resolved_text[2:]
+            if len(resolved_text) >= 2
+            else resolved_text
+        )
+    if raw_text != resolved_text:
+        raise ValueError("ledger locator is not canonical")
+    return resolved_text
+
+
+_canonical_locator = canonical_locator
+
+
+def volume_identity(path: Path) -> str:
+    candidate = Path(path)
+    try:
+        existing = candidate if candidate.exists() else candidate.parent
+        stat = existing.stat()
+    except OSError as exc:
+        raise ValueError("output locator volume cannot be inspected") from exc
+    drive = candidate.drive.upper() if os.name == "nt" else ""
+    return f"{drive}:{int(stat.st_dev)}"
+
+
 def _canonical_json(payload: dict[str, object]) -> str:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
 
 
 def _canonical_hash(payload: dict[str, object]) -> str:
     return hashlib.sha256(_canonical_json(payload).rstrip("\n").encode("utf-8")).hexdigest()
+
+
+def _event_hash(event_kind: str, snapshot: str, previous_hash: str) -> str:
+    payload = {
+        "event_kind": event_kind,
+        "snapshot": snapshot,
+        "previous_hash": previous_hash,
+    }
+    return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
 
 
 def _load_custodian_manifest(path: Path) -> CustodianRootManifest:

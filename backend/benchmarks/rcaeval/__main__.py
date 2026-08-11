@@ -380,6 +380,7 @@ def _freeze_set(arguments) -> None:
     from backend.benchmarks.rcaeval.models import RcaEvalConfiguration
     from backend.benchmarks.rcaeval.runner import (
         _reject_reparse_path,
+        canonical_locator,
         freeze_prediction_set,
     )
 
@@ -394,6 +395,7 @@ def _freeze_set(arguments) -> None:
         count = 90
     ledger = CustodianPairLedger.from_manifest(arguments.custodian_manifest)
     _reject_reparse_path(arguments.root, "prediction set root")
+    canonical_locator(arguments.root)
     root = arguments.root.resolve()
     if not _within(root, ledger.canonical_root):
         raise ValueError("prediction root must stay inside the canonical custodian root")
@@ -478,6 +480,10 @@ def _evaluate(arguments) -> None:
             str(arguments.audit_export),
             "--manual-audit",
             str(arguments.manual_audit),
+            "--expected-label-manifest-hash",
+            arguments.label_manifest_hash,
+            "--expected-runtime-manifest-hash",
+            arguments.runtime_manifest_hash,
         ]
     )
     spec = build_evaluator_launch(
@@ -545,7 +551,6 @@ def _evaluate(arguments) -> None:
             predictions_hash=spec.predictions_hash,
             labels_manifest_hash=spec.labels_manifest_hash,
         )
-        output_dir.mkdir(parents=True, exist_ok=False)
         subprocess.run(spec.argv, cwd=spec.cwd, env=spec.env, check=True)
         artifact = EvaluationArtifact.model_validate_json(
             evaluation_path.read_text(encoding="utf-8")

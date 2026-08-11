@@ -168,6 +168,10 @@ def _seed_pair_ledger(predictions_root: Path, partition: str) -> None:
         (side_dir / "predictions.json").write_text("{}", encoding="utf-8")
         lease = ledger.record_side_started(side, str(side_dir))
         ledger.record_side_completed(side, f"{index + 1:064x}", lease_token=lease)
+    ledger.prepare_prediction_set_freeze(
+        prediction_set_hash="a" * 64,
+        root_locator=str(ledger.canonical_root / "predictions"),
+    )
     ledger.bind_prediction_set_hash("a" * 64)
 
 
@@ -365,6 +369,25 @@ def test_frozen_run_identity_accepts_packaged_source_without_git_and_rejects_tam
         )
 
 
+def test_packaged_source_manifest_survives_relocation_without_git(tmp_path):
+    from backend.services.source_identity import resolve_source_identity, write_source_manifest
+
+    package_root = tmp_path / "site-packages"
+    worker = package_root / "backend" / "benchmarks" / "rcaeval" / "prediction_worker.py"
+    worker.parent.mkdir(parents=True)
+    worker.write_text("PACKAGE_WORKER = True\n", encoding="utf-8")
+    manifest = package_root / "backend" / "services" / "diagops-source-manifest.json"
+    write_source_manifest(package_root, output=manifest, package_scope=True)
+
+    identity = resolve_source_identity(package_root)
+    assert identity.git_dirty is False
+    assert len(identity.manifest_hash) == 64
+
+    worker.write_text("PACKAGE_WORKER = False\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="manifest|digest|source"):
+        resolve_source_identity(package_root)
+
+
 def _argv() -> list[str]:
     return ["python", "-m", "backend.benchmarks.rcaeval.runner", "--profile", "offline"]
 
@@ -462,6 +485,29 @@ def test_prediction_launch_rejects_checksum_symlink_entry(packages, monkeypatch)
     )
 
     with pytest.raises(ValueError, match="symlink"):
+        build_prediction_launch(
+            runtime_package=packages["runtime"],
+            predictions_dir=packages["predictions"],
+            argv=_argv(),
+            environ={},
+        )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction attributes are platform-specific")
+def test_prediction_launch_rejects_real_windows_junction(packages, tmp_path):
+    target = tmp_path / "junction-target"
+    target.mkdir()
+    (target / "escaped.txt").write_text("escaped", encoding="utf-8")
+    junction = packages["runtime"] / "junction"
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(target)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        pytest.skip("junction creation unavailable in this Windows environment")
+    with pytest.raises(ValueError, match="reparse|junction|symlink|checksum"):
         build_prediction_launch(
             runtime_package=packages["runtime"],
             predictions_dir=packages["predictions"],
@@ -591,18 +637,30 @@ def test_evaluator_launch_rejects_slashed_production_module_paths(packages, help
             label_package=packages["labels"],
             argv=argv,
             expected_runtime_manifest_hash=_runtime_hash(),
+            expected_label_manifest_hash=_label_manifest(_runtime_hash()).manifest_hash,
         )
 
 
 def test_evaluator_launch_rejects_unpaired_label_binding(packages):
+    from backend.benchmarks.rcaeval.evaluator import read_label_manifest_once
+
     with pytest.raises(ValueError, match="binding"):
-        build_evaluator_launch(
-            predictions_bundle=packages["predictions"],
-            expected_bundle_hash=_bundle_hash(packages["predictions"]),
-            label_package=packages["labels"],
-            argv=["python", "-m", "backend.benchmarks.rcaeval.evaluator"],
+        read_label_manifest_once(
+            packages["labels"] / "labels.json",
+            expected_manifest_hash=_label_manifest(_runtime_hash()).manifest_hash,
             expected_runtime_manifest_hash="1" * 64,
         )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows canonical spelling semantics")
+def test_canonical_locator_rejects_case_alias(tmp_path):
+    from backend.benchmarks.rcaeval.ledger import canonical_locator
+
+    actual = tmp_path / "ReviewRoot" / "Single"
+    actual.mkdir(parents=True)
+    alias = Path(str(actual).lower())
+    with pytest.raises(ValueError, match="canonical|locator"):
+        canonical_locator(alias)
 
 
 def test_evaluator_launch_rejects_malformed_expected_runtime_hash(packages):
@@ -613,6 +671,7 @@ def test_evaluator_launch_rejects_malformed_expected_runtime_hash(packages):
             label_package=packages["labels"],
             argv=["python", "-m", "backend.benchmarks.rcaeval.evaluator"],
             expected_runtime_manifest_hash="z" * 64,
+            expected_label_manifest_hash=_label_manifest(_runtime_hash()).manifest_hash,
         )
 
 
@@ -623,6 +682,7 @@ def test_evaluator_launch_happy_path(packages):
         label_package=packages["labels"],
         argv=["python", "-m", "backend.benchmarks.rcaeval.evaluator"],
         expected_runtime_manifest_hash=_runtime_hash(),
+        expected_label_manifest_hash=_label_manifest(_runtime_hash()).manifest_hash,
     )
     assert spec.predictions_hash == _bundle_hash(packages["predictions"])
     label_manifest = _label_manifest(_runtime_manifest().manifest_hash)
@@ -652,6 +712,60 @@ def test_formal_evaluator_launch_does_not_preopen_labels(packages, monkeypatch):
     assert spec.labels_manifest_hash == _label_manifest(_runtime_hash()).manifest_hash
 
 
+def test_evaluator_child_rejects_label_hash_mismatch_before_artifact(packages):
+    """The trusted child validates the custodian hash on its sole label read."""
+    from backend.benchmarks.rcaeval.evaluator import read_label_manifest_once
+
+    with pytest.raises(ValueError, match="label.*hash|label.*manifest"):
+        read_label_manifest_once(
+            packages["labels"] / "labels.json",
+            expected_manifest_hash="0" * 64,
+            expected_runtime_manifest_hash=_runtime_hash(),
+        )
+
+
+def test_evaluator_child_rejects_label_path_replacement_before_binding(packages, monkeypatch):
+    import os
+
+    import backend.benchmarks.rcaeval.evaluator as evaluator
+
+    labels_path = packages["labels"] / "labels.json"
+    backup_path = packages["labels"] / "labels.original.json"
+    replacement_path = packages["labels"] / "labels.replacement.json"
+    replacement_path.write_bytes(b"{}\n")
+    original_open = os.open
+    swapped = False
+
+    def swap_before_open(path, *args):
+        nonlocal swapped
+        if Path(path) == labels_path and not swapped:
+            labels_path.replace(backup_path)
+            replacement_path.replace(labels_path)
+            swapped = True
+        return original_open(path, *args)
+
+    monkeypatch.setattr(os, "open", swap_before_open)
+    with pytest.raises(ValueError, match="changed|replaced|label"):
+        evaluator.read_label_manifest_once(
+            labels_path,
+            expected_manifest_hash=_label_manifest(_runtime_hash()).manifest_hash,
+            expected_runtime_manifest_hash=_runtime_hash(),
+        )
+
+
+def test_runtime_checksum_manifest_rejects_duplicate_entries(packages):
+    sums = packages["runtime"] / "SHA256SUMS"
+    original = sums.read_text(encoding="utf-8")
+    sums.write_text(original + original.splitlines()[0] + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="duplicate|canonical|checksum"):
+        build_prediction_launch(
+            runtime_package=packages["runtime"],
+            predictions_dir=packages["predictions"],
+            argv=_argv(),
+            environ={},
+        )
+
+
 def test_evaluator_launch_rejects_post_freeze_change(packages):
     frozen = _bundle_hash(packages["predictions"])
     (packages["predictions"] / "predictions.json").write_text("{}", encoding="utf-8")
@@ -662,6 +776,7 @@ def test_evaluator_launch_rejects_post_freeze_change(packages):
             label_package=packages["labels"],
             argv=["python", "-m", "backend.benchmarks.rcaeval.evaluator"],
             expected_runtime_manifest_hash=_runtime_hash(),
+            expected_label_manifest_hash=_label_manifest(_runtime_hash()).manifest_hash,
         )
 
 
@@ -673,6 +788,7 @@ def test_evaluator_launch_rejects_wrong_expected_hash(packages):
             label_package=packages["labels"],
             argv=["python", "-m", "backend.benchmarks.rcaeval.evaluator"],
             expected_runtime_manifest_hash=_runtime_hash(),
+            expected_label_manifest_hash=_label_manifest(_runtime_hash()).manifest_hash,
         )
 
 
@@ -693,6 +809,7 @@ def test_evaluator_launch_rejects_production_or_foreign_entries(packages, argv):
             label_package=packages["labels"],
             argv=argv,
             expected_runtime_manifest_hash=_runtime_hash(),
+            expected_label_manifest_hash=_label_manifest(_runtime_hash()).manifest_hash,
         )
 
 
@@ -1032,6 +1149,7 @@ def test_formal_evaluation_rejects_child_artifact_with_wrong_label_binding(
     (tmp_path / "manual.json").write_text("{}", encoding="utf-8")
 
     def run_child(*_, **__):
+        output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "evaluation.json").write_text("{}", encoding="utf-8")
 
     monkeypatch.setattr("subprocess.run", run_child)
