@@ -52,6 +52,7 @@ from backend.domain.agent_findings import (
     RootCauseCandidate,
 )
 from backend.domain.agent_plan import (
+    AgentExecution,
     AgentExecutionStatus,
     DiagnosisPlan,
     DiagnosisTask,
@@ -61,12 +62,15 @@ from backend.domain.agent_plan import (
 from backend.domain.events import IncidentEvent, IncidentSource, Severity
 from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
 from backend.domain.multi_agent import (
+    AgentExecutionLayer,
     CausalCheckStatus,
     CriticVerdict,
+    DiagnosticStatus,
     ExecutionStepKind,
     FailureCategory,
     LeadAction,
     ModelProvider,
+    MultiAgentRunStatus,
 )
 from backend.domain.runtime import (
     RuntimeActorType,
@@ -78,6 +82,7 @@ from backend.domain.runtime import (
     seal_v11_execution_contract,
 )
 from backend.domain.tool_calls import ToolSpec
+from backend.domain.v11_contracts import validate_v11_final_status
 from backend.providers.registry import build_mock_provider_registry
 from backend.runtime.phase_executor import DiagnosisPhaseExecutor
 from backend.runtime.phases import V11_PHASE_ORDER, PhaseInput
@@ -2242,6 +2247,239 @@ async def test_v11_validator_failure_is_failed_without_inconclusive_fallback():
     assert review.critic_assessments == []
     assert review.diagnostic_status is None
     assert repository.get(record.id).status == InvestigationStatus.FAILED
+
+
+@pytest.mark.anyio
+async def test_v11_insufficient_partial_downgrades_to_inconclusive_via_lead_correction():
+    """spec §9.2：证据不足的 partial 经一次 Lead correction 降级为 inconclusive。"""
+    repository, record = _seed_repository()
+    candidate = RootCauseCandidate(
+        id="candidate-insufficient",
+        summary="candidate supported by a single evidence item",
+        rank=1,
+        confidence=0.6,
+        supporting_evidence_ids=["ev-metric"],
+    )
+    assessment = CriticAssessment(
+        id="assessment-insufficient",
+        candidate_id=candidate.id,
+        verdict=CriticVerdict.ACCEPT,
+        checks=[
+            CausalCheck(
+                name=name,
+                status=CausalCheckStatus.PASS,
+                summary="supported",
+                evidence_ids=["ev-metric"],
+            )
+            for name in CausalCheckName
+        ],
+        summary="accepted",
+        runtime_run_id="run-v11",
+    )
+    repository.save_multi_agent_result(
+        record.id,
+        [],
+        [
+            AgentExecution(
+                task_id="task-critic",
+                agent_name="CriticAgent",
+                runtime_run_id="run-v11",
+                status=AgentExecutionStatus.COMPLETED,
+                execution_layer=AgentExecutionLayer.OPENAI_AGENTS_SDK,
+                step_kind=ExecutionStepKind.CRITIC_REVIEW,
+                analysis_round=1,
+                summary="completed",
+            ),
+            AgentExecution(
+                task_id="task-lead",
+                agent_name="LeadAgent",
+                runtime_run_id="run-v11",
+                status=AgentExecutionStatus.COMPLETED,
+                execution_layer=AgentExecutionLayer.OPENAI_AGENTS_SDK,
+                step_kind=ExecutionStepKind.LEAD_ADJUDICATION,
+                analysis_round=1,
+                summary="completed",
+            ),
+        ],
+        CoordinationReview(
+            investigation_id=record.id,
+            runtime_run_id="run-v11",
+            authority_mode="agent",
+            candidates=[candidate],
+            critic_assessments=[assessment],
+            lead_decision=LeadDecision(
+                action=LeadAction.CONCLUDE,
+                summary="conclude the accepted candidate",
+                candidate_ids=[candidate.id],
+            ),
+            diagnostic_status=DiagnosticStatus.PARTIAL,
+        ),
+    )
+
+    async def turn(**_kwargs):
+        return {
+            "decision": {
+                "action": "inconclusive",
+                "summary": "evidence cannot support a root cause",
+                "stop_reason": "insufficient_evidence",
+            }
+        }
+
+    runtime = V11Runtime(
+        model="fake",
+        model_provider=ModelProvider.OPENAI,
+        model_name="fake",
+        tool_registry=build_provider_tool_registry(build_mock_provider_registry()),
+        turn=turn,
+    )
+    runtime.runtime_run_id = "run-v11"
+
+    review = await runtime.result_validation(
+        repository=repository,
+        investigation_id=record.id,
+        event=record.event,
+    )
+
+    assert review.diagnostic_status == DiagnosticStatus.INCONCLUSIVE
+    assert review.candidates == []
+    assert review.critic_assessments == []
+    assert review.lead_decision is not None
+    assert review.lead_decision.action == LeadAction.INCONCLUSIVE
+    assert review.run_status == MultiAgentRunStatus.COMPLETED
+    record_after = repository.get(record.id)
+    assert record_after.status != InvestigationStatus.FAILED
+    run = record_after.multi_agent_run
+    assert run.status == MultiAgentRunStatus.COMPLETED
+    assert run.diagnostic_status == DiagnosticStatus.INCONCLUSIVE
+    validate_v11_final_status(review, run)
+
+
+@pytest.mark.anyio
+async def test_v11_resume_restores_partial_failure_memory_before_lead_adjudication():
+    """跨进程 resume 后 Lead conclude 必须投影 partial 而非 complete。"""
+    repository, record = _repository()
+    record = repository.save(
+        record.model_copy(
+            update={
+                "evidence": [
+                    EvidenceItem(
+                        id="ev-log",
+                        provider=EvidenceProvider.LOG,
+                        kind=EvidenceKind.LOG_PATTERN,
+                        timestamp=record.event.started_at,
+                        summary="committed log evidence",
+                        runtime_run_id="run-v11",
+                    ),
+                    EvidenceItem(
+                        id="ev-metric",
+                        provider=EvidenceProvider.METRIC,
+                        kind=EvidenceKind.METRIC_TREND,
+                        timestamp=record.event.started_at,
+                        summary="committed metric evidence",
+                        runtime_run_id="run-v11",
+                    ),
+                ]
+            }
+        )
+    )
+    candidate = RootCauseCandidate(
+        id="candidate-resumed",
+        summary="candidate supported by two provider types",
+        rank=1,
+        confidence=0.7,
+        supporting_evidence_ids=["ev-log", "ev-metric"],
+    )
+    assessment = CriticAssessment(
+        id="assessment-resumed",
+        candidate_id=candidate.id,
+        verdict=CriticVerdict.ACCEPT,
+        checks=[
+            CausalCheck(
+                name=name,
+                status=CausalCheckStatus.PASS,
+                summary="supported",
+                evidence_ids=["ev-log"],
+            )
+            for name in CausalCheckName
+        ],
+        summary="accepted",
+        runtime_run_id="run-v11",
+    )
+    repository.save_multi_agent_result(
+        record.id,
+        [],
+        [
+            # 崩溃前已持久化的 round-1 Investigator 失败与新进程 Critic 审计。
+            AgentExecution(
+                task_id="task-failed-investigator",
+                agent_name="InvestigatorAgent",
+                runtime_run_id="run-v11",
+                status=AgentExecutionStatus.FAILED,
+                execution_layer=AgentExecutionLayer.OPENAI_AGENTS_SDK,
+                step_kind=ExecutionStepKind.INVESTIGATOR_ANALYSIS,
+                analysis_round=1,
+                summary="investigator failed",
+            ),
+            AgentExecution(
+                task_id="task-critic",
+                agent_name="CriticAgent",
+                runtime_run_id="run-v11",
+                status=AgentExecutionStatus.COMPLETED,
+                execution_layer=AgentExecutionLayer.OPENAI_AGENTS_SDK,
+                step_kind=ExecutionStepKind.CRITIC_REVIEW,
+                analysis_round=1,
+                summary="completed",
+            ),
+        ],
+        CoordinationReview(
+            investigation_id=record.id,
+            runtime_run_id="run-v11",
+            authority_mode="agent",
+            candidates=[candidate],
+            critic_assessments=[assessment],
+        ),
+    )
+
+    async def turn(**_kwargs):
+        return {
+            "decision": {
+                "action": "conclude",
+                "summary": "accept the Critic-approved candidate",
+                "candidate_ids": [candidate.id],
+            }
+        }
+
+    # 模拟崩溃后 resume：全新 runtime 的内存失败记录为空，只有持久化执行可查。
+    runtime = V11Runtime(
+        model="fake",
+        model_provider=ModelProvider.OPENAI,
+        model_name="fake",
+        tool_registry=build_provider_tool_registry(build_mock_provider_registry()),
+        turn=turn,
+    )
+    runtime.runtime_run_id = "run-v11"
+
+    review = await runtime.lead_adjudication(
+        repository=repository,
+        investigation_id=record.id,
+        event=record.event,
+    )
+
+    assert review.diagnostic_status == DiagnosticStatus.PARTIAL
+    assert review.run_status == MultiAgentRunStatus.PARTIAL
+
+    await runtime.result_validation(
+        repository=repository,
+        investigation_id=record.id,
+        event=record.event,
+    )
+
+    record_after = repository.get(record.id)
+    assert record_after.status != InvestigationStatus.FAILED
+    run = record_after.multi_agent_run
+    assert run.status == MultiAgentRunStatus.PARTIAL
+    assert run.diagnostic_status == DiagnosticStatus.PARTIAL
+    validate_v11_final_status(review, run)
 
 
 @pytest.mark.anyio

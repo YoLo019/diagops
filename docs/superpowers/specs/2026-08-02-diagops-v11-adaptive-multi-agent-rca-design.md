@@ -1948,6 +1948,53 @@ predictions, attempts, and label opens remain zero. This Spec remains
 `review_required`, M5 remains blocked at T12, and no accuracy claim is made
 pending capability admission and independent review.
 
+M5 seventh-round review-fix record (2026-08-12, ledger backfill): the follow-up
+review against `6c238e3b0187ced00891ac7aa5e914c88b9a04c3` returned
+`changes_required` (1 medium, 1 low). All three recursive scans dropped
+`sorted(Path.rglob("*"))` materialization for iterate-and-reject so planted
+junction loops fail closed immediately with elapsed-bound regressions, and the
+shared strict checksum parser rejects POSIX-rooted `/`-prefixed paths. Gates:
+focused M5 group `383 passed, 1 skipped`; full pytest
+`2214 passed, 4 skipped, 1 warning`; Ruff and diff-check clean. A same-day
+trusted read-only redundancy cleanup (R1 plus twelve confirmed-keep items;
+R16/R18 deferred as efficiency refactors) kept the full gate identical at
+`2214 passed, 4 skipped, 1 warning`. Full evidence lives in `current.md`; this
+entry closes the ledger lag noted by the eighth-round review.
+
+M5 eighth-round review-fix record (2026-08-12): an independent whole-version
+review of `58c6382..2b42b0f` (M0–M5, 144 files) returned
+`approve_with_followups` with two medium and three low findings and reran all
+engineering gates green (`2214 passed, 4 skipped, 1 warning`; offline 80/80;
+runtime acceptance 14/14 privacy-clean on `git_dirty=false`). Medium-1 (R9):
+the §9.2 partial sufficiency contract had drifted bidirectionally — the
+implementation required only a global PASS check plus a round-two task linkage
+and never enforced the candidate-level no-failed-check and two-independent-
+evidence conditions. The approved contract was kept and the code aligned:
+`result_validation.py` now enforces, per accepted candidate, no failed causal
+check, at least two distinct supporting evidence items, and two provider types
+when the run's usable evidence covers two provider types; the spec-external
+round-two linkage requirement was removed; an insufficiently supported partial
+is downgraded to `inconclusive` through the existing single tool-less Lead
+correction, never a code-invented candidate. Medium-2 (R8): cross-process
+resume lost partial failure memory, projecting `COMPLETE` where §9.2 requires
+`partial` and failing publication; `_restore_failure_memory` now backfills from
+the same persisted failed/cancelled execution source the summary fallback used,
+idempotently, at the adjudication/validation/summary entries. RED evidence: 7
+new or rewritten regressions failed against the old code (5 validator, 2
+runtime). GREEN evidence: focused `60 passed`; full pytest
+`2220 passed, 4 skipped, 1 warning`; both Ruff commands and diff-check clean.
+An independent re-review of the uncommitted diff returned `approve` with one
+informational low (`PARTIAL` evidence counts toward provider success, which
+only tightens the gate). The three eighth-round lows are recorded for T13
+reconciliation: the leakage gate is structural input-plane isolation with a
+hardcoded zero runtime counter (no runtime detector), this ledger's lag
+(closed by the backfill above), and a bare `KeyError` preflight in
+`production_acceptance.py`. The approved R1–R27 contract is unchanged; M5
+remains blocked at T12 capability admission; formal SS30/TT90 predictions,
+paired attempts, and label opens remain zero; no accuracy claim is made. On
+explicit user instruction the branch was merged to `main`; T12/T13 gates and
+the blocked status are unaffected.
+
 ## 16. Approval state
 
 - Requirements Brief: confirmed by user.
@@ -1970,6 +2017,8 @@ pending capability admission and independent review.
 - Implementation: M2 baseline `c2245ac` and the M3 review-fix history remain
 isolated; M4 review-fix is RED→GREEN verified in isolated branch
 `codex/v11-m4`, with its local commit SHA recorded in the implementation
-handoff. No merge or push was performed; M5 review-fix is isolated on
-`codex/v11-m5`, with formal SS30/TT90 still protected and independent
-re-review pending.
+handoff. M1–M4 were merged to `main` (`c3a0189`); on 2026-08-12 the user
+explicitly instructed merging `codex/v11-m5` (through the eighth-round
+review-fix) into `main` as well. M5 remains blocked at T12 capability
+admission with formal SS30/TT90 still protected; merge is not completion and
+no accuracy claim is made.

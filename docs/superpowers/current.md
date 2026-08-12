@@ -372,6 +372,33 @@ run was executed: formal predictions, paired attempts, label opens, and label
 consumption remain `0`; all tests use `tmp_path`. M5 stays blocked at T12;
 no accuracy or completion claim is made.
 
+Verification evidence (M5 eighth-round full-version review and partial-contract
+fix, 2026-08-12): an independent whole-version review of `58c6382..2b42b0f`
+(M0–M5, 144 files) returned `approve_with_followups` (2 medium, 3 low) after
+rerunning every engineering gate green: full pytest
+`2214 passed, 4 skipped, 1 warning` (two runs), both Ruff commands, offline
+`80/80`, runtime acceptance `14/14` privacy-clean on `git_dirty=false`,
+frontend build, and diff-check; blindness spot-grep zero-hit; Docker/T5/T12
+blocks re-confirmed as environmental. Medium-1 (R9, §9.2 partial sufficiency
+bidirectional drift) and Medium-2 (R8, resume lost partial failure memory)
+were fixed per the approved contract — candidate-level no-failed-check, ≥2
+distinct supporting evidence items, two provider types when usable evidence
+covers two, spec-external round-two linkage removed, insufficient partial
+downgraded to `inconclusive` via the existing single tool-less Lead
+correction, and `_restore_failure_memory` backfilling from the same persisted
+failed/cancelled execution source. RED: 7 regressions failed pre-fix (5
+validator, 2 runtime). GREEN: focused `60 passed`; full pytest
+`2220 passed, 4 skipped, 1 warning`; both Ruff commands and diff-check clean.
+An independent re-review of the uncommitted diff returned `approve` (one
+informational low). The three lows are queued for T13 reconciliation:
+leakage gate is structural input-plane isolation with a hardcoded zero
+runtime counter, spec §15 ledger lag (closed by backfill in the same commit),
+and a bare `KeyError` preflight in `production_acceptance.py`. Approved
+R1–R27 contract unchanged; formal SS30/TT90 predictions, paired attempts, and
+label opens remain `0`. On explicit user instruction `codex/v11-m5` was merged
+to `main`; M5 stays blocked at T12 capability admission and no accuracy or
+completion claim is made.
+
 Allowed values:
 
 ```text
@@ -407,7 +434,7 @@ docs/superpowers/plans/2026-08-02-diagops-v11-adaptive-multi-agent-rca-implement
 
 ## V11 Planning Dashboard
 
-Overall progress: `V11 Spec/Plan approved；M0–M3 已按记录完成；M4 最终提交 7539c7f 已获独立 review approve；M5 T11 与 M0-L1/L2 工程实现/ focused 验证完成，T12 在 capability admission 前阻断，T13 未开始且 TT90 未消耗。`
+Overall progress: `V11 Spec/Plan approved；M0–M3 已按记录完成；M4 最终提交 7539c7f 已获独立 review approve；M5 T11 与 M0-L1/L2 工程实现/ focused 验证完成；第八轮全量复审 approve_with_followups，两条 Medium（§9.2 partial 契约、resume 失败记忆）已 RED→GREEN 关闭并获独立复审 approve，分支已按用户指示合并 main；T12 在 capability admission 前阻断，T13 未开始且 TT90 未消耗。`
 
 Latest M4 verification: fourth-round H1–H3 were reproduced and fixed at the
 real OpenRCA runner and shared V11 publication boundaries; M4 focused 124,
@@ -422,12 +449,14 @@ produce empty prediction/CSV output with an explicit failure category; V10
 legacy output remains unchanged. M4 focused 137, T9 289, T10 881, and full
 pytest 2097 passed with only the recorded skips/warning.
 
-Current phase: Full iteration / M5 review-fix verifying，T12 capability stop
-gate blocked；等待独立 M5 source/artifact re-review 与可调用认证端点
+Current phase: Full iteration / M5 第八轮全量复审 approve_with_followups 且两条
+Medium 已按 §9.2 RED→GREEN 关闭并获独立复审 approve，分支已按用户指示合并 main；
+T12 capability stop gate 仍 blocked
 
-Next action: 父任务先创建独立 M5 re-review；若后续提供 exact passed capability
-artifact、endpoint/model 与 process-only credential，再从 OB30/SS30 继续；保持
-当前 worktree/branch，不 merge、push，不打开 TT90 labels。
+Next action: 若后续提供 exact passed capability artifact、endpoint/model 与
+process-only credential，再从 OB30/SS30 继续 T12；T13 对账清单纳入三条 Low
+（leakage 运行期检测空转、production_acceptance preflight、M2R-4 跟踪）；不打开
+TT90 labels，不做任何准确率声称。
 
 | ID | Phase | Task | Status | Evidence or result | Next action or blocker |
 | --- | --- | --- | --- | --- | --- |
@@ -441,7 +470,7 @@ artifact、endpoint/model 与 process-only credential，再从 OB30/SS30 继续�
 | M2/T4–T6 | Execute | 九工具离线事件包与 data-only skills、File/Tempo trace 平价、模型边界与能力认证 | implemented / verified | 独立复审重跑：T4 336 passed + 离线验收 rows=80 failed=0；T5 17 passed + Docker gate blocked（daemon 不可用）；T6 106→110 passed（M2R-1 补 4 条 slow-endpoint 测试）；全量 1927 passed/3 skipped、Ruff clean、runtime acceptance exit=0；复审 approve_with_followups，M2R-1 closed；M2 基线 `c2245ac` 已单独提交，M2R-2/3 在 M3 T7 中关闭，M2R-4 跟踪 | 保持基线提交，不修改 dirty main |
 | M3/T7–T8 | Execute / Verify | Lead/Investigators/Critic/Lead V11 authority runtime | implemented / verifying | fifth-round base `e52e47984c4b460ed3b06dc4147d3d3b0532345b`; T7 91 passed、T8 207 passed；M2R/隔离 84 passed/3 skipped；变更相关 102 passed/2 skipped；全量 1995 passed/3 skipped/1 warning；两套全仓 Ruff clean；H1 usage/audit RED→GREEN | 等待同一审查线程复审；不 merge/push，不进入 M4/M5 |
 | M4/T9–T10 | Execute / Verify | Reports/actions, human transitions, API/UI, OpenRCA compatibility, recovery/privacy/offline gates | implemented / verified | 最终提交 `7539c7fd8b707fc54cf2ed75a7d9fcba13d7618c` 已获独立 review approve；第五轮 High RED→GREEN 与 focused/full/offline/runtime/frontend/Ruff/diff-check 证据沿用 M4 handoff | M5 worktree 精确从该提交创建；不 merge/push |
-| M5/T11–T13 | Execute / Verify | Frozen RCAEval control, sealed validation, one TT90 paired result | blocked at T12 capability admission | 第六轮 review-fix（base `cf5e4295`）：外部 HMAC 链 seal anchor（一次性随机 key）、evaluator child 冻结根复验+仅消费已验证字节、custodian label hash 经 fence 绑定、统一写边界 failure intent+启动 reconcile 收敛、reparse/drive-alias/UNC 严格 locator、统一严格 checksum parser、V11 contract topology 机械校验、wheel 内容 manifest 重生成+dependency lock fail-closed，全部 RED→GREEN；focused 379 passed/1 skip、full 2210 passed/4 skip/1 warning；SS30/TT90 无模型结果，labels 未正式打开 | 缺 passed capability artifact/endpoint/credential；T13 未开始、TT90 未消耗；等待独立第七轮 M5 re-review |
+| M5/T11–T13 | Execute / Verify | Frozen RCAEval control, sealed validation, one TT90 paired result | blocked at T12 capability admission | 第八轮全量复审（`58c6382..2b42b0f`）approve_with_followups：Medium-1（§9.2 partial 三条件候选级对齐、round-2 linkage 移除、不足降级 inconclusive）与 Medium-2（resume 失败记忆回填）RED 7 例→GREEN，focused 60 passed、full `2220 passed/4 skipped/1 warning`，独立复审 approve；三条 Low 入 T13 对账；SS30/TT90 无模型结果，labels 未正式打开 | 已按用户指示合并 main；缺 passed capability artifact/endpoint/credential；T13 未开始、TT90 未消耗 |
 
 M1 review-fix record (2026-08-06): High 1–6 and Medium 7–10 were reproduced
 with focused regressions, fixed at shared profile/ownership/transaction/entry

@@ -1406,6 +1406,7 @@ class V11Runtime:
         self, *, repository, investigation_id: str, event: IncidentEvent
     ) -> CoordinationReview:
         """Lead 只可采纳 Critic accepted IDs；无候选时结论必须 inconclusive。"""
+        self._restore_failure_memory(repository, investigation_id)
         review = repository.get_coordination_review(investigation_id)
         if review is None:
             review = self._empty_review(repository, investigation_id)
@@ -1503,9 +1504,11 @@ class V11Runtime:
             "lead_decision": decision,
             "diagnostic_status": status,
             "stop_reason": decision.stop_reason,
+            # 终态矩阵只允许 COMPLETE/COMPLETED、PARTIAL/PARTIAL、
+            # INCONCLUSIVE/COMPLETED 三种组合。
             "run_status": (
                 MultiAgentRunStatus.PARTIAL
-                if self._failures
+                if status == DiagnosticStatus.PARTIAL
                 else MultiAgentRunStatus.COMPLETED
             ),
             "summary": decision.summary,
@@ -1527,6 +1530,7 @@ class V11Runtime:
     ) -> CoordinationReview:
         """机械校验结果，失败时只做一次无工具 Lead correction。"""
         del event
+        self._restore_failure_memory(repository, investigation_id)
         review = repository.get_coordination_review(investigation_id)
         if review is None:
             review = self._empty_review(repository, investigation_id)
@@ -1580,13 +1584,24 @@ class V11Runtime:
                     turn.output, LeadAdjudicationOutput
                 ).decision
                 self._validate_lead_decision(corrected, review)
-                review = review.model_copy(
-                    update={
-                        "lead_decision": corrected,
-                        "diagnostic_status": self._diagnostic_status(corrected),
-                        "stop_reason": corrected.stop_reason,
-                    }
-                )
+                corrected_status = self._diagnostic_status(corrected)
+                correction_projection = {
+                    "lead_decision": corrected,
+                    "diagnostic_status": corrected_status,
+                    "stop_reason": corrected.stop_reason,
+                    "run_status": (
+                        MultiAgentRunStatus.PARTIAL
+                        if corrected_status == DiagnosticStatus.PARTIAL
+                        else MultiAgentRunStatus.COMPLETED
+                    ),
+                }
+                if corrected.action == LeadAction.INCONCLUSIVE:
+                    # 与 lead_adjudication 相同的语义归一化：Lead 决定 inconclusive
+                    # 后不得保留候选投影；代码不替代 Lead 造候选。
+                    correction_projection.update(
+                        {"candidates": [], "critic_assessments": [], "root_causes": []}
+                    )
+                review = review.model_copy(update=correction_projection)
                 repository.save_coordination_review(review)
                 validate_v11_result(
                     investigation_id=investigation_id,
@@ -2244,31 +2259,44 @@ class V11Runtime:
             )
         self._update_summary(repository, investigation_id)
 
+    def _restore_failure_memory(self, repository, investigation_id: str) -> None:
+        """跨进程 resume 后从持久化 failed/cancelled execution 回填失败记忆。
+
+        持久化执行是失败记忆的唯一事实来源；内存 _failures 只是其运行期缓存。
+        """
+        for item in repository.list_executions(investigation_id):
+            if (
+                item.runtime_run_id == self.runtime_run_id
+                and item.status
+                in {AgentExecutionStatus.FAILED, AgentExecutionStatus.CANCELLED}
+                and item.id not in self._failures
+            ):
+                self._failures.append(item.id)
+
     def _update_summary(self, repository, investigation_id: str) -> None:
         from backend.domain.multi_agent import MultiAgentRunSummary
 
         review = repository.get_coordination_review(investigation_id)
-        executions = repository.list_executions(investigation_id)
         calls = repository.list_tool_calls(investigation_id)
-        failures = self._failures or [
-            item.id
-            for item in executions
-            if item.runtime_run_id == self.runtime_run_id
-            and item.status in {AgentExecutionStatus.FAILED, AgentExecutionStatus.CANCELLED}
-        ]
+        self._restore_failure_memory(repository, investigation_id)
+        failures = self._failures
+        diagnostic_status = review.diagnostic_status if review is not None else None
+        status = (
+            MultiAgentRunStatus.FAILED
+            if self._terminal_failure
+            # 失败记忆只影响已发布的诊断（partial）；inconclusive 是无候选的
+            # 证据受限停止，终态矩阵固定映射为 COMPLETED。
+            else MultiAgentRunStatus.PARTIAL
+            if failures and diagnostic_status != DiagnosticStatus.INCONCLUSIVE
+            else MultiAgentRunStatus.COMPLETED
+        )
         summary = MultiAgentRunSummary(
-            status=(
-                MultiAgentRunStatus.FAILED
-                if self._terminal_failure
-                else MultiAgentRunStatus.PARTIAL
-                if failures
-                else MultiAgentRunStatus.COMPLETED
-            ),
+            status=status,
             failure_reason=(
                 self._terminal_failure_reason
                 if self._terminal_failure
                 else "V11 partial execution"
-                if failures
+                if status == MultiAgentRunStatus.PARTIAL
                 else None
             ),
             model_provider=self.model_provider,

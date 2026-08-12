@@ -218,22 +218,31 @@ def validate_v11_result(
             else 1,
         )
     if status == DiagnosticStatus.PARTIAL:
+        # spec §9.2：被采纳候选必须满足——无 FAIL causal check、至少两条独立
+        # 支撑证据，且当两种 Provider 均成功时覆盖两种 Provider 类型。
+        # Critic accept 已由 lead_accepted_candidate_reference 强制。
         if not usable_evidence:
             raise V11ResultValidationError("partial_usable_evidence_required")
-        if not any(
-            check.status == CausalCheckStatus.PASS
-            for assessment in review.critic_assessments
-            for check in assessment.checks
-        ):
-            raise V11ResultValidationError("partial_passing_check_required")
-        assessment_ids = {item.id for item in review.critic_assessments}
-        if not any(
-            task.analysis_round == 2
-            and task.runtime_run_id == runtime_run_id
-            and task.critic_assessment_id in assessment_ids
-            for task in task_items
-        ):
-            raise V11ResultValidationError("partial_supplemental_task_linkage")
+        successful_providers = {
+            evidence_by_id[evidence_id].provider for evidence_id in usable_evidence
+        }
+        assessments_by_candidate = {
+            item.candidate_id: item for item in review.critic_assessments
+        }
+        candidates_by_id = {item.id: item for item in candidate_items}
+        for candidate_id in decision.candidate_ids:
+            assessment = assessments_by_candidate[candidate_id]
+            if any(
+                check.status == CausalCheckStatus.FAIL for check in assessment.checks
+            ):
+                raise V11ResultValidationError("partial_candidate_failed_check")
+            supporting = set(candidates_by_id[candidate_id].supporting_evidence_ids)
+            if len(supporting) < 2:
+                raise V11ResultValidationError("partial_candidate_evidence")
+            if len(successful_providers) >= 2 and len(
+                {evidence_by_id[item].provider for item in supporting}
+            ) < 2:
+                raise V11ResultValidationError("partial_candidate_provider_types")
     if status == DiagnosticStatus.INCONCLUSIVE and decision.candidate_ids:
         raise V11ResultValidationError("inconclusive_candidates")
 
