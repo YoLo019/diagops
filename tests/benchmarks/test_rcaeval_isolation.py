@@ -209,7 +209,7 @@ def _tiny_frozen_bundle(configuration: RcaEvalConfiguration) -> PredictionBundle
     prediction = CasePrediction(
         case_id=OPAQUE_ID,
         configuration=configuration,
-        completed=False,
+        completed=True,
         candidates=[
             CandidatePrediction(
                 affected_service="service",
@@ -228,6 +228,20 @@ def _tiny_frozen_bundle(configuration: RcaEvalConfiguration) -> PredictionBundle
         predictions=[prediction],
         frozen_at=datetime(2026, 8, 12, tzinfo=UTC),
     )
+
+
+def test_freeze_prediction_bundle_rejects_incomplete_prediction(tmp_path):
+    bundle = _tiny_frozen_bundle(RcaEvalConfiguration.SINGLE_INTENDED)
+    failed = bundle.predictions[0].model_copy(
+        update={"completed": False, "failure_category": "ValueError"}
+    )
+    bundle = bundle.model_copy(update={"predictions": [failed]})
+    output = tmp_path / "failed-side"
+
+    with pytest.raises(ValueError, match="incomplete prediction"):
+        freeze_prediction_bundle(bundle, output)
+
+    assert not output.exists()
 
 
 def test_freeze_set_requires_ledger_side_output_binding(tmp_path):

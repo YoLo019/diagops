@@ -17,7 +17,15 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
-from agents import Agent, Model, ModelRetrySettings, ModelSettings, RunConfig
+from agents import (
+    Agent,
+    AgentOutputSchema,
+    FunctionTool,
+    Model,
+    ModelRetrySettings,
+    ModelSettings,
+    RunConfig,
+)
 from agents.models.interface import ModelProvider as AgentsModelProvider
 from agents.models.multi_provider import MultiProvider
 from openai import AsyncOpenAI
@@ -39,6 +47,7 @@ from backend.diagnosis.diagnostic_skills import (
     validate_skill_catalog,
 )
 from backend.diagnosis.openai_compatible_model import (
+    STRICT_TOOL_ENVELOPE_SCHEMA,
     OpenAICompatibleChatCompletionsModel,
 )
 from backend.diagnosis.openai_model import OFFICIAL_OPENAI_BASE_URL
@@ -171,6 +180,30 @@ class _ModelTurn:
     input_tokens: int = 0
     output_tokens: int = 0
     execution_id: str | None = None
+
+
+def _strict_output_tool(output_type: type[BaseModel]) -> FunctionTool:
+    schema = AgentOutputSchema(output_type)
+
+    async def submit(_context, raw_input: str) -> BaseModel:
+        envelope = json.loads(raw_input)
+        if set(envelope) != {"payload_json"} or not isinstance(
+            envelope["payload_json"], str
+        ):
+            raise V11RuntimeContractError("structured output envelope is invalid")
+        return schema.validate_json(envelope["payload_json"])
+
+    return FunctionTool(
+        name="submit_structured_output",
+        description=(
+            "Submit the final structured result. Encode it as a JSON string in "
+            "payload_json. The decoded JSON must match this schema: "
+            f"{json.dumps(schema.json_schema(), ensure_ascii=False, sort_keys=True)}"
+        ),
+        params_json_schema=copy.deepcopy(STRICT_TOOL_ENVELOPE_SCHEMA),
+        on_invoke_tool=submit,
+        strict_json_schema=True,
+    )
 
 
 @dataclass(slots=True)
@@ -3096,9 +3129,25 @@ class V11Runtime:
                             "tools": tools,
                             "output_type": output_type,
                         }
-                        agent_kwargs["model_settings"] = ModelSettings(
+                        model_settings = ModelSettings(
                             retry=ModelRetrySettings(max_retries=0),
                         )
+                        if (
+                            isinstance(self.model, OpenAICompatibleChatCompletionsModel)
+                            and self.model.structured_output_transport
+                            == "strict_output_tool"
+                        ):
+                            output_tool = _strict_output_tool(output_type)
+                            agent_kwargs["tools"] = [*tools, output_tool]
+                            agent_kwargs["tool_use_behavior"] = {
+                                "stop_at_tool_names": [output_tool.name]
+                            }
+                            agent_kwargs["reset_tool_choice"] = False
+                            model_settings = ModelSettings(
+                                tool_choice="required",
+                                retry=ModelRetrySettings(max_retries=0),
+                            )
+                        agent_kwargs["model_settings"] = model_settings
                         agent = Agent(**agent_kwargs)
                         model_provider = (
                             _V11ModelProvider(

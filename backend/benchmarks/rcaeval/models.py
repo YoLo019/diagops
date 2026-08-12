@@ -246,6 +246,9 @@ class EndpointCapabilityIdentity(BaseModel):
     provider: str = Field(min_length=1, max_length=64)
     model: str = Field(min_length=1, max_length=160)
     api_mode: Literal["responses", "chat_completions"]
+    structured_output_transport: Literal[
+        "native_json_schema", "strict_output_tool"
+    ] = "native_json_schema"
     endpoint_id: str = Field(min_length=1, max_length=128)
     artifact_hash: str = Field(pattern=_SHA256_PATTERN)
     result: Literal["passed"] = "passed"

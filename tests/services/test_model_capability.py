@@ -31,8 +31,9 @@ def _artifact(**overrides):
     values = {
         "provider": "openai_compatible",
         "model": "compat-model",
+        "structured_output_transport": "native_json_schema",
         "endpoint_id": _ENDPOINT_ID,
-        "adapter_version": "openai-compatible-adapter-v1",
+        "adapter_version": "openai-compatible-adapter-v2",
         "openai_sdk_version": "1.0.0",
         "agents_sdk_version": "0.18.1",
         "tested_parallelism": 2,
@@ -143,8 +144,8 @@ class _FakeMessage:
 
 
 class _FakeToolCall:
-    def __init__(self, name):
-        self.function = type("Fn", (), {"name": name, "arguments": "{}"})()
+    def __init__(self, name, arguments="{}"):
+        self.function = type("Fn", (), {"name": name, "arguments": arguments})()
 
 
 class _FakeChoice:
@@ -169,14 +170,46 @@ class _FakeResponse:
 class _FakeCompletions:
     """确定性 fake endpoint：按请求形状应答，全部探测在本地完成。"""
 
-    def __init__(self, *, with_usage=True, with_tool_calls=True):
+    def __init__(
+        self,
+        *,
+        with_usage=True,
+        with_tool_calls=True,
+        supports_native_schema=True,
+        supports_strict_output_tool=True,
+    ):
         self._with_usage = with_usage
         self._with_tool_calls = with_tool_calls
+        self._supports_native_schema = supports_native_schema
+        self._supports_strict_output_tool = supports_strict_output_tool
+        self.requests = []
 
     async def create(self, **kwargs):
-        if kwargs.get("response_format"):
+        self.requests.append(kwargs)
+        response_format = kwargs.get("response_format")
+        if response_format and response_format.get("type") == "json_schema":
+            if not self._supports_native_schema:
+                raise RuntimeError("native schema unsupported")
+            return _FakeResponse(
+                _FakeMessage(content='{"ok":true,"scope":null,"items":[]}')
+            )
+        if response_format:
             return _FakeResponse(_FakeMessage(content='{"ok": true}'))
         if kwargs.get("tools"):
+            function_name = kwargs["tools"][0]["function"]["name"]
+            if function_name == "submit_structured_output":
+                if not self._supports_strict_output_tool:
+                    return _FakeResponse(_FakeMessage(tool_calls=None))
+                return _FakeResponse(
+                    _FakeMessage(
+                        tool_calls=[
+                            _FakeToolCall(
+                                "submit_structured_output",
+                                '{"payload_json":"{\\"ok\\":true}"}',
+                            )
+                        ]
+                    )
+                )
             tool_calls = (
                 [_FakeToolCall("read_logs")] if self._with_tool_calls else None
             )
@@ -196,7 +229,8 @@ class _FakeClient:
 
 @pytest.mark.anyio
 async def test_certify_passes_against_fake_endpoint():
-    client = _FakeClient(_FakeCompletions())
+    completions = _FakeCompletions()
+    client = _FakeClient(completions)
 
     artifact = await certify_endpoint_async(
         base_url="HTTP://127.0.0.1:8000/v1/",
@@ -213,6 +247,47 @@ async def test_certify_passes_against_fake_endpoint():
     )
     assert client.closed is True
     assert artifact.artifact_hash is None  # hash 只在写盘时回填
+    assert artifact.structured_output_transport == "native_json_schema"
+    assert any(
+        request.get("response_format", {}).get("type") == "json_schema"
+        and request["response_format"]["json_schema"]["strict"] is True
+        and request.get("tools")
+        for request in completions.requests
+    )
+    assert "json_object_output" not in CAPABILITY_MANIFEST
+    assert {
+        "native_json_schema_with_tools",
+        "strict_output_tool",
+    } <= set(CAPABILITY_MANIFEST)
+
+
+@pytest.mark.anyio
+async def test_certify_selects_strict_output_tool_when_native_schema_is_unavailable():
+    completions = _FakeCompletions(supports_native_schema=False)
+
+    artifact = await certify_endpoint_async(
+        base_url=_CANONICAL_URL,
+        model="compat-model",
+        api_key="local-secret",
+        client_factory=lambda: _FakeClient(completions),
+    )
+
+    assert artifact.result == "passed"
+    assert artifact.structured_output_transport == "strict_output_tool"
+    observations = {item.capability: item.passed for item in artifact.observations}
+    assert observations["native_json_schema_with_tools"] is False
+    assert observations["strict_output_tool"] is True
+    strict_tool_request = next(
+        request
+        for request in completions.requests
+        if request.get("tools")
+        and request["tools"][0]["function"]["name"] == "submit_structured_output"
+    )
+    function = strict_tool_request["tools"][0]["function"]
+    assert strict_tool_request["tool_choice"] == "required"
+    assert function["strict"] is True
+    assert function["parameters"]["additionalProperties"] is False
+    assert set(function["parameters"]["properties"]) == {"payload_json"}
 
 
 @pytest.mark.anyio

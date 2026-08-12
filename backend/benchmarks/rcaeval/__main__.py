@@ -317,6 +317,7 @@ def _predict(arguments) -> None:
         canonical_endpoint,
         timeout_seconds=arguments.timeout_seconds,
         max_retries=0,
+        structured_output_transport=artifact.structured_output_transport,
     )
     if model is None:
         raise ValueError("prediction model adapter is unavailable")
@@ -324,6 +325,7 @@ def _predict(arguments) -> None:
         provider=artifact.provider,
         model=artifact.model,
         api_mode=artifact.api_mode,
+        structured_output_transport=artifact.structured_output_transport,
         endpoint_id=artifact.endpoint_id,
         artifact_hash=artifact.artifact_hash,
     )

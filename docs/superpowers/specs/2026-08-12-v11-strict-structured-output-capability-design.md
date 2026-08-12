@@ -8,7 +8,7 @@ OB30 `single_intended` 生成了 30 条冻结预测，但全部在第一次模�
 
 ## 目标
 
-1. 保留 `response_format.type = "json_schema"` 和严格 schema，不降级到 `json_object`。
+1. 优先使用 `response_format.type = "json_schema"`；端点缺少该能力时，只允许切换到 `strict: true` 的最终输出工具，不降级到 `json_object`。
 2. 让 V11 所有实际模型输出类型均能通过 Agents SDK 的严格 schema 构造。
 3. 让模型能力认证覆盖生产请求所需的 Structured Outputs 契约，并与工具调用组合验证。
 4. 阻止“案例全部失败但预测包仍被冻结为成功产物”的同类误判。
@@ -18,18 +18,19 @@ OB30 `single_intended` 生成了 30 条冻结预测，但全部在第一次模�
 
 实现不绑定某个模型名称。每个 `(canonical endpoint, model, API mode, adapter/SDK/code identity)` 组合必须分别通过能力认证，才能进入 prediction：
 
-- 通过 `strict_json_schema_output` 与 `strict_json_schema_with_tools` 的模型可以使用。
-- 未实现 `json_schema`、只实现旧 JSON mode，或无法同时使用 tools 与 Structured Outputs 的模型认证失败，不得启动评测。
+- 通过 `native_json_schema_with_tools` 的模型选择 `native_json_schema` 传输。
+- 原生接口不支持 `json_schema`、但通过 `strict_output_tool` 的模型选择 `strict_output_tool` 传输。所有远端 function schema 均保持 `strict: true`；供应商仅支持 schema 子集时，传输一个闭合的 `payload_json` 外壳，解码后继续用完整 Pydantic schema 本地严格校验。
+- 两种严格传输均未通过、仅实现旧 JSON mode，或缺少普通工具调用能力的模型认证失败，不得启动评测。
 - 同一模型名经不同 OpenAI-compatible endpoint 暴露时视为不同能力主体，不复用认证结果。
 - endpoint 或模型升级后必须重新认证，避免用名称推断实际协议行为。
 
-因此该方案可适配 OpenAI 模型和其它实现了相同严格协议的兼容模型，但不承诺所有模型均可用。
+因此该方案可适配 Kimi 等原生支持 strict `json_schema` 的兼容模型，也可适配 DeepSeek 等支持 strict function calling、但不支持原生 `json_schema` 的模型。最终准入仍以具体 endpoint/model 的实测认证为准，而不是以模型名称推断。
 
 ## 方案比较
 
-### 方案 A：显式类型化 schema，并补强认证（采用）
+### 方案 A：显式类型化 schema，并按能力选择严格传输（采用）
 
-将开放字典 `evidence_scope` 替换为字段明确、`extra="forbid"` 的 Pydantic 输出类型；继续让 Agents SDK 生成 strict `json_schema`。能力认证新增实际的 `json_schema + tools` 请求探针，确保端点支持生产组合。
+将开放字典 `evidence_scope` 替换为字段明确、`extra="forbid"` 的 Pydantic 输出类型；能力认证分别探测原生 `json_schema + tools` 和 strict final-output tool。前者直接让 Agents SDK 生成 strict `json_schema`；后者将每个远端 function 投影成 strict `payload_json` 外壳，并在本地调用前恢复原始参数、执行原 schema 校验。
 
 优点是模型侧约束最强、失败最早、认证与运行路径一致。代价是需要明确冻结 `evidence_scope` 的允许字段。
 
@@ -61,10 +62,10 @@ OB30 `single_intended` 生成了 30 条冻结预测，但全部在第一次模�
 
 能力清单以新契约替换旧的 `json_object_output`：
 
-- `strict_json_schema_output`
-- `strict_json_schema_with_tools`
+- `native_json_schema_with_tools`
+- `strict_output_tool`
 
-探针使用小型、无业务数据的严格 schema。组合探针在同一 Chat Completions 请求中同时携带 strict function tool 与 `response_format.type="json_schema"`，验证生产所依赖的组合可被 endpoint 接受。探针只记录通过状态和脱敏后的错误类别，不持久化 prompt、响应正文或 endpoint URL。
+原生探针在同一 Chat Completions 请求中同时携带 strict function tool 与 `response_format.type="json_schema"`。工具输出探针强制调用 `submit_structured_output`，其参数只有必填字符串 `payload_json`、`additionalProperties: false` 且 `strict: true`。认证工件记录选中的 `structured_output_transport`，所有运行入口必须从该工件配置 adapter。探针只记录通过状态和脱敏后的错误类别，不持久化 prompt、响应正文或 endpoint URL。
 
 能力清单与 required contracts 的变化会自然改变 manifest hash，使旧认证工件失效；修复提交后必须重新认证。
 
@@ -82,15 +83,15 @@ OB30 `single_intended` 生成了 30 条冻结预测，但全部在第一次模�
 
 1. 回归测试先证明当前 `SingleControlOutput` 无法通过 strict schema 构造。
 2. 类型修复后，所有 V11 输出 schema 均通过严格校验，现有 planning/investigation 测试保持通过。
-3. 能力认证单元测试断言请求发送 `response_format.type="json_schema"`，schema 为 strict，并验证与 tools 的组合。
+3. 能力认证单元测试断言原生请求发送 strict `json_schema + tools`，并断言原生不可用时只选择 strict output tool。
 4. prediction worker 单元测试断言任一 case 未完成时不会冻结 bundle。
 5. 运行相关测试集和 V11 回归测试。
-6. 在干净提交身份上重新执行 live 能力认证；两项 strict schema 观测均通过。
+6. 在干净提交身份上重新执行 live 能力认证；两个传输中至少一个通过且认证工件选中该传输。
 7. 重新运行 OB30 Single，验收标准为 30/30 `completed=true`、存在模型使用记录、checksum/identity/ledger 校验通过且 labels 从未打开。
 
 ## 非目标
 
-- 不为不支持 strict Structured Outputs 的 endpoint 增加 fallback。
+- 不为两种严格传输均不支持的 endpoint 增加 fallback。
 - 不迁移既有 capability artifact；旧 artifact 直接因 manifest/代码身份不匹配而失效。
 - 不修改 Multi/Single 的预算比例、工具预算或拓扑。
 - 不在本修复中重构整个 V11 输出模型层。

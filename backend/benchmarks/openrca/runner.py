@@ -443,6 +443,7 @@ class OpenRcaDiagnosisRunner:
             raise ValueError(
                 "OpenRCA V11 compatible endpoint lacks a passed capability artifact"
             )
+        self.model.structured_output_transport = artifact.structured_output_transport
         return identity, artifact.artifact_hash
 
     def register_replay_artifact(

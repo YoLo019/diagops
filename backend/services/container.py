@@ -99,6 +99,14 @@ class AppContainer:
                     )
                 elif provider == ModelProvider.OPENAI_COMPATIBLE:
                     compatible = self.settings.agents.openai_compatible
+                    artifact = None
+                    if compatible.base_url and agent_model:
+                        artifact = latest_capability_artifact(
+                            self._capability_directory(),
+                            provider=ModelProvider.OPENAI_COMPATIBLE.value,
+                            model=agent_model,
+                            endpoint_id_value=endpoint_id(compatible.base_url),
+                        )
                     # generic endpoint 的凭证只允许 DIAGOPS_AGENTS_API_KEY，
                     # 绝不回退到官方 provider 的环境变量。
                     agent_model = create_openai_compatible_model(
@@ -107,6 +115,11 @@ class AppContainer:
                         compatible.base_url,
                         timeout_seconds=float(compatible.timeout_seconds),
                         max_retries=compatible.max_retries,
+                        structured_output_transport=(
+                            artifact.structured_output_transport
+                            if artifact is not None
+                            else "native_json_schema"
+                        ),
                     )
                 agents_runtime = AgentsRcaRuntime(
                     model=agent_model,

@@ -35,7 +35,8 @@ CAPABILITY_API_MODE = "chat_completions"
 CAPABILITY_MANIFEST = (
     "non_streaming_chat_completions",
     "tool_calls",
-    "json_object_output",
+    "native_json_schema_with_tools",
+    "strict_output_tool",
     "token_usage",
     "bounded_response_deadline",
     "configured_parallelism",
@@ -45,11 +46,99 @@ DEFAULT_CERTIFICATION_PARALLELISM = 3
 REQUIRED_CONTRACTS = (
     "chat_completions.non_streaming",
     "chat_completions.tool_calls",
-    "chat_completions.json_object_output",
+    "chat_completions.strict_structured_output",
     "chat_completions.token_usage",
     "chat_completions.bounded_response_deadline",
     "chat_completions.configured_parallelism",
 )
+STRUCTURED_OUTPUT_TRANSPORTS = ("native_json_schema", "strict_output_tool")
+_STRICT_OK_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "ok": {"type": "boolean"},
+        "scope": {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "entity_ids": {
+                            "type": "array",
+                            "items": {"type": "string", "maxLength": 160},
+                            "maxItems": 20,
+                        },
+                        "start_time": {
+                            "anyOf": [
+                                {"type": "string", "format": "date-time"},
+                                {"type": "null"},
+                            ]
+                        },
+                        "end_time": {
+                            "anyOf": [
+                                {"type": "string", "format": "date-time"},
+                                {"type": "null"},
+                            ]
+                        },
+                    },
+                    "required": ["entity_ids", "start_time", "end_time"],
+                    "additionalProperties": False,
+                },
+                {"type": "null"},
+            ]
+        },
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "enum": ["log", "metric"]},
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                },
+                "required": ["kind", "confidence"],
+                "additionalProperties": False,
+            },
+            "maxItems": 8,
+        },
+    },
+    "required": ["ok", "scope", "items"],
+    "additionalProperties": False,
+}
+_STRICT_OK_RESULT = {"ok": True, "scope": None, "items": []}
+_STRICT_OK_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "capability_ok",
+        "strict": True,
+        "schema": _STRICT_OK_SCHEMA,
+    },
+}
+_STRICT_OUTPUT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "submit_structured_output",
+        "description": "Submit the structured capability result.",
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {"payload_json": {"type": "string"}},
+            "required": ["payload_json"],
+            "additionalProperties": False,
+        },
+    },
+}
+_READ_LOGS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "read_logs",
+        "description": "Read log evidence.",
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {"reason": {"type": "string"}},
+            "required": ["reason"],
+            "additionalProperties": False,
+        },
+    },
+}
 
 
 def capability_manifest_hash() -> str:
@@ -88,6 +177,9 @@ class ModelCapabilityArtifact(BaseModel):
     provider: str = Field(min_length=1, max_length=64)
     model: str = Field(min_length=1, max_length=128)
     api_mode: Literal["chat_completions"] = CAPABILITY_API_MODE
+    structured_output_transport: Literal[
+        "native_json_schema", "strict_output_tool"
+    ]
     endpoint_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     adapter_version: str = Field(min_length=1, max_length=64)
     openai_sdk_version: str = Field(min_length=1, max_length=32)
@@ -271,7 +363,19 @@ def validate_capability_for_prediction(
     if artifact.execution_environment != current_execution_environment():
         raise ValueError("capability execution environment is stale")
     observations = {item.capability: item.passed for item in artifact.observations}
-    if set(observations) != set(CAPABILITY_MANIFEST) or not all(observations.values()):
+    if set(observations) != set(CAPABILITY_MANIFEST):
+        raise ValueError("capability observations are incomplete or failed")
+    common = set(CAPABILITY_MANIFEST) - {
+        "native_json_schema_with_tools",
+        "strict_output_tool",
+    }
+    selected_observation = {
+        "native_json_schema": "native_json_schema_with_tools",
+        "strict_output_tool": "strict_output_tool",
+    }[artifact.structured_output_transport]
+    if not all(observations[name] for name in common) or not observations[
+        selected_observation
+    ]:
         raise ValueError("capability observations are incomplete or failed")
 
 
@@ -292,38 +396,60 @@ async def _probe_capabilities(
         )
         return bool(response.choices and response.choices[0].message)
 
-    async def json_object() -> bool:
+    async def native_json_schema_with_tools() -> bool:
         response = await client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "user", "content": "Reply with JSON: {\"ok\": true}"}
+                {
+                    "role": "user",
+                    "content": (
+                        "Do not call read_logs. Return ok=true, scope=null, and "
+                        "an empty items array."
+                    ),
+                }
             ],
-            response_format={"type": "json_object"},
-            max_tokens=32,
+            response_format=_STRICT_OK_RESPONSE_FORMAT,
+            tools=[_READ_LOGS_TOOL],
+            tool_choice="auto",
+            max_tokens=64,
         )
         content = response.choices[0].message.content if response.choices else None
-        return isinstance(content, str) and isinstance(json.loads(content), dict)
+        return isinstance(content, str) and json.loads(content) == _STRICT_OK_RESULT
+
+    async def strict_output_tool() -> bool:
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        "Call submit_structured_output with payload_json containing "
+                        "the JSON object {\"ok\": true}."
+                    ),
+                }
+            ],
+            tools=[_STRICT_OUTPUT_TOOL],
+            tool_choice="required",
+            max_tokens=64,
+        )
+        if not response.choices:
+            return False
+        calls = response.choices[0].message.tool_calls or []
+        return any(
+            call.function
+            and call.function.name == "submit_structured_output"
+            and json.loads(
+                json.loads(call.function.arguments)["payload_json"]
+            )
+            == {"ok": True}
+            for call in calls
+        )
 
     async def tool_calls() -> bool:
         response = await client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": "Read the logs for window now."}],
-            tools=[
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "read_logs",
-                        "description": "Read log evidence.",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "reason": {"type": "string"},
-                            },
-                            "required": ["reason"],
-                        },
-                    },
-                }
-            ],
+            tools=[_READ_LOGS_TOOL],
             tool_choice="auto",
             max_tokens=64,
         )
@@ -355,7 +481,8 @@ async def _probe_capabilities(
     probes = (
         ("non_streaming_chat_completions", non_streaming),
         ("tool_calls", tool_calls),
-        ("json_object_output", json_object),
+        ("native_json_schema_with_tools", native_json_schema_with_tools),
+        ("strict_output_tool", strict_output_tool),
         ("token_usage", token_usage),
         ("configured_parallelism", configured_parallelism),
     )
@@ -421,10 +548,27 @@ async def certify_endpoint_async(
     source_identity = resolve_source_identity(
         _repository_root() if repository_root is None else repository_root
     )
+    observation_status = {item.capability: item.passed for item in observations}
+    transport = (
+        "native_json_schema"
+        if observation_status["native_json_schema_with_tools"]
+        else "strict_output_tool"
+    )
+    common = set(CAPABILITY_MANIFEST) - {
+        "native_json_schema_with_tools",
+        "strict_output_tool",
+    }
+    passed = all(observation_status[name] for name in common) and observation_status[
+        {
+            "native_json_schema": "native_json_schema_with_tools",
+            "strict_output_tool": "strict_output_tool",
+        }[transport]
+    ]
     return ModelCapabilityArtifact(
         provider="openai_compatible",
         model=model,
         api_mode=CAPABILITY_API_MODE,
+        structured_output_transport=transport,
         endpoint_id=endpoint_id(canonical),
         adapter_version=COMPATIBLE_ADAPTER_VERSION,
         openai_sdk_version=openai_version,
@@ -437,9 +581,7 @@ async def certify_endpoint_async(
         git_dirty=source_identity.git_dirty,
         execution_environment=current_execution_environment(),
         tested_at=datetime.now(UTC),
-        result=(
-            "passed" if all(item.passed for item in observations) else "failed"
-        ),
+        result="passed" if passed else "failed",
         observations=observations,
     )
 

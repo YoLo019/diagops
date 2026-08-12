@@ -906,6 +906,8 @@ def validate_prediction_bundle(bundle: PredictionBundle) -> None:
         raise ValueError("prediction bundle contains duplicate cases")
     if any(item.configuration != bundle.configuration for item in bundle.predictions):
         raise ValueError("prediction bundle contains mixed configurations")
+    if any(not item.completed for item in bundle.predictions):
+        raise ValueError("prediction bundle contains incomplete prediction")
     contract_hashes = {item.execution_contract_hash for item in bundle.predictions}
     if len(contract_hashes) > 1:
         raise ValueError("prediction bundle contains mixed execution identities")

@@ -501,8 +501,9 @@ def test_v11_certified_compatible_tuple_freezes_endpoint_identity(
         ModelCapabilityArtifact(
             provider="openai_compatible",
             model="compat-model",
+            structured_output_transport="native_json_schema",
             endpoint_id=identity,
-            adapter_version="openai-compatible-adapter-v1",
+            adapter_version="openai-compatible-adapter-v2",
             openai_sdk_version="1.0.0",
             agents_sdk_version="0.18.1",
             tested_parallelism=2,

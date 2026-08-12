@@ -8,16 +8,76 @@ Responses adapter 并钉死 endpoint；DeepSeek 是本 adapter 的预设；任�
 
 from __future__ import annotations
 
-from typing import Any
+import copy
+import json
+from typing import Any, Literal
 
 import openai
+from agents import FunctionTool, ModelResponse
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from openai import AsyncOpenAI
 from pydantic import SecretStr
 
 from backend.domain.multi_agent import FailureCategory
 
-COMPATIBLE_ADAPTER_VERSION = "openai-compatible-adapter-v1"
+COMPATIBLE_ADAPTER_VERSION = "openai-compatible-adapter-v2"
+StructuredOutputTransport = Literal["native_json_schema", "strict_output_tool"]
+STRICT_TOOL_ENVELOPE_SCHEMA = {
+    "type": "object",
+    "properties": {"payload_json": {"type": "string"}},
+    "required": ["payload_json"],
+    "additionalProperties": False,
+}
+
+
+def _unwrap_strict_tool_payload(raw_input: str) -> str:
+    envelope = json.loads(raw_input)
+    if set(envelope) != {"payload_json"} or not isinstance(
+        envelope["payload_json"], str
+    ):
+        raise ValueError("strict tool envelope is invalid")
+    return envelope["payload_json"]
+
+
+def _strict_transport_tools(tools: list[Any]) -> list[Any]:
+    projected = []
+    for tool in tools:
+        if (
+            isinstance(tool, FunctionTool)
+            and tool.params_json_schema != STRICT_TOOL_ENVELOPE_SCHEMA
+        ):
+            original_invoke = tool.on_invoke_tool
+            original_schema = copy.deepcopy(tool.params_json_schema)
+
+            async def invoke(context, raw_input, *, _original=original_invoke):
+                return await _original(context, _unwrap_strict_tool_payload(raw_input))
+
+            tool = copy.copy(tool)
+            tool.description = (
+                f"{tool.description}\n"
+                "Encode the function arguments as a JSON string in payload_json. "
+                "The decoded JSON must match this schema: "
+                f"{json.dumps(original_schema, ensure_ascii=False, sort_keys=True)}"
+            )
+            tool.params_json_schema = copy.deepcopy(STRICT_TOOL_ENVELOPE_SCHEMA)
+            tool.on_invoke_tool = invoke
+            tool.strict_json_schema = True
+        projected.append(tool)
+    return projected
+
+
+def _restore_strict_tool_arguments(
+    response: ModelResponse,
+    *,
+    output_tool_name: str = "submit_structured_output",
+) -> ModelResponse:
+    for item in response.output:
+        if (
+            getattr(item, "type", None) == "function_call"
+            and getattr(item, "name", None) != output_tool_name
+        ):
+            item.arguments = _unwrap_strict_tool_payload(item.arguments)
+    return response
 
 
 class OpenAICompatibleChatCompletionsModel(OpenAIChatCompletionsModel):
@@ -37,6 +97,7 @@ class OpenAICompatibleChatCompletionsModel(OpenAIChatCompletionsModel):
         timeout_seconds: float | None = None,
         max_retries: int = 2,
         strict_feature_validation: bool = False,
+        structured_output_transport: StructuredOutputTransport = "native_json_schema",
     ) -> None:
         self.model = model
         self._api_key = SecretStr(api_key)
@@ -44,13 +105,29 @@ class OpenAICompatibleChatCompletionsModel(OpenAIChatCompletionsModel):
         self._timeout_seconds = timeout_seconds
         self._max_retries = max_retries
         self._strict_feature_validation = strict_feature_validation
+        self.structured_output_transport = structured_output_transport
 
     async def get_response(self, *args: Any, **kwargs: Any) -> Any:
         """在当前 event loop 内完成一次非流式请求并释放 transport。"""
         client = self._create_client()
         try:
             delegate = self._create_delegate(client)
-            return await delegate.get_response(*args, **kwargs)
+            if self.structured_output_transport == "strict_output_tool":
+                args = list(args)
+                kwargs = dict(kwargs)
+                if len(args) >= 5:
+                    args[3] = _strict_transport_tools(args[3])
+                    args[4] = None
+                else:
+                    kwargs["tools"] = _strict_transport_tools(kwargs.get("tools", []))
+                    kwargs["output_schema"] = None
+            response = await delegate.get_response(*args, **kwargs)
+            if (
+                self.structured_output_transport == "strict_output_tool"
+                and isinstance(response, ModelResponse)
+            ):
+                return _restore_strict_tool_arguments(response)
+            return response
         finally:
             await client.close()
 
@@ -101,6 +178,7 @@ class OpenAICompatibleChatCompletionsModel(OpenAIChatCompletionsModel):
                 self._max_retries if max_retries is None else max_retries
             ),
             strict_feature_validation=self._strict_feature_validation,
+            structured_output_transport=self.structured_output_transport,
         )
 
     def __repr__(self) -> str:
@@ -114,6 +192,7 @@ def create_openai_compatible_model(
     *,
     timeout_seconds: float | None = None,
     max_retries: int = 2,
+    structured_output_transport: StructuredOutputTransport = "native_json_schema",
 ) -> OpenAICompatibleChatCompletionsModel | None:
     """缺少 model/key/canonical base_url 时不创建 client；绝不读官方凭证。"""
     model = (model_name or "").strip()
@@ -127,6 +206,7 @@ def create_openai_compatible_model(
         base_url=url,
         timeout_seconds=timeout_seconds,
         max_retries=max_retries,
+        structured_output_transport=structured_output_transport,
     )
 
 

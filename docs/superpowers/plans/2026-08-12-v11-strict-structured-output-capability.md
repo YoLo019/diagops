@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make every admitted V11 model use a locally valid strict JSON Schema, certify the exact `json_schema + tools` transport contract, and refuse to freeze failed predictions.
+**Goal:** Make every admitted V11 model use a locally valid strict JSON Schema, certify and bind either native `json_schema + tools` or strict output-tool transport, and refuse to freeze failed predictions.
 
-**Architecture:** Keep the existing OpenAI Agents SDK structured-output path. Replace the one open-ended output field with a strict Pydantic draft type, strengthen the endpoint/model capability manifest with two production-shaped probes, and enforce completeness in the shared prediction bundle validator.
+**Architecture:** Keep the existing OpenAI Agents SDK structured-output path. Replace the one open-ended output field with a strict Pydantic draft type. Select native `json_schema` where certified; otherwise use a strict function envelope whose decoded payload is validated by the full local schema. Bind that choice into capability and prediction identities, and enforce completeness in the shared prediction bundle validator.
 
 **Tech Stack:** Python 3.12, Pydantic v2, openai-agents 0.18.1, OpenAI Python SDK, pytest, uv.
 
@@ -26,11 +26,11 @@
 - Modify: `tests/benchmarks/test_rcaeval_runner.py`
 - Modify: `backend/diagnosis/v11_runtime.py`
 
-- [ ] **Step 1: Write the failing strict-schema regression tests**
+- [x] **Step 1: Write the failing strict-schema regression tests**
 
 Use `AgentOutputSchema(output_type, strict_json_schema=True).json_schema()` for `LeadPlanningOutput`, `InvestigatorOutput`, `CriticOutput`, `LeadAdjudicationOutput`, and RCAEval's `SingleControlOutput`. Recursively assert every object schema has `additionalProperties is False`.
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 ```powershell
 uv run pytest tests/diagnosis/test_v11_runtime.py -k "valid_strict_json_schemas" tests/benchmarks/test_rcaeval_runner.py -k "strict_json_schema" -q
@@ -38,7 +38,7 @@ uv run pytest tests/diagnosis/test_v11_runtime.py -k "valid_strict_json_schemas"
 
 Expected: FAIL with the Agents SDK message that `additionalProperties` is set for `LeadTaskDraft.evidence_scope`.
 
-- [ ] **Step 3: Implement the minimal strict draft type**
+- [x] **Step 3: Implement the minimal strict draft type**
 
 Add this model in `backend/diagnosis/v11_runtime.py` and use it for `LeadTaskDraft.evidence_scope`:
 
@@ -53,7 +53,7 @@ class EvidenceScopeDraft(BaseModel):
 
 At both `DiagnosisTask` construction sites, convert a non-null draft with `model_dump(mode="json")`. Keep the persisted domain type `dict[str, JsonValue] | None`.
 
-- [ ] **Step 4: Run focused tests**
+- [x] **Step 4: Run focused tests**
 
 ```powershell
 uv run pytest tests/diagnosis/test_v11_runtime.py tests/benchmarks/test_rcaeval_runner.py -q
@@ -61,7 +61,7 @@ uv run pytest tests/diagnosis/test_v11_runtime.py tests/benchmarks/test_rcaeval_
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add backend/diagnosis/v11_runtime.py tests/diagnosis/test_v11_runtime.py tests/benchmarks/test_rcaeval_runner.py
@@ -74,11 +74,11 @@ git commit -m "fix(v11): make model outputs strict-schema compatible"
 - Modify: `tests/services/test_model_capability.py`
 - Modify: `backend/services/model_capability.py`
 
-- [ ] **Step 1: Write failing request-shape tests**
+- [x] **Step 1: Write failing request-shape tests**
 
 Make the fake completions client retain request kwargs. Assert certification sends one `response_format.type == "json_schema"` request with `json_schema.strict is True`, and one request combining that format with a strict function tool. Assert `json_object_output` is absent and both new capabilities are present.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 ```powershell
 uv run pytest tests/services/test_model_capability.py -q
@@ -86,18 +86,18 @@ uv run pytest tests/services/test_model_capability.py -q
 
 Expected: FAIL because current certification sends `json_object` and has no combined strict-schema/tool probe.
 
-- [ ] **Step 3: Implement strict probes**
+- [x] **Step 3: Implement strict probes and transport binding**
 
 Replace the obsolete capability and required-contract names with:
 
 ```python
-"strict_json_schema_output",
-"strict_json_schema_with_tools",
+"native_json_schema_with_tools",
+"strict_output_tool",
 ```
 
-Use a small response schema with one required boolean `ok`, `additionalProperties: false`, and `strict: true`. The combined probe sends the same response format with a `read_logs` function whose parameters are also strict. It must observe the expected tool call. Do not persist request or response bodies.
+The native probe combines strict `json_schema` with a strict diagnostic tool. The alternate probe forces a strict `submit_structured_output` tool with a closed `payload_json` envelope. Persist the selected transport in the capability artifact and apply it at every runtime entry point. Do not persist request or response bodies.
 
-- [ ] **Step 4: Run capability tests**
+- [x] **Step 4: Run capability tests**
 
 ```powershell
 uv run pytest tests/services/test_model_capability.py -q
@@ -118,11 +118,11 @@ git commit -m "fix(v11): certify strict structured outputs"
 - Modify: `tests/benchmarks/test_rcaeval_runner.py`
 - Modify: `backend/benchmarks/rcaeval/runner.py`
 
-- [ ] **Step 1: Write the failing bundle-integrity test**
+- [x] **Step 1: Write the failing bundle-integrity test**
 
 Construct an otherwise-valid prediction bundle with one prediction changed to `completed=False` and `failure_category="ValueError"`. Assert `freeze_prediction_bundle` raises `ValueError("...incomplete prediction...")` and creates no output directory.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 ```powershell
 uv run pytest tests/benchmarks/test_rcaeval_runner.py -k "incomplete_prediction" -q
@@ -130,7 +130,7 @@ uv run pytest tests/benchmarks/test_rcaeval_runner.py -k "incomplete_prediction"
 
 Expected: FAIL because the current validator permits incomplete predictions.
 
-- [ ] **Step 3: Add the shared invariant**
+- [x] **Step 3: Add the shared invariant**
 
 Add to `validate_prediction_bundle` before filesystem creation:
 

@@ -6,8 +6,9 @@ import time
 import httpx
 import openai
 import pytest
-from agents import ModelSettings
+from agents import FunctionTool, ModelResponse, ModelSettings, Usage
 from agents.models.interface import ModelTracing
+from openai.types.responses import ResponseFunctionToolCall
 
 import backend.diagnosis.openai_compatible_model as compatible_model
 from backend.diagnosis.agents_runtime import _disables_sdk_tracing, _is_deepseek
@@ -29,6 +30,152 @@ def _create(**overrides):
     }
     values.update(overrides)
     return create_openai_compatible_model(**values)
+
+
+@pytest.mark.anyio
+async def test_strict_output_tool_transport_omits_native_response_format(monkeypatch):
+    captured = {}
+
+    class FakeClient:
+        async def close(self):
+            pass
+
+    class FakeDelegate:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def get_response(
+            self,
+            system_instructions,
+            input,
+            model_settings,
+            tools,
+            output_schema,
+            handoffs,
+            tracing,
+            **kwargs,
+        ):
+            captured.update(
+                {
+                    "system_instructions": system_instructions,
+                    "input": input,
+                    "model_settings": model_settings,
+                    "tools": tools,
+                    "output_schema": output_schema,
+                    "handoffs": handoffs,
+                    "tracing": tracing,
+                    **kwargs,
+                }
+            )
+            return "response"
+
+    monkeypatch.setattr(compatible_model, "AsyncOpenAI", lambda **_kwargs: FakeClient())
+    monkeypatch.setattr(compatible_model, "OpenAIChatCompletionsModel", FakeDelegate)
+    model = _create(structured_output_transport="strict_output_tool")
+
+    async def invoke(_context, _raw_input):
+        return "ok"
+
+    tool = FunctionTool(
+        name="read_logs",
+        description="Read logs.",
+        params_json_schema={
+            "type": "object",
+            "properties": {
+                "reason": {"type": "string", "maxLength": 240},
+                "keywords": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                    "maxItems": 8,
+                },
+            },
+            "required": ["reason", "keywords"],
+            "additionalProperties": False,
+        },
+        on_invoke_tool=invoke,
+    )
+    async def submit(_context, raw_input):
+        return raw_input
+
+    output_tool = FunctionTool(
+        name="submit_structured_output",
+        description="Submit output.",
+        params_json_schema=compatible_model.STRICT_TOOL_ENVELOPE_SCHEMA,
+        on_invoke_tool=submit,
+        strict_json_schema=True,
+    )
+    assert await model.get_response(
+        None, "input", object(), [tool, output_tool], object(), [], object()
+    ) == "response"
+    assert captured["output_schema"] is None
+    sent_tool = captured["tools"][0]
+    assert set(sent_tool.params_json_schema["properties"]) == {"payload_json"}
+    assert '"reason"' in sent_tool.description
+    assert '"keywords"' in sent_tool.description
+    assert await sent_tool.on_invoke_tool(
+        None,
+        '{"payload_json":"{\\"reason\\":\\"inspect\\",\\"keywords\\":[]}"}',
+    ) == "ok"
+    sent_output_tool = captured["tools"][1]
+    assert await sent_output_tool.on_invoke_tool(
+        None, '{"payload_json":"{\\"value\\":\\"valid\\"}"}'
+    ) == '{"payload_json":"{\\"value\\":\\"valid\\"}"}'
+    assert tool.params_json_schema["properties"]["reason"]["maxLength"] == 240
+
+
+def test_clone_preserves_structured_output_transport():
+    model = _create(structured_output_transport="strict_output_tool")
+
+    clone = model.clone_for_model("other-model")
+
+    assert clone.structured_output_transport == "strict_output_tool"
+
+
+@pytest.mark.anyio
+async def test_strict_output_tool_transport_restores_tool_arguments(monkeypatch):
+    class FakeClient:
+        async def close(self):
+            pass
+
+    class FakeDelegate:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def get_response(self, *_args, **_kwargs):
+            return ModelResponse(
+                output=[
+                    ResponseFunctionToolCall(
+                        arguments=(
+                            '{"payload_json":"{\\"reason\\":\\"inspect\\"}"}'
+                        ),
+                        call_id="call-1",
+                        name="read_logs",
+                        type="function_call",
+                    ),
+                    ResponseFunctionToolCall(
+                        arguments=(
+                            '{"payload_json":"{\\"value\\":\\"valid\\"}"}'
+                        ),
+                        call_id="call-2",
+                        name="submit_structured_output",
+                        type="function_call",
+                    ),
+                ],
+                usage=Usage(),
+                response_id=None,
+            )
+
+    monkeypatch.setattr(compatible_model, "AsyncOpenAI", lambda **_kwargs: FakeClient())
+    monkeypatch.setattr(compatible_model, "OpenAIChatCompletionsModel", FakeDelegate)
+
+    response = await _create(
+        structured_output_transport="strict_output_tool"
+    ).get_response(None, "input", object(), [], object(), [], object())
+
+    assert response.output[0].arguments == '{"reason":"inspect"}'
+    assert response.output[1].arguments == (
+        '{"payload_json":"{\\"value\\":\\"valid\\"}"}'
+    )
 
 
 def test_create_requires_model_key_and_canonical_url():

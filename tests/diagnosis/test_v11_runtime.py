@@ -8,7 +8,15 @@ from types import SimpleNamespace
 import httpx
 import openai
 import pytest
-from agents import AgentOutputSchema, FunctionTool, Model, ModelResponse, ModelSettings, Usage
+from agents import (
+    AgentOutputSchema,
+    FunctionTool,
+    Model,
+    ModelBehaviorError,
+    ModelResponse,
+    ModelSettings,
+    Usage,
+)
 from openai.types.responses import (
     ResponseFunctionToolCall,
     ResponseOutputMessage,
@@ -26,6 +34,7 @@ from backend.config.settings import (
 )
 from backend.db.models import InvestigationRecord, InvestigationStatus
 from backend.db.repositories import InMemoryInvestigationRepository
+from backend.diagnosis import openai_compatible_model as compatible_model_module
 from backend.diagnosis import v11_runtime as v11_runtime_module
 from backend.diagnosis.adaptive_tools import ClassifiedRetryableError
 from backend.diagnosis.diagnostic_skills import (
@@ -122,6 +131,173 @@ def test_v11_model_output_types_are_valid_strict_json_schemas(output_type):
                 assert_strict(child)
 
     assert_strict(schema)
+
+
+def test_strict_output_tool_uses_provider_subset_and_full_local_validation():
+    class StrictOutput(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+        value: str = v11_runtime_module.Field(min_length=3, max_length=8)
+
+    tool = v11_runtime_module._strict_output_tool(StrictOutput)
+
+    assert tool.strict_json_schema is True
+    assert tool.params_json_schema["additionalProperties"] is False
+    assert set(tool.params_json_schema["properties"]) == {"payload_json"}
+    assert tool.params_json_schema["properties"]["payload_json"] == {
+        "type": "string"
+    }
+    assert '"value"' in tool.description
+    assert '"minLength": 3' in tool.description
+    with pytest.raises(ModelBehaviorError):
+        asyncio.run(
+            tool.on_invoke_tool(
+                None, '{"payload_json":"{\\"value\\":\\"x\\"}"}'
+            )
+        )
+    assert asyncio.run(
+        tool.on_invoke_tool(
+            None, '{"payload_json":"{\\"value\\":\\"valid\\"}"}'
+        )
+    ) == StrictOutput(value="valid")
+
+
+@pytest.mark.anyio
+async def test_strict_output_tool_transport_configures_agent_finalization(monkeypatch):
+    class StrictOutput(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+        value: str
+
+    captured = {}
+
+    async def fake_run(agent, *_args, **_kwargs):
+        captured["agent"] = agent
+        return SimpleNamespace(
+            final_output=StrictOutput(value="ok"), raw_responses=[]
+        )
+
+    monkeypatch.setattr(v11_runtime_module, "_run_with_model_lifecycle", fake_run)
+    runtime = V11Runtime(
+        model=OpenAICompatibleChatCompletionsModel(
+            model="compat-model",
+            api_key="local-secret",
+            base_url="http://127.0.0.1:8000/v1",
+            structured_output_transport="strict_output_tool",
+        ),
+        model_provider=ModelProvider.OPENAI_COMPATIBLE,
+        model_name="compat-model",
+        token_budget=1000,
+    )
+
+    result = await runtime._call_model(
+        actor="LeadAgent",
+        prompt="return a structured result",
+        output_type=StrictOutput,
+        context={"request": "bounded"},
+        tools=[],
+        remaining_token_budget=1000,
+        remaining_tool_budget=8,
+    )
+
+    agent = captured["agent"]
+    assert result.output == StrictOutput(value="ok")
+    assert [tool.name for tool in agent.tools] == ["submit_structured_output"]
+    assert agent.tool_use_behavior == {
+        "stop_at_tool_names": ["submit_structured_output"]
+    }
+    assert agent.model_settings.tool_choice == "required"
+    assert agent.reset_tool_choice is False
+
+
+@pytest.mark.anyio
+async def test_strict_output_tool_transport_completes_real_sdk_tool_loop(monkeypatch):
+    class StrictOutput(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+        value: str
+
+    received_arguments = []
+
+    async def read_logs(_context, raw_input):
+        received_arguments.append(raw_input)
+        return "log evidence"
+
+    diagnostic_tool = FunctionTool(
+        name="read_logs",
+        description="Read log evidence.",
+        params_json_schema={
+            "type": "object",
+            "properties": {"reason": {"type": "string", "maxLength": 240}},
+            "required": ["reason"],
+            "additionalProperties": False,
+        },
+        on_invoke_tool=read_logs,
+        strict_json_schema=True,
+    )
+
+    class FakeClient:
+        async def close(self):
+            pass
+
+    class FakeDelegate:
+        calls = 0
+
+        def __init__(self, **_kwargs):
+            pass
+
+        async def get_response(self, *_args, **_kwargs):
+            type(self).calls += 1
+            if self.calls == 1:
+                name = "read_logs"
+                arguments = '{"payload_json":"{\\"reason\\":\\"inspect\\"}"}'
+            else:
+                name = "submit_structured_output"
+                arguments = '{"payload_json":"{\\"value\\":\\"valid\\"}"}'
+            return ModelResponse(
+                output=[
+                    ResponseFunctionToolCall(
+                        arguments=arguments,
+                        call_id=f"call-{self.calls}",
+                        name=name,
+                        type="function_call",
+                    )
+                ],
+                usage=Usage(input_tokens=10, output_tokens=5),
+                response_id=f"response-{self.calls}",
+            )
+
+    monkeypatch.setattr(
+        compatible_model_module, "AsyncOpenAI", lambda **_kwargs: FakeClient()
+    )
+    monkeypatch.setattr(
+        compatible_model_module, "OpenAIChatCompletionsModel", FakeDelegate
+    )
+    runtime = V11Runtime(
+        model=OpenAICompatibleChatCompletionsModel(
+            model="compat-model",
+            api_key="local-secret",
+            base_url="http://127.0.0.1:8000/v1",
+            structured_output_transport="strict_output_tool",
+        ),
+        model_provider=ModelProvider.OPENAI_COMPATIBLE,
+        model_name="compat-model",
+        token_budget=2000,
+    )
+
+    result = await runtime._call_model(
+        actor="LeadAgent",
+        prompt="inspect logs, then submit the structured result",
+        output_type=StrictOutput,
+        context={"request": "bounded"},
+        tools=[diagnostic_tool],
+        remaining_token_budget=2000,
+        remaining_tool_budget=8,
+    )
+
+    assert result.output == StrictOutput(value="valid")
+    assert received_arguments == ['{"reason":"inspect"}']
+    assert FakeDelegate.calls == 2
 
 
 def _event() -> IncidentEvent:
