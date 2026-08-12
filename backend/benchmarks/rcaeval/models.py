@@ -7,6 +7,8 @@ payload：`extra="forbid"`、有界字符串、拒绝 NaN/Infinity。runtime 侧
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from datetime import datetime
 from enum import StrEnum
@@ -20,6 +22,18 @@ _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 _REVISION_PATTERN = r"^[0-9a-f]{40}$"
 # 源 case ID 与遥测文件名只允许单层安全标识符；含斜杠即天然排除路径穿越。
 _SAFE_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+
+
+def canonical_json_sha256(value: object) -> str:
+    """canonical JSON（UTF-8、排序键、紧凑分隔符、拒绝非有限数）的 SHA256。"""
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 class RcaEvalSystem(StrEnum):
@@ -42,6 +56,13 @@ SYSTEM_TO_PARTITION: dict[RcaEvalSystem, RcaEvalPartition] = {
     RcaEvalSystem.ONLINE_BOUTIQUE: RcaEvalPartition.OB30,
     RcaEvalSystem.SOCK_SHOP: RcaEvalPartition.SS30,
     RcaEvalSystem.TRAIN_TICKET: RcaEvalPartition.TT90,
+}
+
+# 分区契约：OB30/SS30 每单元格 1 例共 30 例，TT90 每单元格 3 次重复共 90 例。
+EXPECTED_PARTITION_COUNTS: dict[RcaEvalPartition, int] = {
+    RcaEvalPartition.OB30: 30,
+    RcaEvalPartition.SS30: 30,
+    RcaEvalPartition.TT90: 90,
 }
 
 
@@ -193,6 +214,16 @@ class RcaEvalConfiguration(StrEnum):
     @property
     def is_multi(self) -> bool:
         return self in {self.MULTI_INTENDED, self.MULTI_EQUAL_TOKEN}
+
+
+# topology 由 configuration 机械派生：Single 一律 one-context (1,1)，
+# Multi 一律 Lead+Investigators+Critic (3,2)；拍平、互换、篡改一律拒绝。
+EXPECTED_CONFIGURATION_TOPOLOGY: dict[RcaEvalConfiguration, tuple[int, int]] = {
+    RcaEvalConfiguration.SINGLE_INTENDED: (1, 1),
+    RcaEvalConfiguration.SINGLE_EQUAL_TOKEN: (1, 1),
+    RcaEvalConfiguration.MULTI_INTENDED: (3, 2),
+    RcaEvalConfiguration.MULTI_EQUAL_TOKEN: (3, 2),
+}
 
 
 class EvaluationBudget(BaseModel):

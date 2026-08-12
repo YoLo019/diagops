@@ -324,6 +324,54 @@ label opens remain `0`; capability/endpoint/credential and Docker daemon
 gates are unchanged. M5 stays blocked at T12 awaiting independent re-review;
 no accuracy or completion claim is made.
 
+Simplification record (v11 redundancy cleanup, 2026-08-12): a trusted
+read-only review enumerated redundant checks and dead code; each item was
+implemented surgically in worktree branch `codex/v11-m5` with focused tests
+after every group. Dispositions — implemented: R1 (dead `_pair_ledger_path`
+and `_git_revision` in `__main__.py`), R2 (dead runner `_canonical_path`;
+the ledger self-use copy stays), R3 (always-false checksum-parser clause
+`relative_path.parts != tuple(relative_path.parts)`), R4 (manual bundle-hash
+recompute after `_validate_frozen_bundle` in `evaluate_acceptance`), R5
+(`_agent_manifest` re-validation already covered by
+`_validate_execution_contract`; raw manifest extraction and the
+`assert_agent_callable` loop retained), R6 (duplicate
+max_investigators/max_rounds bounds in `_validate_execution_contract`;
+max_turns/max_tool_calls_per_specialist lower bounds retained), R7
+(`v11_projection` report identity/status and digest pre-checks duplicated by
+`validate_v11_report_projection`/`validate_v11_execution_contract`), R8
+(`_assert_persisted_contract` digest recompute implied by validator digest
+consistency plus dict equality), R10 (evaluator `main()` pre-validation
+duplicated by `evaluate_bundles`; CLI partition consistency check retained),
+R11 (runner local reparse helpers converged onto
+`backend.services.source_identity.reject_reparse_path` with
+iterate-and-reject rglob loops that never recurse into junctions; evaluator's
+local copy untouched per the scorer-closure import boundary), R12 (`run_case`
+dual near-identical runtime construction merged into shared kwargs plus
+conditional multi-only keys), R13 (partition cardinality and
+configuration-topology rules converged into `models.py`
+`EXPECTED_PARTITION_COUNTS`/`EXPECTED_CONFIGURATION_TOPOLOGY`; both trust
+sides keep their own validation calls), R15(a) (`_within` implied by the
+parent `_same_path` check), R15(b) (second `_reject_label_reparse` implied by
+the dev/ino re-check), R17 (six canonical-JSON-SHA256 copies converged onto
+`models.py:canonical_json_sha256` with `allow_nan=False`; scorer-closure
+modules and outside-closure callers all import it, respecting the closure
+import boundary; `test_rcaeval_isolation.py` import updated). Retained by
+decision: R9 (ledger reserve double-hash) and R14 (freeze-loop second symlink
+check) as cheap defense-in-depth, plus the review's twelve confirmed-keep
+items (H3 anchor full replay, parent+child re-verification,
+read_label_manifest_once double hash, evaluator local reparse copy, idempotent
+freeze re-validation, dual-boundary configuration validation calls, two-layer
+final_status validation, result_validation double invocation, `_pair_row_exists`
+biased-True, prelabel audit full rebuild comparison, post-reserve heartbeat,
+prepare `sorted(rglob)`). Deferred: R16 (prepare three-pass 26GB reads merge)
+and R18 (freeze double seal-verification merge) as efficiency refactors, not
+redundancy removals. Gates on the final state: full pytest `2214 passed,
+4 skipped, 1 warning` (identical to the pre-cleanup baseline);
+`uv run ruff check .` clean; `git diff --check` clean. No formal OB30/SS30/TT90
+run was executed: formal predictions, paired attempts, label opens, and label
+consumption remain `0`; all tests use `tmp_path`. M5 stays blocked at T12;
+no accuracy or completion claim is made.
+
 Allowed values:
 
 ```text

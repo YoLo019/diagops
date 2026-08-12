@@ -32,8 +32,8 @@ from backend.benchmarks.rcaeval.models import (
     RcaEvalSystem,
     RuntimeCaseEntry,
     RuntimeManifest,
+    canonical_json_sha256,
 )
-from backend.benchmarks.rcaeval.prepare import _canonical_sha256
 from backend.benchmarks.rcaeval.runner import (
     freeze_prediction_bundle,
     freeze_prediction_set,
@@ -79,7 +79,7 @@ def _runtime_manifest() -> RuntimeManifest:
             )
         ],
     )
-    manifest.manifest_hash = _canonical_sha256(
+    manifest.manifest_hash = canonical_json_sha256(
         manifest.model_dump(mode="json", exclude={"manifest_hash"})
     )
     return manifest
@@ -100,7 +100,7 @@ def _label_manifest(runtime_hash: str) -> LabelManifest:
             )
         ],
     )
-    manifest.manifest_hash = _canonical_sha256(
+    manifest.manifest_hash = canonical_json_sha256(
         manifest.model_dump(mode="json", exclude={"manifest_hash"})
     )
     return manifest

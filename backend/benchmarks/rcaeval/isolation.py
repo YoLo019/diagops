@@ -20,7 +20,11 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from backend.benchmarks.rcaeval.models import LabelManifest, RuntimeManifest
+from backend.benchmarks.rcaeval.models import (
+    LabelManifest,
+    RuntimeManifest,
+    canonical_json_sha256,
+)
 from backend.services.source_identity import reject_reparse_path
 
 # prediction 进程只允许这组最小环境变量穿过；其余环境一律不带入。
@@ -299,7 +303,6 @@ def parse_canonical_checksum_bytes(raw: bytes) -> dict[str, str]:
             or relative.startswith("/")
             or relative_path.is_absolute()
             or relative_path.drive
-            or relative_path.parts != tuple(relative_path.parts)
             or any(part in {"", ".", ".."} for part in relative_path.parts)
             or relative_path.as_posix() != relative
         ):
@@ -383,7 +386,4 @@ def _verify_checksums(package_root: Path) -> None:
 
 def _manifest_hash(manifest: RuntimeManifest | LabelManifest) -> str:
     payload = manifest.model_dump(mode="json", exclude={"manifest_hash"})
-    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
-        "utf-8"
-    )
-    return hashlib.sha256(encoded).hexdigest()
+    return canonical_json_sha256(payload)

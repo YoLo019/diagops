@@ -961,27 +961,6 @@ class V11Runtime:
             if not isinstance(raw_manifest, (list, tuple)):
                 raise V11RuntimeContractError("V11 contract lacks frozen tool manifest")
             manifest = tuple(raw_manifest)
-            if len(manifest) != 9 or len(set(manifest)) != len(manifest):
-                raise V11RuntimeContractError(
-                    "V11 requires exactly nine frozen Agent tools"
-                )
-            if manifest != tuple(sorted(manifest)):
-                raise V11RuntimeContractError("V11 frozen tool manifest is not ordered")
-            if contract.get("tool_manifest_hash") != agent_manifest_hash(manifest):
-                raise V11RuntimeContractError("V11 frozen tool manifest hash mismatch")
-            skill_identity = contract.get("skill_catalog")
-            if skill_identity is not None:
-                expected_skill_identity = {
-                    "catalog_version": SKILL_CATALOG_VERSION,
-                    "catalog_hash": skill_catalog_hash(self.skills),
-                    "skill_names": ",".join(
-                        f"{skill.name}@{skill.version}" for skill in self.skills
-                    ),
-                }
-                if skill_identity != expected_skill_identity:
-                    raise V11RuntimeContractError(
-                        "V11 frozen skill catalog identity mismatch"
-                    )
             try:
                 for tool_name in manifest:
                     self.tool_registry.assert_agent_callable(tool_name, manifest)
@@ -1059,10 +1038,6 @@ class V11Runtime:
         ):
             raise V11RuntimeContractError("V11 capability identity projection mismatch")
         limits = contract["limits"]
-        if not 1 <= int(limits["max_investigators"]) <= 3:
-            raise V11RuntimeContractError("V11 investigator limit is out of bounds")
-        if int(limits["max_rounds"]) not in {1, 2}:
-            raise V11RuntimeContractError("V11 round limit is out of bounds")
         if int(limits["max_turns"]) < 1 or int(limits["max_tool_calls_per_specialist"]) < 1:
             raise V11RuntimeContractError("V11 actor limit is out of bounds")
         try:

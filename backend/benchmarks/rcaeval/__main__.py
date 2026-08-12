@@ -170,10 +170,10 @@ def _launch_predict(arguments) -> None:
         CustodianPairLedger,
         canonical_creation_locator,
     )
-    from backend.benchmarks.rcaeval.runner import _reject_reparse_path
+    from backend.services.source_identity import reject_reparse_path
 
-    _reject_reparse_path(arguments.output, "prediction output")
-    _reject_reparse_path(arguments.pair_root, "prediction pair root")
+    reject_reparse_path(arguments.output, "prediction output")
+    reject_reparse_path(arguments.pair_root, "prediction pair root")
     # 两个调用方 root 都会成为持久化身份输入；先拒绝相对/别名拼写，
     # 再禁止按进程 cwd 解析。输出此时允许尚未创建，绑定最近存在祖先。
     canonical_creation_locator(arguments.output)
@@ -273,6 +273,7 @@ def _predict(arguments) -> None:
     # 重依赖仅属于可信 prediction 进程；evaluator 模块不会导入这条闭包。
     from backend.benchmarks.rcaeval.isolation import verify_runtime_package
     from backend.benchmarks.rcaeval.models import (
+        EXPECTED_PARTITION_COUNTS,
         EndpointCapabilityIdentity,
         EvaluationBudget,
         PredictionBundle,
@@ -350,8 +351,7 @@ def _predict(arguments) -> None:
     )
     partition = RcaEvalPartition(arguments.partition)
     cases = [item for item in manifest.cases if item.partition == partition]
-    expected = {RcaEvalPartition.OB30: 30, RcaEvalPartition.SS30: 30, RcaEvalPartition.TT90: 90}
-    if len(cases) != expected[partition]:
+    if len(cases) != EXPECTED_PARTITION_COUNTS[partition]:
         raise ValueError("prediction partition case count is not frozen")
     predictions = [runner.run_case(case, budget) for case in cases]
     contracts = {
@@ -388,10 +388,8 @@ def _freeze_set(arguments) -> None:
         canonical_creation_locator,
     )
     from backend.benchmarks.rcaeval.models import RcaEvalConfiguration
-    from backend.benchmarks.rcaeval.runner import (
-        _reject_reparse_path,
-        freeze_prediction_set,
-    )
+    from backend.benchmarks.rcaeval.runner import freeze_prediction_set
+    from backend.services.source_identity import reject_reparse_path
 
     if arguments.partition == "ss30":
         configurations = set(RcaEvalConfiguration)
@@ -403,7 +401,7 @@ def _freeze_set(arguments) -> None:
         }
         count = 90
     ledger = CustodianPairLedger.from_manifest(arguments.custodian_manifest)
-    _reject_reparse_path(arguments.root, "prediction set root")
+    reject_reparse_path(arguments.root, "prediction set root")
     canonical_creation_locator(arguments.root)
     root = arguments.root.resolve()
     if not _within(root, ledger.canonical_root):
@@ -457,8 +455,6 @@ def _evaluate(arguments) -> None:
         raise ValueError("runtime manifest differs from the custodian root manifest")
     if arguments.label_manifest_hash != ledger.label_manifest_hash:
         raise ValueError("label manifest differs from the custodian root manifest")
-    if not _within(prediction_root, ledger.canonical_root):
-        raise ValueError("prediction root must stay inside the canonical custodian root")
     argv = [sys.executable, "-m", "backend.benchmarks.rcaeval.evaluator"]
     for configuration in configurations:
         argv.extend(
@@ -646,13 +642,6 @@ def _write_new_artifact(path: Path, artifact) -> None:
     )
 
 
-def _pair_ledger_path(custodian_manifest: Path) -> Path:
-    """Resolve only the immutable custodian manifest, never an output directory."""
-    from backend.benchmarks.rcaeval.ledger import CustodianPairLedger
-
-    return CustodianPairLedger.from_manifest(custodian_manifest).path
-
-
 def _formal_configuration_names(partition: str) -> tuple[str, ...]:
     from backend.benchmarks.rcaeval.models import RcaEvalConfiguration
 
@@ -695,12 +684,6 @@ def _same_path(left: Path, right: Path) -> bool:
 
 def _repository_root() -> Path:
     return Path(__file__).resolve().parents[3]
-
-
-def _git_revision(repository_root: Path) -> str:
-    from backend.services.source_identity import resolve_source_identity
-
-    return resolve_source_identity(repository_root).revision
 
 
 if __name__ == "__main__":

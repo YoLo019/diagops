@@ -19,6 +19,8 @@ from backend.benchmarks.rcaeval.dependency import (
 )
 from backend.benchmarks.rcaeval.ledger import CustodianPairLedger
 from backend.benchmarks.rcaeval.models import (
+    EXPECTED_CONFIGURATION_TOPOLOGY,
+    EXPECTED_PARTITION_COUNTS,
     AcceptanceDecision,
     AcceptancePolicy,
     AcceptanceResultArtifact,
@@ -34,11 +36,16 @@ from backend.benchmarks.rcaeval.models import (
     PairedEvaluation,
     PredictionBundle,
     RcaEvalConfiguration,
+    canonical_json_sha256,
 )
 
 BOOTSTRAP_SEED = 20260802
 BOOTSTRAP_SAMPLES = 10_000
-FORMAL_CASE_COUNTS = {"ss30": 30, "tt90": 90}
+FORMAL_CASE_COUNTS = {
+    partition.value: count
+    for partition, count in EXPECTED_PARTITION_COUNTS.items()
+    if partition.value in {"ss30", "tt90"}
+}
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -181,7 +188,7 @@ def evaluate_bundles(
 ) -> EvaluationArtifact:
     if not bundles:
         raise ValueError("evaluation requires at least one prediction bundle")
-    actual_label_hash = _canonical_hash(
+    actual_label_hash = canonical_json_sha256(
         label_manifest.model_dump(mode="json", exclude={"manifest_hash"})
     )
     if label_manifest.manifest_hash != actual_label_hash:
@@ -261,7 +268,7 @@ def evaluate_bundles(
         paired=paired,
         evaluated_at=datetime.now(UTC),
     )
-    artifact.artifact_hash = _canonical_hash(
+    artifact.artifact_hash = canonical_json_sha256(
         artifact.model_dump(mode="json", exclude={"artifact_hash"})
     )
     return artifact
@@ -322,7 +329,7 @@ def freeze_acceptance_policy(
         tt90_manifest_hash=tt90_manifest_hash,
         evaluator_hash=scorer_dependency_hash(),
     )
-    policy.policy_hash = _canonical_hash(
+    policy.policy_hash = canonical_json_sha256(
         policy.model_dump(mode="json", exclude={"policy_hash"})
     )
     return policy
@@ -381,11 +388,6 @@ def evaluate_acceptance(
         raise ValueError("TT90 acceptance requires the frozen multi intended bundle")
     multi_bundle = by_configuration[RcaEvalConfiguration.MULTI_INTENDED]
     _validate_frozen_bundle(multi_bundle)
-    actual_bundle_hash = _canonical_hash(
-        multi_bundle.model_dump(mode="json", exclude={"bundle_hash"})
-    )
-    if multi_bundle.bundle_hash != actual_bundle_hash:
-        raise ValueError("frozen acceptance bundle hash changed")
     validate_prelabel_audit(
         audit_export,
         manual_audit,
@@ -459,7 +461,7 @@ def freeze_acceptance_result(
         decision=decision,
         evaluated_at=datetime.now(UTC),
     )
-    result.artifact_hash = _canonical_hash(
+    result.artifact_hash = canonical_json_sha256(
         result.model_dump(mode="json", exclude={"artifact_hash"})
     )
     return result
@@ -500,7 +502,6 @@ def main() -> None:
     for path in bundle_paths:
         relative = path.relative_to(path.parent.parent).as_posix()
         bundles.append(PredictionBundle.model_validate_json(verified_files[relative]))
-    _validate_scorer_dependency_identity(bundles)
     export = EvidenceAuditExport.model_validate_json(
         arguments.audit_export.read_text(encoding="utf-8")
     )
@@ -518,14 +519,6 @@ def main() -> None:
     )
     if any(bundle.partition.value != arguments.partition for bundle in bundles):
         raise ValueError("evaluator partition differs from frozen pair")
-    by_configuration = {bundle.configuration: bundle for bundle in bundles}
-    _validate_formal_configuration_set(arguments.partition, by_configuration)
-    for bundle in bundles:
-        _validate_frozen_bundle(bundle)
-        _validate_formal_bundle_cardinality(
-            bundle,
-            FORMAL_CASE_COUNTS[arguments.partition],
-        )
     ledger = CustodianPairLedger.from_manifest(arguments.custodian_manifest)
     if ledger.path != arguments.ledger.resolve():
         raise ValueError("evaluator ledger path is not the custodian canonical ledger")
@@ -579,7 +572,7 @@ def read_label_manifest_once(
     if labels.manifest_hash != expected_manifest_hash:
         raise ValueError("label manifest identity differs from custodian freeze")
     if (
-        _canonical_hash(labels.model_dump(mode="json", exclude={"manifest_hash"}))
+        canonical_json_sha256(labels.model_dump(mode="json", exclude={"manifest_hash"}))
         != labels.manifest_hash
     ):
         raise ValueError("label manifest hash mismatch")
@@ -623,7 +616,6 @@ def _read_label_bytes_once(path: Path) -> bytes:
             if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
                 raise ValueError("label manifest was replaced before it was read")
             content = handle.read()
-        _reject_label_reparse(candidate)
         after = candidate.lstat()
         if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
             raise ValueError("label manifest was replaced while it was read")
@@ -675,7 +667,7 @@ def _billable_tokens(predictions: list[CasePrediction]) -> int:
 def _validate_frozen_bundle(bundle: PredictionBundle) -> None:
     if not bundle.bundle_hash:
         raise ValueError("prediction bundle is not frozen")
-    actual = _canonical_hash(bundle.model_dump(mode="json", exclude={"bundle_hash"}))
+    actual = canonical_json_sha256(bundle.model_dump(mode="json", exclude={"bundle_hash"}))
     if actual != bundle.bundle_hash:
         raise ValueError("prediction bundle changed after freeze")
 
@@ -705,13 +697,13 @@ def _validate_scorer_dependency_identity(value: str | list[PredictionBundle]) ->
 
 
 def _validate_artifact_hash(artifact: EvaluationArtifact) -> None:
-    actual = _canonical_hash(artifact.model_dump(mode="json", exclude={"artifact_hash"}))
+    actual = canonical_json_sha256(artifact.model_dump(mode="json", exclude={"artifact_hash"}))
     if not artifact.artifact_hash or actual != artifact.artifact_hash:
         raise ValueError("evaluation artifact changed after freeze")
 
 
 def _validate_policy_hash(policy: AcceptancePolicy) -> None:
-    actual = _canonical_hash(policy.model_dump(mode="json", exclude={"policy_hash"}))
+    actual = canonical_json_sha256(policy.model_dump(mode="json", exclude={"policy_hash"}))
     if not policy.policy_hash or actual != policy.policy_hash:
         raise ValueError("acceptance policy changed after freeze")
 
@@ -738,14 +730,10 @@ def _validate_formal_configuration_set(
     }
     if len(common) != 1:
         raise ValueError("formal evaluation contains mixed tool/turn/deadline limits")
-    expected_topology = {
-        RcaEvalConfiguration.SINGLE_INTENDED: (1, 1),
-        RcaEvalConfiguration.SINGLE_EQUAL_TOKEN: (1, 1),
-        RcaEvalConfiguration.MULTI_INTENDED: (3, 2),
-        RcaEvalConfiguration.MULTI_EQUAL_TOKEN: (3, 2),
-    }
     for configuration, budget in budgets.items():
-        if (budget.max_investigators, budget.max_rounds) != expected_topology[configuration]:
+        if (budget.max_investigators, budget.max_rounds) != EXPECTED_CONFIGURATION_TOPOLOGY[
+            configuration
+        ]:
             raise ValueError("formal evaluation topology limits are not frozen")
     if partition == "ss30":
         single_equal = budgets[RcaEvalConfiguration.SINGLE_EQUAL_TOKEN]
@@ -754,17 +742,6 @@ def _validate_formal_configuration_set(
             raise ValueError("formal single equal-token budget is not 3B")
         if multi_equal.token_budget != single_equal.token_budget:
             raise ValueError("formal equal-token budgets differ")
-
-
-def _canonical_hash(value: object) -> str:
-    encoded = json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def _nearest_rank_percentile(values: list[float], quantile: float) -> float:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 from pathlib import Path
 
@@ -14,6 +13,7 @@ from backend.benchmarks.rcaeval.models import (
     EvidenceAuditPair,
     ManualAuditArtifact,
     PredictionBundle,
+    canonical_json_sha256,
 )
 
 RUBRIC = {
@@ -51,13 +51,13 @@ def export_evidence_pairs(
                 }
                 pairs.append(
                     EvidenceAuditPair(
-                        pair_id=_canonical_hash(payload),
+                        pair_id=canonical_json_sha256(payload),
                         evidence_summary=prediction.evidence_summaries.get(evidence_id, ""),
                         **payload,
                     )
                 )
     bindings = prediction_bundle_hashes or {}
-    export_hash = _canonical_hash(
+    export_hash = canonical_json_sha256(
         {
             "prediction_bundle_hashes": {
                 str(key): value for key, value in bindings.items()
@@ -90,7 +90,7 @@ def freeze_manual_audit(
     reviewers = {item.reviewer_id for item in decisions}
     if len(reviewers) != 1:
         raise ValueError("manual audit requires one frozen reviewer identity")
-    rubric_hash = _canonical_hash(RUBRIC)
+    rubric_hash = canonical_json_sha256(RUBRIC)
     pass_rate = None if not decisions else sum(item.passed for item in decisions) / len(decisions)
     artifact = ManualAuditArtifact(
         export_hash=export.export_hash,
@@ -99,7 +99,7 @@ def freeze_manual_audit(
         decisions=sorted(decisions, key=lambda item: item.pair_id),
         pass_rate=pass_rate,
     )
-    artifact.artifact_hash = _canonical_hash(
+    artifact.artifact_hash = canonical_json_sha256(
         artifact.model_dump(mode="json", exclude={"artifact_hash"})
     )
     return artifact
@@ -111,14 +111,14 @@ def validate_manual_audit(
 ) -> float | None:
     """重放冻结校验，禁止 acceptance 接受裸汇总数字。"""
     _validate_export_hash(export)
-    actual_artifact_hash = _canonical_hash(
+    actual_artifact_hash = canonical_json_sha256(
         artifact.model_dump(mode="json", exclude={"artifact_hash"})
     )
     if not artifact.artifact_hash or artifact.artifact_hash != actual_artifact_hash:
         raise ValueError("manual audit changed after freeze")
     if artifact.export_hash != export.export_hash:
         raise ValueError("manual audit does not belong to the frozen export")
-    if artifact.rubric_hash != _canonical_hash(RUBRIC):
+    if artifact.rubric_hash != canonical_json_sha256(RUBRIC):
         raise ValueError("manual audit rubric changed after freeze")
     pair_ids = [item.pair_id for item in artifact.decisions]
     expected_pair_ids = sorted(item.pair_id for item in export.pairs)
@@ -159,7 +159,7 @@ def validate_prelabel_audit(
     ):
         raise ValueError("frozen prediction bundles do not match the expected identities")
     for bundle in frozen.values():
-        actual_bundle_hash = _canonical_hash(
+        actual_bundle_hash = canonical_json_sha256(
             bundle.model_dump(mode="json", exclude={"bundle_hash"})
         )
         if bundle.bundle_hash != actual_bundle_hash:
@@ -182,7 +182,7 @@ def validate_prelabel_audit(
 
 
 def _validate_export_hash(export: EvidenceAuditExport) -> None:
-    actual = _canonical_hash(
+    actual = canonical_json_sha256(
         {
             "prediction_bundle_hashes": {
                 str(key): value
@@ -213,16 +213,6 @@ def _candidate_onset(start, end) -> dict[str, object]:
     }
 
 
-def _canonical_hash(value: object) -> str:
-    payload = json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(prog="python -m backend.benchmarks.rcaeval.audit")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -240,7 +230,7 @@ def main() -> None:
             for path in arguments.bundle
         ]
         for bundle in bundles:
-            expected = _canonical_hash(
+            expected = canonical_json_sha256(
                 bundle.model_dump(mode="json", exclude={"bundle_hash"})
             )
             if not bundle.bundle_hash or bundle.bundle_hash != expected:

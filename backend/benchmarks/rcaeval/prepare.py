@@ -20,6 +20,7 @@ from pathlib import Path
 
 from backend.benchmarks.rcaeval.ledger import create_custodian_manifest
 from backend.benchmarks.rcaeval.models import (
+    EXPECTED_PARTITION_COUNTS,
     SYSTEM_TO_PARTITION,
     LabelEntry,
     LabelManifest,
@@ -29,14 +30,9 @@ from backend.benchmarks.rcaeval.models import (
     RuntimeManifest,
     SourceCaseDescriptor,
     SourcePin,
+    canonical_json_sha256,
 )
 
-# 分区契约：OB30/SS30 每单元格 1 例共 30 例，TT90 每单元格 3 次重复共 90 例。
-EXPECTED_PARTITION_COUNTS: dict[RcaEvalPartition, int] = {
-    RcaEvalPartition.OB30: 30,
-    RcaEvalPartition.SS30: 30,
-    RcaEvalPartition.TT90: 90,
-}
 REPETITIONS_PER_CELL = 3
 
 # 遥测只接受这三种后缀；CSV/JSON 做非有限数值扫描，LOG 只做 UTF-8/NUL 检查。
@@ -193,7 +189,7 @@ def _verify_source_tree(source_root: Path, pin: SourcePin) -> None:
     for relative, expected in pin.files.items():
         if actual[relative] != expected:
             raise ValueError(f"source file hash mismatch (changed source): {relative}")
-    archive_hash = _canonical_sha256(pin.files)
+    archive_hash = canonical_json_sha256(pin.files)
     if archive_hash != pin.archive_sha256:
         raise ValueError("archive hash mismatch: pin archive identity does not match its files")
 
@@ -373,7 +369,7 @@ def _materialize_runtime_case(case: _SourceCase, runtime_dir: Path, opaque_id: s
 
 
 def _manifest_hash(manifest: RuntimeManifest | LabelManifest) -> str:
-    return _canonical_sha256(manifest.model_dump(mode="json", exclude={"manifest_hash"}))
+    return canonical_json_sha256(manifest.model_dump(mode="json", exclude={"manifest_hash"}))
 
 
 def _write_checksums(package_dir: Path) -> None:
@@ -399,10 +395,3 @@ def _write_json(path: Path, value: object) -> None:
 
 def _sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
-
-
-def _canonical_sha256(value: object) -> str:
-    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
-        "utf-8"
-    )
-    return hashlib.sha256(encoded).hexdigest()

@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 import json
 import math
-import os
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -21,6 +20,7 @@ from backend.benchmarks.rcaeval.ledger import (
     volume_identity,
 )
 from backend.benchmarks.rcaeval.models import (
+    EXPECTED_CONFIGURATION_TOPOLOGY,
     CandidatePrediction,
     CasePrediction,
     EndpointCapabilityIdentity,
@@ -30,6 +30,7 @@ from backend.benchmarks.rcaeval.models import (
     RcaEvalConfiguration,
     RuntimeCaseEntry,
     RuntimeManifest,
+    canonical_json_sha256,
 )
 from backend.benchmarks.rcaeval.providers import (
     build_rcaeval_providers,
@@ -87,7 +88,7 @@ from backend.runtime.phase_executor import DiagnosisPhaseExecutor
 from backend.runtime.sqlite_store import SQLiteRuntimeStore
 from backend.runtime.telemetry import RuntimeTelemetry
 from backend.runtime.writer import RuntimeWriter
-from backend.services.source_identity import resolve_source_identity
+from backend.services.source_identity import reject_reparse_path, resolve_source_identity
 from backend.services.v11_projection import ensure_v11_projection_owner
 from backend.tools.provider_tools import VerifiedMemoryLookup, build_provider_tool_registry
 from backend.tools.registry import agent_manifest_hash
@@ -446,16 +447,10 @@ def validate_configuration_set(
     }
     if len(common) != 1:
         raise ValueError("configuration tool/turn/deadline identity mismatch")
-    # topology 由 configuration 机械派生：Single 一律 one-context (1,1)，
-    # Multi 一律 Lead+Investigators+Critic (3,2)；拍平、互换、篡改一律拒绝。
-    expected_topology = {
-        RcaEvalConfiguration.SINGLE_INTENDED: (1, 1),
-        RcaEvalConfiguration.SINGLE_EQUAL_TOKEN: (1, 1),
-        RcaEvalConfiguration.MULTI_INTENDED: (3, 2),
-        RcaEvalConfiguration.MULTI_EQUAL_TOKEN: (3, 2),
-    }
     for key, value in configurations.items():
-        if (value.max_investigators, value.max_rounds) != expected_topology[key]:
+        if (value.max_investigators, value.max_rounds) != EXPECTED_CONFIGURATION_TOPOLOGY[
+            key
+        ]:
             raise ValueError("configuration topology limits are not frozen")
 
 
@@ -517,31 +512,22 @@ class RcaEvalCaseRunner:
         memory = EmptyRunOwnedMemory()
         registry = build_provider_tool_registry(providers, memory)
         runtime_type = V11Runtime if budget.configuration.is_multi else SingleInvestigatorAgent
-        runtime = runtime_type(
-            model=self.model,
-            model_provider=provider,
-            model_name=self.capability.model,
-            tool_registry=registry,
-            turn=self.turn,
-            max_turns=budget.max_turns,
-            timeout_seconds=budget.timeout_seconds,
-            max_investigators=budget.max_investigators,
-            max_rounds=budget.max_rounds,
-            max_total_tool_calls=budget.tool_budget,
-            max_tool_calls_per_specialist=min(3, budget.tool_budget),
-            token_budget=budget.token_budget,
-        ) if budget.configuration.is_multi else runtime_type(
-            model=self.model,
-            model_provider=provider,
-            model_name=self.capability.model,
-            tool_registry=registry,
-            turn=self.turn,
-            max_turns=budget.max_turns,
-            timeout_seconds=budget.timeout_seconds,
-            max_total_tool_calls=budget.tool_budget,
-            max_tool_calls_per_specialist=min(3, budget.tool_budget),
-            token_budget=budget.token_budget,
-        )
+        runtime_kwargs = {
+            "model": self.model,
+            "model_provider": provider,
+            "model_name": self.capability.model,
+            "tool_registry": registry,
+            "turn": self.turn,
+            "max_turns": budget.max_turns,
+            "timeout_seconds": budget.timeout_seconds,
+            "max_total_tool_calls": budget.tool_budget,
+            "max_tool_calls_per_specialist": min(3, budget.tool_budget),
+            "token_budget": budget.token_budget,
+        }
+        if budget.configuration.is_multi:
+            runtime_kwargs["max_investigators"] = budget.max_investigators
+            runtime_kwargs["max_rounds"] = budget.max_rounds
+        runtime = runtime_type(**runtime_kwargs)
         contract = build_execution_contract(runtime, budget, self.capability)
         run = RuntimeRun.create_new(
             id=run_id,
@@ -726,7 +712,7 @@ def freeze_prediction_bundle(bundle: PredictionBundle, output_dir: Path) -> str:
         raise ValueError("prediction bundle is already frozen")
     output_dir.mkdir(parents=True, exist_ok=False)
     payload = bundle.model_dump(mode="json", exclude={"bundle_hash"})
-    digest = _canonical_hash(payload)
+    digest = canonical_json_sha256(payload)
     frozen = bundle.model_copy(update={"bundle_hash": digest})
     path = output_dir / "predictions.json"
     path.write_text(
@@ -750,14 +736,16 @@ def freeze_prediction_set(
 ) -> str:
     """在全部配置完成后冻结 evaluator 的单一输入根。"""
     raw_root = Path(root).expanduser()
-    _reject_reparse_path(raw_root, "prediction set root")
+    reject_reparse_path(raw_root, "prediction set root")
     root_locator = canonical_locator(raw_root)
     root = raw_root.resolve()
     canonical_root = Path(ledger.canonical_root).resolve()
     if canonical_root not in root.parents:
         raise ValueError("prediction set root is outside the canonical custodian root")
-    if _contains_reparse_point(root):
-        raise ValueError("prediction set rejects symlink/junction entries")
+    # 条目一产出即经 reject_reparse_path 拒绝，绝不递归进入 junction。
+    reject_reparse_path(root, "prediction set root")
+    for entry in root.rglob("*"):
+        reject_reparse_path(entry, "prediction set entry")
     expected_sides = {configuration.value for configuration in expected_configurations}
     snapshot = ledger.snapshot()
     if snapshot["state"] != "predictions_frozen":
@@ -798,7 +786,7 @@ def freeze_prediction_set(
         validate_prediction_bundle(bundle)
         if bundle.configuration != configuration or not bundle.bundle_hash:
             raise ValueError("prediction set contains an unfrozen configuration")
-        actual_bundle_hash = _canonical_hash(
+        actual_bundle_hash = canonical_json_sha256(
             bundle.model_dump(mode="json", exclude={"bundle_hash"})
         )
         if bundle.bundle_hash != actual_bundle_hash:
@@ -823,7 +811,7 @@ def freeze_prediction_set(
     if len(identities) != 1 or len(case_sets) != 1:
         raise ValueError("prediction set contains mixed identity or case rows")
     bundle_identity = next(iter(bundles.values())).identity
-    expected_pair_identity = _canonical_hash(
+    expected_pair_identity = canonical_json_sha256(
         {
             "partition": snapshot["partition"],
             "runtime_manifest_hash": bundle_identity.runtime_manifest_hash,
@@ -886,8 +874,12 @@ def _verify_side_directory(path: Path, expected_bundle_hash: str | None) -> None
     if not expected_bundle_hash or len(expected_bundle_hash) != 64:
         raise ValueError("prediction side bundle hash is missing")
     checksum_path = path / "SHA256SUMS"
-    if not checksum_path.is_file() or _contains_reparse_point(path):
+    if not checksum_path.is_file():
         raise ValueError("prediction side checksum or directory is invalid")
+    # 条目一产出即经 reject_reparse_path 拒绝，绝不递归进入 junction。
+    reject_reparse_path(path, "prediction side directory")
+    for entry in path.rglob("*"):
+        reject_reparse_path(entry, "prediction side entry")
     actual_checksum_hash = hashlib.sha256(checksum_path.read_bytes()).hexdigest()
     if actual_checksum_hash != expected_bundle_hash:
         raise ValueError("prediction side checksum differs from ledger")
@@ -904,37 +896,6 @@ def _verify_side_directory(path: Path, expected_bundle_hash: str | None) -> None
     for relative, expected in entries.items():
         if hashlib.sha256((path / relative).read_bytes()).hexdigest() != expected:
             raise ValueError("prediction side checksum content changed")
-
-
-def _contains_reparse_point(root: Path) -> bool:
-    if _is_reparse_path(root):
-        return True
-    for path in root.rglob("*"):
-        if _is_reparse_path(path):
-            return True
-    return False
-
-
-def _reject_reparse_path(path: Path, what: str) -> None:
-    raw = Path(path).expanduser()
-    if any(_is_reparse_path(candidate) for candidate in (raw, *raw.parents)):
-        raise ValueError(f"{what} rejects symlink/junction entries")
-
-
-def _is_reparse_path(path: Path) -> bool:
-    if path.is_symlink():
-        return True
-    try:
-        attributes = getattr(path.lstat(), "st_file_attributes", 0)
-    except FileNotFoundError:
-        return False
-    except OSError as exc:
-        raise ValueError("prediction set path cannot be inspected") from exc
-    return bool(attributes & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT (junctions too)
-
-
-def _canonical_path(path: Path) -> str:
-    return os.path.normcase(os.path.normpath(str(path.expanduser().resolve(strict=False))))
 
 
 def validate_prediction_bundle(bundle: PredictionBundle) -> None:
@@ -985,12 +946,12 @@ def frozen_run_identity(
         ),
         tool_manifest_hash=tool_manifest_hash_value,
         skill_catalog_hash=skill_catalog_hash_value,
-        prediction_schema_hash=_canonical_hash(CasePrediction.model_json_schema()),
+        prediction_schema_hash=canonical_json_sha256(CasePrediction.model_json_schema()),
         normalizer_hash=_hash_files([Path(__file__).with_name("evaluator.py")]),
         scorer_dependency_hash=scorer_dependency_hash(),
         dependency_lock_hash=dependency_lock_hash,
-        memory_snapshot_hash=_canonical_hash(EMPTY_MEMORY_IDENTITY),
-        retry_policy_hash=_canonical_hash(RETRY_POLICY),
+        memory_snapshot_hash=canonical_json_sha256(EMPTY_MEMORY_IDENTITY),
+        retry_policy_hash=canonical_json_sha256(RETRY_POLICY),
     )
 
 
@@ -998,10 +959,6 @@ def _assert_persisted_contract(run: RuntimeRun, expected: dict[str, object]) -> 
     validate_v11_execution_contract(run.execution_contract)
     if run.execution_contract != expected:
         raise ValueError("persisted RCAEval RuntimeRun contract mismatch")
-    if execution_contract_digest(run.execution_contract) != expected[
-        "execution_contract_digest"
-    ]:
-        raise ValueError("persisted RCAEval RuntimeRun contract hash mismatch")
 
 
 def _published_candidates(
@@ -1031,13 +988,6 @@ def _runtime_token_usage(runtime_store, run_id: str) -> tuple[int, int]:
         sum(int(item.get("input_tokens", 0)) for item in payloads),
         sum(int(item.get("output_tokens", 0)) for item in payloads),
     )
-
-
-def _canonical_hash(value: object) -> str:
-    encoded = json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def _hash_files(paths: list[Path]) -> str:

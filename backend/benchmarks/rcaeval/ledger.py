@@ -22,6 +22,7 @@ from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 
+from backend.benchmarks.rcaeval.models import canonical_json_sha256
 from backend.services.source_identity import reject_reparse_path
 
 
@@ -92,7 +93,7 @@ def create_custodian_manifest(
         "label_manifest_hash": label_manifest_hash,
         "ledger_filename": "pair-ledger.sqlite3",
     }
-    sealed = dict(payload, manifest_hash=_canonical_hash(payload))
+    sealed = dict(payload, manifest_hash=canonical_json_sha256(payload))
     encoded = _canonical_json(sealed)
     try:
         with path.open("x", encoding="utf-8", newline="") as handle:
@@ -1025,7 +1026,7 @@ class CustodianPairLedger:
             "custodian_manifest_hash": self.custodian_manifest_hash,
             "reason": reason[:256],
         }
-        sealed = dict(payload, intent_hash=_canonical_hash(payload))
+        sealed = dict(payload, intent_hash=canonical_json_sha256(payload))
         encoded = _canonical_json(sealed)
         if path.exists():
             try:
@@ -1067,7 +1068,7 @@ class CustodianPairLedger:
             raise ValueError("pair failure intent ledger identity differs")
         if payload["custodian_manifest_hash"] != self.custodian_manifest_hash:
             raise ValueError("pair failure intent custodian identity differs")
-        if _canonical_hash(identity) != payload["intent_hash"]:
+        if canonical_json_sha256(identity) != payload["intent_hash"]:
             raise ValueError("pair failure intent hash is invalid")
         _begin_immediate(connection, self.SQLITE_BUSY_TIMEOUT_SECONDS)
         row = self._require_pair(connection)
@@ -1351,10 +1352,6 @@ def _canonical_json(payload: dict[str, object]) -> str:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
 
 
-def _canonical_hash(payload: dict[str, object]) -> str:
-    return hashlib.sha256(_canonical_json(payload).rstrip("\n").encode("utf-8")).hexdigest()
-
-
 def _event_hash(event_kind: str, snapshot: str, previous_hash: str) -> str:
     payload = {
         "event_kind": event_kind,
@@ -1419,7 +1416,7 @@ def _load_custodian_manifest(path: Path) -> CustodianRootManifest:
     ):
         raise ValueError("custodian manifest identities must be sha256")
     identity = {key: payload[key] for key in required if key != "manifest_hash"}
-    if _canonical_hash(identity) != payload["manifest_hash"]:
+    if canonical_json_sha256(identity) != payload["manifest_hash"]:
         raise ValueError("custodian manifest hash mismatch")
     return CustodianRootManifest(
         path=manifest_path,
@@ -1448,11 +1445,11 @@ def _ledger_identity(
         "expected_sides": sorted(expected_sides),
         "lineage_identity_hash": lineage_identity_hash,
     }
-    return _canonical_hash(payload)
+    return canonical_json_sha256(payload)
 
 
 def _lineage_hash(audit_export_hash: str, manual_audit_hash: str) -> str:
-    return _canonical_hash(
+    return canonical_json_sha256(
         {
             "audit_export_hash": audit_export_hash,
             "manual_audit_hash": manual_audit_hash,
