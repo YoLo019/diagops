@@ -296,6 +296,7 @@ def parse_canonical_checksum_bytes(raw: bytes) -> dict[str, str]:
         if (
             not relative
             or "\\" in relative
+            or relative.startswith("/")
             or relative_path.is_absolute()
             or relative_path.drive
             or relative_path.parts != tuple(relative_path.parts)
@@ -340,7 +341,9 @@ def verify_frozen_prediction_root(
     entries = parse_canonical_checksum_bytes(raw)
     verified: dict[str, bytes] = {}
     actual: set[str] = set()
-    for path in sorted(root.rglob("*")):
+    # 边迭代边检查，不物化 sorted()：junction 环下 rglob 递归指数膨胀，
+    # 条目一产出即经 reject_reparse_path 拒绝，绝不递归进入。
+    for path in root.rglob("*"):
         reject_reparse_path(path, "prediction root entry")
         if path.is_file() and path != sums_path:
             relative = path.relative_to(root).as_posix()
@@ -368,7 +371,8 @@ def _verify_checksums(package_root: Path) -> None:
     reject_reparse_path(sums_path, "checksum manifest")
     expected = parse_canonical_checksum_bytes(sums_path.read_bytes())
     actual: dict[str, str] = {}
-    for path in sorted(package_root.rglob("*")):
+    # 边迭代边检查，不物化 sorted()：理由同 verify_frozen_prediction_root。
+    for path in package_root.rglob("*"):
         reject_reparse_path(path, "package checksum entry")
         if path.is_file() and path != sums_path:
             relative = path.relative_to(package_root).as_posix()

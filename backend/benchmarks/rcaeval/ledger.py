@@ -1407,8 +1407,10 @@ def _load_custodian_manifest(path: Path) -> CustodianRootManifest:
         or manifest_path.name != "custodian-manifest.json"
     ):
         raise ValueError("custodian manifest is not at its canonical custodian root")
-    # 固定文件的递归 entries 同样不得含 reparse/symlink。
-    for entry in sorted(Path(root).rglob("*")):
+    # 固定文件的递归 entries 同样不得含 reparse/symlink。边迭代边检查：
+    # rglob 会递归进入 junction（junction 非 symlink），先物化的 sorted()
+    # 在指向祖先的 junction 环下指数膨胀挂起；条目一产出即拒绝则绝不递归进入。
+    for entry in Path(root).rglob("*"):
         reject_reparse_path(entry, "custodian root entry")
     if payload["ledger_filename"] != "pair-ledger.sqlite3":
         raise ValueError("custodian ledger filename is not frozen")

@@ -806,6 +806,64 @@ def test_child_frozen_root_rejects_extra_and_missing_entries(tmp_path):
         verify_frozen_prediction_root(root, root_hash)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction semantics")
+def test_frozen_root_verification_fails_fast_on_junction_loop(tmp_path):
+    """冻结 root 内指向祖先的 junction 环必须快速 fail-closed：rglob 递归
+    进入 junction（junction 非 symlink）指数膨胀，先物化的 sorted(rglob)
+    会挂起而不是拒绝。"""
+    import time
+
+    from backend.benchmarks.rcaeval.isolation import verify_frozen_prediction_root
+
+    root = tmp_path / "predictions"
+    root_hash = _frozen_prediction_root(root)
+    for name in ("loop1", "loop2"):
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(root / name), str(root)],
+            check=True,
+            capture_output=True,
+        )
+    started = time.monotonic()
+    with pytest.raises(ValueError, match="reparse|junction|symlink"):
+        verify_frozen_prediction_root(root, root_hash)
+    assert time.monotonic() - started < 5.0, "junction loop must fail fast, not hang"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction semantics")
+def test_package_checksum_verification_fails_fast_on_junction_loop(tmp_path):
+    """_verify_checksums 同款 sorted(rglob)：package 内 junction 环快速拒绝。"""
+    import time
+
+    from backend.benchmarks.rcaeval.isolation import _verify_checksums
+
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (package / "mod.py").write_text("x = 1\n", encoding="utf-8")
+    _write_checksums(package)
+    for name in ("loop1", "loop2"):
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(package / name), str(package)],
+            check=True,
+            capture_output=True,
+        )
+    started = time.monotonic()
+    with pytest.raises(ValueError, match="reparse|junction|symlink"):
+        _verify_checksums(package)
+    assert time.monotonic() - started < 5.0, "junction loop must fail fast, not hang"
+
+
+def test_checksum_parser_rejects_posix_rooted_paths():
+    """M3 拒绝 absolute 必须跨平台一致：Windows 下 Path('/etc/a.txt') 非
+    absolute、无 drive、as_posix 往返一致，parser 必须显式拒绝 rooted 拼写。"""
+    from backend.benchmarks.rcaeval.isolation import parse_canonical_checksum_bytes
+
+    digest = hashlib.sha256(b"{}").hexdigest()
+    for rooted in ("/etc/a.txt", "//etc/a.txt", "/a.txt"):
+        raw = f"{digest}  {rooted}\n".encode()
+        with pytest.raises(ValueError, match="canonical|absolute|rooted"):
+            parse_canonical_checksum_bytes(raw)
+
+
 def test_child_frozen_root_rejects_noncanonical_checksum_paths(tmp_path):
     from backend.benchmarks.rcaeval.isolation import verify_frozen_prediction_root
 

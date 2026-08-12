@@ -305,6 +305,25 @@ only: formal SS30/TT90 predictions, paired attempts, and label opens remain
 and process-only credentials remain absent. M5 stays blocked at T12 awaiting
 independent seventh-round review; no accuracy or completion claim is made.
 
+Verification evidence (M5 seventh-round review-fix, 2026-08-12): base was
+`6c238e3b0187ced00891ac7aa5e914c88b9a04c3`; the follow-up review returned
+`changes_required` (1 medium, 1 low). Both findings were reproduced RED and
+closed GREEN: all three recursive scans (`ledger.py` custodian entries,
+`isolation.py` frozen prediction root and package checksum verification)
+dropped `sorted(Path.rglob("*"))` materialization in favor of
+iterate-and-reject, so planted junction loops (junctions are not symlinks and
+rglob recurses into them; two junctions reproduced a >10s pre-fix hang in a
+subprocess probe and a 60s timeout kill, exit 124) now fail closed
+immediately with explicit elapsed-bound regressions; and the shared strict
+checksum parser now explicitly rejects POSIX-rooted `/`-prefixed paths, which
+Windows previously accepted (not absolute, no drive, round-trip stable).
+Gates on the final state: focused M5 group `383 passed, 1 skipped`; full
+pytest `2214 passed, 4 skipped, 1 warning`; `uv run ruff check .` clean;
+`git diff --check` clean. Formal SS30/TT90 predictions, paired attempts, and
+label opens remain `0`; capability/endpoint/credential and Docker daemon
+gates are unchanged. M5 stays blocked at T12 awaiting independent re-review;
+no accuracy or completion claim is made.
+
 Allowed values:
 
 ```text

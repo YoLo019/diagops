@@ -905,6 +905,33 @@ def test_custodian_manifest_loader_rejects_junction_root(tmp_path):
         CustodianPairLedger.from_manifest(junction / manifest.name)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction semantics")
+def test_custodian_manifest_loader_fails_fast_on_junction_loop(tmp_path):
+    """custodian root 内指向祖先的 junction 环：rglob 会先物化并递归进入
+    junction（junction 非 symlink），2 个 junction 即指数膨胀挂起。必须
+    边迭代边拒绝，快速 fail-closed 而不是挂起。"""
+    import time
+
+    root = tmp_path / "real-root"
+    manifest = create_custodian_manifest(
+        root,
+        runtime_manifest_hash="1" * 64,
+        label_manifest_hash="2" * 64,
+    )
+    (root / "sub").mkdir(exist_ok=True)
+    (root / "sub" / "leaf.txt").write_text("x", encoding="utf-8")
+    for name in ("loop1", "loop2"):
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(root / name), str(root)],
+            check=True,
+            capture_output=True,
+        )
+    started = time.monotonic()
+    with pytest.raises(ValueError, match="reparse|junction|symlink"):
+        CustodianPairLedger.from_manifest(manifest)
+    assert time.monotonic() - started < 5.0, "junction loop must fail fast, not hang"
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics")
 def test_custodian_manifest_loader_rejects_symlink_root(tmp_path):
     real = tmp_path / "real-root"

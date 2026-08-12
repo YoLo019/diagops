@@ -1290,6 +1290,8 @@ independent M5 implementation review; M5 review status remains tracked below.
 | M5-R6-M1 | medium | `canonical_locator` accepted lowercase drive aliases, UNC paths, and nonexistent paths | Closed locally with strict final-handle spelling binding (`resolve(strict=True)` plus exact spelling comparison) for existing paths and nearest-existing-ancestor binding for creation; UNC/drive-alias/reparse spellings are rejected, normal Windows spellings pass. Independent re-review pending. |
 | M5-R6-M2 | medium | side SHA256SUMS accepted non-canonical path spellings such as `digest  ./predictions.json` | Closed locally by reusing one strict parser that rejects duplicate/missing/extra/unordered/absolute/`..`/case-alias spellings and binds canonical bytes; root/side checksum generation shares the same posix-string ordering. Independent re-review pending. |
 | M5-R6-M3 | medium | `validate_configuration_set` and the V11 contract did not mechanically validate topology, so self-declared subagent/hidden-model-call flags passed | Closed locally: `topology` is a required V11 contract key with mechanical mode/one-context/critic/subagent/hidden-call/investigator/round rules, and `validate_configuration_set` freezes per-configuration topology limits; swapped/tampered topologies are rejected. Independent re-review pending. |
+| M5-R7-M1 | medium | recursive entry scans used `sorted(Path.rglob("*"))`, materializing the whole iterator while rglob recurses into junctions (junctions are not symlinks), so a junction loop planted in a custodian/frozen root hung every load instead of failing closed | Closed locally at all three sites (`ledger.py` custodian entries, `isolation.py` frozen-root and package checksum scans) by iterating and rejecting each reparse entry as produced, never recursing into it; junction-loop regressions fail fast with explicit elapsed bounds. Independent re-review pending. |
+| M5-R7-L1 | low | the strict checksum parser accepted POSIX-rooted spellings such as `/etc/a.txt` on Windows (not absolute, no drive, round-trip stable) | Closed locally by explicitly rejecting `/`-prefixed rooted paths in the shared parser; cross-platform rooted regression GREEN. Independent re-review pending. |
 
 M5 review-fix record (2026-08-11): the second independent review reproduced
 three residual findings: pair-ledger crash recovery, stale scorer identity at
@@ -1407,6 +1409,26 @@ preflight is unavailable and remains an unmet gate. Formal predictions, paired
 attempts and label opens remain zero (`D:\data\RCAEval\v11-m5` absent); T12 is
 still blocked on a fresh passed capability artifact/endpoint/credential and
 this Plan remains `review_required` pending independent re-review.
+
+M5 seventh-round implementation/review-fix record (2026-08-12): base
+`6c238e3b0187ced00891ac7aa5e914c88b9a04c3`; the follow-up review returned
+`changes_required` with one medium and one low finding (M5-R7-M1/L1 above).
+All three `sorted(Path.rglob("*"))` recursive scans (custodian manifest
+entries, frozen prediction root, package checksum verification) now iterate
+and reject reparse entries as produced instead of materializing the iterator,
+so a junction loop planted in a scanned root fails closed immediately instead
+of hanging (junctions are not symlinks and rglob recurses into them; two
+junctions made the pre-fix scans exceed 10s without returning in a subprocess
+probe). The shared strict checksum parser now explicitly rejects POSIX-rooted
+`/`-prefixed spellings, closing the Windows-only absolute-path acceptance gap.
+RED→GREEN evidence: junction-loop tests timed out (killed at 60s, exit 124)
+against the old code and the rooted-path parser test failed; after the fix all
+four regressions pass with explicit elapsed bounds. Gates on the final state:
+focused M5 group `383 passed, 1 skipped`; full pytest `2214 passed, 4 skipped,
+1 warning`; full Ruff clean; `git diff --check` clean. Formal predictions,
+paired attempts and label opens remain zero; T12 capability stop-gate and the
+missing Docker daemon gate are unchanged, and this Plan remains
+`review_required` pending independent re-review.
 
 M0 review (dataset/leakage): completed on 2026-08-02 in worktree
 `agent+v11-m0`; conclusion `approve_with_followups`. Reviewer independently
