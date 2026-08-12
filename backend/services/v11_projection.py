@@ -1,6 +1,6 @@
 from backend.db.models import InvestigationRecord
 from backend.domain.multi_agent import AuthorityMode
-from backend.domain.runtime import execution_contract_digest, validate_v11_execution_contract
+from backend.domain.runtime import validate_v11_execution_contract
 from backend.domain.v11_contracts import (
     validate_v11_final_status,
     validate_v11_report_projection,
@@ -116,10 +116,6 @@ def ensure_v11_projection_owner(repository, runtime_store, record: Investigation
             raise V11ProjectionIntegrityError(
                 "active V11 projection cannot publish a legacy report"
             )
-        if record.report.investigation_id != record.id:
-            raise V11ProjectionIntegrityError("Agent report investigation mismatch")
-        if record.report.diagnostic_status != review.diagnostic_status:
-            raise V11ProjectionIntegrityError("Agent report diagnostic status mismatch")
         try:
             validate_v11_report_projection(review, record.report)
         except ValueError as exc:
@@ -129,8 +125,6 @@ def ensure_v11_projection_owner(repository, runtime_store, record: Investigation
 
     contract = run.execution_contract
     try:
-        if contract.get("execution_contract_digest") != execution_contract_digest(contract):
-            raise ValueError("digest")
         validate_v11_execution_contract(contract)
     except (AttributeError, TypeError, ValueError) as exc:
         raise V11ProjectionIntegrityError("Agent projection contract integrity failed") from exc

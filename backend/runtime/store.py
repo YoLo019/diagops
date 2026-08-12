@@ -279,6 +279,10 @@ class RuntimeStore(Protocol):
 
     def commit_phase(self, commit: PhaseCommit) -> RuntimeCheckpoint: ...
 
+    def reserve_model_turn(
+        self, run_id: str, *, owner: str, lease_version: int
+    ) -> int: ...
+
 
 _ACTIVE_LIVE_STATUSES = {
     RuntimeRunStatus.CREATED,
@@ -1075,6 +1079,28 @@ class InMemoryRuntimeStore:
         self._publish_events(published)
         return interrupted
 
+    def reserve_model_turn(
+        self, run_id: str, *, owner: str, lease_version: int
+    ) -> int:
+        """在同一 Store 锁内原子扣减 V11 Run 的模型 turn 总预算。"""
+        with self._lock:
+            run = self._require_run(run_id)
+            if not run.is_v11:
+                raise RuntimeIntegrityError("model turn budget is only valid for V11")
+            if run.status not in {
+                RuntimeRunStatus.RUNNING,
+                RuntimeRunStatus.CANCELLING,
+            }:
+                raise RuntimeConflict("model turn reservation requires a live run")
+            self._validate_fence(run, owner, lease_version)
+            remaining = run.remaining_model_turns
+            if remaining is None:
+                raise RuntimeIntegrityError("V11 run lacks durable model turn budget")
+            if remaining <= 0:
+                raise RuntimeConflict("V11 model turn budget exhausted")
+            run.remaining_model_turns = remaining - 1
+            return run.remaining_model_turns
+
     def commit_phase(self, commit: PhaseCommit) -> RuntimeCheckpoint:
         from backend.runtime.phases import (
             checkpoint_digest,
@@ -1145,6 +1171,13 @@ class InMemoryRuntimeStore:
             ):
                 raise RuntimeIntegrityError(
                     "checkpoint remaining token budget differs from durable consumption"
+                )
+            if run.is_v11 and "execution_contract_digest" in run.execution_contract and (
+                commit.resume_state.remaining_model_turns
+                != run.remaining_model_turns
+            ):
+                raise RuntimeIntegrityError(
+                    "checkpoint remaining model turns differ from durable run budget"
                 )
             existing = self._checkpoints.get(commit.checkpoint_id)
             if existing is not None:

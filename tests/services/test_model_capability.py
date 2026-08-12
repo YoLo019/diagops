@@ -2,19 +2,23 @@
 
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
 from backend.config.settings import endpoint_id
 from backend.services.model_capability import (
     CAPABILITY_MANIFEST,
+    REQUIRED_CONTRACTS,
     ModelCapabilityArtifact,
     capability_certification_status,
     capability_manifest_hash,
     certify_endpoint_async,
     compute_artifact_hash,
+    current_execution_environment,
     main,
     read_capability_artifact,
+    validate_capability_for_prediction,
     write_capability_artifact,
 )
 
@@ -33,7 +37,10 @@ def _artifact(**overrides):
         "agents_sdk_version": "0.18.1",
         "tested_parallelism": 2,
         "capability_manifest_hash": capability_manifest_hash(),
-        "code_revision": "abc123",
+        "required_contracts": REQUIRED_CONTRACTS,
+        "code_revision": "a" * 40,
+        "source_manifest_hash": "b" * 64,
+        "execution_environment": current_execution_environment(),
         "tested_at": _TESTED_AT,
         "result": "passed",
         "observations": [],
@@ -267,3 +274,55 @@ def test_main_writes_artifact_without_persisting_key(monkeypatch, tmp_path):
     assert exit_code == 0
     persisted = next(tmp_path.glob("*/result.json")).read_text(encoding="utf-8")
     assert "local-secret" not in persisted
+
+
+def test_prediction_admission_rejects_stale_revision_and_insufficient_parallelism(
+    monkeypatch,
+):
+    artifact = _artifact(code_revision="0" * 40, tested_parallelism=1)
+    with pytest.raises(ValueError, match="code revision|parallelism|stale"):
+        validate_capability_for_prediction(
+            artifact,
+            provider="openai_compatible",
+            model="compat-model",
+            endpoint_id_value=_ENDPOINT_ID,
+            expected_parallelism=3,
+            repository_root=Path(__file__).resolve().parents[2],
+        )
+
+
+def test_git_identity_is_explicit_and_independent_of_process_cwd(tmp_path, monkeypatch):
+    from backend.services.model_capability import _git_identity
+
+    repository_root = Path(__file__).resolve().parents[2]
+    monkeypatch.chdir(tmp_path)
+    revision, dirty = _git_identity(repository_root)
+    assert len(revision) == 40
+    assert isinstance(dirty, bool)
+
+
+def test_packaged_source_identity_without_git_rejects_tampering(tmp_path):
+    package_root = tmp_path / "package"
+    (package_root / "backend").mkdir(parents=True)
+    (package_root / "backend" / "worker.py").write_text(
+        "print('trusted')\n",
+        encoding="utf-8",
+    )
+
+    from backend.services.source_identity import (
+        resolve_source_identity,
+        write_source_manifest,
+    )
+
+    write_source_manifest(package_root)
+    identity = resolve_source_identity(package_root)
+    assert len(identity.revision) == 40
+    assert len(identity.manifest_hash) == 64
+    assert identity.git_dirty is False
+
+    (package_root / "backend" / "worker.py").write_text(
+        "print('tampered')\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="manifest|digest|tamper"):
+        resolve_source_identity(package_root)

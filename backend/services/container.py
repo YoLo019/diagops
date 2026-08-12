@@ -449,6 +449,7 @@ class AppContainer:
                 },
                 "limits": {
                     "max_turns": self.settings.agents.max_turns,
+                    "model_turn_budget_scope": "run",
                     "max_investigators": 3,
                     "max_rounds": 2,
                     "token_budget": self.settings.agents.token_budget,
@@ -456,6 +457,13 @@ class AppContainer:
                         self.settings.agents.max_tool_calls_per_specialist
                     ),
                     "tool_timeout_seconds": self.settings.agents.tool_timeout_seconds,
+                },
+                "topology": {
+                    "mode": "multi_lead_investigators_critic",
+                    "one_context": False,
+                    "critic": True,
+                    "subagent": False,
+                    "hidden_model_calls": False,
                 },
                 "retry_policy": {
                     "max_retries": 1,
@@ -468,7 +476,7 @@ class AppContainer:
                 "timeout_seconds": float(self.settings.agents.timeout_seconds),
             }
             contract = seal_v11_execution_contract(contract)
-        run = RuntimeRun(
+        run = RuntimeRun.create_new(
             investigation_id=investigation_id,
             run_kind=RuntimeRunKind.LIVE,
             strategy=strategy,

@@ -18,7 +18,9 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from backend.benchmarks.rcaeval.ledger import create_custodian_manifest
 from backend.benchmarks.rcaeval.models import (
+    EXPECTED_PARTITION_COUNTS,
     SYSTEM_TO_PARTITION,
     LabelEntry,
     LabelManifest,
@@ -28,14 +30,9 @@ from backend.benchmarks.rcaeval.models import (
     RuntimeManifest,
     SourceCaseDescriptor,
     SourcePin,
+    canonical_json_sha256,
 )
 
-# 分区契约：OB30/SS30 每单元格 1 例共 30 例，TT90 每单元格 3 次重复共 90 例。
-EXPECTED_PARTITION_COUNTS: dict[RcaEvalPartition, int] = {
-    RcaEvalPartition.OB30: 30,
-    RcaEvalPartition.SS30: 30,
-    RcaEvalPartition.TT90: 90,
-}
 REPETITIONS_PER_CELL = 3
 
 # 遥测只接受这三种后缀；CSV/JSON 做非有限数值扫描，LOG 只做 UTF-8/NUL 检查。
@@ -160,6 +157,11 @@ def prepare_partitions(source_root: Path, pin_path: Path, output_dir: Path) -> P
     _write_checksums(runtime_dir)
     _write_json(labels_dir / "labels.json", label_manifest.model_dump(mode="json"))
     _write_checksums(labels_dir)
+    create_custodian_manifest(
+        output_dir,
+        runtime_manifest_hash=runtime_manifest.manifest_hash,
+        label_manifest_hash=label_manifest.manifest_hash,
+    )
     return PrepareResult(
         runtime_manifest=runtime_manifest,
         label_manifest=label_manifest,
@@ -187,7 +189,7 @@ def _verify_source_tree(source_root: Path, pin: SourcePin) -> None:
     for relative, expected in pin.files.items():
         if actual[relative] != expected:
             raise ValueError(f"source file hash mismatch (changed source): {relative}")
-    archive_hash = _canonical_sha256(pin.files)
+    archive_hash = canonical_json_sha256(pin.files)
     if archive_hash != pin.archive_sha256:
         raise ValueError("archive hash mismatch: pin archive identity does not match its files")
 
@@ -367,15 +369,18 @@ def _materialize_runtime_case(case: _SourceCase, runtime_dir: Path, opaque_id: s
 
 
 def _manifest_hash(manifest: RuntimeManifest | LabelManifest) -> str:
-    return _canonical_sha256(manifest.model_dump(mode="json", exclude={"manifest_hash"}))
+    return canonical_json_sha256(manifest.model_dump(mode="json", exclude={"manifest_hash"}))
 
 
 def _write_checksums(package_dir: Path) -> None:
-    lines = []
-    for path in sorted(package_dir.rglob("*")):
+    entries: list[tuple[str, str]] = []
+    for path in package_dir.rglob("*"):
         if path.is_file() and path.name != "SHA256SUMS":
             relative = path.relative_to(package_dir).as_posix()
-            lines.append(f"{_sha256_bytes(path.read_bytes())}  {relative}")
+            entries.append((relative, _sha256_bytes(path.read_bytes())))
+    # canonical 序是 posix 相对路径字符串序；Windows Path 排序为 casefold，
+    # 跨平台字节序不一致，不能作为 canonical 序。
+    lines = [f"{digest}  {relative}" for relative, digest in sorted(entries)]
     target = package_dir / "SHA256SUMS"
     with target.open("w", encoding="utf-8", newline="\n") as file:
         file.write("\n".join(lines) + "\n")
@@ -390,10 +395,3 @@ def _write_json(path: Path, value: object) -> None:
 
 def _sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
-
-
-def _canonical_sha256(value: object) -> str:
-    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
-        "utf-8"
-    )
-    return hashlib.sha256(encoded).hexdigest()

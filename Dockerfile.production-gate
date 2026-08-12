@@ -5,10 +5,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md uv.lock ./
 COPY backend ./backend
-RUN pip install --no-cache-dir .
-
 COPY config ./config
+RUN python -c "from pathlib import Path; from backend.services.source_identity import write_source_manifest; write_source_manifest(Path('/app'))"
+RUN python -c "from pathlib import Path; from backend.services.source_identity import write_source_manifest; write_source_manifest(Path('/app'), output=Path('/app/backend/services/diagops-source-manifest.json'), package_scope=True)"
+RUN pip install --no-cache-dir .
 
 CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]

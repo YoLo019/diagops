@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from copy import deepcopy
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -175,6 +176,7 @@ _V11_CONTRACT_REQUIRED_KEYS = {
     "skill_catalog",
     "capability_identity",
     "limits",
+    "topology",
     "retry_policy",
     "tool_budget",
     "token_budget",
@@ -196,6 +198,50 @@ _V11_LIMIT_KEYS = {
     "max_tool_calls_per_specialist",
     "tool_timeout_seconds",
 }
+_V11_TOPOLOGY_KEYS = {
+    "mode",
+    "one_context",
+    "critic",
+    "subagent",
+    "hidden_model_calls",
+}
+_V11_TOPOLOGY_MODES = {"multi_lead_investigators_critic", "single_one_context"}
+
+
+def _validate_v11_topology(contract: dict[str, Any]) -> None:
+    """topology 必须由 configuration/limits 机械派生；自封或互换一律拒绝。"""
+    topology = contract.get("topology")
+    limits = contract.get("limits")
+    if not isinstance(topology, dict) or set(topology) != _V11_TOPOLOGY_KEYS:
+        raise ValueError("V11 execution contract topology is incomplete")
+    mode = topology.get("mode")
+    if mode not in _V11_TOPOLOGY_MODES:
+        raise ValueError("V11 execution contract topology mode is not frozen")
+    if topology.get("subagent") is not False:
+        raise ValueError("V11 execution contract subagent topology is forbidden")
+    if topology.get("hidden_model_calls") is not False:
+        raise ValueError("V11 execution contract hidden model calls are forbidden")
+    investigators = limits.get("max_investigators")
+    rounds = limits.get("max_rounds")
+    if (
+        not isinstance(investigators, int)
+        or isinstance(investigators, bool)
+        or not 1 <= investigators <= 3
+        or not isinstance(rounds, int)
+        or isinstance(rounds, bool)
+        or rounds not in {1, 2}
+    ):
+        raise ValueError("V11 execution contract topology limits are invalid")
+    if mode == "single_one_context":
+        if topology.get("one_context") is not True or topology.get("critic") is not False:
+            raise ValueError("V11 single topology flags are inconsistent")
+        if (investigators, rounds) != (1, 1):
+            raise ValueError("V11 single topology requires one context and one round")
+    else:
+        if topology.get("one_context") is not False or topology.get("critic") is not True:
+            raise ValueError("V11 multi topology flags are inconsistent")
+        if investigators < 2 or rounds != 2:
+            raise ValueError("V11 multi topology requires investigators and two rounds")
 
 
 def execution_contract_digest(contract: dict[str, Any]) -> str:
@@ -240,10 +286,13 @@ def validate_v11_execution_contract(contract: dict[str, Any]) -> None:
         raise ValueError("V11 execution contract capability identity is incomplete")
     if not isinstance(limits, dict) or not _V11_LIMIT_KEYS <= limits.keys():
         raise ValueError("V11 execution contract limits are incomplete")
+    if limits.get("model_turn_budget_scope", "run") != "run":
+        raise ValueError("V11 model turn budget scope must be run")
     if not isinstance(skill_catalog, dict):
         raise ValueError("V11 execution contract skill catalog is incomplete")
     if not isinstance(retry_policy, dict):
         raise ValueError("V11 execution contract retry policy is incomplete")
+    _validate_v11_topology(contract)
     if contract.get("token_budget") is None or limits.get("token_budget") is None:
         raise ValueError("V11 execution contract token ceiling is missing")
     if limits["token_budget"] != contract["token_budget"]:
@@ -341,6 +390,7 @@ class RuntimeRun(RuntimeModel):
     prompt_version: str | None = Field(default=None, max_length=160)
     tool_budget: int | None = Field(default=None, ge=0)
     token_budget: int | None = Field(default=None, ge=0)
+    remaining_model_turns: int | None = Field(default=None, ge=0)
     timeout_seconds: float = Field(
         default=60.0, ge=1, allow_inf_nan=False
     )
@@ -356,6 +406,33 @@ class RuntimeRun(RuntimeModel):
     execution_contract_version: ExecutionContractVersion = ExecutionContractVersion.V10_LEGACY
     authority_mode: AuthorityMode = AuthorityMode.LEGACY_DETERMINISTIC
     execution_contract: dict[str, Any] = Field(default_factory=dict)
+
+    @classmethod
+    def create_new(cls, **data: Any) -> RuntimeRun:
+        """Construct one new run and initialize its V11 budget exactly once."""
+        version = data.get("execution_contract_version")
+        if version == ExecutionContractVersion.V11 or version == ExecutionContractVersion.V11.value:
+            contract = data.get("execution_contract") or {}
+            limits = contract.get("limits") if isinstance(contract, dict) else None
+            budget = (
+                limits.get("max_turns")
+                if isinstance(limits, dict)
+                else contract.get("max_turns", 8)
+            )
+            if not isinstance(budget, int) or budget < 1:
+                budget = 8
+            if data.get("remaining_model_turns") is None:
+                data["remaining_model_turns"] = budget
+        return cls(**data)
+
+    @classmethod
+    def from_persisted(cls, payload: Mapping[str, Any]) -> RuntimeRun:
+        """Deserialize a persisted run; sealed V11 payloads may not omit budget state."""
+        version = payload.get("execution_contract_version")
+        if version == ExecutionContractVersion.V11 or version == ExecutionContractVersion.V11.value:
+            if "remaining_model_turns" not in payload or payload["remaining_model_turns"] is None:
+                raise ValueError("persisted remaining model turns are missing")
+        return cls.model_validate(payload)
 
     @field_validator("model_name", "prompt_version")
     @classmethod
@@ -411,6 +488,29 @@ class RuntimeRun(RuntimeModel):
                 raise ValueError("V11 execution contract is incomplete")
             if self.timeout_seconds > 120:
                 raise ValueError("V11 timeout_seconds exceeds the hard deadline")
+            limits = self.execution_contract.get("limits")
+            model_turn_budget = (
+                limits.get("max_turns")
+                if isinstance(limits, dict)
+                else self.execution_contract.get("max_turns", 8)
+            )
+            if not isinstance(model_turn_budget, int) or model_turn_budget < 1:
+                if _EXECUTION_CONTRACT_DIGEST in self.execution_contract:
+                    raise ValueError(
+                        "V11 execution contract model-turn budget is missing"
+                    )
+                model_turn_budget = 8
+            if self.remaining_model_turns is None:
+                if (
+                    _EXECUTION_CONTRACT_DIGEST in self.execution_contract
+                    and "remaining_model_turns" in self.model_fields_set
+                ):
+                    raise ValueError(
+                        "V11 persisted remaining model turns are missing"
+                    )
+                self.remaining_model_turns = model_turn_budget
+            elif self.remaining_model_turns > model_turn_budget:
+                raise ValueError("V11 remaining model turns exceed frozen run budget")
             if _EXECUTION_CONTRACT_DIGEST in self.execution_contract:
                 try:
                     validate_v11_execution_contract(self.execution_contract)
@@ -482,6 +582,7 @@ class RuntimeResumeState(RuntimeModel):
     completed_report_ids: list[str] = Field(default_factory=list)
     remaining_tool_budget: int = Field(default=0, ge=0)
     remaining_token_budget: int | None = Field(default=None, ge=0)
+    remaining_model_turns: int | None = Field(default=None, ge=0)
     successful_tool_keys: list[str] = Field(default_factory=list)
 
 
@@ -541,6 +642,8 @@ for _event_type in (
             "actual_input_tokens",
             "attempt",
             "request_index",
+            "model_turn_budget",
+            "remaining_model_turns",
         }
     )
 for _event_type in (

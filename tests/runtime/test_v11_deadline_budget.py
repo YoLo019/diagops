@@ -317,6 +317,33 @@ def test_v11_run_rejects_timeout_seconds_above_hard_deadline() -> None:
         )
 
 
+def test_v11_model_turn_budget_is_durable_across_invocations_and_exhaustion() -> None:
+    _repository, store, run, _executor, _coordinator = _v11_services(
+        run_id="run-v11-model-turn-budget"
+    )
+    leased, _attempt = store.acquire_lease_and_create_attempt(
+        run.id,
+        attempt=RuntimeAttempt(
+            run_id=run.id,
+            attempt_number=1,
+            status=RuntimeAttemptStatus.RUNNING,
+        ),
+        owner="worker-a",
+        expected_status=RuntimeRunStatus.CREATED,
+    )
+
+    assert leased.remaining_model_turns == 8
+    assert store.reserve_model_turn(
+        run.id, owner="worker-a", lease_version=leased.lease_version
+    ) == 7
+    assert store.get_run(run.id).remaining_model_turns == 7
+    # A fresh invocation must consume the same persisted run budget, not reset to 8.
+    assert store.reserve_model_turn(
+        run.id, owner="worker-a", lease_version=leased.lease_version
+    ) == 6
+    assert store.get_run(run.id).remaining_model_turns == 6
+
+
 def test_v11_started_model_reservation_is_durable_for_resume_reconciliation() -> None:
     started = RuntimeEvent(
         run_id="run-token-reservation",

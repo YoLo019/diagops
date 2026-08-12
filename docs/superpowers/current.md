@@ -4,7 +4,7 @@ This file is the mutable routing and status entry point for the current version.
 
 It does not override an approved spec or plan, current code contracts, or the long-term product goal and production safety boundary in `AGENT.md`.
 
-Updated: 2026-08-10
+Updated: 2026-08-12
 
 ## Implemented Baseline
 
@@ -35,16 +35,19 @@ authority for a general-purpose SRE workflow while preserving the existing
 read-only safety, durable runtime, historical records, and benchmark-neutral
 provider contracts.
 
-Iteration status: `verifying`
+Iteration status: `blocked`
 
-Spec status: `approved`
+Spec status: `review_required` (sixth-round ledger/evaluator/contract fixes await independent re-review)
 
-Plan status: `approved`
+Plan status: `review_required` (sixth-round ledger/evaluator/contract fixes await independent re-review)
 
-Implementation status: `complete`
+Implementation status: `blocked` (M5 engineering fixes implemented/verifying; capability and independent-review gates remain open)
 
-Completion commit: local M4 fifth-round final High-fix commit on `codex/v11-m4`
-(SHA is recorded in the final handoff; no merge or push)
+Completion commit: `none`（M5 尚未完成正式 SS30/TT90）
+
+M4 approved baseline: `7539c7fd8b707fc54cf2ed75a7d9fcba13d7618c`
+on `codex/v11-m5`; M4 independent review approved before this worktree was
+created. No merge or push was performed.
 
 M2 baseline commit: `c2245ac` (`chore(v11): checkpoint M2 T4-T6`), committed
 in the isolated M3 worktree; dirty `main` was not modified.
@@ -114,7 +117,287 @@ the shared V11 contract; V10-only legacy reports remain unchanged. The final
 post-commit runtime artifact and `git_dirty=false` binding are recorded in the
 handoff.
 
-Blocker: `none`
+Verification evidence (M5 engineering and stop gate, 2026-08-10): `T11/M0-L1/
+M0-L2 RED→GREEN；frozen SingleInvestigatorAgent、真实 V11/SQLite runner、RCAEval
+offline providers、四 SS30 配置、exact/统计 evaluator、pre-label manual audit、
+controlled prediction/evaluator launch、policy/acceptance archive 均已实现；T11
+initial T11 focused 79 passed，benchmark Ruff clean；真实 26 GB runtime package 再校验为
+manifest bb119fc9…、150 cases。正式 capability admission 在首个 OB30 model
+call 前失败：本 worktree 无 passed model-capability artifact，且
+DIAGOPS_AGENTS_API_KEY/BASE_URL/MODEL 均未配置。因此 SS30 未执行、SS/TT
+labels 未由正式 evaluator 打开、TT90 未消耗；父任务为本 Codex task 设置的
+Luna Max 只证明实现线程模型，不是 RCAEval 可调用 endpoint identity。独立 M5
+复审未执行。`
+
+Verification evidence (M5 repository gates, 2026-08-10): `uv run ruff check .
+clean；full pytest 2121 passed/3 skipped/1 existing Starlette warning；frontend
+production build passed；offline_tool_acceptance rows=80 failed=0（matrix SHA
+3a49df20…）；runtime_acceptance 14/14、privacy scan passed（pre-commit artifact
+SHA 2a980b25…）；git diff --check clean。production gate 的 Compose config
+通过，但正式脚本 preflight 因 Docker Desktop Linux daemon unavailable 阻断，
+未生成或伪造 7-scenario result。未发布 Tempo claim，故按 Plan 不运行
+tempo_acceptance。独立 review 仍 pending。`
+
+Verification evidence (M5 review-fix, 2026-08-11): the first and second
+independent M5 reviews were reproduced with RED regressions. The custodian pair
+ledger is shared across output directories, requires an exact frozen
+prediction-set hash and exact pre-label audit/manual artifact identities, uses a
+one-shot reservation token, and converts expired prediction/pre-label/label-open
+leases to pair-level FAILED_NON_RESUMABLE before explicit reauthorization.
+Prediction admission binds clean source revision, adapter/SDK/environment
+identity, capability contracts, and tested parallelism. Formal SS30/TT90
+cardinality is exact (30/90), current scorer dependency closure is checked at
+policy freeze and final acceptance, placement-only runtime state is unknown,
+Single uses one model context, and V11 model turns use a durable run-level
+remaining budget carried through checkpoints and retries. Engineering tests are
+green; formal predictions, attempts, and label opens remain zero. A fresh
+independent re-review is still pending, so M5 remains blocked and no accuracy
+claim is made.
+
+Verification evidence (M5 review-fix repository gates, 2026-08-11): `uv run
+pytest -q` → `2141 passed, 3 skipped, 1 warning`; `uv run ruff check .` clean;
+frontend production build passed; offline tool acceptance `rows=80 failed=0`;
+runtime acceptance produced a passed 14-scenario artifact (privacy scan
+passed) at `output/runtime-acceptance/runtime-20260811T155221149309Z-6cd0f67e/result.json`
+(SHA-256 `45165e1453004e8f2a6afbbdf6a41b99eb850bb23b3ff1502770d1db47da6c4d`,
+clean engineering run bound to code commit `b591e40df5569cd53c40e9984b9d056f2ceb57f5`,
+`git_dirty=false`);
+offline matrix is `output/offline_tool_acceptance/matrix.json` (SHA-256
+`d85e162d0cba644c09397b38c6756eb41bbf8b58c61120c98a72f0617d674540`);
+`git diff --check` clean. Production acceptance was attempted but the
+required lab/Docker environment variables were absent, so no production
+scenario artifact was generated. Tempo acceptance was not run because no
+Tempo claim is being published.
+
+Verification evidence (M5 third-round review-fix, 2026-08-12): base was the
+second-round clean code `977a040a`; code fix commit is
+`094a20f2cd22066a00c32adead51b0e7b8489a63` on `codex/v11-m5`. RED→GREEN
+regressions close canonical custodian-root/manifest ledger binding (including
+alternate-root rejection), an external-cwd trusted prediction worker with
+explicit source/Git root, permanent label reveal epoch and one-time
+reauthorization identity, frozen-bundle candidate/evidence audit reconstruction,
+sealed persisted RuntimeRun turn-state rejection, completion-failure pair
+invalidation, and required lease-token APIs. Targeted M5 regression gate is
+`132 passed`; full pytest is `2151 passed, 3 skipped, 1 warning`; Ruff and
+`git diff --check` are clean; frontend production build passed; offline tool
+acceptance is `80/80`; runtime acceptance is `14/14` with privacy passed at
+`output/runtime-acceptance/runtime-20260811T180307749157Z-fcf30999/result.json`
+(SHA-256
+`37ff2eece9e2feb14d00d4622d13acc00f0ef21d64a6e064633bf82d7f4094ff`,
+`git_commit=094a20f2cd22066a00c32adead51b0e7b8489a63`, `git_dirty=false`);
+offline matrix is `output/offline_tool_acceptance/matrix.json` (SHA-256
+`8c5e150a9e07923528a5c1d6a0f7016739ffaaeb07b7b21f10faf16458659c9d`).
+Formal SS30/TT90 predictions, paired attempts, and label opens remain `0`.
+Production acceptance stopped before scenario creation because
+`DIAGOPS_PRODUCTION_SCENARIO` and the required production/endpoint environment
+are absent; no Tempo claim was published or run. M5 remains blocked and awaits
+fresh capability admission plus independent re-review; no accuracy claim is
+made.
+
+Verification evidence (M5 fourth-round review-fix, 2026-08-12): base was
+`2e8b276ed053e6d5c87f8590954705f3f4459acd`; implementation head is
+`da9dbb8496835bc1a2cca60a4d1b9764ad9bc822`. RED→GREEN regressions now close
+the frozen prediction-set ledger-identity transition, exact side
+output/checksum/bundle binding, authorized reauthorization lineage, and
+completion/evaluation SQLite-lock failure convergence. The ledger uses one
+bounded write-lock backoff policy and explicit connection close; a completion
+write failure atomically attempts pair invalidation before returning the
+original error. Prediction-set root and every parent path reject symlink/
+junction aliases before the first freeze write, and the root checksum is
+created exclusively to prevent concurrent overwrite. Packaged source identity
+uses a build-time manifest/code digest without copying `.git`; runtime and
+capability admission reject manifest tampering or stale source identity.
+The focused M5 regression group is `164 passed, 1 warning`; full pytest is
+`2163 passed, 3 skipped, 1 warning`; full Ruff, frontend build, and
+`git diff --check` are clean. Offline acceptance ran in a temporary directory
+(`80/80`, SHA-256
+`654ec4cba7c43d28ace4918af6fe547de1a1efb30ea433039f944fb5d13d9eb1`) and
+runtime acceptance ran in a temporary directory (`14/14`, privacy passed,
+SHA-256
+`ebe8a975eaf950fc46b320665c4fbce5c5ac9d2b8f1c6e8d0a148142870ef1af`);
+both temporary trees were removed. The acceptance run was engineering-only
+while the worktree was dirty, so its `git_dirty=true` is not a formal artifact.
+Docker production preflight remains host-blocked because the Linux daemon is
+unavailable. `D:\data\RCAEval\v11-m5` is absent, the three endpoint/credential
+environment variables are absent, and formal predictions, paired attempts,
+and label opens remain `0`. M5 remains blocked and awaits capability admission
+and a fresh independent re-review; no accuracy or completion claim is made.
+
+Blocker: `T12 capability admission：缺少 exact passed model-capability artifact、
+可调用 endpoint/model 与 process-only credential；SS30/TT90 不得以任务线程模型
+或 test double 替代。外部 owner：父任务/用户提供已认证本机端点后另行恢复。`
+
+Verification evidence (M5 fifth-round review-fix, 2026-08-12): base was
+`75f964495d6e6f391ebd8eef4c2170ba982d53ea`; code commit is
+`0bb9c4e2b0dd37068380bc07d32aeb9d7838a901` on `codex/v11-m5`. RED→GREEN
+regressions now cover the trusted evaluator's single stable label-file read
+(hash/identity is checked before result construction and replacement races
+leave no evaluator artifact), an idempotent freeze-intent/materialize/bind
+recovery path, append-only sealed ledger state across all transitions, durable
+writer-lock failure reconciliation, Windows reparse/junction rejection,
+relocated wheel/package manifests without Git or cwd dependence, exact formal
+topology limits, candidate onset semantics, and strict checksum parsing. The
+RCAEval focused group is `123 passed`; full pytest is `2176 passed, 3 skipped,
+1 warning`; full Ruff, frontend build, `git diff --check`, offline `80/80`, and
+runtime `14/14` with privacy scan are green. A wheel installed into a clean
+target and invoked from an external cwd passed the trusted worker help smoke.
+The package manifest is
+`backend/services/diagops-source-manifest.json` (package identity hash
+`56cca55981f24aa03f02b21d20eb931649bf65ecd5ef0ba31bf9ad2f51722448`, file
+SHA-256
+`841af38222554f8652291ef5e5df0cd430c050ad16ef85803d1aa8e587a56085`, 135
+files). These are engineering gates only: formal SS30/TT90 predictions,
+paired attempts, and label opens remain `0`; `D:\data\RCAEval\v11-m5` is
+absent; capability artifact, endpoint, model, and process-only credentials are
+absent. M5 remains blocked at T12 and awaits independent sixth-round review;
+no accuracy or completion claim is made.
+
+Verification evidence (M5 fifth-round follow-up hardening, 2026-08-12): code
+commits `071315d4be5b599e638c7b71e3d1caac0bad5086` and
+`effa4cfdf44380b3d7ce9ce006acb89d51a39412` tighten the reviewed contract
+without consuming formal data. Custodian side locators now reject
+relative/non-canonical spellings before persistence; direct invalidation under
+a held SQLite writer lock records the same durable failure intent used by
+completion paths; the packaged prediction worker and launcher reject relative
+and reparse source/entrypoint roots before resolving them. The focused
+ledger/isolation/evaluator/runner gate is `91 passed`; the added lock-intent
+and launcher-locator regressions are green; full pytest is `2179 passed, 3 skipped, 1 warning`; Ruff, frontend
+build, offline `80/80`, runtime `14/14` with privacy, wheel external-cwd
+smoke, and `git diff --check` are green. The installed package manifest is
+`backend/services/diagops-source-manifest.json` with identity hash
+`44a5cc1ce2acda0ff9f974aec010c94a9574aec4bc102a0a7d255ad7bb708da4`, file
+SHA-256 `0fbe8c5b2b9888d22719069bd6708e616f5da395005ab9b0c7132585fa2d7739`,
+and 135 files. Formal predictions, paired attempts, label opens, and label
+consumption remain `0`; M5 is still blocked at T12 pending capability
+admission and the next independent review, with no accuracy claim.
+
+Verification evidence (M5 sixth-round review-fix, 2026-08-12): base was
+`cf5e4295e96e2fb8067d719e088afdbad0fc9dc2`; the sixth independent review
+returned `changes_required`/`blocked` (1 blocking, 5 high, 3 medium). All nine
+findings were reproduced RED and closed GREEN: the custodian ledger seal is
+authenticated by an external append-only HMAC-chained anchor keyed by a
+one-time random seal key (raw SQLite tamper, forged appended seals, and reveal
+clearing fail closed at every write boundary; anchor/key absence refuses seal
+rebuild); the evaluator child re-verifies the frozen prediction root's
+canonical SHA256SUMS bytes/hash and every bundle byte before its first side
+effect, parses bundles only from verified bytes, and passes the expected
+custodian label manifest hash through the ledger fence (mismatch/replacement
+leave zero artifact); one guarded write boundary persists verifiable failure
+intent on lock/exception exhaustion and startup reconcile converges intents
+plus expired leases; custodian/locator paths reject reparse/junction/symlink,
+drive-alias, UNC, and nonexistent spellings before resolve; side/root checksum
+manifests share one strict canonical parser; `topology` is a required
+mechanically validated V11 contract key and `validate_configuration_set`
+freezes per-configuration topology limits; and `setup.py` `build_py`
+regenerates the wheel package manifest from final `build_lib` content while
+dependency-lock identity fails closed without `uv.lock`/`pyproject.toml`.
+Repository gates on the final state: focused M5 group `379 passed, 1
+skipped`; full pytest `2210 passed, 4 skipped, 1 warning` (the fourth skip is
+the new POSIX-only custodian symlink regression; the other three are
+pre-existing allowed skips); `uv run ruff check .` clean; frontend build
+green; offline acceptance `rows=80 failed=0` in a temp dir; runtime acceptance
+`14/14` with privacy scan passed; wheel external-cwd smoke passed (no Git, no
+`.pth`, external cwd) with installed-file tamper and missing-manifest cases
+refused; `git diff --check` clean. Docker Linux daemon preflight is
+unavailable and remains an unmet milestone gate. These are engineering gates
+only: formal SS30/TT90 predictions, paired attempts, and label opens remain
+`0` (`D:\data\RCAEval\v11-m5` absent); capability artifact, endpoint/model,
+and process-only credentials remain absent. M5 stays blocked at T12 awaiting
+independent seventh-round review; no accuracy or completion claim is made.
+
+Verification evidence (M5 seventh-round review-fix, 2026-08-12): base was
+`6c238e3b0187ced00891ac7aa5e914c88b9a04c3`; the follow-up review returned
+`changes_required` (1 medium, 1 low). Both findings were reproduced RED and
+closed GREEN: all three recursive scans (`ledger.py` custodian entries,
+`isolation.py` frozen prediction root and package checksum verification)
+dropped `sorted(Path.rglob("*"))` materialization in favor of
+iterate-and-reject, so planted junction loops (junctions are not symlinks and
+rglob recurses into them; two junctions reproduced a >10s pre-fix hang in a
+subprocess probe and a 60s timeout kill, exit 124) now fail closed
+immediately with explicit elapsed-bound regressions; and the shared strict
+checksum parser now explicitly rejects POSIX-rooted `/`-prefixed paths, which
+Windows previously accepted (not absolute, no drive, round-trip stable).
+Gates on the final state: focused M5 group `383 passed, 1 skipped`; full
+pytest `2214 passed, 4 skipped, 1 warning`; `uv run ruff check .` clean;
+`git diff --check` clean. Formal SS30/TT90 predictions, paired attempts, and
+label opens remain `0`; capability/endpoint/credential and Docker daemon
+gates are unchanged. M5 stays blocked at T12 awaiting independent re-review;
+no accuracy or completion claim is made.
+
+Simplification record (v11 redundancy cleanup, 2026-08-12): a trusted
+read-only review enumerated redundant checks and dead code; each item was
+implemented surgically in worktree branch `codex/v11-m5` with focused tests
+after every group. Dispositions — implemented: R1 (dead `_pair_ledger_path`
+and `_git_revision` in `__main__.py`), R2 (dead runner `_canonical_path`;
+the ledger self-use copy stays), R3 (always-false checksum-parser clause
+`relative_path.parts != tuple(relative_path.parts)`), R4 (manual bundle-hash
+recompute after `_validate_frozen_bundle` in `evaluate_acceptance`), R5
+(`_agent_manifest` re-validation already covered by
+`_validate_execution_contract`; raw manifest extraction and the
+`assert_agent_callable` loop retained), R6 (duplicate
+max_investigators/max_rounds bounds in `_validate_execution_contract`;
+max_turns/max_tool_calls_per_specialist lower bounds retained), R7
+(`v11_projection` report identity/status and digest pre-checks duplicated by
+`validate_v11_report_projection`/`validate_v11_execution_contract`), R8
+(`_assert_persisted_contract` digest recompute implied by validator digest
+consistency plus dict equality), R10 (evaluator `main()` pre-validation
+duplicated by `evaluate_bundles`; CLI partition consistency check retained),
+R11 (runner local reparse helpers converged onto
+`backend.services.source_identity.reject_reparse_path` with
+iterate-and-reject rglob loops that never recurse into junctions; evaluator's
+local copy untouched per the scorer-closure import boundary), R12 (`run_case`
+dual near-identical runtime construction merged into shared kwargs plus
+conditional multi-only keys), R13 (partition cardinality and
+configuration-topology rules converged into `models.py`
+`EXPECTED_PARTITION_COUNTS`/`EXPECTED_CONFIGURATION_TOPOLOGY`; both trust
+sides keep their own validation calls), R15(a) (`_within` implied by the
+parent `_same_path` check), R15(b) (second `_reject_label_reparse` implied by
+the dev/ino re-check), R17 (six canonical-JSON-SHA256 copies converged onto
+`models.py:canonical_json_sha256` with `allow_nan=False`; scorer-closure
+modules and outside-closure callers all import it, respecting the closure
+import boundary; `test_rcaeval_isolation.py` import updated). Retained by
+decision: R9 (ledger reserve double-hash) and R14 (freeze-loop second symlink
+check) as cheap defense-in-depth, plus the review's twelve confirmed-keep
+items (H3 anchor full replay, parent+child re-verification,
+read_label_manifest_once double hash, evaluator local reparse copy, idempotent
+freeze re-validation, dual-boundary configuration validation calls, two-layer
+final_status validation, result_validation double invocation, `_pair_row_exists`
+biased-True, prelabel audit full rebuild comparison, post-reserve heartbeat,
+prepare `sorted(rglob)`). Deferred: R16 (prepare three-pass 26GB reads merge)
+and R18 (freeze double seal-verification merge) as efficiency refactors, not
+redundancy removals. Gates on the final state: full pytest `2214 passed,
+4 skipped, 1 warning` (identical to the pre-cleanup baseline);
+`uv run ruff check .` clean; `git diff --check` clean. No formal OB30/SS30/TT90
+run was executed: formal predictions, paired attempts, label opens, and label
+consumption remain `0`; all tests use `tmp_path`. M5 stays blocked at T12;
+no accuracy or completion claim is made.
+
+Verification evidence (M5 eighth-round full-version review and partial-contract
+fix, 2026-08-12): an independent whole-version review of `58c6382..2b42b0f`
+(M0–M5, 144 files) returned `approve_with_followups` (2 medium, 3 low) after
+rerunning every engineering gate green: full pytest
+`2214 passed, 4 skipped, 1 warning` (two runs), both Ruff commands, offline
+`80/80`, runtime acceptance `14/14` privacy-clean on `git_dirty=false`,
+frontend build, and diff-check; blindness spot-grep zero-hit; Docker/T5/T12
+blocks re-confirmed as environmental. Medium-1 (R9, §9.2 partial sufficiency
+bidirectional drift) and Medium-2 (R8, resume lost partial failure memory)
+were fixed per the approved contract — candidate-level no-failed-check, ≥2
+distinct supporting evidence items, two provider types when usable evidence
+covers two, spec-external round-two linkage removed, insufficient partial
+downgraded to `inconclusive` via the existing single tool-less Lead
+correction, and `_restore_failure_memory` backfilling from the same persisted
+failed/cancelled execution source. RED: 7 regressions failed pre-fix (5
+validator, 2 runtime). GREEN: focused `60 passed`; full pytest
+`2220 passed, 4 skipped, 1 warning`; both Ruff commands and diff-check clean.
+An independent re-review of the uncommitted diff returned `approve` (one
+informational low). The three lows are queued for T13 reconciliation:
+leakage gate is structural input-plane isolation with a hardcoded zero
+runtime counter, spec §15 ledger lag (closed by backfill in the same commit),
+and a bare `KeyError` preflight in `production_acceptance.py`. Approved
+R1–R27 contract unchanged; formal SS30/TT90 predictions, paired attempts, and
+label opens remain `0`. On explicit user instruction `codex/v11-m5` was merged
+to `main`; M5 stays blocked at T12 capability admission and no accuracy or
+completion claim is made.
 
 Allowed values:
 
@@ -151,7 +434,7 @@ docs/superpowers/plans/2026-08-02-diagops-v11-adaptive-multi-agent-rca-implement
 
 ## V11 Planning Dashboard
 
-Overall progress: `V11 Spec/Plan approved, execution authorized 2026-08-02; M0/T1 done：真实 RCAEval RE2 全链路完成（byte-verified 双向对账 2700/2700、真实 prepare runtime manifest_hash bb119fc9…/150 cases/26 GB、二次 prepare diff -r 零差异字节等价）；M0 exit review 2026-08-04 approve_with_followups（出口判据满足，M0-I2 措辞 followup 已修复并 closed：28 focused + 142 regression passed, Ruff clean；M0-L1/L2 low open，M5 前处理）；M1/T2–T3 第三轮独立复审 2026-08-07 approve_with_followups，全部 6 项发现当日 RED→GREEN 关闭并已合并 main 336067c；M2/T4–T6 2026-08-08 独立复审 approve_with_followups，M2 基线 `c2245ac` 已提交；M3/T7–T8 第五轮 review-fix5 已完成 RED→GREEN 验证；M4/T9–T10 首轮 10 项 changes_required 已按根因关闭，第二轮 H1/M2 亦已 RED→GREEN 并完成本地门禁，等待复审`
+Overall progress: `V11 Spec/Plan approved；M0–M3 已按记录完成；M4 最终提交 7539c7f 已获独立 review approve；M5 T11 与 M0-L1/L2 工程实现/ focused 验证完成；第八轮全量复审 approve_with_followups，两条 Medium（§9.2 partial 契约、resume 失败记忆）已 RED→GREEN 关闭并获独立复审 approve，分支已按用户指示合并 main；T12 在 capability admission 前阻断，T13 未开始且 TT90 未消耗。`
 
 Latest M4 verification: fourth-round H1–H3 were reproduced and fixed at the
 real OpenRCA runner and shared V11 publication boundaries; M4 focused 124,
@@ -166,12 +449,14 @@ produce empty prediction/CSV output with an explicit failure category; V10
 legacy output remains unchanged. M4 focused 137, T9 289, T10 881, and full
 pytest 2097 passed with only the recorded skips/warning.
 
-Current phase: Full iteration / M4 review-fix implemented and locally verified
-in isolated worktree; fifth-round final High fix and all local gates verified;
-awaiting same-thread independent re-review
+Current phase: Full iteration / M5 第八轮全量复审 approve_with_followups 且两条
+Medium 已按 §9.2 RED→GREEN 关闭并获独立复审 approve，分支已按用户指示合并 main；
+T12 capability stop gate 仍 blocked
 
-Next action: 独立复审 M4 fifth-round review-fix；保持当前 worktree/branch，不 merge、push
-或进入 M5。
+Next action: 若后续提供 exact passed capability artifact、endpoint/model 与
+process-only credential，再从 OB30/SS30 继续 T12；T13 对账清单纳入三条 Low
+（leakage 运行期检测空转、production_acceptance preflight、M2R-4 跟踪）；不打开
+TT90 labels，不做任何准确率声称。
 
 | ID | Phase | Task | Status | Evidence or result | Next action or blocker |
 | --- | --- | --- | --- | --- | --- |
@@ -184,7 +469,8 @@ Next action: 独立复审 M4 fifth-round review-fix；保持当前 worktree/bran
 | M1/T3 | Execute | Versioned phase profiles, activation, gates, replay, and diff | implemented / verified | 初始审查问题 H1–H7 已补最小 RED 并 GREEN；第二轮 ownerless RESULT_VALIDATION、计划/任务和 Investigation 聚合写入回归先 RED 后 GREEN；`uv run pytest tests/runtime tests/api/test_runtime_runs_api.py -q` → `420 passed, 2 skipped, 1 warning in 117.53s`; `tests/runtime/test_review_fixes.py` → `27 passed, 1 skipped`; T3 Ruff clean；V10/V11 phase、owner、replay/diff、contract-integrity reload、service/API gate 回归通过 | 独立运行时复审通过（第三轮 RR 全关闭）；M2 基线 `c2245ac` 已提交，T4–T5 已按当前 Plan 记录完成 |
 | M2/T4–T6 | Execute | 九工具离线事件包与 data-only skills、File/Tempo trace 平价、模型边界与能力认证 | implemented / verified | 独立复审重跑：T4 336 passed + 离线验收 rows=80 failed=0；T5 17 passed + Docker gate blocked（daemon 不可用）；T6 106→110 passed（M2R-1 补 4 条 slow-endpoint 测试）；全量 1927 passed/3 skipped、Ruff clean、runtime acceptance exit=0；复审 approve_with_followups，M2R-1 closed；M2 基线 `c2245ac` 已单独提交，M2R-2/3 在 M3 T7 中关闭，M2R-4 跟踪 | 保持基线提交，不修改 dirty main |
 | M3/T7–T8 | Execute / Verify | Lead/Investigators/Critic/Lead V11 authority runtime | implemented / verifying | fifth-round base `e52e47984c4b460ed3b06dc4147d3d3b0532345b`; T7 91 passed、T8 207 passed；M2R/隔离 84 passed/3 skipped；变更相关 102 passed/2 skipped；全量 1995 passed/3 skipped/1 warning；两套全仓 Ruff clean；H1 usage/audit RED→GREEN | 等待同一审查线程复审；不 merge/push，不进入 M4/M5 |
-| M4/T9–T10 | Execute / Verify | Reports/actions, human transitions, API/UI, OpenRCA compatibility, recovery/privacy/offline gates | implemented / verifying | 第五轮 High 先 RED 后 GREEN：共享 guard 收敛 InvestigationStatus 与 RuntimeRunStatus 发布矩阵，V11 非成功 outcome 的 prediction/CSV fail-closed；M4 focused 137 passed/1 warning；T9 289 passed/1 warning；T10 881 passed/3 skipped/1 warning；全量 2097 passed/3 skipped/1 warning；offline 80/80；runtime acceptance 提交后复跑；frontend build、两套 Ruff、diff-check clean | 等待 M4 独立复审；不 merge/push，不进入 M5 |
+| M4/T9–T10 | Execute / Verify | Reports/actions, human transitions, API/UI, OpenRCA compatibility, recovery/privacy/offline gates | implemented / verified | 最终提交 `7539c7fd8b707fc54cf2ed75a7d9fcba13d7618c` 已获独立 review approve；第五轮 High RED→GREEN 与 focused/full/offline/runtime/frontend/Ruff/diff-check 证据沿用 M4 handoff | M5 worktree 精确从该提交创建；不 merge/push |
+| M5/T11–T13 | Execute / Verify | Frozen RCAEval control, sealed validation, one TT90 paired result | blocked at T12 capability admission | 第八轮全量复审（`58c6382..2b42b0f`）approve_with_followups：Medium-1（§9.2 partial 三条件候选级对齐、round-2 linkage 移除、不足降级 inconclusive）与 Medium-2（resume 失败记忆回填）RED 7 例→GREEN，focused 60 passed、full `2220 passed/4 skipped/1 warning`，独立复审 approve；三条 Low 入 T13 对账；SS30/TT90 无模型结果，labels 未正式打开 | 已按用户指示合并 main；缺 passed capability artifact/endpoint/credential；T13 未开始、TT90 未消耗 |
 
 M1 review-fix record (2026-08-06): High 1–6 and Medium 7–10 were reproduced
 with focused regressions, fixed at shared profile/ownership/transaction/entry

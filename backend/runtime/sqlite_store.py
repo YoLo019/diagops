@@ -1265,6 +1265,62 @@ class SQLiteRuntimeStore:
         self._publish_events(published)
         return [self._run_from_row(row) for row in rows]
 
+    def reserve_model_turn(
+        self, run_id: str, *, owner: str, lease_version: int
+    ) -> int:
+        """用带租约 CAS 的 SQLite UPDATE 原子扣减 V11 模型 turn 总预算。"""
+        now = datetime.now(UTC).isoformat()
+        try:
+            with self.engine.begin() as connection:
+                result = connection.execute(
+                    update(runtime_runs)
+                    .where(
+                        runtime_runs.c.id == run_id,
+                        runtime_runs.c.status.in_(
+                            (
+                                RuntimeRunStatus.RUNNING.value,
+                                RuntimeRunStatus.CANCELLING.value,
+                            )
+                        ),
+                        runtime_runs.c.lease_owner == owner,
+                        runtime_runs.c.lease_version == lease_version,
+                        runtime_runs.c.lease_expires_at > now,
+                        runtime_runs.c.remaining_model_turns.is_not(None),
+                        runtime_runs.c.remaining_model_turns > 0,
+                    )
+                    .values(
+                        remaining_model_turns=runtime_runs.c.remaining_model_turns - 1
+                    )
+                    .returning(runtime_runs.c.remaining_model_turns)
+                ).scalar_one_or_none()
+                if result is not None:
+                    return int(result)
+                current = connection.execute(
+                    select(
+                        runtime_runs.c.status,
+                        runtime_runs.c.lease_owner,
+                        runtime_runs.c.lease_version,
+                        runtime_runs.c.lease_expires_at,
+                        runtime_runs.c.remaining_model_turns,
+                        runtime_runs.c.execution_contract_version,
+                    ).where(runtime_runs.c.id == run_id)
+                ).mappings().one_or_none()
+                if current is None:
+                    raise RuntimeNotFound(f"unknown runtime run: {run_id}")
+                if current["execution_contract_version"] != "v11":
+                    raise RuntimeIntegrityError(
+                        "model turn budget is only valid for V11"
+                    )
+                if current["remaining_model_turns"] is not None and int(
+                    current["remaining_model_turns"]
+                ) <= 0:
+                    raise RuntimeConflict("V11 model turn budget exhausted")
+                raise RuntimeLeaseLost("runtime lease fence rejected model turn reservation")
+        except (RuntimeNotFound, RuntimeConflict, RuntimeLeaseLost, RuntimeIntegrityError):
+            raise
+        except SQLAlchemyError as exc:
+            raise RuntimePersistenceError("failed to reserve V11 model turn") from exc
+
     def commit_phase(self, commit) -> RuntimeCheckpoint:
         with self._write_lock:
             return self._commit_phase(commit)
@@ -1339,6 +1395,15 @@ class SQLiteRuntimeStore:
         ):
             raise RuntimeIntegrityError(
                 "checkpoint remaining token budget differs from durable consumption"
+            )
+        if run_snapshot.is_v11 and (
+            "execution_contract_digest" in run_snapshot.execution_contract
+        ) and (
+            commit.resume_state.remaining_model_turns
+            != run_snapshot.remaining_model_turns
+        ):
+            raise RuntimeIntegrityError(
+                "checkpoint remaining model turns differ from durable run budget"
             )
         try:
             with self.engine.begin() as connection:
@@ -1613,7 +1678,7 @@ class SQLiteRuntimeStore:
         data.pop("frozen_business_projection", None)
         data.pop("benchmark_replay_locator", None)
         try:
-            return RuntimeRun.model_validate(data)
+            return RuntimeRun.from_persisted(data)
         except ValidationError:
             if not self._has_contract_projection_mismatch(data):
                 raise
@@ -1644,7 +1709,7 @@ class SQLiteRuntimeStore:
             data.pop("next_event_sequence", None)
             data.pop("frozen_business_projection", None)
             data["execution_contract"] = self._safe_contract_projection(data)
-            return RuntimeRun.model_validate(data)
+            return RuntimeRun.from_persisted(data)
 
     def _repair_contract_integrity(
         self,

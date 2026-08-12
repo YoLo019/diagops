@@ -247,13 +247,54 @@ def test_v11_validator_rejects_orphan_supplemental_task_ids():
         )
 
 
-def test_v11_partial_requires_usable_evidence_passing_check_and_round_two_linkage():
-    evidence = _validation_evidence()
-    candidate = _validation_candidate()
+def _validation_metric_evidence(
+    *, runtime_run_id: str = "run-v11", evidence_id: str = "ev-metric"
+):
+    return EvidenceItem(
+        id=evidence_id,
+        provider=EvidenceProvider.METRIC,
+        kind=EvidenceKind.METRIC_TREND,
+        status=EvidenceStatus.SUCCESS,
+        timestamp=datetime(2026, 7, 15, tzinfo=UTC),
+        summary="committed metric evidence",
+        runtime_run_id=runtime_run_id,
+    )
+
+
+def _partial_validation_kwargs(
+    *,
+    candidate_supporting: tuple[str, ...] = ("ev-log", "ev-metric"),
+    run_evidence: tuple[EvidenceItem, ...] | None = None,
+    failed_check: CausalCheckName | None = None,
+) -> dict:
+    """spec §9.2 合法 partial 的基准输入；调用方只覆盖被测差异。"""
+    evidence = (
+        list(run_evidence)
+        if run_evidence is not None
+        else [_validation_evidence(), _validation_metric_evidence()]
+    )
+    checks = [
+        CausalCheck(
+            name=name,
+            status=(
+                CausalCheckStatus.FAIL if name == failed_check else CausalCheckStatus.PASS
+            ),
+            summary="supported",
+            evidence_ids=["ev-log"],
+        )
+        for name in CausalCheckName
+    ]
+    candidate = RootCauseCandidate(
+        id="candidate-1",
+        summary="candidate",
+        rank=1,
+        confidence=0.7,
+        supporting_evidence_ids=list(candidate_supporting),
+    )
     assessment = CriticAssessment(
         candidate_id=candidate.id,
         verdict=CriticVerdict.ACCEPT,
-        checks=_validation_checks(),
+        checks=checks,
         summary="assessed",
         runtime_run_id="run-v11",
     )
@@ -280,18 +321,63 @@ def test_v11_partial_requires_usable_evidence_passing_check_and_round_two_linkag
             step_kind=ExecutionStepKind.LEAD_ADJUDICATION,
         ),
     ]
+    return {
+        "investigation_id": "inv-1",
+        "runtime_run_id": "run-v11",
+        "findings": [],
+        "candidates": [candidate],
+        "review": review,
+        "executions": executions,
+        "evidence": evidence,
+        "status": DiagnosticStatus.PARTIAL,
+    }
 
-    with pytest.raises(Exception, match="partial"):
+
+def test_v11_partial_rejects_candidate_without_sufficient_independent_evidence():
+    """spec §9.2：被采纳候选的支撑证据不足两条独立 evidence item 时不得 partial。"""
+    with pytest.raises(Exception, match="partial_candidate_evidence"):
+        validate_v11_result(**_partial_validation_kwargs(candidate_supporting=("ev-log",)))
+
+
+def test_v11_partial_rejects_candidate_with_failed_causal_check():
+    """spec §9.2：被采纳候选的任何 causal check 为 FAIL 时不得 partial。"""
+    with pytest.raises(Exception, match="partial_candidate_failed_check"):
         validate_v11_result(
-            investigation_id="inv-1",
-            runtime_run_id="run-v11",
-            findings=[],
-            candidates=[candidate],
-            review=review,
-            executions=executions,
-            evidence=[evidence],
-            status=DiagnosticStatus.PARTIAL,
+            **_partial_validation_kwargs(failed_check=CausalCheckName.TEMPORAL)
         )
+
+
+def test_v11_partial_requires_two_provider_types_when_two_providers_succeeded():
+    """spec §9.2：两种 Provider 均成功时候选支撑证据必须覆盖两种类型。"""
+    with pytest.raises(Exception, match="partial_candidate_provider_types"):
+        validate_v11_result(
+            **_partial_validation_kwargs(
+                candidate_supporting=("ev-log", "ev-log-2"),
+                run_evidence=(
+                    _validation_evidence(),
+                    _validation_evidence(evidence_id="ev-log-2"),
+                    _validation_metric_evidence(),
+                ),
+            )
+        )
+
+
+def test_v11_partial_without_round_two_task_is_valid():
+    """spec §9.2：合法 partial 不要求 round-2 supplemental task linkage。"""
+    validate_v11_result(**_partial_validation_kwargs())
+
+
+def test_v11_partial_allows_single_successful_provider_type():
+    """只有一种 Provider 成功时，不强制候选覆盖两种 Provider 类型。"""
+    validate_v11_result(
+        **_partial_validation_kwargs(
+            candidate_supporting=("ev-log", "ev-log-2"),
+            run_evidence=(
+                _validation_evidence(),
+                _validation_evidence(evidence_id="ev-log-2"),
+            ),
+        )
+    )
 
 
 def test_v11_partial_requires_final_round_critic_and_lead_audits():

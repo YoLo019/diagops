@@ -57,6 +57,7 @@ class PhaseInput:
     persist_tool_result: Callable[[ToolInvocationResult], Any] | None = None
     persist_agent_event: Callable[[str, str], Any] | None = None
     persist_model_event: Callable[[str, str, int, int, str], Any] | None = None
+    reserve_model_turn: Callable[[], Any] | None = None
     model_events: tuple[Any, ...] = ()
     hit_fault: Callable[[str], None] | None = None
 
@@ -342,6 +343,7 @@ def checkpoint_digest(
         "remaining_budgets": {
             "tool": resume_state.remaining_tool_budget,
             "token": resume_state.remaining_token_budget,
+            "model_turns": resume_state.remaining_model_turns,
         },
         "successful_tool_keys": sorted(resume_state.successful_tool_keys),
     }
@@ -431,6 +433,7 @@ def durable_projection_digest(
         "remaining_budgets": {
             "tool": resume_state.remaining_tool_budget,
             "token": resume_state.remaining_token_budget,
+            "model_turns": resume_state.remaining_model_turns,
         },
     }
     encoded = json.dumps(

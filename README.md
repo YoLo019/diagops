@@ -510,6 +510,129 @@ only in the process environment, current caller-supplied input/output prices,
 and a separate Microsoft OpenRCA checkout for the official evaluator. A small
 fixture run is useful for development but is not the 40-case live release gate.
 
+## V11 RCAEval Controlled Evaluation
+
+V11 uses the separately prepared RCAEval RE2 package for its local held-out
+effectiveness gate. The runtime package contains opaque case IDs and telemetry;
+labels stay in a separate custodian package. Formal prediction uses the real
+V11 runtime, SQLite persistence, the nine read-only Agent tools, a frozen
+single-Investigator control, and a capability-certified OpenAI-compatible
+endpoint. Test doubles are not accepted by the CLI.
+
+Before a scored run, certify the exact endpoint/model tuple against the clean
+source/package identity. The capability artifact also freezes the adapter/SDK
+versions, required contracts, tested parallelism, execution environment, and
+source manifest hash. The API key remains process-only and is never written to
+artifacts:
+
+```powershell
+$env:DIAGOPS_AGENTS_API_KEY = "<process-only>"
+uv run python -m backend.services.model_capability `
+  --base-url $env:DIAGOPS_AGENTS_BASE_URL `
+  --model $env:DIAGOPS_AGENTS_MODEL `
+  --output-dir output/model_capability
+```
+
+Run each required configuration into a distinct child of one prediction root.
+SS30 requires all four configurations; TT90 requires only the two intended
+configurations. `single_intended` uses `B`, `multi_intended` uses at most `3B`,
+and both equal-token SS30 configurations use exactly `3B`.
+All children must live under one canonical custodian root. `--pair-root` is
+only an output grouping path; the immutable `--custodian-manifest` selects the
+single SQLite ledger shared across configurations and evaluation output
+directories, so changing the output root cannot create a second pair.
+Prediction output locators are required to be absolute canonical spellings;
+relative paths, case/drive aliases, symlinks, junctions, and other reparse
+paths are rejected before a side is recorded or a freeze marker is written.
+
+```powershell
+uv run python -m backend.benchmarks.rcaeval launch-predict `
+  --runtime D:\data\RCAEval\prepared-v11-m0\runtime `
+  --pair-root D:\data\RCAEval\v11-m5\ss30 `
+  --custodian-manifest D:\data\RCAEval\v11-m5\custodian-manifest.json `
+  --label-package D:\data\RCAEval\prepared-v11-m0\labels `
+  --partition ss30 `
+  --configuration single_intended `
+  --base-url $env:DIAGOPS_AGENTS_BASE_URL `
+  --capability-artifact <passed-result.json> `
+  --database D:\data\RCAEval\v11-m5\ss30-single.db `
+  --output D:\data\RCAEval\v11-m5\ss30\single_intended `
+  --token-budget <B>
+
+uv run python -m backend.benchmarks.rcaeval freeze-set `
+  --root D:\data\RCAEval\v11-m5\ss30 `
+  --custodian-manifest D:\data\RCAEval\v11-m5\custodian-manifest.json `
+  --partition ss30
+```
+
+Export and finish the four-part, single-reviewer evidence audit before labels
+are opened. Then launch the evaluator with the frozen prediction-set hash and
+custodian manifest hashes. Supply both frozen audit artifacts; the custodian
+ledger binds their exact hashes to one atomic label-open reservation. The
+formal launcher leaves the only label-file open to the evaluator child
+process. A crash or lease loss is recovered by the custodian ledger into a
+pair-level non-resumable state. Completion-write failures leave a durable
+custodian recovery intent when a SQLite writer lock prevents immediate
+invalidation; the next explicit custodian recovery entry converges it before
+business work continues. Concurrent attempts and post-child artifact failures
+invalidate the pair and require explicit reauthorization.
+Changing the evaluation output directory cannot bypass that ledger. V11 model
+turns are also a durable run-level budget carried through checkpoint, retry,
+and recovery rather than an SDK-invocation-local ceiling.
+
+```powershell
+# Repeat --bundle for every frozen configuration in the partition.
+uv run python -m backend.benchmarks.rcaeval.audit export `
+  --bundle <single-predictions.json> `
+  --bundle <multi-predictions.json> `
+  --output <evidence-audit-export.json>
+
+uv run python -m backend.benchmarks.rcaeval evaluate `
+  --predictions-root D:\data\RCAEval\v11-m5\ss30 `
+  --custodian-manifest D:\data\RCAEval\v11-m5\custodian-manifest.json `
+  --partition ss30 `
+  --prediction-set-hash <sha256> `
+  --label-package D:\data\RCAEval\prepared-v11-m0\labels `
+  --runtime-manifest-hash <sha256> `
+  --label-manifest-hash <sha256> `
+  --audit-export <evidence-audit-export.json> `
+  --manual-audit <manual-audit.json> `
+  --output-dir D:\data\RCAEval\v11-m5\ss30-evaluation
+
+uv run python -m backend.benchmarks.rcaeval freeze-policy `
+  --sealed-validation D:\data\RCAEval\v11-m5\ss30-evaluation\evaluation.json `
+  --tt90-manifest-hash <sha256> `
+  --output D:\data\RCAEval\v11-m5\acceptance-policy.json
+```
+
+OB30 is development-only and unscored. SS30 may be executed once per frozen
+candidate to seal the acceptance policy. TT90 is one paired attempt on the
+exact clean source; a non-resumable infrastructure failure is archived and
+requires explicit authorization before a fresh pair. RCAEval artifacts and
+labels are intentionally local-only and are not exposed through the product
+benchmark API. No accuracy improvement may be claimed unless every frozen gate
+passes.
+
+After the one TT90 evaluator attempt, archive the frozen policy result together
+with the pre-label manual audit. The command derives evidence support from the
+hashed pair-level artifact; it does not accept a caller-supplied percentage.
+
+```powershell
+uv run python -m backend.benchmarks.rcaeval accept `
+  --evaluation D:\data\RCAEval\v11-m5\tt90-evaluation\evaluation.json `
+  --policy D:\data\RCAEval\v11-m5\acceptance-policy.json `
+  --audit-export D:\data\RCAEval\v11-m5\tt90-evidence-audit-export.json `
+  --manual-audit D:\data\RCAEval\v11-m5\tt90-manual-audit.json `
+  --output D:\data\RCAEval\v11-m5\tt90-acceptance-result.json
+```
+
+`launch-predict` is the supported formal entry. Its child receives only the
+verified runtime package, the exact capability identity, and a minimal
+environment; calling the internal `predict` worker directly is rejected. A
+packaged deployment carries `backend/services/diagops-source-manifest.json`,
+so source identity is verified after wheel relocation without relying on Git,
+editable installs, or the caller's cwd.
+
 ## Runtime Operations
 
 An Investigation is one Runtime session. Different Investigations may execute

@@ -490,6 +490,9 @@ class V11Runtime:
         self.runtime_run_id: str | None = None
         self._remaining_token_budget = token_budget
         self._token_budget_lock = asyncio.Lock()
+        self._remaining_model_turns: int | None = None
+        self._reserve_model_turn_callback: Callable[[], Any] | None = None
+        self._model_turn_budget_enabled = False
         self._model_reservations: dict[str, _ModelReservation] = {}
         self._settled_model_reservations: set[str] = set()
         self._model_request_history: dict[
@@ -552,6 +555,9 @@ class V11Runtime:
         runtime.model_name = model_name or self.model_name
         runtime._remaining_token_budget = token_budget
         runtime._token_budget_lock = asyncio.Lock()
+        runtime._remaining_model_turns = None
+        runtime._reserve_model_turn_callback = None
+        runtime._model_turn_budget_enabled = False
         runtime._model_reservations = {}
         runtime._settled_model_reservations = set()
         runtime._model_request_history = {}
@@ -624,8 +630,26 @@ class V11Runtime:
         )
         self._hit_fault = phase_input.hit_fault or (lambda _point: None)
         self._phase_tool_budget = phase_input.tool_budget
+        self._remaining_model_turns = getattr(
+            phase_input.resume_state, "remaining_model_turns", None
+        )
+        self._reserve_model_turn_callback = getattr(
+            phase_input, "reserve_model_turn", None
+        )
         self._execution_contract = copy.deepcopy(phase_input.execution_contract)
         if getattr(phase_input, "execution_contract_version", None) == "v11":
+            # 正式 RuntimeCoordinator 总是注入 Store CAS；无 Store 的单元 phase
+            # 只测试模型协议，不能把非持久化计数器冒充正式预算。
+            self._model_turn_budget_enabled = (
+                self._reserve_model_turn_callback is not None
+            )
+            if (
+                self._reserve_model_turn_callback is None
+                and phase_input.persist_model_event is not None
+            ):
+                raise V11RuntimeContractError(
+                    "V11 durable model turn reservation is not wired"
+                )
             if self._execution_contract is None:
                 raise V11RuntimeContractError("V11 phase lacks execution contract")
             self._validate_execution_contract(
@@ -661,6 +685,37 @@ class V11Runtime:
     @property
     def remaining_token_budget(self) -> int | None:
         return self._remaining_token_budget
+
+    @property
+    def remaining_model_turns(self) -> int | None:
+        return self._remaining_model_turns
+
+    async def _reserve_run_model_turn(self) -> None:
+        if not self._model_turn_budget_enabled:
+            return
+        callback = self._reserve_model_turn_callback
+        if callback is None:
+            raise V11RuntimeContractError(
+                "V11 durable model turn reservation is not wired"
+            )
+        remaining = await _maybe_await(callback())
+        if isinstance(remaining, bool) or not isinstance(remaining, int) or remaining < 0:
+            raise V11RuntimeContractError(
+                "V11 durable model turn reservation returned an invalid remainder"
+            )
+        self._remaining_model_turns = remaining
+
+    def _model_turn_audit_payload(self) -> dict[str, int]:
+        if not self._model_turn_budget_enabled:
+            return {}
+        if self._remaining_model_turns is None:
+            raise V11RuntimeContractError(
+                "V11 durable model turn budget is missing"
+            )
+        return {
+            "model_turn_budget": self.max_turns,
+            "remaining_model_turns": self._remaining_model_turns,
+        }
 
     async def run_phase(
         self,
@@ -906,27 +961,6 @@ class V11Runtime:
             if not isinstance(raw_manifest, (list, tuple)):
                 raise V11RuntimeContractError("V11 contract lacks frozen tool manifest")
             manifest = tuple(raw_manifest)
-            if len(manifest) != 9 or len(set(manifest)) != len(manifest):
-                raise V11RuntimeContractError(
-                    "V11 requires exactly nine frozen Agent tools"
-                )
-            if manifest != tuple(sorted(manifest)):
-                raise V11RuntimeContractError("V11 frozen tool manifest is not ordered")
-            if contract.get("tool_manifest_hash") != agent_manifest_hash(manifest):
-                raise V11RuntimeContractError("V11 frozen tool manifest hash mismatch")
-            skill_identity = contract.get("skill_catalog")
-            if skill_identity is not None:
-                expected_skill_identity = {
-                    "catalog_version": SKILL_CATALOG_VERSION,
-                    "catalog_hash": skill_catalog_hash(self.skills),
-                    "skill_names": ",".join(
-                        f"{skill.name}@{skill.version}" for skill in self.skills
-                    ),
-                }
-                if skill_identity != expected_skill_identity:
-                    raise V11RuntimeContractError(
-                        "V11 frozen skill catalog identity mismatch"
-                    )
             try:
                 for tool_name in manifest:
                     self.tool_registry.assert_agent_callable(tool_name, manifest)
@@ -1004,10 +1038,6 @@ class V11Runtime:
         ):
             raise V11RuntimeContractError("V11 capability identity projection mismatch")
         limits = contract["limits"]
-        if not 1 <= int(limits["max_investigators"]) <= 3:
-            raise V11RuntimeContractError("V11 investigator limit is out of bounds")
-        if int(limits["max_rounds"]) not in {1, 2}:
-            raise V11RuntimeContractError("V11 round limit is out of bounds")
         if int(limits["max_turns"]) < 1 or int(limits["max_tool_calls_per_specialist"]) < 1:
             raise V11RuntimeContractError("V11 actor limit is out of bounds")
         try:
@@ -1376,6 +1406,7 @@ class V11Runtime:
         self, *, repository, investigation_id: str, event: IncidentEvent
     ) -> CoordinationReview:
         """Lead 只可采纳 Critic accepted IDs；无候选时结论必须 inconclusive。"""
+        self._restore_failure_memory(repository, investigation_id)
         review = repository.get_coordination_review(investigation_id)
         if review is None:
             review = self._empty_review(repository, investigation_id)
@@ -1473,9 +1504,11 @@ class V11Runtime:
             "lead_decision": decision,
             "diagnostic_status": status,
             "stop_reason": decision.stop_reason,
+            # 终态矩阵只允许 COMPLETE/COMPLETED、PARTIAL/PARTIAL、
+            # INCONCLUSIVE/COMPLETED 三种组合。
             "run_status": (
                 MultiAgentRunStatus.PARTIAL
-                if self._failures
+                if status == DiagnosticStatus.PARTIAL
                 else MultiAgentRunStatus.COMPLETED
             ),
             "summary": decision.summary,
@@ -1497,6 +1530,7 @@ class V11Runtime:
     ) -> CoordinationReview:
         """机械校验结果，失败时只做一次无工具 Lead correction。"""
         del event
+        self._restore_failure_memory(repository, investigation_id)
         review = repository.get_coordination_review(investigation_id)
         if review is None:
             review = self._empty_review(repository, investigation_id)
@@ -1550,13 +1584,24 @@ class V11Runtime:
                     turn.output, LeadAdjudicationOutput
                 ).decision
                 self._validate_lead_decision(corrected, review)
-                review = review.model_copy(
-                    update={
-                        "lead_decision": corrected,
-                        "diagnostic_status": self._diagnostic_status(corrected),
-                        "stop_reason": corrected.stop_reason,
-                    }
-                )
+                corrected_status = self._diagnostic_status(corrected)
+                correction_projection = {
+                    "lead_decision": corrected,
+                    "diagnostic_status": corrected_status,
+                    "stop_reason": corrected.stop_reason,
+                    "run_status": (
+                        MultiAgentRunStatus.PARTIAL
+                        if corrected_status == DiagnosticStatus.PARTIAL
+                        else MultiAgentRunStatus.COMPLETED
+                    ),
+                }
+                if corrected.action == LeadAction.INCONCLUSIVE:
+                    # 与 lead_adjudication 相同的语义归一化：Lead 决定 inconclusive
+                    # 后不得保留候选投影；代码不替代 Lead 造候选。
+                    correction_projection.update(
+                        {"candidates": [], "critic_assessments": [], "root_causes": []}
+                    )
+                review = review.model_copy(update=correction_projection)
                 repository.save_coordination_review(review)
                 validate_v11_result(
                     investigation_id=investigation_id,
@@ -1673,6 +1718,12 @@ class V11Runtime:
             else f"investigator-{uuid4().hex}"
         )
         manifest = self._agent_manifest()
+        plan = repository.get_plan(investigation_id)
+        selected_skills = (
+            list(plan.lead_decision.selected_skills)
+            if plan is not None and plan.lead_decision is not None
+            else []
+        )
         session = AdaptiveToolSession(
             event=event,
             seed_evidence=seed_evidence,
@@ -1704,6 +1755,7 @@ class V11Runtime:
                 seed_evidence,
                 own_findings,
                 assessment,
+                selected_skills,
             )
             turn = await self._call_model(
                 actor=ExecutionActor.INVESTIGATOR.value,
@@ -1715,6 +1767,7 @@ class V11Runtime:
                     "agent_instance_id": instance_id,
                     "round": round_number,
                     "tool_manifest": manifest,
+                    "selected_skills": selected_skills,
                     "own_committed_evidence_ids": [item.id for item in seed_evidence],
                     "own_committed_finding_ids": [item.id for item in own_findings],
                     "assessment_id": assessment.id if assessment is not None else None,
@@ -2206,31 +2259,44 @@ class V11Runtime:
             )
         self._update_summary(repository, investigation_id)
 
+    def _restore_failure_memory(self, repository, investigation_id: str) -> None:
+        """跨进程 resume 后从持久化 failed/cancelled execution 回填失败记忆。
+
+        持久化执行是失败记忆的唯一事实来源；内存 _failures 只是其运行期缓存。
+        """
+        for item in repository.list_executions(investigation_id):
+            if (
+                item.runtime_run_id == self.runtime_run_id
+                and item.status
+                in {AgentExecutionStatus.FAILED, AgentExecutionStatus.CANCELLED}
+                and item.id not in self._failures
+            ):
+                self._failures.append(item.id)
+
     def _update_summary(self, repository, investigation_id: str) -> None:
         from backend.domain.multi_agent import MultiAgentRunSummary
 
         review = repository.get_coordination_review(investigation_id)
-        executions = repository.list_executions(investigation_id)
         calls = repository.list_tool_calls(investigation_id)
-        failures = self._failures or [
-            item.id
-            for item in executions
-            if item.runtime_run_id == self.runtime_run_id
-            and item.status in {AgentExecutionStatus.FAILED, AgentExecutionStatus.CANCELLED}
-        ]
+        self._restore_failure_memory(repository, investigation_id)
+        failures = self._failures
+        diagnostic_status = review.diagnostic_status if review is not None else None
+        status = (
+            MultiAgentRunStatus.FAILED
+            if self._terminal_failure
+            # 失败记忆只影响已发布的诊断（partial）；inconclusive 是无候选的
+            # 证据受限停止，终态矩阵固定映射为 COMPLETED。
+            else MultiAgentRunStatus.PARTIAL
+            if failures and diagnostic_status != DiagnosticStatus.INCONCLUSIVE
+            else MultiAgentRunStatus.COMPLETED
+        )
         summary = MultiAgentRunSummary(
-            status=(
-                MultiAgentRunStatus.FAILED
-                if self._terminal_failure
-                else MultiAgentRunStatus.PARTIAL
-                if failures
-                else MultiAgentRunStatus.COMPLETED
-            ),
+            status=status,
             failure_reason=(
                 self._terminal_failure_reason
                 if self._terminal_failure
                 else "V11 partial execution"
-                if failures
+                if status == MultiAgentRunStatus.PARTIAL
                 else None
             ),
             model_provider=self.model_provider,
@@ -2341,6 +2407,7 @@ class V11Runtime:
         evidence: list[EvidenceItem],
         own_findings: Iterable[AgentFinding],
         assessment: CriticAssessment | None,
+        selected_skills: list[str],
     ) -> str:
         payload = {
             "role": "general investigator",
@@ -2350,6 +2417,7 @@ class V11Runtime:
             "round": task.analysis_round,
             "tool_manifest": manifest,
             "skills": [_skill_projection(skill) for skill in self.skills],
+            "selected_skills": selected_skills,
             "own_committed_evidence": [
                 _evidence_projection(item) for item in evidence
             ],
@@ -2620,6 +2688,7 @@ class V11Runtime:
                         "reserved_tokens": released_tokens,
                         "input_estimate": reservation.input_estimate,
                         "attempt": attempt,
+                        **self._model_turn_audit_payload(),
                         **self._request_index_payload(later_index),
                     },
                 )
@@ -2666,6 +2735,7 @@ class V11Runtime:
             )
             if existing is not None:
                 if existing.status == "retrying":
+                    await self._reserve_run_model_turn()
                     await self._emit_model(
                         execution_id or logical_call_id or reservation_id,
                         "started",
@@ -2677,6 +2747,7 @@ class V11Runtime:
                             "reserved_tokens": existing.reserved_total,
                             "input_estimate": existing.input_estimate,
                             "attempt": attempt,
+                            **self._model_turn_audit_payload(),
                             **self._request_index_payload(request_index),
                         },
                     )
@@ -2716,6 +2787,7 @@ class V11Runtime:
             output_cap = available - input_estimate
             if output_cap <= 0:
                 raise V11RuntimeContractError("model token budget exhausted")
+            await self._reserve_run_model_turn()
             if current is not None:
                 self._remaining_token_budget = current - available
             else:
@@ -2738,6 +2810,7 @@ class V11Runtime:
                             "reserved_tokens": available,
                             "input_estimate": input_estimate,
                             "attempt": attempt,
+                            **self._model_turn_audit_payload(),
                             **self._request_index_payload(request_index),
                         },
                     )
@@ -2789,6 +2862,7 @@ class V11Runtime:
                             "reserved_tokens": reservation.reserved_total,
                             "input_estimate": reservation.input_estimate,
                             "attempt": attempt,
+                            **self._model_turn_audit_payload(),
                             **self._request_index_payload(request_index),
                         },
                     )
@@ -2810,6 +2884,7 @@ class V11Runtime:
                         "input_estimate": reservation.input_estimate,
                         "attempt": attempt,
                         **self._actual_input_payload(actual_input_tokens),
+                        **self._model_turn_audit_payload(),
                         **self._request_index_payload(request_index),
                     },
                 )
@@ -2866,6 +2941,13 @@ class V11Runtime:
             raise V11RuntimeContractError("model token budget exhausted")
         if remaining_tool_budget is not None and remaining_tool_budget <= 0:
             raise V11RuntimeContractError("model tool budget exhausted")
+        if self._model_turn_budget_enabled:
+            if self._remaining_model_turns is None:
+                raise V11RuntimeContractError(
+                    "V11 durable model turn budget is missing"
+                )
+            if self._remaining_model_turns <= 0:
+                raise V11RuntimeContractError("V11 model turn budget exhausted")
         self._model_timeout()
         model_event_id = f"v11-model-{uuid4().hex}"
         reservation_id = self._model_reservation_id(model_event_id, 0)
@@ -3012,6 +3094,10 @@ class V11Runtime:
                             else MultiProvider()
                         )
                         try:
+                            sdk_turn_ceiling = self.max_turns
+                            if self._model_turn_budget_enabled:
+                                assert self._remaining_model_turns is not None
+                                sdk_turn_ceiling = self._remaining_model_turns
                             raw_result = await asyncio.wait_for(
                                 _run_with_model_lifecycle(
                                     agent,
@@ -3021,7 +3107,7 @@ class V11Runtime:
                                         sort_keys=True,
                                     ),
                                     persist_model_event=None,
-                                    max_turns=self.max_turns,
+                                    max_turns=sdk_turn_ceiling,
                                     run_config=RunConfig(
                                         workflow_name="DiagOps V11 Agent RCA",
                                         tracing_disabled=True,

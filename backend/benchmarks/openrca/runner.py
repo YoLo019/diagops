@@ -201,7 +201,7 @@ class OpenRcaDiagnosisRunner:
             else {}
         )
         runtime_run = self.runtime_store.create_run(
-            RuntimeRun(
+            RuntimeRun.create_new(
                 investigation_id=record.id,
                 run_kind=RuntimeRunKind.LIVE,
                 strategy=strategy,
@@ -393,11 +393,19 @@ class OpenRcaDiagnosisRunner:
             },
             "limits": {
                 "max_turns": runtime.max_turns,
+                "model_turn_budget_scope": "run",
                 "max_investigators": runtime.max_investigators,
                 "max_rounds": runtime.max_rounds,
                 "token_budget": 10_000,
                 "max_tool_calls_per_specialist": runtime.max_tool_calls_per_specialist,
                 "tool_timeout_seconds": runtime.tool_timeout_seconds,
+            },
+            "topology": {
+                "mode": "multi_lead_investigators_critic",
+                "one_context": False,
+                "critic": True,
+                "subagent": False,
+                "hidden_model_calls": False,
             },
             "retry_policy": {
                 "max_retries": 1,

@@ -36,7 +36,130 @@ from backend.domain.multi_agent import (
 )
 from backend.domain.react_trace import ReActTraceStep
 from backend.domain.reports import IncidentReport
-from backend.domain.runtime import RuntimeRun, RuntimeRunKind, RuntimeRunReason, RuntimeRunStatus
+from backend.domain.runtime import (
+    RuntimeRun,
+    RuntimeRunKind,
+    RuntimeRunReason,
+    RuntimeRunStatus,
+    seal_v11_execution_contract,
+    validate_v11_execution_contract,
+)
+
+
+def _sealed_contract(*, topology=None, limits=None) -> dict:
+    contract = {
+        "execution_contract_version": "v11",
+        "authority_mode": "agent",
+        "model_provider": "openai",
+        "model_name": "gpt-test",
+        "prompt_version": "v11-test",
+        "api_mode": "responses",
+        "endpoint_id": "endpoint-test",
+        "capability_artifact_hash": "artifact-test",
+        "tool_manifest": ["tool-a"],
+        "tool_manifest_hash": "tool-manifest-test",
+        "skill_catalog": {
+            "catalog_version": "skills-v1",
+            "catalog_hash": "skill-catalog-test",
+            "skill_names": "skill-a@v1",
+        },
+        "capability_identity": {
+            "provider": "openai",
+            "model": "gpt-test",
+            "api_mode": "responses",
+            "endpoint_id": "endpoint-test",
+            "artifact_hash": "artifact-test",
+        },
+        "limits": {
+            "max_turns": 8,
+            "max_investigators": 3,
+            "max_rounds": 2,
+            "token_budget": 1000,
+            "max_tool_calls_per_specialist": 3,
+            "tool_timeout_seconds": 10,
+        }
+        if limits is None
+        else limits,
+        "retry_policy": {
+            "max_retries": 1,
+            "retryable_categories": ["transport", "rate_limit"],
+            "provider_max_retries": 0,
+            "sdk_max_retries": 0,
+        },
+        "tool_budget": 8,
+        "token_budget": 1000,
+        "timeout_seconds": 120.0,
+    }
+    if topology is not None:
+        contract["topology"] = topology
+    return seal_v11_execution_contract(contract)
+
+
+_MULTI_TOPOLOGY = {
+    "mode": "multi_lead_investigators_critic",
+    "one_context": False,
+    "critic": True,
+    "subagent": False,
+    "hidden_model_calls": False,
+}
+_SINGLE_TOPOLOGY = {
+    "mode": "single_one_context",
+    "one_context": True,
+    "critic": False,
+    "subagent": False,
+    "hidden_model_calls": False,
+}
+
+
+def test_v11_contract_requires_frozen_topology() -> None:
+    with pytest.raises(ValueError, match="incomplete|topology"):
+        validate_v11_execution_contract(_sealed_contract())
+    validate_v11_execution_contract(_sealed_contract(topology=_MULTI_TOPOLOGY))
+    single_limits = {
+        "max_turns": 8,
+        "max_investigators": 1,
+        "max_rounds": 1,
+        "token_budget": 1000,
+        "max_tool_calls_per_specialist": 3,
+        "tool_timeout_seconds": 10,
+    }
+    validate_v11_execution_contract(
+        _sealed_contract(topology=_SINGLE_TOPOLOGY, limits=single_limits)
+    )
+
+
+def test_v11_contract_rejects_self_declared_hidden_or_subagent_topology() -> None:
+    for flag in ("subagent", "hidden_model_calls"):
+        topology = {**_MULTI_TOPOLOGY, flag: True}
+        with pytest.raises(ValueError, match="topology|subagent|hidden"):
+            validate_v11_execution_contract(_sealed_contract(topology=topology))
+
+
+def test_v11_contract_rejects_swapped_or_tampered_topology() -> None:
+    single_limits = {
+        "max_turns": 8,
+        "max_investigators": 1,
+        "max_rounds": 1,
+        "token_budget": 1000,
+        "max_tool_calls_per_specialist": 3,
+        "tool_timeout_seconds": 10,
+    }
+    # 互换：single topology 配 multi limits，及 multi topology 配 single limits
+    with pytest.raises(ValueError, match="topology"):
+        validate_v11_execution_contract(_sealed_contract(topology=_SINGLE_TOPOLOGY))
+    with pytest.raises(ValueError, match="topology"):
+        validate_v11_execution_contract(
+            _sealed_contract(topology=_MULTI_TOPOLOGY, limits=single_limits)
+        )
+    # 篡改 flag：one_context/critic 与 mode 不一致
+    tampered = {**_MULTI_TOPOLOGY, "one_context": True}
+    with pytest.raises(ValueError, match="topology"):
+        validate_v11_execution_contract(_sealed_contract(topology=tampered))
+    tampered = {**_SINGLE_TOPOLOGY, "critic": True}
+    with pytest.raises(ValueError, match="topology"):
+        validate_v11_execution_contract(
+            _sealed_contract(topology=tampered, limits=single_limits)
+        )
 
 
 def _contract() -> dict:
@@ -118,6 +241,81 @@ def test_v11_run_requires_a_frozen_token_ceiling() -> None:
             authority_mode=AuthorityMode.AGENT,
             execution_contract={**_contract(), "token_budget": None},
         )
+
+
+def test_v11_sealed_run_without_persisted_model_turns_fails_closed() -> None:
+    contract = seal_v11_execution_contract(
+        {
+            "execution_contract_version": "v11",
+            "authority_mode": "agent",
+            "model_provider": "openai",
+            "model_name": "gpt-test",
+            "prompt_version": "v11-test",
+            "api_mode": "responses",
+            "endpoint_id": "endpoint-test",
+            "capability_artifact_hash": "artifact-test",
+            "tool_manifest": ["tool-a"],
+            "tool_manifest_hash": "tool-manifest-test",
+            "skill_catalog": {
+                "catalog_version": "skills-v1",
+                "catalog_hash": "skill-catalog-test",
+                "skill_names": "skill-a@v1",
+            },
+            "capability_identity": {
+                "provider": "openai",
+                "model": "gpt-test",
+                "api_mode": "responses",
+                "endpoint_id": "endpoint-test",
+                "artifact_hash": "artifact-test",
+            },
+            "limits": {
+                "max_turns": 8,
+                "max_investigators": 3,
+                "max_rounds": 2,
+                "token_budget": 1000,
+                "max_tool_calls_per_specialist": 3,
+                "tool_timeout_seconds": 10,
+            },
+            "retry_policy": {
+                "max_retries": 1,
+                "retryable_categories": ["transport", "rate_limit"],
+                "provider_max_retries": 0,
+                "sdk_max_retries": 0,
+            },
+            "tool_budget": 8,
+            "token_budget": 1000,
+            "timeout_seconds": 120.0,
+        }
+    )
+    with pytest.raises(ValueError, match="remaining model turns"):
+        RuntimeRun(
+            id="run-v11-missing-turn-state",
+            investigation_id="inv-1",
+            run_kind=RuntimeRunKind.LIVE,
+            strategy="adaptive",
+            run_reason=RuntimeRunReason.INITIAL,
+            model_provider=ModelProvider.OPENAI,
+            model_name="gpt-test",
+            prompt_version="v11-test",
+            tool_budget=8,
+            token_budget=1000,
+            timeout_seconds=120.0,
+            execution_contract_version="v11",
+            authority_mode="agent",
+            execution_contract=contract,
+            remaining_model_turns=None,
+        )
+
+
+def test_v11_persisted_deserialization_rejects_missing_or_null_model_turns() -> None:
+    payload = _run().model_dump(mode="python")
+    payload["execution_contract"] = seal_v11_execution_contract(_contract())
+    payload.pop("remaining_model_turns", None)
+    with pytest.raises(ValueError, match="persisted remaining model turns"):
+        RuntimeRun.from_persisted(payload)
+    payload["remaining_model_turns"] = None
+    with pytest.raises(ValueError, match="persisted remaining model turns"):
+        RuntimeRun.from_persisted(payload)
 
 
 def test_v11_lead_decision_rejects_unbounded_or_invalid_action() -> None:

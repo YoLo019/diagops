@@ -219,6 +219,12 @@ def test_prepare_is_byte_equivalent_on_repeat(source_root, pin_path, tmp_path):
 
     first_files = _package_files(first.output_dir)
     second_files = _package_files(second.output_dir)
+    # custodian 锚点刻意绑定绝对 canonical root；runtime/label 包字节仍须跨输出根稳定。
+    first_files.pop("custodian-manifest.json")
+    second_files.pop("custodian-manifest.json")
+    # seal HMAC key 是一次性随机秘密，不属于字节等价面；其随机性正是防伪造前提。
+    first_files.pop("pair-ledger-seal.key")
+    second_files.pop("pair-ledger-seal.key")
     assert first_files == second_files
     assert first.runtime_manifest.manifest_hash == second.runtime_manifest.manifest_hash
     assert first.label_manifest.manifest_hash == second.label_manifest.manifest_hash
@@ -496,3 +502,17 @@ def test_inspect_reports_selection_without_writing(source_root, pin_path, tmp_pa
     )
     assert len(report.selected_source_ids[RcaEvalPartition.TT90]) == 90
     assert not (tmp_path / "out").exists()
+
+
+def test_selector_matches_frozen_golden_vector(source_root, pin_path):
+    golden_path = Path(__file__).parent / "fixtures" / "rcaeval-selector-golden-v1.json"
+    golden = json.loads(golden_path.read_text(encoding="utf-8"))
+    report = inspect_source(source_root, load_pin(pin_path))
+
+    assert golden["schema_version"] == "rcaeval-selector-golden-v1"
+    assert golden["selection_seed"] == TEST_SEED
+    assert {
+        partition.value: source_ids
+        for partition, source_ids in report.selected_source_ids.items()
+        if partition in {RcaEvalPartition.OB30, RcaEvalPartition.SS30}
+    } == golden["selected_source_ids"]

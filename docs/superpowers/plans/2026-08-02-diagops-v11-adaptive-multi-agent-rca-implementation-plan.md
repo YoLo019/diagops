@@ -1,6 +1,6 @@
 # DiagOps V11 Adaptive Multi-Agent RCA Implementation Plan
 
-Status: `approved`
+Status: `review_required`
 
 Date: 2026-08-02
 
@@ -1247,7 +1247,7 @@ request only the missing authority.
 
 | Task | Status | Requirements | Evidence |
 | --- | --- | --- | --- |
-| T1 | done | R15, R17, R25 | 代码侧：M0 review 三轮后 approve（全部 findings closed）；修正案 TDD red→green 落地，55 focused + 142 benchmarks regression passed + ruff clean。真实 artifact 全链路（2026-08-04）：归一化 270 cases + custodian pin（SHA `b064b858…`，archive hash `10863f25…`）；`verify_against_raw.py`（SHA `88fa5ab2…`）双向逐文件对账 2700/2700 全匹配（provenance 升级为 byte-verified）；真实 prepare 产出 `D:\data\RCAEval\prepared-v11-m0`——runtime manifest_hash `bb119fc9fe338f7cf2d6f03a82f87a0038a1a589fde0c96ad99b02504a5f3d73`（150 cases：OB30+SS30+TT90，1560 telemetry files，26 GB），label manifest_hash `06413003c877177e01d907106ad1181631d16a568b26a4dea86e52d73108a05d`，产物内 SHA256SUMS 1561 行全 OK；taxonomy 词 grep 对 manifest/文件名 0 命中（遥测正文合法包含服务名，见 M0-I2）；二次独立 prepare `diff -r` 零差异 + manifest_hash 逐字符一致（真实数据字节等价确定性，此前仅合成 fixture 覆盖）；M0-R1/R2 closed、M0-R3 closed（用户追认 256 MiB）、M0-I3 closed、M0-I4 recorded、M0-I2 closed（测试断言范围修正，28 focused + 142 regression passed）。剩余 open：M0-L1/L2（low，M5 freeze 前处理）；M0 exit review 2026-08-04 `approve_with_followups`，出口判据满足（见 §10 评审记录） |
+| T1 | done | R15, R17, R25 | 代码侧：M0 review 三轮后 approve；真实 artifact 全链路（2026-08-04）：归一化 270 cases、双向逐文件对账 2700/2700、runtime manifest `bb119fc9fe338f7cf2d6f03a82f87a0038a1a589fde0c96ad99b02504a5f3d73`（150 cases/26 GB）、label manifest `06413003c877177e01d907106ad1181631d16a568b26a4dea86e52d73108a05d`。M0-L1/L2 已在 T11 freeze 前以 frozen golden vector 与 symlink checksum rejection RED→GREEN 关闭。 |
 | T2 | implemented / verified | R2, R4–R6, R9–R10, R20, R27 | RED→GREEN domain/migration/persistence tests; `198 passed in 8.07s`; scoped Ruff clean; full requirement acceptance remains subject to later M3–M5 tasks and M1 independent review |
 | T3 | implemented / verified | R7–R10, R13, R18, R20, R27 | RED→GREEN runtime isolation/recovery tests; `391 passed, 1 skipped, 1 warning in 160.40s`; scoped Ruff clean; full requirement acceptance remains subject to later M3–M5 tasks and M1 independent review |
 | T4 | implemented / verified | R3, R11, R21–R22, R24, R27 | 336 focused passed; offline acceptance rows=80, failed=0; nine-tool/data-only skill evidence recorded; independent M2 review approve_with_followups |
@@ -1257,13 +1257,13 @@ request only the missing authority.
 | T8 | implemented / verifying | R1, R4–R7, R9, R11–R13, R27 | M3 fifth-round review-fix5 preserves the already-green exact T8 validator, terminal, safe-text, supplemental-linkage, and final-actor contracts; exact gate 207 passed and scoped Ruff clean |
 | T9 | implemented / verified | R5–R12, R18–R19, R27 | M4 first/second/third-round review fixes reproduced and closed with focused RED→GREEN regressions; exact gate 280 passed/1 warning; candidate-led V11 reports/actions, active-owner/rerun fencing, additive API/UI, shared privacy-safe public projection, usable-evidence validation, actual Markdown actors/tasks/rounds, generic OpenRCA `v11-agent` projection, semantic status matrix, durable lifecycle guard, and Lead-bound report references verified |
 | T10 | implemented / verified | R8–R13, R16, R18, R21–R23, R26–R27 | Exact gate 855 passed/3 skipped/1 warning; full pytest 2071 passed/3 skipped/1 warning; offline rows=80 failed=0; runtime acceptance exit=0; Ruff/build/diff-check clean |
-| T11 | pending | R14–R17, R24–R27 | pending |
-| T12 | pending | R14–R17, R25–R26 | pending |
-| T13 | pending | R1–R27 | pending |
+| T11 | implemented / verifying | R14–R17, R24–R27 | 首轮至第四轮 review-fix 的 contract regressions 均按 RED→GREEN 修复；164 focused tests GREEN。新增冻结 prediction-set ledger identity transition、逐 side canonical output/checksum/bundle binding、authorized reauthorization lineage、统一 SQLite busy/backoff 与 completion/evaluation failure invalidation、freeze 前 reparse-path gate、exclusive root checksum 写入、无 Git packaged source manifest；保留 Single one-context、真实 V11/SQLite accounting、四配置/空 memory、exact cardinality/statistics、scorer/capability identity、external-cwd worker、frozen-bundle audit reconstruction、sealed RuntimeRun persistence 与 lease guards；M0-L1 golden vector 与 M0-L2 symlink rejection closed。独立复审尚未重新 approve。 |
+| T12 | blocked at capability admission | R14–R17, R25–R26 | 真实 runtime package 完整 checksum 复核通过：manifest `bb119fc9fe338f7cf2d6f03a82f87a0038a1a589fde0c96ad99b02504a5f3d73`/150 cases；但本 worktree capability artifact=0，`DIAGOPS_AGENTS_API_KEY/BASE_URL/MODEL` 均 absent。未执行 OB30 model run 或 SS30 四配置，未打开 SS labels，未冻结 acceptance policy。任务线程 Luna Max 配置不是 benchmark endpoint certification。 |
+| T13 | not started / protected | R1–R27 | TT90 predictions=0、formal label opens=0、paired attempts=0；未消耗 holdout。最新 clean code `da9dbb8496835bc1a2cca60a4d1b9764ad9bc822` 的仓库 gate：focused 164 passed/1 warning，full pytest 2163 passed/3 skipped/1 warning，Ruff/frontend/offline/runtime/privacy/diff-check clean；production preflight 因 Docker Linux daemon unavailable 及缺少 endpoint/credential 环境变量停止，未生成 artifact；Tempo claim 未发布/未运行。必须在同一 clean frozen source、passed capability identity 和已冻结 SS policy 下恢复；任何正式非可恢复失败仍按实现归档并停止。 |
 
 Independent Plan review: completed on 2026-08-02; initial review found three
-high and two medium issues. Focused re-review confirmed H1–H3/M1–M2 closed and
-found no remaining blocking, high, or medium issue.
+high and two medium issues. That plan review does not substitute for the
+independent M5 implementation review; M5 review status remains tracked below.
 
 | ID | Severity | Finding | Resolution |
 | --- | --- | --- | --- |
@@ -1272,6 +1272,163 @@ found no remaining blocking, high, or medium issue.
 | H3 | high | T9 required an RCAEval entry gate before the runner existed | Closed by limiting T9 to existing entries and adding RCAEval run/hash/forbidden-call gates in T11 |
 | M1 | medium | Same-account label isolation wording implied an OS sandbox that the mechanism did not provide | Closed in §1/T1 by freezing the trusted-input threat model, supported-input/path-traversal denial, and bounded claim language |
 | M2 | medium | Lifecycle status updates were missing at implementation start and milestone reviews | Closed in §2 with ready/implementing transitions and M0–M5 Plan/Spec/current evidence updates |
+| M5-E1 | external blocker | 正式 SS30/TT90 需要一个 exact passed capability artifact、可调用 endpoint/model 和 process-only credential；当前三者均不存在 | Open；prediction 在首个模型调用前 fail closed。不得以 Codex task 的 Luna Max 配置、FakeRuntime 或测试 double 替代；TT90 保持未消耗，等待外部 owner 提供认证端点后恢复。 |
+| M5-R1 | review pending | T11–T13 source/artifact independent review 尚未执行 | Open；首轮 M5 review（2026-08-10）为 `changes_required`，本实现线程已按 RED→GREEN 修复并记录 focused evidence，不自行给出 approve。父任务应基于最终本地提交创建独立 re-review 线程。 |
+| M5-R4-B1 | blocking | provisional pair ledger identity was not transitioned to the final frozen prediction-root identity | Closed locally with an atomic bind transition and evaluator-reopen identity checks; RED→GREEN `test_prediction_set_bind_transitions_ledger_identity_for_evaluate_reopen` plus ABA/tamper regression. Independent re-review pending. |
+| M5-R4-H1 | high | frozen side bundle hashes/output directories were not bound to the custodian records | Closed locally by checking canonical locators, exact side checksums/files, bundle content and runtime/config identity before the first root write; RED→GREEN side-binding and zero-side-effect regressions. Independent re-review pending. |
+| M5-R4-H2 | high | reauthorization identity was stored but not enforced by later transitions | Closed locally with authorized-lineage checks across initialize/bind/reserve/assert/recover/completion and one-time identity rotation; old identity/token replay regressions GREEN. Independent re-review pending. |
+| M5-R4-H3 | high | SQLite writer-lock failures could leave prediction or label-open state in flight | Closed locally with one bounded busy/backoff policy, explicit close, and completion/evaluation failure guards that attempt pair invalidation; real writer-lock RED→GREEN regressions GREEN. Independent re-review pending. |
+| M5-R4-H4 | high | packaged source identity depended on runtime Git metadata | Closed locally with a build-time immutable source manifest/code digest in the production image and runtime tamper checks; package-without-Git RED→GREEN regression GREEN. Independent re-review pending. |
+| M5-R4-M1 | medium | freeze-set canonical-root validation occurred after a marker write | Closed locally by validating root and all parent reparse paths before writing and using exclusive marker creation; zero-side-effect regression GREEN. Independent re-review pending. |
+| M5-R4-M2 | medium | ledger connections used zero timeout without explicit close | Closed locally with explicit context-managed close and centralized bounded lock acquisition; handle-release and transient-lock regressions GREEN. Independent re-review pending. |
+| M5-R6-B1 | blocking | ledger seal shared the same mutable SQLite state it attested, so raw tamper plus a forged appended seal could revive a consumed label reveal | Closed locally with a trusted anchor outside the mutable database: a one-time random custodian seal key plus an append-only HMAC-chained anchor file; seal rebuild is refused without a valid chain, raw SQLite tamper/forged seal/reveal-clearing regressions fail closed on every write boundary. Independent re-review pending. |
+| M5-R6-H1 | high | evaluator child asserted label open without binding the custodian `label_manifest_hash` | Closed locally: `assert_label_open` requires the expected hash and compares it against the custodian manifest after connection close; the child passes its CLI expectation through the fence, mismatch leaves zero artifact. Independent re-review pending. |
+| M5-R6-H2 | high | evaluator child parsed bundles without independently re-verifying the frozen root | Closed locally: `verify_frozen_prediction_root` re-verifies root checksum, canonical SHA256SUMS bytes/hash, and every bundle byte before the first side effect, and bundle parsing consumes only the returned verified bytes (no verify→parse window); post-freeze replacement leaves zero scoring artifact. Independent re-review pending. |
+| M5-R6-H3 | high | `reconcile_pending_failure` did not converge expired leases and write boundaries had no uniform durable failure intent | Closed locally with one `_guarded_write` boundary across initialize/bind/freeze/reserve/heartbeat/recover/reauthorize/completion paths persisting a verifiable failure intent on lock/exception exhaustion, plus an idempotent startup reconcile that converges intents and expired in-flight leases without any future business command. Independent re-review pending. |
+| M5-R6-H4 | high | custodian manifest loader resolved paths before rejecting junction/reparse points | Closed locally: reparse checks run before any resolve/open on the root, all parents, the pinned manifest file, and every recursive entry; Windows junction and POSIX symlink roots fail closed. Independent re-review pending. |
+| M5-R6-H5 | high | installed wheel source manifest digests did not bind final wheel content and dependency-lock identity fell back to the source manifest hash | Closed locally: `setup.py` `build_py` regenerates the package manifest from the final `build_lib` content, and `frozen_run_identity` fails closed when `uv.lock`/`pyproject.toml` are absent; wheel external-cwd smoke passes and installed-file tamper is refused. Independent re-review pending. |
+| M5-R6-M1 | medium | `canonical_locator` accepted lowercase drive aliases, UNC paths, and nonexistent paths | Closed locally with strict final-handle spelling binding (`resolve(strict=True)` plus exact spelling comparison) for existing paths and nearest-existing-ancestor binding for creation; UNC/drive-alias/reparse spellings are rejected, normal Windows spellings pass. Independent re-review pending. |
+| M5-R6-M2 | medium | side SHA256SUMS accepted non-canonical path spellings such as `digest  ./predictions.json` | Closed locally by reusing one strict parser that rejects duplicate/missing/extra/unordered/absolute/`..`/case-alias spellings and binds canonical bytes; root/side checksum generation shares the same posix-string ordering. Independent re-review pending. |
+| M5-R6-M3 | medium | `validate_configuration_set` and the V11 contract did not mechanically validate topology, so self-declared subagent/hidden-model-call flags passed | Closed locally: `topology` is a required V11 contract key with mechanical mode/one-context/critic/subagent/hidden-call/investigator/round rules, and `validate_configuration_set` freezes per-configuration topology limits; swapped/tampered topologies are rejected. Independent re-review pending. |
+| M5-R7-M1 | medium | recursive entry scans used `sorted(Path.rglob("*"))`, materializing the whole iterator while rglob recurses into junctions (junctions are not symlinks), so a junction loop planted in a custodian/frozen root hung every load instead of failing closed | Closed locally at all three sites (`ledger.py` custodian entries, `isolation.py` frozen-root and package checksum scans) by iterating and rejecting each reparse entry as produced, never recursing into it; junction-loop regressions fail fast with explicit elapsed bounds. Independent re-review pending. |
+| M5-R7-L1 | low | the strict checksum parser accepted POSIX-rooted spellings such as `/etc/a.txt` on Windows (not absolute, no drive, round-trip stable) | Closed locally by explicitly rejecting `/`-prefixed rooted paths in the shared parser; cross-platform rooted regression GREEN. Independent re-review pending. |
+
+M5 review-fix record (2026-08-11): the second independent review reproduced
+three residual findings: pair-ledger crash recovery, stale scorer identity at
+acceptance, and invocation-local model-turn ceilings. They are fixed locally
+with RED→GREEN tests: custodian lease expiry atomically invalidates the pair
+before reauthorization; policy freeze and final acceptance verify the current
+scorer dependency closure; and V11 model turns are atomically persisted at the
+RuntimeRun boundary and carried through checkpoint/resume/retry. Formal
+SS30/TT90 predictions, attempts, and labels remain untouched; T12 remains
+blocked on a fresh passed capability artifact/endpoint/credential and a new
+independent re-review.
+Repository verification after the fixes: full pytest `2141 passed/3 skipped/1
+warning`, full Ruff clean, frontend build passed, offline acceptance `80/80`,
+runtime acceptance `14/14` with privacy scan, and diff-check clean. Production
+acceptance was environment-blocked before any scenario artifact; Tempo was not
+run because no Tempo claim is published.
+
+M5 third-round implementation/review-fix record (2026-08-12): base
+`977a040a1a8689fbf5b53b7266113348acdb268c`, code head
+`094a20f2cd22066a00c32adead51b0e7b8489a63`. The canonical custodian-root
+manifest now maps every output/pair root to one durable ledger and rejects
+copied/symlinked/alternate roots; prediction children use an explicit source
+entrypoint/Git root from external cwd; reveal state is permanent and
+reauthorization binds a new identity without ABA/replay; audit validation
+rebuilds candidate/evidence pairs from exact frozen bundles; persisted V11 runs
+reject missing/null remaining turns; completion failures retry then invalidate
+the pair; and lease token arguments have no optional default. Formal SS30/TT90
+predictions, attempts, and label opens remain zero. This plan is
+`review_required` pending independent re-review; T12 capability admission is
+still the actual execution blocker.
+
+M5 fourth-round implementation/review-fix record (2026-08-12): base
+`2e8b276ed053e6d5c87f8590954705f3f4459acd`; implementation head
+`da9dbb8496835bc1a2cca60a4d1b9764ad9bc822`. The ledger now performs an atomic
+prediction-set identity transition from the provisional pair lineage to the
+exact frozen root and validates that transition on evaluator reopen. Freeze
+reads custodian side records before writing, verifies canonical output
+locators, side checksum/bundle hashes, partition/configuration identity and
+exact file sets, rejects reparse aliases before the first write, and creates
+the root checksum exclusively. Reauthorization identity is checked across
+initialize/bind/reserve/assert/recover/completion; old lineage/token state is
+not replayable. All ledger writers share one bounded SQLite busy/backoff
+policy with explicit connection close; prediction/evaluation completion lock
+failures immediately attempt pair invalidation and preserve reveal
+consumption. Packaged workers use a build-time source manifest/code digest
+without `.git`, and capability/frozen identities reject stale or tampered
+packages. RED→GREEN evidence: focused M5 group `164 passed, 1 warning`, full
+pytest `2163 passed, 3 skipped, 1 warning`, full Ruff, frontend build and
+diff-check clean; temporary offline `80/80` and runtime `14/14` acceptance
+outputs were removed after hashing. Docker daemon preflight is unavailable.
+Formal predictions, paired attempts and label opens remain zero; T12 is still
+blocked on a fresh passed capability artifact/endpoint/credential and this
+Plan remains `review_required` pending independent re-review.
+
+M5 fifth-round implementation/review-fix record (2026-08-12): base
+`75f964495d6e6f391ebd8eef4c2170ba982d53ea`; code commit
+`0bb9c4e2b0dd37068380bc07d32aeb9d7838a901`. The evaluator now receives the
+custodian label hash and performs one stable descriptor read, validating bytes
+and identity before constructing an evaluation artifact; replacement,
+symlink/junction, and mismatch paths produce no artifact. Freeze uses a
+durable intent before marker materialization and accepts exact retries after
+bind. The custodian ledger has append-only sealed snapshots and a durable
+failure intent for bounded SQLite-lock recovery; reveal history cannot be
+cleared. Reparse checks cover source roots, parents, fixed files, and recursive
+entries. The installed wheel carries the package manifest and the trusted
+worker succeeds from an external cwd without Git or editable-install state.
+Formal topology limits, onset semantics, and checksum serialization are
+mechanically frozen. RED→GREEN evidence is RCAEval focused `123 passed`; full
+pytest `2176 passed, 3 skipped, 1 warning`; Ruff/frontend/offline/runtime and
+diff-check are green. Formal predictions/attempts/label opens remain zero;
+M5 is `review_required`/blocked at T12, with capability/endpoint/credential
+stop-gate unchanged.
+
+M5 fifth-round follow-up hardening (2026-08-12): code commits
+`071315d4be5b599e638c7b71e3d1caac0bad5086` and
+`effa4cfdf44380b3d7ce9ce006acb89d51a39412` reject relative and non-canonical
+custodian side/launcher locators before persistence, persist the custodian
+failure intent even when direct pair invalidation meets a held SQLite writer
+lock, and check prediction-worker source/entrypoint paths for absolute
+non-reparse identity before resolution. The focused ledger/isolation/evaluator/
+runner gate is `91 passed`; full pytest is `2179 passed, 3 skipped, 1 warning`;
+Ruff, frontend, offline/runtime
+acceptance, wheel external-cwd smoke, and diff-check are green. Formal
+predictions, attempts and label opens remain zero. This Plan remains
+`review_required`/blocked at T12 pending fresh capability admission and
+independent review.
+
+M5 sixth-round implementation/review-fix record (2026-08-12): base
+`cf5e4295e96e2fb8067d719e088afdbad0fc9dc2`; the sixth independent review
+returned `changes_required`/`blocked` with one blocking, five high, and three
+medium findings (M5-R6-B1/H1–H5/M1–M3 above). The ledger seal is now anchored
+outside mutable SQLite state: a one-time random custodian seal key authenticates
+an append-only HMAC-chained anchor that must match persisted events one-to-one,
+so raw tamper, forged appended seals, and reveal clearing fail closed at every
+write boundary. The evaluator child re-verifies the frozen prediction root
+(canonical SHA256SUMS bytes/hash and every bundle byte) before its first side
+effect, parses bundles only from the verified bytes, and routes the expected
+custodian label manifest hash through the ledger fence. One guarded write
+boundary persists a verifiable failure intent on lock/exception exhaustion and
+startup reconcile idempotently converges intents plus expired in-flight leases.
+Custodian loading and ledger locators reject reparse/junction/symlink, drive
+aliases, UNC, and nonexistent spellings before resolve; side and root checksum
+manifests share one strict canonical parser. The V11 execution contract
+requires a mechanically validated topology and `validate_configuration_set`
+freezes per-configuration investigator/round limits. The wheel build
+regenerates the package manifest from final `build_lib` content and dependency
+lock identity fails closed without `uv.lock`/`pyproject.toml`. RED→GREEN
+evidence: focused M5 group `379 passed, 1 skipped`; full pytest `2210 passed,
+4 skipped, 1 warning` (the fourth skip is the new POSIX-only custodian symlink
+regression; the other three are the pre-existing allowed skips); full Ruff
+clean; frontend build green; temporary offline `80/80` and runtime `14/14`
+with privacy scan; wheel external-cwd smoke passed with tamper and
+missing-manifest cases refused; `git diff --check` clean. Docker daemon
+preflight is unavailable and remains an unmet gate. Formal predictions, paired
+attempts and label opens remain zero (`D:\data\RCAEval\v11-m5` absent); T12 is
+still blocked on a fresh passed capability artifact/endpoint/credential and
+this Plan remains `review_required` pending independent re-review.
+
+M5 seventh-round implementation/review-fix record (2026-08-12): base
+`6c238e3b0187ced00891ac7aa5e914c88b9a04c3`; the follow-up review returned
+`changes_required` with one medium and one low finding (M5-R7-M1/L1 above).
+All three `sorted(Path.rglob("*"))` recursive scans (custodian manifest
+entries, frozen prediction root, package checksum verification) now iterate
+and reject reparse entries as produced instead of materializing the iterator,
+so a junction loop planted in a scanned root fails closed immediately instead
+of hanging (junctions are not symlinks and rglob recurses into them; two
+junctions made the pre-fix scans exceed 10s without returning in a subprocess
+probe). The shared strict checksum parser now explicitly rejects POSIX-rooted
+`/`-prefixed spellings, closing the Windows-only absolute-path acceptance gap.
+RED→GREEN evidence: junction-loop tests timed out (killed at 60s, exit 124)
+against the old code and the rooted-path parser test failed; after the fix all
+four regressions pass with explicit elapsed bounds. Gates on the final state:
+focused M5 group `383 passed, 1 skipped`; full pytest `2214 passed, 4 skipped,
+1 warning`; full Ruff clean; `git diff --check` clean. Formal predictions,
+paired attempts and label opens remain zero; T12 capability stop-gate and the
+missing Docker daemon gate are unchanged, and this Plan remains
+`review_required` pending independent re-review.
 
 M0 review (dataset/leakage): completed on 2026-08-02 in worktree
 `agent+v11-m0`; conclusion `approve_with_followups`. Reviewer independently
@@ -1301,7 +1458,7 @@ unblocked. Followups: one low (M0-I2 wording materialized in a test assertion ov
 the whole-package blob — fixed same day by scoping service/fault assertions to
 manifest bytes + file names, 28 focused + 142 benchmarks regression passed, Ruff
 clean; reviewer's duplicate-content and `"service"`-token measurements folded into
-the M0-I2 closure evidence); M0-L1/L2 remain open (low), due before the M5 freeze.
+the M0-I2 closure evidence); M0-L1/L2 were closed in T11 before any formal M5 freeze.
 
 | ID | Severity | Finding | Resolution |
 | --- | --- | --- | --- |
@@ -1309,8 +1466,8 @@ the M0-I2 closure evidence); M0-L1/L2 remain open (low), due before the M5 freez
 | M0-M1 | medium | Evaluator forbidden tokens match only dotted module names; slash-path references to production runtime pass | Closed on 2026-08-03: `_module_token_in` matches dotted and slashed forms with repeated-separator folding; residual `backend//runtime//coordinator.py` bypass fixed and confirmed |
 | M0-M2 | medium | Evaluator launcher does not cross-check `LabelManifest.runtime_manifest_hash`, so swapped label/runtime package pairs are accepted | Closed on 2026-08-03: required `expected_runtime_manifest_hash` parameter with format and pairing validation |
 | M0-I1 | informational | Bare `..` argv element escaped both path-form and traversal checks | Closed on 2026-08-03: explicit bare `..` rejection in `_reject_argv_traversal`; benign `wait..please` control still passes |
-| M0-L1 | low | Selector test mirrors the formula without a frozen golden vector | open |
-| M0-L2 | low | Package checksum verification does not reject symlink entries | open |
+| M0-L1 | low | Selector test mirrors the formula without a frozen golden vector | closed in T11：独立 frozen OB30/SS30 selection vector fixture 与 exact match regression |
+| M0-L2 | low | Package checksum verification does not reject symlink entries | closed in T11：checksum traversal rejects symlink entries；Windows 无权限环境以边界 mock 验证同一分支 |
 | M0-L3 | low | AST no-runtime-import scan covers direct imports only | recorded |
 | M0-I1 | informational | Worktree base `7b26024` predates V10.1 archive commits; final TT90 freeze must rebase onto the approved baseline | Closed on 2026-08-04: 分支 `worktree-agent+v11-m0` 已 rebase 到 main `58c6382`（V10.1 归档提交）之上，唯一冲突 current.md 按"V11 active + V10.1 archived"语义解决；M0 以单个提交落在该基线上，后续 freeze 不再背负基线债 |
 | M0-I2 | informational | "Runtime package contains no service/fault strings" holds only on synthetic fixtures; reword after real prepare | Closed on 2026-08-04: M0 exit review 实测确认真实遥测正文合法包含全部 15 个服务名（抽样 3 case CSV 头部 15/15）与通用 fault 词元；泄漏判据限定为答案元数据（源 case ID、manifest/文件名字段的标签值）。`test_runtime_package_has_no_labels_or_source_ids` 的 service/fault 断言已从全包 blob 收缩到 manifest 字节 + 文件名（源 case ID 仍对全包字节断言，真实包 1561 文件 0 命中）；spec §11.1/prepare.py/models.py 的字段级表述经评审确认无需修改；28 focused + 142 regression passed。附带实测记录：51 组字节相同遥测（均为 telemetry-05/06.csv 小文件、无一跨分区，内容不随答案变化，非泄漏）；2 处带引号 `"service"` 命中定位于单个遥测 CSV 正文（内容非字段，非泄漏） |
@@ -1344,4 +1501,4 @@ M1 third-round review (migration/runtime, 2026-08-07): conclusion
 - Specification: approved by the user on 2026-08-02 after L22–L30 reuse review.
 - Implementation Plan: independently reviewed with H1–H3/M1–M2 closed; approved
   by the user on 2026-08-02 with authorization to begin execution.
-- Implementation: M0/T1 complete; M1/T2–T3 implemented and verified on 2026-08-05 in the delegated worktree; third-round independent migration/runtime review concluded `approve_with_followups` on 2026-08-07 with all six findings closed the same day (RR-H1/RR-M1/RR-M2/RR-L2 at commit `336067c`, RR-L1/RR-L3 in the follow-up Light fix); M2 snapshot committed as `M2_BASE_SHA=c2245ac`; M3 fifth-round review-fix5 remains isolated on `codex/v11-m3`; M4 second-round review-fix is RED→GREEN verified on isolated branch `codex/v11-m4`, with the local commit SHA recorded in the final handoff. No merge or push was performed; M5 has not started.
+- Implementation: M0/T1 complete; M1/T2–T3 implemented and verified on 2026-08-05 in the delegated worktree; third-round independent migration/runtime review concluded `approve_with_followups` on 2026-08-07 with all six findings closed the same day (RR-H1/RR-M1/RR-M2/RR-L2 at commit `336067c`, RR-L1/RR-L3 in the follow-up Light fix); M2 snapshot committed as `M2_BASE_SHA=c2245ac`; M3 fifth-round review-fix5 remains isolated on `codex/v11-m3`; M4 second-round review-fix is RED→GREEN verified on isolated branch `codex/v11-m4`, with the local commit SHA recorded in the final handoff. No merge or push was performed; M5 review-fix remains isolated on `codex/v11-m5`, with formal SS30/TT90 protected and independent re-review pending.

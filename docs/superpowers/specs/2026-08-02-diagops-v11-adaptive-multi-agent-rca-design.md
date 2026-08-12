@@ -1,6 +1,6 @@
 # DiagOps V11 Adaptive Multi-Agent RCA Design
 
-Status: `approved`
+Status: `review_required`
 
 Date: 2026-08-02
 
@@ -1407,20 +1407,20 @@ historical replay—not because the old benchmark score is unchanged.
 | R11 | No production writes or unsafe tool escalation | Current read-only allowlist exists | Safety and injection suites | T4, T6–T10, T13 | M3/T7–T8: all model tool calls use the frozen registry manifest with invocation-time callable/read-only checks; no report/action/fixed specialist path is entered; full safety/privacy suite remains in T10/T13 |
 | R12 | No private reasoning or secrets are persisted/exposed | Current ReAct trace can store assistant text | Payload privacy scans | T6–T10, T13 | M3/T7–T8: only bounded structured outputs/summaries and committed evidence references are persisted; M4 adds one shared V11 public projection across findings, candidates, Critic/Lead, summaries, reports, and graph seeds, with API/UI end-to-end private-marker regressions; T10 green |
 | R13 | Production run is bounded to 3 Investigators, 2 rounds, and 120s | Current parallel/budget primitives exist | Boundary, timeout, and race tests | T3, T6–T8, T10, T13 | M1/T3: V11 absolute deadline/phase budget monotonicity and timeout ownership checks; second-round M3/T7–T8 covers 1–3 bounded concurrent Investigators, two rounds, per-request model/tool/turn reservations, timeout, cancellation, late results, and cleanup; final acceptance remains in T10 |
-| R14 | Frozen V11 single-Agent control is reproducible and Multi-Agent tokens are ≤3x in primary evaluation | No current paired V11 single-Agent path | Control-contract tests and artifact/hash verifier | T11–T13 | pending |
-| R15 | Primary locally held-out exact score meets frozen formula and gains ≥10pp | V10.1 OpenRCA delta was zero; no independent external custodian is available | One frozen RCAEval final paired gate with prediction/label process isolation | T1, T11–T13 | pending |
-| R16 | Reference integrity 100%, single-reviewer evidence-support rubric pass rate ≥95%, P95 ≤120s, read-only/leakage zero | Existing acceptance measures only reference existence | Runtime integrity tests plus frozen label-input-isolated support/latency/safety gate | T10–T13 | pending |
-| R17 | Equal-token ablation is published with bounded claim language | Not currently measured | Artifact presence and claim checker | T1, T11–T13 | pending |
+| R14 | Frozen V11 single-Agent control is reproducible and Multi-Agent tokens are ≤3x in primary evaluation | No current paired V11 single-Agent path | Control-contract tests and artifact/hash verifier | T11–T13 | engineering verified / scored evidence blocked：T11 one-context control、四配置与 ≤3x contract、run-level pair ledger 和 fresh capability admission regressions GREEN；SS/TT paired run 未执行 |
+| R15 | Primary locally held-out exact score meets frozen formula and gains ≥10pp | V10.1 OpenRCA delta was zero; no independent external custodian is available | One frozen RCAEval final paired gate with prediction/label process isolation | T1, T11–T13 | blocked：无 capability-certified endpoint；TT90 未执行/未揭盲，不声称准确率提升 |
+| R16 | Reference integrity 100%, single-reviewer evidence-support rubric pass rate ≥95%, P95 ≤120s, read-only/leakage zero | Existing acceptance measures only reference existence | Runtime integrity tests plus frozen label-input-isolated support/latency/safety gate | T10–T13 | engineering verified / metric blocked：reference、latency、violations 与不可伪造 manual-audit gate 已实现；无 SS/TT 实测分母 |
+| R17 | Equal-token ablation is published with bounded claim language | Not currently measured | Artifact presence and claim checker | T1, T11–T13 | blocked：四配置合同已验证，SS30 equal-token runs 未执行，因而无结果可发布 |
 | R18 | OpenRCA remains compatible without production-path adaptation | Deterministic historical runner/projector exist | Dual-mode compatibility suite and code scan | T3, T9, T10, T13 | M1/T3: V10 phase/profile and golden payload compatibility green; M4 adds a V11-only generic candidate projector with shared usable-evidence/status/owner validation while retaining the deterministic V10 projector; T9/T10 green |
 | R19 | Report/API/UI expose V11 reasoning artifacts and legacy authority labels | Current UI is deterministic-hypothesis-led | Contract and frontend tests | T9, T13 | M4 API/UI/report regressions preserve safe Critic/Lead summaries, finding/candidate rationale, graph labels, actual finding actors/tasks/rounds/evidence, and legacy authority labels without private markers; T9/T10 green |
 | R20 | Add only the three Schema V7 run-contract columns; no new framework or table family | Existing runtime/payload tables are reusable but lack immutable execution identity and full budgets | Diff/design review and schema V3–V7 manifest tests | T2, T3, T13 | M1/T2: fresh/V3/V4/V5/legacy-V6/current-V6 manifests agree, only the three approved columns are added, and contract-integrity reload is fail-closed; final review remains in T13 |
-| R21 | Trace, runtime-state, related-alert, dependency, and verified-memory evidence are available through provider-neutral contracts | Trace is absent; dependency is mock-only in production; related alerts lack a tool; memory returns empty success | Domain/query/provider/tool contract tests | T4, T5, T10, T13 | pending |
-| R22 | Every V11 tool is verifiable offline on one host without credentials, Docker, or external services | Local OpenRCA metrics/logs/traces exist but there is no complete incident-package gate | Nine-tool offline acceptance and artifact hash check | T4, T10, T13 | pending |
-| R23 | Tempo is the only V11 real trace backend and is reproducibly testable through local Docker and OTLP replay | Docker/Compose client exists locally but the daemon may be unavailable; no Tempo Provider or replay gate exists | Pinned-image preflight, unique-project Compose, replay, parity, bounded polling, blocked-state, and scoped cleanup acceptance | T5, T10, T13 | pending |
-| R24 | Four versioned data-only diagnostic skills are selectable without adding executable plugins or MCP | Strategies are prose only; no Skill/MCP subsystem exists | Catalog schema/hash, required-tool, prompt, and no-dynamic-load checks | T4, T7, T11–T13 | M3/T7 uses the existing data-only skill catalog and registry-derived manifest without executable plugin/MCP loading; exact T7 gate green; control/evaluation parity remains in T11–T13 |
-| R25 | Formal scoring uses offline evidence and locally isolates runtime inputs from labels until prediction freeze | Current spec assumed an unavailable external custodian | Mount/path/environment denial tests and evaluator ordering/hash checks | T1, T11–T13 | pending |
-| R26 | Official OpenAI, existing DeepSeek, and certified OpenAI-compatible Chat Completions endpoints share one safe model boundary without vendor lock-in | Current settings expose only OpenAI/DeepSeek; the DeepSeek adapter hardcodes its URL/key and runtime treats every non-OpenAI provider as DeepSeek | Generic-adapter contract tests, fake-endpoint failure matrix, secret/tracing scans, live capability certification, and paired-run identity checks | T6, T10–T13 | pending |
-| R27 | Reused V10 infrastructure is isolated from V11 diagnostic semantics and every V11 artifact/entry is bound to one durable run | Current phase executor, direct orchestrator, Agent runtime, report/action paths, manifests, and latest-projection rows can execute or retain legacy semantics | Versioned-phase/profile tests, forbidden-call sentinels, all-entry RuntimeRun gate, supplemental-finding ownership, registry exposure, atomic projection activation/rerun/action ownership, run-create mismatch, `contract_integrity`, and persistence-boundary revalidation suites | T2–T4, T6–T11, T13 | M1/T2–T3: first-round ten findings plus second-round three medium persistence bypasses closed at shared profile, frozen-owner, BusinessMutation, aggregate model-validation, transaction-repair, summary, Critic/finding-linkage, execution-owner, and service/API boundaries; M3/T7–T8 adds persisted V11 phase dispatch, runtime/task/tool/evidence owner checks, V10 legacy-runtime isolation, supplemental ownership, and no report/action/fixed-loop entry; M4 closes report/action PhaseCommit atomicity, configured V11 product entry/rerun selection, active V11 rejection of V10, exact artifact owners, and shared public/evidence projections; exact T9/T10 and full gates green |
+| R21 | Trace, runtime-state, related-alert, dependency, and verified-memory evidence are available through provider-neutral contracts | Trace is absent; dependency is mock-only in production; related alerts lack a tool; memory returns empty success | Domain/query/provider/tool contract tests | T4, T5, T10, T13 | engineering verified：T4/T10 既有 gate + T11 RCAEval offline provider adapter/显式空 memory；最终 scored usage blocked |
+| R22 | Every V11 tool is verifiable offline on one host without credentials, Docker, or external services | Local OpenRCA metrics/logs/traces exist but there is no complete incident-package gate | Nine-tool offline acceptance and artifact hash check | T4, T10, T13 | verified：既有 offline acceptance 80/80；T11 OB30 单 case 九工具真实 package smoke 均返回 success/skipped 合法结果；最终全仓 gate 待本提交复跑 |
+| R23 | Tempo is the only V11 real trace backend and is reproducibly testable through local Docker and OTLP replay | Docker/Compose client exists locally but the daemon may be unavailable; no Tempo Provider or replay gate exists | Pinned-image preflight, unique-project Compose, replay, parity, bounded polling, blocked-state, and scoped cleanup acceptance | T5, T10, T13 | host-dependent live Docker gate 仍按既有记录 blocked；M5 不发布 Tempo claim，故不运行 tempo_acceptance |
+| R24 | Four versioned data-only diagnostic skills are selectable without adding executable plugins or MCP | Strategies are prose only; no Skill/MCP subsystem exists | Catalog schema/hash, required-tool, prompt, and no-dynamic-load checks | T4, T7, T11–T13 | engineering verified：T11 single/Multi 共享 catalog、planning schema、持久 selected_skills 与正常 model/token 计费；focused GREEN |
+| R25 | Formal scoring uses offline evidence and locally isolates runtime inputs from labels until prediction freeze | Current spec assumed an unavailable external custodian | Mount/path/environment denial tests and evaluator ordering/hash checks | T1, T11–T13 | engineering verified / execution blocked：formal `launch-predict` 是唯一 worker 入口，最小 env/argv 不传 label/scorer；custodian pair ledger 绑定 exact prediction/audit identity 并以 one-shot reservation 只允许一次 label open；evaluator 在 prediction-set freeze 后单次打开 labels；SS/TT 未启动 |
+| R26 | Official OpenAI, existing DeepSeek, and certified OpenAI-compatible Chat Completions endpoints share one safe model boundary without vendor lock-in | Current settings expose only OpenAI/DeepSeek; the DeepSeek adapter hardcodes its URL/key and runtime treats every non-OpenAI provider as DeepSeek | Generic-adapter contract tests, fake-endpoint failure matrix, secret/tracing scans, live capability certification, and paired-run identity checks | T6, T10–T13 | product boundary verified by T6/T10；M5 live certification blocked（capability artifact/endpoint/credential absent），正式 paired identity 未生成 |
+| R27 | Reused V10 infrastructure is isolated from V11 diagnostic semantics and every V11 artifact/entry is bound to one durable run | Current phase executor, direct orchestrator, Agent runtime, report/action paths, manifests, and latest-projection rows can execute or retain legacy semantics | Versioned-phase/profile tests, forbidden-call sentinels, all-entry RuntimeRun gate, supplemental-finding ownership, registry exposure, atomic projection activation/rerun/action ownership, run-create mismatch, `contract_integrity`, and persistence-boundary revalidation suites | T2–T4, T6–T11, T13 | M1–M4 evidence preserved；T11 RCAEval now creates/reloads real SQLite V11 RuntimeRun, checks execution-contract digest and shared publication owner before output, and persists an immutable replay locator；formal T13 artifact evidence blocked |
 
 ## 14. Alternatives considered
 
@@ -1830,6 +1830,171 @@ diff-check passed; post-commit runtime acceptance is recorded in the final
 handoff with `git_dirty=false`. No merge or push was performed and M5 was not
 started.
 
+M5 review-fix ledger (2026-08-11): the first independent M5 review was
+`changes_required`; the second review reproduced three residual findings with
+RED regressions. They were fixed locally without opening formal labels. The
+custodian-owned SQLite pair ledger now spans prediction/evaluation output
+directories, binds the exact frozen prediction-set plus pre-label export/manual-
+audit hashes, uses a one-shot reservation token, and converts expired
+prediction/pre-label/label-open leases to pair-level FAILED_NON_RESUMABLE before
+explicit reauthorization. Capability admission binds clean source revision,
+adapter/SDK versions, required contracts/manifest, tested parallelism,
+endpoint/model/provider, and execution environment. Single has one model
+context and persists its planning/skill-selection action before tools. Formal
+cardinality is exact (SS30=30, TT90=90), current scorer dependency closure is
+checked at policy freeze and final acceptance, placement-only runtime state is
+unknown rather than healthy/ready, and V11 model turns use a durable
+run-level remaining budget across checkpoints and retries. Engineering tests
+are green; formal SS30/TT90 predictions, attempts, and label opens remain zero.
+M5 is still blocked at T12 pending a fresh passed capability artifact and
+endpoint/credential, and a new independent re-review is pending; no accuracy
+claim is made. Repository verification counts and artifact paths are recorded
+in the current/plan handoff after this repair.
+Production acceptance was environment-blocked before any scenario artifact;
+Tempo was not run because no Tempo claim is published.
+
+M5 third-round review-fix record (2026-08-12): the independent review found
+four blocking/high boundary defects and two medium ledger/API defects. The
+local implementation commit `094a20f2cd22066a00c32adead51b0e7b8489a63` adds a
+custodian-root manifest whose canonical path and ledger identity cannot be
+replaced by `--pair-root`, an explicit-source trusted worker and Git identity,
+permanent reveal epoch/consumed state with one-time authorized reauthorization,
+mechanical frozen-bundle candidate/evidence audit reconstruction, persisted
+RuntimeRun deserialization fail-closed for missing/null remaining turns,
+bounded completion retry plus pair invalidation, and non-optional lease tokens.
+RED→GREEN evidence is recorded in the implementation handoff: 132 focused
+passes and 2151 full passes/3 skips/1 warning. Formal prediction/attempt/label
+counts remain zero. Because these changes alter persisted/CLI contracts, this
+spec is `review_required` pending a new independent review; M5 remains blocked
+at capability admission and no accuracy or completion claim is made.
+
+M5 fourth-round review-fix record (2026-08-12): base
+`2e8b276ed053e6d5c87f8590954705f3f4459acd`; implementation head
+`da9dbb8496835bc1a2cca60a4d1b9764ad9bc822`. The custodian ledger now seals
+the provisional-to-frozen prediction identity transition and validates it on
+evaluator reopen; side records mechanically bind canonical output locators,
+checksum/bundle contents, partition/configuration identities and exact file
+sets before the root checksum is written. Authorized reauthorization lineage
+is enforced on every state transition, while reveal consumption remains
+permanent. All write paths share a bounded SQLite busy/backoff policy with
+explicit connection close; completion/evaluation lock failures attempt atomic
+pair invalidation and preserve the original failure. Root and parent reparse
+aliases are rejected before any freeze write, and packaged workers use a
+build-time source manifest/code digest rather than runtime Git. Focused M5
+regressions are `164 passed, 1 warning`; full pytest is
+`2163 passed, 3 skipped, 1 warning`; Ruff, frontend build and diff-check are
+clean. Temporary offline `80/80` and runtime `14/14` acceptance outputs were
+hashed then removed; Docker preflight is blocked by the unavailable Linux
+daemon. Formal predictions, attempts and label opens remain zero. These are
+engineering fixes only: this spec remains `review_required`, M5 remains
+blocked at capability admission, and no accuracy or completion claim is made
+pending independent re-review.
+
+M5 fifth-round review-fix record (2026-08-12): independent review remained
+`changes_required` against `75f964495d6e6f391ebd8eef4c2170ba982d53ea`. Local
+commit `0bb9c4e2b0dd37068380bc07d32aeb9d7838a901` adds the remaining mechanical
+boundaries without changing the approved R1–R27 contract: the trusted
+evaluator receives the custodian label hash and reads a stable label handle
+once, rejecting replacement/reparse/mismatch before any result artifact;
+freeze intent, marker materialization, and SQLite bind are retry-safe; ledger
+snapshots are append-only sealed across every transition and durable lock
+failure reconciliation preserves reveal consumption; package/source identity
+uses a relocatable manifest rather than runtime Git/cwd; formal topology,
+candidate onset semantics, and checksum serialization are exact. RED→GREEN
+RCAEval focused evidence is `123 passed`; full pytest is `2176 passed, 3
+skipped, 1 warning`; Ruff/frontend/offline/runtime/diff-check are green. Wheel
+external-cwd smoke passed. Formal SS30/TT90 predictions, attempts, and label
+opens remain zero, and no accuracy claim is made. Capability artifact,
+endpoint/model, and process-only credential are still absent, so M5 remains
+blocked at T12 and this Spec remains `review_required` pending independent
+review.
+
+M5 fifth-round follow-up hardening (2026-08-12): code commits
+`071315d4be5b599e638c7b71e3d1caac0bad5086` and
+`effa4cfdf44380b3d7ce9ce006acb89d51a39412` close the remaining locator and
+recovery boundary details without weakening the approved contract. Side and
+launcher locators are absolute and canonical before ledger persistence; a
+direct invalidation that cannot obtain SQLite's writer lock leaves the durable
+custodian intent for automatic reconciliation; and packaged prediction
+workers reject relative or reparse source/entrypoint paths before resolving
+them. The focused ledger/isolation/evaluator/runner gate is `91 passed`; full
+pytest is `2179 passed, 3 skipped, 1 warning`; Ruff, frontend, offline/runtime
+acceptance, wheel external-cwd smoke, and diff-check are green. Formal
+predictions, attempts, and label opens remain zero. This Spec remains
+`review_required`, M5 remains blocked at T12, and no accuracy claim is made
+pending capability admission and independent review.
+
+M5 sixth-round review-fix record (2026-08-12): independent review returned
+`changes_required`/`blocked` against `cf5e4295e96e2fb8067d719e088afdbad0fc9dc2`
+with one blocking, five high, and three medium findings. The fixes harden the
+approved R1–R27 contract without changing it: the custodian ledger seal is
+authenticated by an external HMAC-chained anchor keyed by a one-time random
+seal key, so raw SQLite tamper, forged seals, and reveal clearing cannot
+revive a consumed label; the evaluator child independently re-verifies the
+frozen prediction root and consumes only verified bundle bytes, and binds the
+custodian label manifest hash through the ledger fence before any artifact;
+all ledger write boundaries share one guarded failure-intent path with
+idempotent startup reconciliation of intents and expired leases; custodian and
+locator paths reject reparse/junction/symlink, drive-alias, UNC, and
+nonexistent spellings before resolve; checksum manifests share one strict
+canonical parser; topology is a required mechanically validated V11 contract
+key with frozen per-configuration limits; and the wheel build regenerates the
+package manifest from final wheel content with dependency-lock identity
+failing closed. RED→GREEN evidence: focused M5 group `379 passed, 1 skipped`;
+full pytest `2210 passed, 4 skipped, 1 warning`; Ruff, frontend,
+offline/runtime acceptance, wheel external-cwd smoke (tamper refused), and
+diff-check are green. Docker daemon preflight remains an unmet gate. Formal
+predictions, attempts, and label opens remain zero. This Spec remains
+`review_required`, M5 remains blocked at T12, and no accuracy claim is made
+pending capability admission and independent review.
+
+M5 seventh-round review-fix record (2026-08-12, ledger backfill): the follow-up
+review against `6c238e3b0187ced00891ac7aa5e914c88b9a04c3` returned
+`changes_required` (1 medium, 1 low). All three recursive scans dropped
+`sorted(Path.rglob("*"))` materialization for iterate-and-reject so planted
+junction loops fail closed immediately with elapsed-bound regressions, and the
+shared strict checksum parser rejects POSIX-rooted `/`-prefixed paths. Gates:
+focused M5 group `383 passed, 1 skipped`; full pytest
+`2214 passed, 4 skipped, 1 warning`; Ruff and diff-check clean. A same-day
+trusted read-only redundancy cleanup (R1 plus twelve confirmed-keep items;
+R16/R18 deferred as efficiency refactors) kept the full gate identical at
+`2214 passed, 4 skipped, 1 warning`. Full evidence lives in `current.md`; this
+entry closes the ledger lag noted by the eighth-round review.
+
+M5 eighth-round review-fix record (2026-08-12): an independent whole-version
+review of `58c6382..2b42b0f` (M0–M5, 144 files) returned
+`approve_with_followups` with two medium and three low findings and reran all
+engineering gates green (`2214 passed, 4 skipped, 1 warning`; offline 80/80;
+runtime acceptance 14/14 privacy-clean on `git_dirty=false`). Medium-1 (R9):
+the §9.2 partial sufficiency contract had drifted bidirectionally — the
+implementation required only a global PASS check plus a round-two task linkage
+and never enforced the candidate-level no-failed-check and two-independent-
+evidence conditions. The approved contract was kept and the code aligned:
+`result_validation.py` now enforces, per accepted candidate, no failed causal
+check, at least two distinct supporting evidence items, and two provider types
+when the run's usable evidence covers two provider types; the spec-external
+round-two linkage requirement was removed; an insufficiently supported partial
+is downgraded to `inconclusive` through the existing single tool-less Lead
+correction, never a code-invented candidate. Medium-2 (R8): cross-process
+resume lost partial failure memory, projecting `COMPLETE` where §9.2 requires
+`partial` and failing publication; `_restore_failure_memory` now backfills from
+the same persisted failed/cancelled execution source the summary fallback used,
+idempotently, at the adjudication/validation/summary entries. RED evidence: 7
+new or rewritten regressions failed against the old code (5 validator, 2
+runtime). GREEN evidence: focused `60 passed`; full pytest
+`2220 passed, 4 skipped, 1 warning`; both Ruff commands and diff-check clean.
+An independent re-review of the uncommitted diff returned `approve` with one
+informational low (`PARTIAL` evidence counts toward provider success, which
+only tightens the gate). The three eighth-round lows are recorded for T13
+reconciliation: the leakage gate is structural input-plane isolation with a
+hardcoded zero runtime counter (no runtime detector), this ledger's lag
+(closed by the backfill above), and a bare `KeyError` preflight in
+`production_acceptance.py`. The approved R1–R27 contract is unchanged; M5
+remains blocked at T12 capability admission; formal SS30/TT90 predictions,
+paired attempts, and label opens remain zero; no accuracy claim is made. On
+explicit user instruction the branch was merged to `main`; T12/T13 gates and
+the blocked status are unaffected.
+
 ## 16. Approval state
 
 - Requirements Brief: confirmed by user.
@@ -1852,4 +2017,8 @@ started.
 - Implementation: M2 baseline `c2245ac` and the M3 review-fix history remain
 isolated; M4 review-fix is RED→GREEN verified in isolated branch
 `codex/v11-m4`, with its local commit SHA recorded in the implementation
-handoff. No merge or push was performed; M5 has not started.
+handoff. M1–M4 were merged to `main` (`c3a0189`); on 2026-08-12 the user
+explicitly instructed merging `codex/v11-m5` (through the eighth-round
+review-fix) into `main` as well. M5 remains blocked at T12 capability
+admission with formal SS30/TT90 still protected; merge is not completion and
+no accuracy claim is made.
