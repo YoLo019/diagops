@@ -95,6 +95,16 @@ class V11RuntimeUnavailable(RuntimeError):
     """表示 V11 没有可用的模型调用入口。"""
 
 
+class EvidenceScopeDraft(BaseModel):
+    """模型可声明的有界证据范围；持久化时转换为普通 JSON map。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    entity_ids: list[str] = Field(default_factory=list, max_length=20)
+    start_time: datetime | None = None
+    end_time: datetime | None = None
+
+
 class LeadTaskDraft(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -104,7 +114,7 @@ class LeadTaskDraft(BaseModel):
     analysis_round: int = Field(default=1, ge=1, le=2)
     tool_names: list[str] = Field(default_factory=list, max_length=9)
     strategy: str | None = Field(default=None, max_length=128)
-    evidence_scope: dict[str, Any] | None = None
+    evidence_scope: EvidenceScopeDraft | None = None
     expected_discriminator: str | None = Field(default=None, max_length=256)
     information_gap: str | None = Field(default=None, max_length=256)
 
@@ -930,7 +940,11 @@ class V11Runtime:
                 execution_layer=AgentExecutionLayer.OPENAI_AGENTS_SDK,
                 analysis_round=1,
                 strategy=task.strategy,
-                evidence_scope=task.evidence_scope,
+                evidence_scope=(
+                    task.evidence_scope.model_dump(mode="json")
+                    if task.evidence_scope is not None
+                    else None
+                ),
                 expected_discriminator=task.expected_discriminator,
                 information_gap=task.information_gap,
                 runtime_run_id=runtime_run_id,
@@ -2057,7 +2071,11 @@ class V11Runtime:
                         execution_layer=AgentExecutionLayer.OPENAI_AGENTS_SDK,
                         analysis_round=2,
                         strategy=draft.strategy,
-                        evidence_scope=draft.evidence_scope,
+                        evidence_scope=(
+                            draft.evidence_scope.model_dump(mode="json")
+                            if draft.evidence_scope is not None
+                            else None
+                        ),
                         expected_discriminator=draft.expected_discriminator,
                         information_gap=draft.information_gap or assessment.gap,
                         runtime_run_id=runtime_run_id,

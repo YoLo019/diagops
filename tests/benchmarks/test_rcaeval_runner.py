@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 import pytest
+from agents import AgentOutputSchema
 
 from backend.benchmarks.rcaeval.models import (
     EndpointCapabilityIdentity,
@@ -16,12 +17,31 @@ from backend.benchmarks.rcaeval.models import (
 from backend.benchmarks.rcaeval.providers import incident_event_for_case
 from backend.benchmarks.rcaeval.runner import (
     RcaEvalCaseRunner,
+    SingleControlOutput,
     validate_configuration_set,
 )
 from backend.db.session import create_db_engine, initialize_database
 from backend.db.sqlite_repository import SQLiteInvestigationRepository
 from backend.domain.runtime import RuntimeEventType, RuntimeRunStatus
 from backend.runtime.sqlite_store import SQLiteRuntimeStore
+
+
+def test_single_control_output_is_a_valid_strict_json_schema():
+    schema = AgentOutputSchema(
+        SingleControlOutput, strict_json_schema=True
+    ).json_schema()
+
+    def assert_strict(value):
+        if isinstance(value, dict):
+            if value.get("type") == "object":
+                assert value.get("additionalProperties") is False
+            for child in value.values():
+                assert_strict(child)
+        elif isinstance(value, list):
+            for child in value:
+                assert_strict(child)
+
+    assert_strict(schema)
 
 
 def test_ss30_materializes_four_fair_configurations():

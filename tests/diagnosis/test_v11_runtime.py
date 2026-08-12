@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import httpx
 import openai
 import pytest
-from agents import FunctionTool, Model, ModelResponse, ModelSettings, Usage
+from agents import AgentOutputSchema, FunctionTool, Model, ModelResponse, ModelSettings, Usage
 from openai.types.responses import (
     ResponseFunctionToolCall,
     ResponseOutputMessage,
@@ -38,6 +38,9 @@ from backend.diagnosis.openai_compatible_model import (
 )
 from backend.diagnosis.openai_model import OFFICIAL_OPENAI_BASE_URL
 from backend.diagnosis.v11_runtime import (
+    CriticOutput,
+    InvestigatorOutput,
+    LeadAdjudicationOutput,
     LeadPlanningOutput,
     V11Runtime,
     V11RuntimeContractError,
@@ -94,6 +97,31 @@ from backend.tools.provider_tools import (
     current_investigation_scope,
 )
 from backend.tools.registry import agent_manifest_hash
+
+
+@pytest.mark.parametrize(
+    "output_type",
+    [
+        LeadPlanningOutput,
+        InvestigatorOutput,
+        CriticOutput,
+        LeadAdjudicationOutput,
+    ],
+)
+def test_v11_model_output_types_are_valid_strict_json_schemas(output_type):
+    schema = AgentOutputSchema(output_type, strict_json_schema=True).json_schema()
+
+    def assert_strict(value):
+        if isinstance(value, dict):
+            if value.get("type") == "object":
+                assert value.get("additionalProperties") is False
+            for child in value.values():
+                assert_strict(child)
+        elif isinstance(value, list):
+            for child in value:
+                assert_strict(child)
+
+    assert_strict(schema)
 
 
 def _event() -> IncidentEvent:
