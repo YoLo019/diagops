@@ -481,6 +481,33 @@ def test_v11_compatible_tuple_requires_certification(monkeypatch, tmp_path) -> N
     assert [item.id for item in container.repository.list()] == ["inv-api-compat"]
 
 
+def test_v11_legacy_deepseek_provider_requires_certified_compatible_path(
+    monkeypatch,
+) -> None:
+    from backend.domain.multi_agent import ModelProvider
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "local-secret")
+    container = reset_container(
+        AppSettings(
+            storage=StorageSettings(url="memory://"),
+            agents=AgentsSettings(
+                enabled=True,
+                provider=ModelProvider.DEEPSEEK,
+                model="deepseek-v4-pro",
+            ),
+        )
+    )
+    container.repository.save(_record("inv-api-deepseek"))
+
+    with pytest.raises(RuntimeError, match="certified openai_compatible"):
+        container.create_runtime_run(
+            "inv-api-deepseek",
+            strategy=InvestigationStrategy.ADAPTIVE,
+            run_reason=RuntimeRunReason.INITIAL,
+            execution_contract_version=ExecutionContractVersion.V11,
+        )
+
+
 def test_v11_certified_compatible_tuple_freezes_endpoint_identity(
     monkeypatch, tmp_path
 ) -> None:
@@ -494,6 +521,10 @@ def test_v11_certified_compatible_tuple_freezes_endpoint_identity(
     )
 
     container = _compatible_container(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "backend.services.container.validate_capability_for_prediction",
+        lambda *_args, **_kwargs: None,
+    )
     container.repository.save(_record("inv-api-certified"))
     identity = endpoint_id("http://127.0.0.1:8000/v1")
     artifact_path = write_capability_artifact(
@@ -532,4 +563,60 @@ def test_v11_certified_compatible_tuple_freezes_endpoint_identity(
     assert run.execution_contract["capability_artifact_hash"] == artifact_hash
     assert run.execution_contract["api_mode"] == "chat_completions"
     assert "127.0.0.1" not in json.dumps(run.execution_contract)
+
+
+def test_v11_run_binds_latest_certified_transport_atomically(
+    monkeypatch, tmp_path
+) -> None:
+    from backend.config.settings import endpoint_id
+    from backend.services.model_capability import (
+        REQUIRED_CONTRACTS,
+        ModelCapabilityArtifact,
+        capability_manifest_hash,
+        current_execution_environment,
+        write_capability_artifact,
+    )
+
+    container = _compatible_container(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "backend.services.container.validate_capability_for_prediction",
+        lambda *_args, **_kwargs: None,
+    )
+    container.repository.save(_record("inv-api-strict-transport"))
+    identity = endpoint_id("http://127.0.0.1:8000/v1")
+    write_capability_artifact(
+        tmp_path,
+        ModelCapabilityArtifact(
+            provider="openai_compatible",
+            model="compat-model",
+            structured_output_transport="strict_output_tool",
+            endpoint_id=identity,
+            adapter_version="openai-compatible-adapter-v2",
+            openai_sdk_version="1.0.0",
+            agents_sdk_version="0.18.1",
+            tested_parallelism=3,
+            capability_manifest_hash=capability_manifest_hash(),
+            required_contracts=REQUIRED_CONTRACTS,
+            code_revision="a" * 40,
+            source_manifest_hash="b" * 64,
+            execution_environment=current_execution_environment(),
+            tested_at=datetime(2026, 8, 7, 13, 0, tzinfo=UTC),
+            result="passed",
+            observations=[],
+        ),
+    )
+
+    run = container.create_runtime_run(
+        "inv-api-strict-transport",
+        strategy=InvestigationStrategy.ADAPTIVE,
+        run_reason=RuntimeRunReason.INITIAL,
+        execution_contract_version=ExecutionContractVersion.V11,
+    )
+
+    assert run.execution_contract["capability_identity"][
+        "structured_output_transport"
+    ] == "strict_output_tool"
+    assert container.orchestrator.v11_runtime.model.structured_output_transport == (
+        "strict_output_tool"
+    )
 

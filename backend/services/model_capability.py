@@ -125,6 +125,20 @@ _STRICT_OUTPUT_TOOL = {
         },
     },
 }
+_STRICT_EVIDENCE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "read_logs",
+        "description": "Read log evidence. Encode arguments in payload_json.",
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {"payload_json": {"type": "string"}},
+            "required": ["payload_json"],
+            "additionalProperties": False,
+        },
+    },
+}
 _READ_LOGS_TOOL = {
     "type": "function",
     "function": {
@@ -417,32 +431,78 @@ async def _probe_capabilities(
         return isinstance(content, str) and json.loads(content) == _STRICT_OK_RESULT
 
     async def strict_output_tool() -> bool:
-        response = await client.chat.completions.create(
+        first = await client.chat.completions.create(
             model=model,
             messages=[
                 {
                     "role": "user",
                     "content": (
-                        "Call submit_structured_output with payload_json containing "
-                        "the JSON object {\"ok\": true}."
+                        "First call read_logs with payload_json containing "
+                        "{\"reason\": \"certify\"}. Do not submit the final result yet."
                     ),
                 }
             ],
-            tools=[_STRICT_OUTPUT_TOOL],
+            tools=[_STRICT_EVIDENCE_TOOL, _STRICT_OUTPUT_TOOL],
             tool_choice="required",
             max_tokens=64,
         )
-        if not response.choices:
+        if not first.choices:
             return False
-        calls = response.choices[0].message.tool_calls or []
+        first_message = first.choices[0].message
+        evidence_calls = [
+            call
+            for call in (first_message.tool_calls or [])
+            if call.function and call.function.name == "read_logs"
+        ]
+        if not evidence_calls or json.loads(
+            json.loads(evidence_calls[0].function.arguments)["payload_json"]
+        ) != {"reason": "certify"}:
+            return False
+        messages = [
+            {
+                "role": "user",
+                "content": (
+                    "First call read_logs with payload_json containing "
+                    "{\"reason\": \"certify\"}. Do not submit the final result yet."
+                ),
+            },
+            {
+                "role": "assistant",
+                "content": first_message.content,
+                "tool_calls": [call.model_dump() for call in evidence_calls],
+            },
+            *(
+                {
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "content": "bounded log evidence",
+                }
+                for call in evidence_calls
+            ),
+            {
+                "role": "user",
+                "content": (
+                    "Now call submit_structured_output with payload_json containing "
+                    "the JSON object {\"ok\": true}."
+                ),
+            },
+        ]
+        second = await client.chat.completions.create(
+            model=model,
+            messages=messages,
+            tools=[_STRICT_EVIDENCE_TOOL, _STRICT_OUTPUT_TOOL],
+            tool_choice="required",
+            max_tokens=64,
+        )
+        if not second.choices:
+            return False
+        final_calls = second.choices[0].message.tool_calls or []
         return any(
             call.function
             and call.function.name == "submit_structured_output"
-            and json.loads(
-                json.loads(call.function.arguments)["payload_json"]
-            )
+            and json.loads(json.loads(call.function.arguments)["payload_json"])
             == {"ok": True}
-            for call in calls
+            for call in final_calls
         )
 
     async def tool_calls() -> bool:

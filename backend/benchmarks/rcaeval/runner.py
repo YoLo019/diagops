@@ -675,6 +675,7 @@ def build_execution_contract(
             "provider": capability.provider,
             "model": capability.model,
             "api_mode": capability.api_mode,
+            "structured_output_transport": capability.structured_output_transport,
             "endpoint_id": capability.endpoint_id,
             "artifact_hash": capability.artifact_hash,
         },

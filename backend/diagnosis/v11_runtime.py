@@ -335,7 +335,23 @@ class _V11BudgetedModel(Model):
         reservation = await self._runtime._reserve_model_budget(
             model_settings.max_tokens,
             kwargs.get("system_instructions") or "",
-            {"input": kwargs.get("input")},
+            {
+                "input": kwargs.get("input"),
+                "tools": [
+                    {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "schema": tool.params_json_schema,
+                    }
+                    for tool in kwargs.get("tools", [])
+                    if isinstance(tool, FunctionTool)
+                ],
+                "output_schema": (
+                    kwargs["output_schema"].json_schema()
+                    if kwargs.get("output_schema") is not None
+                    else None
+                ),
+            },
             reservation_id=reservation_id,
             logical_call_id=self._logical_call_id,
             execution_id=self._execution_id,
@@ -626,6 +642,9 @@ class V11Runtime:
                 runtime.model_name,
                 max_retries=0,
             )
+            runtime.model.structured_output_transport = runtime._execution_contract[
+                "capability_identity"
+            ].get("structured_output_transport", "native_json_schema")
         limits = runtime._execution_contract["limits"]
         runtime.max_turns = int(limits["max_turns"])
         runtime.max_investigators = int(limits["max_investigators"])
@@ -1084,6 +1103,15 @@ class V11Runtime:
             contract["capability_artifact_hash"],
         ):
             raise V11RuntimeContractError("V11 capability identity projection mismatch")
+        if (
+            expected_provider == ModelProvider.OPENAI_COMPATIBLE.value
+            and isinstance(self.model, OpenAICompatibleChatCompletionsModel)
+            and capability.get("structured_output_transport")
+            not in {"native_json_schema", "strict_output_tool"}
+        ):
+            raise V11RuntimeContractError(
+                "V11 structured output transport is invalid"
+            )
         limits = contract["limits"]
         if int(limits["max_turns"]) < 1 or int(limits["max_tool_calls_per_specialist"]) < 1:
             raise V11RuntimeContractError("V11 actor limit is out of bounds")

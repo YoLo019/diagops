@@ -67,6 +67,10 @@ OB30 `single_intended` 生成了 30 条冻结预测，但全部在第一次模�
 
 原生探针在同一 Chat Completions 请求中同时携带 strict function tool 与 `response_format.type="json_schema"`。工具输出探针强制调用 `submit_structured_output`，其参数只有必填字符串 `payload_json`、`additionalProperties: false` 且 `strict: true`。认证工件记录选中的 `structured_output_transport`，所有运行入口必须从该工件配置 adapter。探针只记录通过状态和脱敏后的错误类别，不持久化 prompt、响应正文或 endpoint URL。
 
+`strict_output_tool` 探针必须走完整两轮：第一轮在多个 strict envelope 工具中调用诊断工具，第二轮带回 tool result 后调用最终输出工具。V11 不再允许旧 `deepseek` provider 绕过认证；DeepSeek 通过 `openai_compatible` 配置其 strict function-calling endpoint 后参与相同认证。建 Run 时对同一个最新工件完成代码、SDK、adapter、manifest、环境与并发度校验，并把其 hash 和 transport 一起冻结，避免运行 adapter 与契约脱节。
+
+冻结 token 预算的输入估算包含 system/input、所有工具说明与参数 schema，以及原生 output schema。严格外壳将完整 schema 写入说明时不会成为预算外隐藏输入。
+
 能力清单与 required contracts 的变化会自然改变 manifest hash，使旧认证工件失效；修复提交后必须重新认证。
 
 ### 预测完整性

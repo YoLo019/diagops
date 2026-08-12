@@ -62,7 +62,10 @@ from backend.runtime.coordinator import RuntimeCoordinator
 from backend.runtime.phase_executor import DiagnosisPhaseExecutor
 from backend.runtime.telemetry import RuntimeTelemetry
 from backend.runtime.writer import RuntimeWriter
-from backend.services.model_capability import latest_capability_artifact
+from backend.services.model_capability import (
+    latest_capability_artifact,
+    validate_capability_for_prediction,
+)
 from backend.services.v11_projection import ensure_v11_projection_owner
 from backend.tools.provider_tools import build_provider_tool_registry
 from backend.tools.registry import agent_manifest_hash
@@ -388,6 +391,13 @@ class OpenRcaDiagnosisRunner:
                 "provider": provider,
                 "model": model_name,
                 "api_mode": api_mode,
+                "structured_output_transport": (
+                    self.model.structured_output_transport
+                    if isinstance(
+                        self.model, OpenAICompatibleChatCompletionsModel
+                    )
+                    else "native_json_schema"
+                ),
                 "endpoint_id": endpoint,
                 "artifact_hash": capability_hash,
             },
@@ -443,6 +453,14 @@ class OpenRcaDiagnosisRunner:
             raise ValueError(
                 "OpenRCA V11 compatible endpoint lacks a passed capability artifact"
             )
+        validate_capability_for_prediction(
+            artifact,
+            provider=ModelProvider.OPENAI_COMPATIBLE.value,
+            model=model_name,
+            endpoint_id_value=identity,
+            expected_parallelism=3,
+            repository_root=Path(__file__).resolve().parents[3],
+        )
         self.model.structured_output_transport = artifact.structured_output_transport
         return identity, artifact.artifact_hash
 

@@ -300,6 +300,66 @@ async def test_strict_output_tool_transport_completes_real_sdk_tool_loop(monkeyp
     assert FakeDelegate.calls == 2
 
 
+@pytest.mark.anyio
+async def test_budget_reservation_counts_strict_transport_tool_schemas(monkeypatch):
+    captured = {}
+
+    async def fake_reserve(requested_budget, prompt, context, **_kwargs):
+        captured.update(
+            requested_budget=requested_budget,
+            prompt=prompt,
+            context=context,
+        )
+        return 100, 900, 1000
+
+    async def fake_settle(*_args, **_kwargs):
+        return None
+
+    class Delegate(Model):
+        async def get_response(self, *_args, **_kwargs):
+            return ModelResponse(output=[], usage=Usage(), response_id=None)
+
+        async def stream_response(self, *_args, **_kwargs):
+            if False:
+                yield None
+
+    runtime = V11Runtime(model=Delegate(), token_budget=1000)
+    monkeypatch.setattr(runtime, "_reserve_model_budget", fake_reserve)
+    monkeypatch.setattr(runtime, "_settle_model_budget", fake_settle)
+    schema_heavy_tool = FunctionTool(
+        name="read_logs",
+        description="Read logs.",
+        params_json_schema={
+            "type": "object",
+            "properties": {"reason": {"type": "string", "maxLength": 240}},
+            "required": ["reason"],
+            "additionalProperties": False,
+        },
+        on_invoke_tool=lambda *_args: None,
+        strict_json_schema=True,
+    )
+    output_schema = AgentOutputSchema(LeadPlanningOutput)
+    budgeted = _V11BudgetedModel(Delegate(), runtime)
+
+    await budgeted.get_response(
+        system_instructions="plan",
+        input="incident",
+        model_settings=ModelSettings(max_tokens=1000),
+        tools=[schema_heavy_tool],
+        output_schema=output_schema,
+        handoffs=[],
+        tracing=None,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+
+    assert captured["context"]["tools"][0]["schema"] == (
+        schema_heavy_tool.params_json_schema
+    )
+    assert captured["context"]["output_schema"] == output_schema.json_schema()
+
+
 def _event() -> IncidentEvent:
     return IncidentEvent(
         source=IncidentSource.MANUAL,
@@ -375,6 +435,7 @@ def _complete_contract(
                 "provider": model_provider,
                 "model": model_name,
                 "api_mode": api_mode,
+                "structured_output_transport": "native_json_schema",
                 "endpoint_id": frozen_endpoint_id,
                 "artifact_hash": artifact_hash,
             },

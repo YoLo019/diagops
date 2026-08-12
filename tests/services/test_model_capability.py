@@ -144,8 +144,19 @@ class _FakeMessage:
 
 
 class _FakeToolCall:
-    def __init__(self, name, arguments="{}"):
+    def __init__(self, name, arguments="{}", call_id="call-1"):
+        self.id = call_id
         self.function = type("Fn", (), {"name": name, "arguments": arguments})()
+
+    def model_dump(self):
+        return {
+            "id": self.id,
+            "type": "function",
+            "function": {
+                "name": self.function.name,
+                "arguments": self.function.arguments,
+            },
+        }
 
 
 class _FakeChoice:
@@ -196,10 +207,26 @@ class _FakeCompletions:
         if response_format:
             return _FakeResponse(_FakeMessage(content='{"ok": true}'))
         if kwargs.get("tools"):
-            function_name = kwargs["tools"][0]["function"]["name"]
-            if function_name == "submit_structured_output":
+            function_names = {
+                tool["function"]["name"] for tool in kwargs["tools"]
+            }
+            if "submit_structured_output" in function_names:
                 if not self._supports_strict_output_tool:
                     return _FakeResponse(_FakeMessage(tool_calls=None))
+                is_follow_up = any(
+                    message.get("role") == "tool" for message in kwargs["messages"]
+                )
+                if not is_follow_up:
+                    return _FakeResponse(
+                        _FakeMessage(
+                            tool_calls=[
+                                _FakeToolCall(
+                                    "read_logs",
+                                    '{"payload_json":"{\\"reason\\":\\"certify\\"}"}',
+                                )
+                            ]
+                        )
+                    )
                 return _FakeResponse(
                     _FakeMessage(
                         tool_calls=[
@@ -281,10 +308,30 @@ async def test_certify_selects_strict_output_tool_when_native_schema_is_unavaila
         request
         for request in completions.requests
         if request.get("tools")
-        and request["tools"][0]["function"]["name"] == "submit_structured_output"
+        and any(
+            tool["function"]["name"] == "submit_structured_output"
+            for tool in request["tools"]
+        )
     )
-    function = strict_tool_request["tools"][0]["function"]
+    function = next(
+        tool["function"]
+        for tool in strict_tool_request["tools"]
+        if tool["function"]["name"] == "submit_structured_output"
+    )
     assert strict_tool_request["tool_choice"] == "required"
+    assert {tool["function"]["name"] for tool in strict_tool_request["tools"]} == {
+        "read_logs",
+        "submit_structured_output",
+    }
+    assert any(
+        any(message.get("role") == "tool" for message in request["messages"])
+        for request in completions.requests
+        if request.get("tools")
+        and any(
+            tool["function"]["name"] == "submit_structured_output"
+            for tool in request["tools"]
+        )
+    )
     assert function["strict"] is True
     assert function["parameters"]["additionalProperties"] is False
     assert set(function["parameters"]["properties"]) == {"payload_json"}

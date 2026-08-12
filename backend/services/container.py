@@ -21,7 +21,10 @@ from backend.diagnosis.agents_runtime import AgentsRcaRuntime
 from backend.diagnosis.coordinator import DiagnosisCoordinator
 from backend.diagnosis.deepseek_model import create_deepseek_model
 from backend.diagnosis.diagnostic_skills import skill_catalog_identity
-from backend.diagnosis.openai_compatible_model import create_openai_compatible_model
+from backend.diagnosis.openai_compatible_model import (
+    OpenAICompatibleChatCompletionsModel,
+    create_openai_compatible_model,
+)
 from backend.diagnosis.openai_model import OFFICIAL_OPENAI_BASE_URL
 from backend.diagnosis.orchestrator import DiagnosisOrchestrator
 from backend.diagnosis.v11_runtime import V11Runtime
@@ -56,7 +59,10 @@ from backend.runtime.store import (
 from backend.runtime.telemetry import RuntimeTelemetry
 from backend.runtime.writer import RuntimeWriter
 from backend.safety.redaction import redact_model
-from backend.services.model_capability import latest_capability_artifact
+from backend.services.model_capability import (
+    latest_capability_artifact,
+    validate_capability_for_prediction,
+)
 from backend.tools.provider_tools import (
     VerifiedMemoryLookup,
     build_provider_tool_registry,
@@ -99,14 +105,6 @@ class AppContainer:
                     )
                 elif provider == ModelProvider.OPENAI_COMPATIBLE:
                     compatible = self.settings.agents.openai_compatible
-                    artifact = None
-                    if compatible.base_url and agent_model:
-                        artifact = latest_capability_artifact(
-                            self._capability_directory(),
-                            provider=ModelProvider.OPENAI_COMPATIBLE.value,
-                            model=agent_model,
-                            endpoint_id_value=endpoint_id(compatible.base_url),
-                        )
                     # generic endpoint 的凭证只允许 DIAGOPS_AGENTS_API_KEY，
                     # 绝不回退到官方 provider 的环境变量。
                     agent_model = create_openai_compatible_model(
@@ -115,11 +113,6 @@ class AppContainer:
                         compatible.base_url,
                         timeout_seconds=float(compatible.timeout_seconds),
                         max_retries=compatible.max_retries,
-                        structured_output_transport=(
-                            artifact.structured_output_transport
-                            if artifact is not None
-                            else "native_json_schema"
-                        ),
                     )
                 agents_runtime = AgentsRcaRuntime(
                     model=agent_model,
@@ -457,6 +450,17 @@ class AppContainer:
                     ),
                     "model": effective_model,
                     "api_mode": self._api_mode_for(effective_provider),
+                    "structured_output_transport": (
+                        self.orchestrator.v11_runtime.model.structured_output_transport
+                        if (
+                            effective_provider == ModelProvider.OPENAI_COMPATIBLE
+                            and isinstance(
+                                self.orchestrator.v11_runtime.model,
+                                OpenAICompatibleChatCompletionsModel,
+                            )
+                        )
+                        else "native_json_schema"
+                    ),
                     "endpoint_id": endpoint_identity,
                     "artifact_hash": capability_hash,
                 },
@@ -518,6 +522,10 @@ class AppContainer:
         """返回 admission 固定的 endpoint/capability 身份。"""
         if provider == ModelProvider.OPENAI:
             return endpoint_id(OFFICIAL_OPENAI_BASE_URL), None
+        if provider == ModelProvider.DEEPSEEK:
+            raise RuntimeContractError(
+                "V11 DeepSeek requires a certified openai_compatible endpoint"
+            )
         if provider != ModelProvider.OPENAI_COMPATIBLE:
             return None, None
         base_url = self.settings.agents.openai_compatible.base_url
@@ -536,6 +544,20 @@ class AppContainer:
             raise RuntimeContractError(
                 "V11 openai_compatible endpoint lacks a passed capability artifact"
             )
+        try:
+            validate_capability_for_prediction(
+                artifact,
+                provider=ModelProvider.OPENAI_COMPATIBLE.value,
+                model=model_name,
+                endpoint_id_value=identity,
+                expected_parallelism=self.settings.runtime.max_parallel_steps_per_run,
+                repository_root=Path(__file__).resolve().parents[2],
+            )
+        except ValueError as exc:
+            raise RuntimeContractError(str(exc)) from exc
+        adapter = getattr(self.orchestrator.v11_runtime, "model", None)
+        if isinstance(adapter, OpenAICompatibleChatCompletionsModel):
+            adapter.structured_output_transport = artifact.structured_output_transport
         return identity, artifact.artifact_hash
 
     @staticmethod
