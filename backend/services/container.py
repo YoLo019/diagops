@@ -458,6 +458,13 @@ class AppContainer:
                     ),
                     "tool_timeout_seconds": self.settings.agents.tool_timeout_seconds,
                 },
+                "topology": {
+                    "mode": "multi_lead_investigators_critic",
+                    "one_context": False,
+                    "critic": True,
+                    "subagent": False,
+                    "hidden_model_calls": False,
+                },
                 "retry_policy": {
                     "max_retries": 1,
                     "retryable_categories": ["transport", "rate_limit"],

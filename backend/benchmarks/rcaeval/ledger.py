@@ -8,7 +8,9 @@ converges an expired lease to FAILED_NON_RESUMABLE before reauthorization.
 
 from __future__ import annotations
 
+import functools
 import hashlib
+import hmac
 import json
 import os
 import secrets
@@ -19,6 +21,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
+
+from backend.services.source_identity import reject_reparse_path
 
 
 class LedgerState(StrEnum):
@@ -59,6 +63,10 @@ class CustodianRootManifest:
     manifest_hash: str
 
 
+SEAL_KEY_FILENAME = "pair-ledger-seal.key"
+SEAL_ANCHOR_FILENAME = "pair-ledger-seal.anchor"
+
+
 def create_custodian_manifest(
     canonical_root: Path,
     *,
@@ -68,9 +76,14 @@ def create_custodian_manifest(
     """Create or verify the one canonical root anchor for a prepared dataset."""
     if not _valid_hash(runtime_manifest_hash) or not _valid_hash(label_manifest_hash):
         raise ValueError("custodian manifest identities must be sha256")
-    root = _canonical_path(canonical_root)
-    root_path = Path(root)
+    raw_root = Path(canonical_root).expanduser()
+    # H5: 任何 resolve/open 前先拒绝 root、父目录与固定文件的 reparse/symlink。
+    reject_reparse_path(raw_root, "custodian root")
+    root_path = raw_root.resolve()
     root_path.mkdir(parents=True, exist_ok=True)
+    # M2: manifest 绑定最终句柄拼写；别名/junction/小写盘符一律拒绝。
+    root = canonical_locator(root_path)
+    root_path = Path(root)
     path = root_path / "custodian-manifest.json"
     payload = {
         "schema_version": "rcaeval-custodian-root-v1",
@@ -90,7 +103,50 @@ def create_custodian_manifest(
             raise ValueError(
                 "custodian manifest already exists with a different identity"
             ) from exc
+    _ensure_seal_key(root_path)
     return path
+
+
+def _ensure_seal_key(root_path: Path) -> Path:
+    """Create the custodian-owned HMAC key once; never overwrite it."""
+    path = root_path / SEAL_KEY_FILENAME
+    try:
+        with path.open("x", encoding="utf-8", newline="") as handle:
+            handle.write(secrets.token_hex(32) + "\n")
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    except FileExistsError:
+        _read_seal_key(path)
+    return path
+
+
+def _read_seal_key(path: Path) -> bytes:
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise ValueError("custodian seal key is unreadable") from exc
+    if len(text) != 64 or any(char not in "0123456789abcdef" for char in text):
+        raise ValueError("custodian seal key is invalid")
+    return bytes.fromhex(text)
+
+
+def _guarded_write(reason: str):
+    """写边界统一守卫：锁/异常/重试耗尽时持久化可验证 failure intent。"""
+
+    def decorator(method):
+        @functools.wraps(method)
+        def wrapper(self: CustodianPairLedger, *args, **kwargs):
+            try:
+                return method(self, *args, **kwargs)
+            except sqlite3.OperationalError as exc:
+                self._invalidate_after_write_error(reason, exc)
+                raise
+
+        return wrapper
+
+    return decorator
 
 
 class CustodianPairLedger:
@@ -122,6 +178,11 @@ class CustodianPairLedger:
             )
             if _canonical_path(self.path) != expected_path:
                 raise ValueError("ledger path is outside the canonical custodian root")
+            self._seal_key = _read_seal_key(
+                Path(self._manifest.canonical_root) / SEAL_KEY_FILENAME
+            )
+        else:
+            self._seal_key = None
 
     @classmethod
     def from_manifest(cls, manifest_path: Path) -> CustodianPairLedger:
@@ -161,6 +222,19 @@ class CustodianPairLedger:
             raise ValueError("custodian manifest is required")
         return self.canonical_root / "pair-ledger-failure-intent.json"
 
+    @property
+    def seal_key_path(self) -> Path:
+        if self._manifest is None:
+            raise ValueError("custodian manifest is required")
+        return self.canonical_root / SEAL_KEY_FILENAME
+
+    @property
+    def seal_anchor_path(self) -> Path:
+        if self._manifest is None:
+            raise ValueError("custodian manifest is required")
+        return self.canonical_root / SEAL_ANCHOR_FILENAME
+
+    @_guarded_write("pair ledger initialization failed or was interrupted")
     def initialize(
         self,
         *,
@@ -367,6 +441,7 @@ class CustodianPairLedger:
                     )
             self._commit(connection, "initialize")
 
+    @_guarded_write("prediction set binding failed or was interrupted")
     def bind_prediction_set_hash(self, prediction_set_hash: str) -> None:
         """Bind the exact frozen prediction-root hash once both sides exist."""
         if not _valid_hash(prediction_set_hash):
@@ -418,6 +493,7 @@ class CustodianPairLedger:
             )
             self._commit(connection, "bind_prediction_set")
 
+    @_guarded_write("prediction freeze intent failed or was interrupted")
     def prepare_prediction_set_freeze(
         self, *, prediction_set_hash: str, root_locator: str
     ) -> None:
@@ -454,6 +530,7 @@ class CustodianPairLedger:
             )
             self._commit(connection, "prepare_freeze")
 
+    @_guarded_write("pre-label reservation failed or was interrupted")
     def reserve_evaluation(
         self, *, audit_export_hash: str, manual_audit_hash: str
     ) -> PrelabelReservation:
@@ -500,6 +577,7 @@ class CustodianPairLedger:
                 expires_at,
             )
 
+    @_guarded_write("label open failed or was interrupted")
     def reserve_label_open(
         self,
         *,
@@ -568,6 +646,7 @@ class CustodianPairLedger:
         audit_export_hash: str,
         manual_audit_hash: str,
         lease_token: str,
+        expected_label_manifest_hash: str,
     ) -> None:
         """Read-only child-process fence immediately before labels are read."""
         with self._connection() as connection:
@@ -590,7 +669,15 @@ class CustodianPairLedger:
                 manual_audit_hash,
             ):
                 raise ValueError("custodian ledger audit identity mismatch")
+        # H1: label 身份只信固定 custodian manifest，调用方参数必须与其一致；
+        # 不一致在首次读取/解析 label、构造结果、写 artifact 之前 fail closed。
+        if (
+            not _valid_hash(expected_label_manifest_hash)
+            or expected_label_manifest_hash != self._manifest.label_manifest_hash
+        ):
+            raise ValueError("label manifest identity differs from custodian manifest")
 
+    @_guarded_write("custodian lease heartbeat failed or was interrupted")
     def heartbeat(
         self, lease_token: str, *, now: float | datetime | None = None
     ) -> float:
@@ -615,22 +702,8 @@ class CustodianPairLedger:
             self._commit(connection, "heartbeat")
             return expires_at
 
+    @_guarded_write("label-side evaluation completion failed or was interrupted")
     def mark_evaluation_completed(
-        self, evaluation_artifact_hash: str, *, lease_token: str
-    ) -> None:
-        try:
-            self._mark_evaluation_completed(
-                evaluation_artifact_hash,
-                lease_token=lease_token,
-            )
-        except sqlite3.OperationalError as exc:
-            self._invalidate_after_write_error(
-                "label-side evaluation completion failed or was interrupted",
-                exc,
-            )
-            raise
-
-    def _mark_evaluation_completed(
         self, evaluation_artifact_hash: str, *, lease_token: str
     ) -> None:
         if not _valid_hash(evaluation_artifact_hash):
@@ -651,6 +724,7 @@ class CustodianPairLedger:
             )
             self._commit(connection, "complete_evaluation")
 
+    @_guarded_write("prediction side start failed or was interrupted")
     def record_side_started(self, side: str, output_dir: str) -> str:
         with self._connection() as connection:
             _begin_immediate(connection, self.SQLITE_BUSY_TIMEOUT_SECONDS)
@@ -677,7 +751,8 @@ class CustodianPairLedger:
                 raise ValueError("prediction side already attempted; pair is non-resumable")
             # 调用方 locator 会作为身份字段持久化；若按当前 cwd 解析相对路径，
             # ledger 就会依赖进程 cwd，并允许同一 side 以另一种 custodian 拼写重放。
-            output_locator = canonical_locator(Path(output_dir).expanduser())
+            # 输出目录此时尚未创建，因此绑定最近存在祖先的最终句柄拼写。
+            output_locator = canonical_creation_locator(Path(output_dir).expanduser())
             output_volume = volume_identity(Path(output_locator))
             token = secrets.token_urlsafe(32)
             expires_at = _now() + float(row["lease_seconds"])
@@ -700,19 +775,8 @@ class CustodianPairLedger:
             self._commit(connection, "start_prediction_side")
             return token
 
+    @_guarded_write("prediction side completion failed or was interrupted")
     def record_side_completed(
-        self, side: str, bundle_hash: str, *, lease_token: str
-    ) -> None:
-        try:
-            self._record_side_completed(side, bundle_hash, lease_token=lease_token)
-        except sqlite3.OperationalError as exc:
-            self._invalidate_after_write_error(
-                "prediction side completion failed or was interrupted",
-                exc,
-            )
-            raise
-
-    def _record_side_completed(
         self, side: str, bundle_hash: str, *, lease_token: str
     ) -> None:
         with self._connection() as connection:
@@ -770,6 +834,7 @@ class CustodianPairLedger:
             self._fail_pair(connection, reason)
             self._commit(connection, "invalidate_pair")
 
+    @_guarded_write("custodian recovery failed or was interrupted")
     def recover_expired(
         self, *, now: float | datetime | None = None
     ) -> LedgerState:
@@ -788,12 +853,26 @@ class CustodianPairLedger:
             self._commit(connection, "recover_expired")
             return LedgerState(row["state"])
 
-    def reconcile_pending_failure(self) -> LedgerState:
-        """Custodian startup recovery entry for durable completion failures."""
+    @_guarded_write("custodian reconcile failed or was interrupted")
+    def reconcile_pending_failure(
+        self, *, now: float | datetime | None = None
+    ) -> LedgerState:
+        """Unified custodian startup/restart reconcile.
+
+        Converges the durable failure intent (via the connection boundary) and
+        every expired in-flight lease in one idempotent entry, so a restart
+        never depends on a future business command to reach a verifiable state.
+        """
+        current = _coerce_now(now)
         with self._connection() as connection:
+            _begin_immediate(connection, self.SQLITE_BUSY_TIMEOUT_SECONDS)
             row = self._require_pair(connection)
+            row = self._recover_if_expired(connection, row, now=current)
+            self._require_authorized_lineage(row)
+            self._commit(connection, "reconcile_pending_failure")
             return LedgerState(row["state"])
 
+    @_guarded_write("pair reauthorization failed or was interrupted")
     def reauthorize(
         self, owner_token: str, *, authorized_evaluation_identity: str
     ) -> None:
@@ -916,8 +995,27 @@ class CustodianPairLedger:
         try:
             self.invalidate_pair(reason)
         except BaseException as cleanup_error:
-            self._write_failure_intent(reason)
+            # pair row 尚不存在（首次 initialize 失败）时没有可收敛的状态；
+            # 写 intent 反而会让后续合法 initialize 永久 fail closed。
+            if self._pair_row_exists():
+                self._write_failure_intent(reason)
             raise original from cleanup_error
+
+    def _pair_row_exists(self) -> bool:
+        try:
+            connection = sqlite3.connect(self.path, timeout=0)
+            try:
+                return (
+                    connection.execute(
+                        "SELECT 1 FROM pair_ledger WHERE id = 1"
+                    ).fetchone()
+                    is not None
+                )
+            finally:
+                connection.close()
+        except sqlite3.Error:
+            # 无法判定时偏向 fail-closed：持久化 intent 交由 custodian 收敛。
+            return True
 
     def _write_failure_intent(self, reason: str) -> None:
         path = self.failure_intent_path
@@ -1039,11 +1137,71 @@ class CustodianPairLedger:
         ).fetchone()
         previous_hash = "" if previous is None else str(previous[0])
         event_hash = _event_hash(event_kind, snapshot, previous_hash)
-        connection.execute(
+        cursor = connection.execute(
             "INSERT INTO ledger_events(event_kind, snapshot, prev_hash, event_hash) "
             "VALUES (?, ?, ?, ?)",
             (event_kind, snapshot, previous_hash, event_hash),
         )
+        self._append_anchor(int(cursor.lastrowid), event_hash)
+
+    def _append_anchor(self, seq: int, event_hash: str) -> None:
+        """Append the HMAC-chained external anchor entry for one sealed event."""
+        chain = self._read_anchor_chain()
+        if chain:
+            last_seq, _, previous_mac = chain[-1]
+            if last_seq != seq - 1:
+                raise ValueError("pair ledger seal anchor is not contiguous")
+        else:
+            if seq != 1:
+                raise ValueError("pair ledger seal anchor is missing")
+            previous_mac = ""
+        mac = self._anchor_mac(seq, event_hash, previous_mac)
+        line = (
+            json.dumps(
+                {"seq": seq, "event_hash": event_hash, "mac": mac},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
+        with self.seal_anchor_path.open("a", encoding="utf-8", newline="") as handle:
+            handle.write(line)
+
+    def _read_anchor_chain(self) -> list[tuple[int, str, str]]:
+        path = self.seal_anchor_path
+        if not path.is_file():
+            return []
+        chain: list[tuple[int, str, str]] = []
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            raise ValueError("pair ledger seal anchor is unreadable") from exc
+        for line in lines:
+            try:
+                payload = json.loads(line)
+            except ValueError as exc:
+                raise ValueError("pair ledger seal anchor line is invalid") from exc
+            if not isinstance(payload, dict) or set(payload) != {"seq", "event_hash", "mac"}:
+                raise ValueError("pair ledger seal anchor schema is not frozen")
+            seq = payload["seq"]
+            if not isinstance(seq, int) or isinstance(seq, bool) or seq < 1:
+                raise ValueError("pair ledger seal anchor sequence is invalid")
+            if not _valid_hash(str(payload["event_hash"])) or not _valid_hash(
+                str(payload["mac"])
+            ):
+                raise ValueError("pair ledger seal anchor hashes are invalid")
+            chain.append((seq, str(payload["event_hash"]), str(payload["mac"])))
+        return chain
+
+    def _anchor_mac(self, seq: int, event_hash: str, previous_mac: str) -> str:
+        if self._seal_key is None:
+            raise ValueError("custodian seal key is required")
+        payload = {"seq": seq, "event_hash": event_hash, "previous_mac": previous_mac}
+        return hmac.new(
+            self._seal_key,
+            _canonical_json(payload).encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
 
     def _assert_sealed(self, connection: sqlite3.Connection) -> None:
         events = connection.execute(
@@ -1069,6 +1227,19 @@ class CustodianPairLedger:
         current = _canonical_json(self._sealed_snapshot(connection))
         if events[-1]["snapshot"] != current:
             raise ValueError("pair ledger sealed state is tampered")
+        # H3: seal 可信性必须锚定在 SQLite 可变状态之外。没有有效外部 anchor
+        # （HMAC 链与事件逐条对齐）时拒绝任何形式的 seal 重建。
+        chain = self._read_anchor_chain()
+        if len(chain) != len(events):
+            raise ValueError("pair ledger seal anchor is missing or diverged")
+        previous_mac = ""
+        for event, (seq, event_hash, mac) in zip(events, chain, strict=True):
+            if seq != event["seq"] or event_hash != event["event_hash"]:
+                raise ValueError("pair ledger seal anchor diverges from event history")
+            expected = self._anchor_mac(seq, event_hash, previous_mac)
+            if not hmac.compare_digest(expected, mac):
+                raise ValueError("pair ledger seal anchor MAC is invalid")
+            previous_mac = mac
 
     @staticmethod
     def _sealed_snapshot(connection: sqlite3.Connection) -> dict[str, object]:
@@ -1116,26 +1287,53 @@ def _canonical_path(path: Path) -> str:
     return os.path.normcase(os.path.normpath(str(Path(path).expanduser().resolve(strict=False))))
 
 
-def canonical_locator(path: Path) -> str:
+def _require_locator_form(path: Path) -> Path:
     raw = Path(path).expanduser()
     if not raw.is_absolute() or any(part in {".", ".."} for part in raw.parts):
         raise ValueError("ledger locator must be absolute and traversal-free")
-    resolved = raw.resolve(strict=False)
+    if os.path.normpath(str(raw)).startswith("\\\\"):
+        raise ValueError("ledger locator rejects UNC paths")
+    return raw
+
+
+def canonical_locator(path: Path) -> str:
+    """Bind the final on-disk handle spelling of an existing path.
+
+    拒绝 UNC、drive/大小写/8.3 别名、junction/symlink/reparse 别名与不存在的
+    路径；正常拼写的 Windows/POSIX 路径原样通过。
+    """
+    raw = _require_locator_form(path)
+    reject_reparse_path(raw, "ledger locator")
+    try:
+        resolved = raw.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("ledger locator path does not exist") from exc
     raw_text = os.path.normpath(str(raw))
     resolved_text = os.path.normpath(str(resolved))
-    if os.name == "nt":
-        raw_text = raw_text[:2].upper() + raw_text[2:] if len(raw_text) >= 2 else raw_text
-        resolved_text = (
-            resolved_text[:2].upper() + resolved_text[2:]
-            if len(resolved_text) >= 2
-            else resolved_text
-        )
+    if resolved_text.startswith("\\\\"):
+        raise ValueError("ledger locator rejects UNC paths")
     if raw_text != resolved_text:
         raise ValueError("ledger locator is not canonical")
     return resolved_text
 
 
-_canonical_locator = canonical_locator
+def canonical_creation_locator(path: Path) -> str:
+    """为尚未创建的输出路径定位：尾部可不存在，最近存在祖先必须严格绑定。"""
+    raw = _require_locator_form(path)
+    if raw.exists():
+        return canonical_locator(raw)
+    ancestor = raw
+    tail: list[str] = []
+    while not ancestor.exists():
+        tail.insert(0, ancestor.name)
+        ancestor = ancestor.parent
+    if not ancestor.is_dir():
+        raise ValueError("ledger locator ancestor is not a directory")
+    base = canonical_locator(ancestor)
+    return os.path.normpath(os.path.join(base, *tail))
+
+
+_canonical_locator = canonical_creation_locator
 
 
 def volume_identity(path: Path) -> str:
@@ -1167,7 +1365,14 @@ def _event_hash(event_kind: str, snapshot: str, previous_hash: str) -> str:
 
 
 def _load_custodian_manifest(path: Path) -> CustodianRootManifest:
-    manifest_path = Path(path).resolve()
+    # H5: 任何 resolve/open 之前，先拒绝 root、所有父目录与固定文件上的
+    # symlink/junction/reparse；Windows 真实 junction 与 POSIX symlink 都 fail-closed。
+    raw_path = Path(path).expanduser()
+    reject_reparse_path(raw_path, "custodian manifest")
+    try:
+        manifest_path = raw_path.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("custodian manifest is unreadable") from exc
     try:
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError) as exc:
@@ -1186,14 +1391,25 @@ def _load_custodian_manifest(path: Path) -> CustodianRootManifest:
         raise ValueError("custodian manifest schema is not frozen")
     if payload["schema_version"] != "rcaeval-custodian-root-v1":
         raise ValueError("custodian manifest schema is not frozen")
-    root = _canonical_path(Path(str(payload["canonical_root"])))
-    if root != str(payload["canonical_root"]):
+    stored_root = str(payload["canonical_root"])
+    root_raw = Path(stored_root)
+    if not root_raw.is_absolute() or os.path.normpath(stored_root) != stored_root:
         raise ValueError("custodian manifest canonical root is not normalized")
+    reject_reparse_path(root_raw, "custodian root")
+    try:
+        root = os.path.normpath(str(root_raw.resolve(strict=True)))
+    except OSError as exc:
+        raise ValueError("custodian manifest canonical root is unreadable") from exc
+    if root != stored_root:
+        raise ValueError("custodian manifest canonical root is not the final spelling")
     if (
-        _canonical_path(manifest_path.parent) != root
+        os.path.normpath(str(manifest_path.parent)) != root
         or manifest_path.name != "custodian-manifest.json"
     ):
         raise ValueError("custodian manifest is not at its canonical custodian root")
+    # 固定文件的递归 entries 同样不得含 reparse/symlink。
+    for entry in sorted(Path(root).rglob("*")):
+        reject_reparse_path(entry, "custodian root entry")
     if payload["ledger_filename"] != "pair-ledger.sqlite3":
         raise ValueError("custodian ledger filename is not frozen")
     if not _valid_hash(str(payload["runtime_manifest_hash"])) or not _valid_hash(

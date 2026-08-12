@@ -1281,6 +1281,15 @@ independent M5 implementation review; M5 review status remains tracked below.
 | M5-R4-H4 | high | packaged source identity depended on runtime Git metadata | Closed locally with a build-time immutable source manifest/code digest in the production image and runtime tamper checks; package-without-Git RED→GREEN regression GREEN. Independent re-review pending. |
 | M5-R4-M1 | medium | freeze-set canonical-root validation occurred after a marker write | Closed locally by validating root and all parent reparse paths before writing and using exclusive marker creation; zero-side-effect regression GREEN. Independent re-review pending. |
 | M5-R4-M2 | medium | ledger connections used zero timeout without explicit close | Closed locally with explicit context-managed close and centralized bounded lock acquisition; handle-release and transient-lock regressions GREEN. Independent re-review pending. |
+| M5-R6-B1 | blocking | ledger seal shared the same mutable SQLite state it attested, so raw tamper plus a forged appended seal could revive a consumed label reveal | Closed locally with a trusted anchor outside the mutable database: a one-time random custodian seal key plus an append-only HMAC-chained anchor file; seal rebuild is refused without a valid chain, raw SQLite tamper/forged seal/reveal-clearing regressions fail closed on every write boundary. Independent re-review pending. |
+| M5-R6-H1 | high | evaluator child asserted label open without binding the custodian `label_manifest_hash` | Closed locally: `assert_label_open` requires the expected hash and compares it against the custodian manifest after connection close; the child passes its CLI expectation through the fence, mismatch leaves zero artifact. Independent re-review pending. |
+| M5-R6-H2 | high | evaluator child parsed bundles without independently re-verifying the frozen root | Closed locally: `verify_frozen_prediction_root` re-verifies root checksum, canonical SHA256SUMS bytes/hash, and every bundle byte before the first side effect, and bundle parsing consumes only the returned verified bytes (no verify→parse window); post-freeze replacement leaves zero scoring artifact. Independent re-review pending. |
+| M5-R6-H3 | high | `reconcile_pending_failure` did not converge expired leases and write boundaries had no uniform durable failure intent | Closed locally with one `_guarded_write` boundary across initialize/bind/freeze/reserve/heartbeat/recover/reauthorize/completion paths persisting a verifiable failure intent on lock/exception exhaustion, plus an idempotent startup reconcile that converges intents and expired in-flight leases without any future business command. Independent re-review pending. |
+| M5-R6-H4 | high | custodian manifest loader resolved paths before rejecting junction/reparse points | Closed locally: reparse checks run before any resolve/open on the root, all parents, the pinned manifest file, and every recursive entry; Windows junction and POSIX symlink roots fail closed. Independent re-review pending. |
+| M5-R6-H5 | high | installed wheel source manifest digests did not bind final wheel content and dependency-lock identity fell back to the source manifest hash | Closed locally: `setup.py` `build_py` regenerates the package manifest from the final `build_lib` content, and `frozen_run_identity` fails closed when `uv.lock`/`pyproject.toml` are absent; wheel external-cwd smoke passes and installed-file tamper is refused. Independent re-review pending. |
+| M5-R6-M1 | medium | `canonical_locator` accepted lowercase drive aliases, UNC paths, and nonexistent paths | Closed locally with strict final-handle spelling binding (`resolve(strict=True)` plus exact spelling comparison) for existing paths and nearest-existing-ancestor binding for creation; UNC/drive-alias/reparse spellings are rejected, normal Windows spellings pass. Independent re-review pending. |
+| M5-R6-M2 | medium | side SHA256SUMS accepted non-canonical path spellings such as `digest  ./predictions.json` | Closed locally by reusing one strict parser that rejects duplicate/missing/extra/unordered/absolute/`..`/case-alias spellings and binds canonical bytes; root/side checksum generation shares the same posix-string ordering. Independent re-review pending. |
+| M5-R6-M3 | medium | `validate_configuration_set` and the V11 contract did not mechanically validate topology, so self-declared subagent/hidden-model-call flags passed | Closed locally: `topology` is a required V11 contract key with mechanical mode/one-context/critic/subagent/hidden-call/investigator/round rules, and `validate_configuration_set` freezes per-configuration topology limits; swapped/tampered topologies are rejected. Independent re-review pending. |
 
 M5 review-fix record (2026-08-11): the second independent review reproduced
 three residual findings: pair-ledger crash recovery, stale scorer identity at
@@ -1367,6 +1376,37 @@ acceptance, wheel external-cwd smoke, and diff-check are green. Formal
 predictions, attempts and label opens remain zero. This Plan remains
 `review_required`/blocked at T12 pending fresh capability admission and
 independent review.
+
+M5 sixth-round implementation/review-fix record (2026-08-12): base
+`cf5e4295e96e2fb8067d719e088afdbad0fc9dc2`; the sixth independent review
+returned `changes_required`/`blocked` with one blocking, five high, and three
+medium findings (M5-R6-B1/H1–H5/M1–M3 above). The ledger seal is now anchored
+outside mutable SQLite state: a one-time random custodian seal key authenticates
+an append-only HMAC-chained anchor that must match persisted events one-to-one,
+so raw tamper, forged appended seals, and reveal clearing fail closed at every
+write boundary. The evaluator child re-verifies the frozen prediction root
+(canonical SHA256SUMS bytes/hash and every bundle byte) before its first side
+effect, parses bundles only from the verified bytes, and routes the expected
+custodian label manifest hash through the ledger fence. One guarded write
+boundary persists a verifiable failure intent on lock/exception exhaustion and
+startup reconcile idempotently converges intents plus expired in-flight leases.
+Custodian loading and ledger locators reject reparse/junction/symlink, drive
+aliases, UNC, and nonexistent spellings before resolve; side and root checksum
+manifests share one strict canonical parser. The V11 execution contract
+requires a mechanically validated topology and `validate_configuration_set`
+freezes per-configuration investigator/round limits. The wheel build
+regenerates the package manifest from final `build_lib` content and dependency
+lock identity fails closed without `uv.lock`/`pyproject.toml`. RED→GREEN
+evidence: focused M5 group `379 passed, 1 skipped`; full pytest `2210 passed,
+4 skipped, 1 warning` (the fourth skip is the new POSIX-only custodian symlink
+regression; the other three are the pre-existing allowed skips); full Ruff
+clean; frontend build green; temporary offline `80/80` and runtime `14/14`
+with privacy scan; wheel external-cwd smoke passed with tamper and
+missing-manifest cases refused; `git diff --check` clean. Docker daemon
+preflight is unavailable and remains an unmet gate. Formal predictions, paired
+attempts and label opens remain zero (`D:\data\RCAEval\v11-m5` absent); T12 is
+still blocked on a fresh passed capability artifact/endpoint/credential and
+this Plan remains `review_required` pending independent re-review.
 
 M0 review (dataset/leakage): completed on 2026-08-02 in worktree
 `agent+v11-m0`; conclusion `approve_with_followups`. Reviewer independently

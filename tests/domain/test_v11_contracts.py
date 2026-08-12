@@ -42,7 +42,124 @@ from backend.domain.runtime import (
     RuntimeRunReason,
     RuntimeRunStatus,
     seal_v11_execution_contract,
+    validate_v11_execution_contract,
 )
+
+
+def _sealed_contract(*, topology=None, limits=None) -> dict:
+    contract = {
+        "execution_contract_version": "v11",
+        "authority_mode": "agent",
+        "model_provider": "openai",
+        "model_name": "gpt-test",
+        "prompt_version": "v11-test",
+        "api_mode": "responses",
+        "endpoint_id": "endpoint-test",
+        "capability_artifact_hash": "artifact-test",
+        "tool_manifest": ["tool-a"],
+        "tool_manifest_hash": "tool-manifest-test",
+        "skill_catalog": {
+            "catalog_version": "skills-v1",
+            "catalog_hash": "skill-catalog-test",
+            "skill_names": "skill-a@v1",
+        },
+        "capability_identity": {
+            "provider": "openai",
+            "model": "gpt-test",
+            "api_mode": "responses",
+            "endpoint_id": "endpoint-test",
+            "artifact_hash": "artifact-test",
+        },
+        "limits": {
+            "max_turns": 8,
+            "max_investigators": 3,
+            "max_rounds": 2,
+            "token_budget": 1000,
+            "max_tool_calls_per_specialist": 3,
+            "tool_timeout_seconds": 10,
+        }
+        if limits is None
+        else limits,
+        "retry_policy": {
+            "max_retries": 1,
+            "retryable_categories": ["transport", "rate_limit"],
+            "provider_max_retries": 0,
+            "sdk_max_retries": 0,
+        },
+        "tool_budget": 8,
+        "token_budget": 1000,
+        "timeout_seconds": 120.0,
+    }
+    if topology is not None:
+        contract["topology"] = topology
+    return seal_v11_execution_contract(contract)
+
+
+_MULTI_TOPOLOGY = {
+    "mode": "multi_lead_investigators_critic",
+    "one_context": False,
+    "critic": True,
+    "subagent": False,
+    "hidden_model_calls": False,
+}
+_SINGLE_TOPOLOGY = {
+    "mode": "single_one_context",
+    "one_context": True,
+    "critic": False,
+    "subagent": False,
+    "hidden_model_calls": False,
+}
+
+
+def test_v11_contract_requires_frozen_topology() -> None:
+    with pytest.raises(ValueError, match="incomplete|topology"):
+        validate_v11_execution_contract(_sealed_contract())
+    validate_v11_execution_contract(_sealed_contract(topology=_MULTI_TOPOLOGY))
+    single_limits = {
+        "max_turns": 8,
+        "max_investigators": 1,
+        "max_rounds": 1,
+        "token_budget": 1000,
+        "max_tool_calls_per_specialist": 3,
+        "tool_timeout_seconds": 10,
+    }
+    validate_v11_execution_contract(
+        _sealed_contract(topology=_SINGLE_TOPOLOGY, limits=single_limits)
+    )
+
+
+def test_v11_contract_rejects_self_declared_hidden_or_subagent_topology() -> None:
+    for flag in ("subagent", "hidden_model_calls"):
+        topology = {**_MULTI_TOPOLOGY, flag: True}
+        with pytest.raises(ValueError, match="topology|subagent|hidden"):
+            validate_v11_execution_contract(_sealed_contract(topology=topology))
+
+
+def test_v11_contract_rejects_swapped_or_tampered_topology() -> None:
+    single_limits = {
+        "max_turns": 8,
+        "max_investigators": 1,
+        "max_rounds": 1,
+        "token_budget": 1000,
+        "max_tool_calls_per_specialist": 3,
+        "tool_timeout_seconds": 10,
+    }
+    # 互换：single topology 配 multi limits，及 multi topology 配 single limits
+    with pytest.raises(ValueError, match="topology"):
+        validate_v11_execution_contract(_sealed_contract(topology=_SINGLE_TOPOLOGY))
+    with pytest.raises(ValueError, match="topology"):
+        validate_v11_execution_contract(
+            _sealed_contract(topology=_MULTI_TOPOLOGY, limits=single_limits)
+        )
+    # 篡改 flag：one_context/critic 与 mode 不一致
+    tampered = {**_MULTI_TOPOLOGY, "one_context": True}
+    with pytest.raises(ValueError, match="topology"):
+        validate_v11_execution_contract(_sealed_contract(topology=tampered))
+    tampered = {**_SINGLE_TOPOLOGY, "critic": True}
+    with pytest.raises(ValueError, match="topology"):
+        validate_v11_execution_contract(
+            _sealed_contract(topology=tampered, limits=single_limits)
+        )
 
 
 def _contract() -> dict:

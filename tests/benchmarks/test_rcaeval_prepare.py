@@ -222,6 +222,9 @@ def test_prepare_is_byte_equivalent_on_repeat(source_root, pin_path, tmp_path):
     # custodian 锚点刻意绑定绝对 canonical root；runtime/label 包字节仍须跨输出根稳定。
     first_files.pop("custodian-manifest.json")
     second_files.pop("custodian-manifest.json")
+    # seal HMAC key 是一次性随机秘密，不属于字节等价面；其随机性正是防伪造前提。
+    first_files.pop("pair-ledger-seal.key")
+    second_files.pop("pair-ledger-seal.key")
     assert first_files == second_files
     assert first.runtime_manifest.manifest_hash == second.runtime_manifest.manifest_hash
     assert first.label_manifest.manifest_hash == second.label_manifest.manifest_hash

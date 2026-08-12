@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 
@@ -283,3 +284,141 @@ def test_prediction_event_exposes_no_dataset_or_system_identity(tmp_path: Path):
     assert "sock shop" not in model_input
     assert "train ticket" not in model_input
     assert "online boutique" not in model_input
+
+
+def test_configuration_set_rejects_flattened_and_swapped_topology():
+    base = materialize_ss30_configurations(
+        single_budget=4_000,
+        multi_budget=10_000,
+        max_turns=8,
+        tool_budget=8,
+        timeout_seconds=120,
+    )
+    flattened = {
+        key: value.model_copy(update={"max_investigators": 3, "max_rounds": 2})
+        for key, value in base.items()
+    }
+    with pytest.raises(ValueError, match="topology"):
+        validate_configuration_set(flattened)
+
+    swapped = dict(
+        materialize_ss30_configurations(
+            single_budget=4_000,
+            multi_budget=10_000,
+            max_turns=8,
+            tool_budget=8,
+            timeout_seconds=120,
+        )
+    )
+    swapped[RcaEvalConfiguration.SINGLE_INTENDED] = swapped[
+        RcaEvalConfiguration.SINGLE_INTENDED
+    ].model_copy(update={"max_investigators": 3, "max_rounds": 2})
+    swapped[RcaEvalConfiguration.MULTI_INTENDED] = swapped[
+        RcaEvalConfiguration.MULTI_INTENDED
+    ].model_copy(update={"max_investigators": 1, "max_rounds": 1})
+    with pytest.raises(ValueError, match="topology"):
+        validate_configuration_set(swapped)
+
+
+def _side_directory(root: Path, files: dict[str, bytes], sums_bytes: bytes):
+    side = root / "side"
+    side.mkdir(parents=True, exist_ok=True)
+    for relative, content in files.items():
+        path = side / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    (side / "SHA256SUMS").write_bytes(sums_bytes)
+    return side
+
+
+def test_side_checksum_rejects_noncanonical_path_spellings(tmp_path: Path):
+    from backend.benchmarks.rcaeval.runner import _verify_side_directory
+
+    digest = hashlib.sha256(b"{}").hexdigest()
+    malformed = [
+        f"{digest}  ./predictions.json\n",
+        f"{digest}  ../predictions.json\n",
+        f"{digest}  /predictions.json\n",
+        f"{digest}  PREDICTIONS.JSON\n",
+        f"{digest} predictions.json\n",
+        f"{digest}  predictions.json",
+        f"{digest}  predictions.json\n{digest}  predictions.json\n",
+    ]
+    for index, line in enumerate(malformed):
+        sums = line.encode("utf-8")
+        side = _side_directory(tmp_path / str(index), {"predictions.json": b"{}"}, sums)
+        with pytest.raises(ValueError, match="canonical|checksum|malformed|escapes|differs"):
+            _verify_side_directory(side, hashlib.sha256(sums).hexdigest())
+
+
+def test_side_checksum_rejects_duplicate_unsorted_and_set_drift(tmp_path: Path):
+    from backend.benchmarks.rcaeval.runner import _verify_side_directory
+
+    digest_a = hashlib.sha256(b"a").hexdigest()
+    digest_b = hashlib.sha256(b"b").hexdigest()
+    files = {"a.json": b"a", "b.json": b"b"}
+    cases = [
+        # duplicate entries
+        f"{digest_a}  a.json\n{digest_a}  a.json\n{digest_b}  b.json\n",
+        # unsorted serialization
+        f"{digest_b}  b.json\n{digest_a}  a.json\n",
+        # missing on-disk entry
+        f"{digest_a}  a.json\n{digest_b}  b.json\n{digest_b}  c.json\n",
+        # extra on-disk file not covered by sums
+        f"{digest_a}  a.json\n",
+    ]
+    for index, text in enumerate(cases):
+        sums = text.encode("utf-8")
+        side = _side_directory(tmp_path / str(index), files, sums)
+        with pytest.raises(ValueError, match="duplicate|sorted|differs|checksum"):
+            _verify_side_directory(side, hashlib.sha256(sums).hexdigest())
+
+
+def test_side_checksum_rejects_post_freeze_content_tamper(tmp_path: Path):
+    from backend.benchmarks.rcaeval.runner import _verify_side_directory
+
+    digest = hashlib.sha256(b"{}").hexdigest()
+    sums = f"{digest}  predictions.json\n".encode()
+    side = _side_directory(tmp_path, {"predictions.json": b"{}"}, sums)
+    bundle_hash = hashlib.sha256(sums).hexdigest()
+    _verify_side_directory(side, bundle_hash)
+    (side / "predictions.json").write_bytes(b'{"tampered": true}')
+    with pytest.raises(ValueError, match="changed|checksum|content"):
+        _verify_side_directory(side, bundle_hash)
+
+
+def test_frozen_run_identity_fails_closed_without_dependency_lock(tmp_path: Path):
+    from backend.benchmarks.rcaeval.runner import frozen_run_identity
+    from backend.services.source_identity import write_source_manifest
+
+    diagnosis = tmp_path / "backend" / "diagnosis"
+    diagnosis.mkdir(parents=True)
+    (diagnosis / "v11_runtime.py").write_text("# fake runtime\n", encoding="utf-8")
+    write_source_manifest(tmp_path)
+    capability = EndpointCapabilityIdentity(
+        provider="openai_compatible",
+        model="frozen-model",
+        api_mode="chat_completions",
+        endpoint_id="endpoint",
+        artifact_hash="1" * 64,
+    )
+    kwargs = {
+        "runtime_manifest_hash": "2" * 64,
+        "capability": capability,
+        "tool_manifest_hash_value": "3" * 64,
+        "skill_catalog_hash_value": "4" * 64,
+        "repository_root": tmp_path,
+    }
+    with pytest.raises(ValueError, match="dependency lock"):
+        frozen_run_identity(**kwargs)
+
+    (tmp_path / "uv.lock").write_text("lock\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    write_source_manifest(tmp_path)
+    identity = frozen_run_identity(**kwargs)
+    expected = hashlib.sha256()
+    for name in ("uv.lock", "pyproject.toml"):
+        expected.update(name.encode("utf-8"))
+        expected.update((tmp_path / name).read_bytes())
+    assert identity.dependency_lock_hash == expected.hexdigest()
+    assert identity.dependency_lock_hash != identity.source_manifest_hash

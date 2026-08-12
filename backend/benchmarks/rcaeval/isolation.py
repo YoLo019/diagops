@@ -267,14 +267,13 @@ def verify_runtime_package(runtime_root: Path) -> RuntimeManifest:
     return RuntimeManifest.model_validate_json(text)
 
 
-def _verify_checksums(package_root: Path) -> None:
-    """按 SHA256SUMS 逐文件复核：缺失、多余或哈希不符一律 fail closed。"""
-    reject_reparse_path(package_root, "package root")
-    sums_path = package_root / "SHA256SUMS"
-    if not sums_path.is_file():
-        raise ValueError(f"package has no SHA256SUMS checksum file: {package_root}")
-    reject_reparse_path(sums_path, "checksum manifest")
-    raw = sums_path.read_bytes()
+def parse_canonical_checksum_bytes(raw: bytes) -> dict[str, str]:
+    """统一严格 SHA256SUMS parser；所有 checksum 消费方共用。
+
+    拒绝 duplicate/missing order/非 canonical 路径拼写（`./`、绝对路径、`..`、
+    反斜杠、盘符、大小写别名）与非 canonical 序列化（缺尾换行、混用 CRLF、
+    未排序）；返回 {posix 相对路径: digest}。
+    """
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -285,7 +284,7 @@ def _verify_checksums(package_root: Path) -> None:
     lines = text.splitlines(keepends=True)
     if not lines or any(not line.endswith(("\n", "\r\n")) for line in lines):
         raise ValueError("checksum manifest serialization is not canonical")
-    newline = "\r\n" if "\r\n" in raw.decode("utf-8") else "\n"
+    newline = "\r\n" if "\r\n" in text else "\n"
     if "\r" in text.replace("\r\n", ""):
         raise ValueError("checksum manifest serialization is not canonical")
     for line in lines:
@@ -316,6 +315,58 @@ def _verify_checksums(package_root: Path) -> None:
     )
     if raw != canonical.encode("utf-8"):
         raise ValueError("checksum manifest serialization is not canonical")
+    return expected
+
+
+def verify_frozen_prediction_root(
+    predictions_root: Path, expected_root_hash: str
+) -> dict[str, bytes]:
+    """evaluator child 首个副作用前的独立复验：root checksum、canonical
+    SHA256SUMS bytes/hash 与全部 bundle bytes。
+
+    返回 {posix 相对路径: 已验证字节}；调用方必须消费这些字节而不是重新读盘，
+    从而关闭 verify→parse 之间的替换竞态。任何 post-freeze 改动都零 artifact。
+    """
+    if not _SHA256_PATTERN.fullmatch(expected_root_hash):
+        raise ValueError("expected root hash must be a sha256 hex digest")
+    root = _resolve_no_traversal(predictions_root, "prediction root")
+    sums_path = root / "SHA256SUMS"
+    if not sums_path.is_file():
+        raise ValueError("prediction root has no SHA256SUMS; refuse unfrozen root")
+    reject_reparse_path(sums_path, "prediction root checksum")
+    raw = sums_path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != expected_root_hash:
+        raise ValueError("prediction root checksum mismatch: refuse post-freeze root")
+    entries = parse_canonical_checksum_bytes(raw)
+    verified: dict[str, bytes] = {}
+    actual: set[str] = set()
+    for path in sorted(root.rglob("*")):
+        reject_reparse_path(path, "prediction root entry")
+        if path.is_file() and path != sums_path:
+            relative = path.relative_to(root).as_posix()
+            actual.add(relative)
+            data = path.read_bytes()
+            if (
+                relative not in entries
+                or hashlib.sha256(data).hexdigest() != entries[relative]
+            ):
+                raise ValueError(
+                    "prediction root bundle changed after freeze; refuse evaluation"
+                )
+            verified[relative] = data
+    if actual != set(entries):
+        raise ValueError("prediction root file set differs from frozen checksum")
+    return verified
+
+
+def _verify_checksums(package_root: Path) -> None:
+    """按 SHA256SUMS 逐文件复核：缺失、多余或哈希不符一律 fail closed。"""
+    reject_reparse_path(package_root, "package root")
+    sums_path = package_root / "SHA256SUMS"
+    if not sums_path.is_file():
+        raise ValueError(f"package has no SHA256SUMS checksum file: {package_root}")
+    reject_reparse_path(sums_path, "checksum manifest")
+    expected = parse_canonical_checksum_bytes(sums_path.read_bytes())
     actual: dict[str, str] = {}
     for path in sorted(package_root.rglob("*")):
         reject_reparse_path(path, "package checksum entry")

@@ -377,11 +377,14 @@ def _manifest_hash(manifest: RuntimeManifest | LabelManifest) -> str:
 
 
 def _write_checksums(package_dir: Path) -> None:
-    lines = []
-    for path in sorted(package_dir.rglob("*")):
+    entries: list[tuple[str, str]] = []
+    for path in package_dir.rglob("*"):
         if path.is_file() and path.name != "SHA256SUMS":
             relative = path.relative_to(package_dir).as_posix()
-            lines.append(f"{_sha256_bytes(path.read_bytes())}  {relative}")
+            entries.append((relative, _sha256_bytes(path.read_bytes())))
+    # canonical 序是 posix 相对路径字符串序；Windows Path 排序为 casefold，
+    # 跨平台字节序不一致，不能作为 canonical 序。
+    lines = [f"{digest}  {relative}" for relative, digest in sorted(entries)]
     target = package_dir / "SHA256SUMS"
     with target.open("w", encoding="utf-8", newline="\n") as file:
         file.write("\n".join(lines) + "\n")

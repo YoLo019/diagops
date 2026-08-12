@@ -1924,6 +1924,30 @@ predictions, attempts, and label opens remain zero. This Spec remains
 `review_required`, M5 remains blocked at T12, and no accuracy claim is made
 pending capability admission and independent review.
 
+M5 sixth-round review-fix record (2026-08-12): independent review returned
+`changes_required`/`blocked` against `cf5e4295e96e2fb8067d719e088afdbad0fc9dc2`
+with one blocking, five high, and three medium findings. The fixes harden the
+approved R1–R27 contract without changing it: the custodian ledger seal is
+authenticated by an external HMAC-chained anchor keyed by a one-time random
+seal key, so raw SQLite tamper, forged seals, and reveal clearing cannot
+revive a consumed label; the evaluator child independently re-verifies the
+frozen prediction root and consumes only verified bundle bytes, and binds the
+custodian label manifest hash through the ledger fence before any artifact;
+all ledger write boundaries share one guarded failure-intent path with
+idempotent startup reconciliation of intents and expired leases; custodian and
+locator paths reject reparse/junction/symlink, drive-alias, UNC, and
+nonexistent spellings before resolve; checksum manifests share one strict
+canonical parser; topology is a required mechanically validated V11 contract
+key with frozen per-configuration limits; and the wheel build regenerates the
+package manifest from final wheel content with dependency-lock identity
+failing closed. RED→GREEN evidence: focused M5 group `379 passed, 1 skipped`;
+full pytest `2210 passed, 4 skipped, 1 warning`; Ruff, frontend,
+offline/runtime acceptance, wheel external-cwd smoke (tamper refused), and
+diff-check are green. Docker daemon preflight remains an unmet gate. Formal
+predictions, attempts, and label opens remain zero. This Spec remains
+`review_required`, M5 remains blocked at T12, and no accuracy claim is made
+pending capability admission and independent review.
+
 ## 16. Approval state
 
 - Requirements Brief: confirmed by user.

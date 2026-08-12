@@ -15,7 +15,11 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict
 
 from backend.benchmarks.rcaeval.dependency import scorer_dependency_hash
-from backend.benchmarks.rcaeval.ledger import canonical_locator, volume_identity
+from backend.benchmarks.rcaeval.isolation import parse_canonical_checksum_bytes
+from backend.benchmarks.rcaeval.ledger import (
+    canonical_locator,
+    volume_identity,
+)
 from backend.benchmarks.rcaeval.models import (
     CandidatePrediction,
     CasePrediction,
@@ -442,6 +446,17 @@ def validate_configuration_set(
     }
     if len(common) != 1:
         raise ValueError("configuration tool/turn/deadline identity mismatch")
+    # topology 由 configuration 机械派生：Single 一律 one-context (1,1)，
+    # Multi 一律 Lead+Investigators+Critic (3,2)；拍平、互换、篡改一律拒绝。
+    expected_topology = {
+        RcaEvalConfiguration.SINGLE_INTENDED: (1, 1),
+        RcaEvalConfiguration.SINGLE_EQUAL_TOKEN: (1, 1),
+        RcaEvalConfiguration.MULTI_INTENDED: (3, 2),
+        RcaEvalConfiguration.MULTI_EQUAL_TOKEN: (3, 2),
+    }
+    for key, value in configurations.items():
+        if (value.max_investigators, value.max_rounds) != expected_topology[key]:
+            raise ValueError("configuration topology limits are not frozen")
 
 
 class RcaEvalCaseRunner:
@@ -827,13 +842,16 @@ def freeze_prediction_set(
     case_ids = next(iter(case_sets))
     if len(case_ids) != expected_case_count:
         raise ValueError("prediction set case count is not frozen")
-    lines = []
-    for path in sorted(root.rglob("*")):
+    entries: list[tuple[str, str]] = []
+    for path in root.rglob("*"):
         if path.is_symlink():
             raise ValueError("prediction set rejects symlink entries")
         if path.is_file() and path != root / "SHA256SUMS":
             relative = path.relative_to(root).as_posix()
-            lines.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {relative}")
+            entries.append((relative, hashlib.sha256(path.read_bytes()).hexdigest()))
+    # canonical 序列化排序键是 posix 相对路径字符串本身；Windows Path 排序是
+    # casefold，跨平台会产生不同字节序，不能作为 canonical 序。
+    lines = [f"{digest}  {relative}" for relative, digest in sorted(entries)]
     checksum_bytes = ("\n".join(lines) + "\n").encode("utf-8")
     digest = hashlib.sha256(checksum_bytes).hexdigest()
     ledger.prepare_prediction_set_freeze(
@@ -873,18 +891,9 @@ def _verify_side_directory(path: Path, expected_bundle_hash: str | None) -> None
     actual_checksum_hash = hashlib.sha256(checksum_path.read_bytes()).hexdigest()
     if actual_checksum_hash != expected_bundle_hash:
         raise ValueError("prediction side checksum differs from ledger")
-    entries: dict[str, str] = {}
-    for raw_line in checksum_path.read_text(encoding="utf-8").splitlines():
-        parts = raw_line.split("  ", 1)
-        if len(parts) != 2 or len(parts[0]) != 64:
-            raise ValueError("prediction side checksum is malformed")
-        relative = Path(parts[1])
-        if relative.is_absolute() or ".." in relative.parts:
-            raise ValueError("prediction side checksum escapes its directory")
-        normalized = relative.as_posix()
-        if normalized in entries:
-            raise ValueError("prediction side checksum contains duplicate files")
-        entries[normalized] = parts[0]
+    # M3: side checksum 与 package/root checksum 共用同一严格 parser，
+    # 拒绝非 canonical 拼写、duplicate、顺序与集合漂移。
+    entries = parse_canonical_checksum_bytes(checksum_path.read_bytes())
     actual_files = {
         file.relative_to(path).as_posix()
         for file in path.rglob("*")
@@ -960,11 +969,11 @@ def frozen_run_identity(
         raise ValueError("formal prediction source must be clean")
     backend_root = repository_root / "backend"
     lock_paths = [repository_root / "uv.lock", repository_root / "pyproject.toml"]
-    dependency_lock_hash = (
-        _hash_files(lock_paths)
-        if all(path.is_file() for path in lock_paths)
-        else source_identity.manifest_hash
-    )
+    # H6: dependency lock identity 必须独立真实绑定；缺失时 fail closed，
+    # 不得 fallback 到 source_manifest_hash 伪装成 lock 身份。
+    if not all(path.is_file() for path in lock_paths):
+        raise ValueError("dependency lock identity requires uv.lock and pyproject.toml")
+    dependency_lock_hash = _hash_files(lock_paths)
     return FrozenRunIdentity(
         source_commit=source_identity.revision,
         source_manifest_hash=source_identity.manifest_hash,

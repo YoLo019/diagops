@@ -176,6 +176,7 @@ _V11_CONTRACT_REQUIRED_KEYS = {
     "skill_catalog",
     "capability_identity",
     "limits",
+    "topology",
     "retry_policy",
     "tool_budget",
     "token_budget",
@@ -197,6 +198,50 @@ _V11_LIMIT_KEYS = {
     "max_tool_calls_per_specialist",
     "tool_timeout_seconds",
 }
+_V11_TOPOLOGY_KEYS = {
+    "mode",
+    "one_context",
+    "critic",
+    "subagent",
+    "hidden_model_calls",
+}
+_V11_TOPOLOGY_MODES = {"multi_lead_investigators_critic", "single_one_context"}
+
+
+def _validate_v11_topology(contract: dict[str, Any]) -> None:
+    """topology 必须由 configuration/limits 机械派生；自封或互换一律拒绝。"""
+    topology = contract.get("topology")
+    limits = contract.get("limits")
+    if not isinstance(topology, dict) or set(topology) != _V11_TOPOLOGY_KEYS:
+        raise ValueError("V11 execution contract topology is incomplete")
+    mode = topology.get("mode")
+    if mode not in _V11_TOPOLOGY_MODES:
+        raise ValueError("V11 execution contract topology mode is not frozen")
+    if topology.get("subagent") is not False:
+        raise ValueError("V11 execution contract subagent topology is forbidden")
+    if topology.get("hidden_model_calls") is not False:
+        raise ValueError("V11 execution contract hidden model calls are forbidden")
+    investigators = limits.get("max_investigators")
+    rounds = limits.get("max_rounds")
+    if (
+        not isinstance(investigators, int)
+        or isinstance(investigators, bool)
+        or not 1 <= investigators <= 3
+        or not isinstance(rounds, int)
+        or isinstance(rounds, bool)
+        or rounds not in {1, 2}
+    ):
+        raise ValueError("V11 execution contract topology limits are invalid")
+    if mode == "single_one_context":
+        if topology.get("one_context") is not True or topology.get("critic") is not False:
+            raise ValueError("V11 single topology flags are inconsistent")
+        if (investigators, rounds) != (1, 1):
+            raise ValueError("V11 single topology requires one context and one round")
+    else:
+        if topology.get("one_context") is not False or topology.get("critic") is not True:
+            raise ValueError("V11 multi topology flags are inconsistent")
+        if investigators < 2 or rounds != 2:
+            raise ValueError("V11 multi topology requires investigators and two rounds")
 
 
 def execution_contract_digest(contract: dict[str, Any]) -> str:
@@ -247,6 +292,7 @@ def validate_v11_execution_contract(contract: dict[str, Any]) -> None:
         raise ValueError("V11 execution contract skill catalog is incomplete")
     if not isinstance(retry_policy, dict):
         raise ValueError("V11 execution contract retry policy is incomplete")
+    _validate_v11_topology(contract)
     if contract.get("token_budget") is None or limits.get("token_budget") is None:
         raise ValueError("V11 execution contract token ceiling is missing")
     if limits["token_budget"] != contract["token_budget"]:

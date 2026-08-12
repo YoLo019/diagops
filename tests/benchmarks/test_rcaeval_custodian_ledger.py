@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import inspect
+import os
 import sqlite3
+import subprocess
 import threading
 import time
 
 import pytest
 
+import backend.benchmarks.rcaeval.ledger as ledger_module
 from backend.benchmarks.rcaeval.ledger import (
     CustodianPairLedger,
     LedgerState,
@@ -685,3 +688,258 @@ def test_label_open_lease_expiry_requires_explicit_reauthorization(tmp_path):
         _reauthorize(ledger, "authorized-label-retry")
     assert ledger.snapshot()["label_open_count"] == 1
     assert ledger.snapshot()["label_ever_opened"] == 1
+
+
+def _forge_appended_seal(ledger, *statements):
+    """攻击者用 raw SQLite 改写状态并追加一条公开算法完全合法的 seal event。"""
+    with sqlite3.connect(ledger.path) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("DROP TRIGGER IF EXISTS ledger_events_no_update")
+        connection.execute("DROP TRIGGER IF EXISTS ledger_events_no_delete")
+        for sql, parameters in statements:
+            connection.execute(sql, parameters)
+        snapshot = ledger_module._canonical_json(
+            ledger_module.CustodianPairLedger._sealed_snapshot(connection)
+        )
+        previous = connection.execute(
+            "SELECT event_hash FROM ledger_events ORDER BY seq DESC LIMIT 1"
+        ).fetchone()[0]
+        connection.execute(
+            "INSERT INTO ledger_events(event_kind, snapshot, prev_hash, event_hash) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                "forged-reveal-reset",
+                snapshot,
+                previous,
+                ledger_module._event_hash("forged-reveal-reset", snapshot, previous),
+            ),
+        )
+
+
+def test_forged_seal_cannot_revive_consumed_label_reveal(tmp_path):
+    """清零 reveal 后追加伪造 seal：reauthorize 必须 fail closed。"""
+    ledger = _new_ledger(tmp_path)
+    _freeze_and_open(ledger)
+    assert ledger.snapshot()["label_ever_opened"] == 1
+
+    _forge_appended_seal(
+        ledger,
+        (
+            "UPDATE pair_ledger SET state = ?, label_ever_opened = 0, "
+            "label_open_count = 0 WHERE id = 1",
+            (LedgerState.FAILED_NON_RESUMABLE.value,),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="anchor|seal|tamper|revealed"):
+        ledger.reauthorize("attacker", authorized_evaluation_identity="f" * 64)
+    # 篡改后所有读边界同样 fail closed；历史揭盲不得复活
+    with pytest.raises(ValueError, match="anchor|seal|tamper"):
+        ledger.snapshot()
+
+
+def test_forged_seal_reopens_no_write_boundary(tmp_path):
+    """伪造 seal 后 heartbeat/reserve/complete/assert/recover 全部 fail closed。"""
+    ledger = _new_ledger(tmp_path)
+    opened = _freeze_and_open(ledger)
+    _forge_appended_seal(
+        ledger,
+        ("UPDATE pair_ledger SET label_ever_opened = 0 WHERE id = 1", ()),
+    )
+
+    with pytest.raises(ValueError, match="anchor|seal|tamper"):
+        ledger.heartbeat(opened.lease_token)
+    with pytest.raises(ValueError, match="anchor|seal|tamper"):
+        ledger.assert_label_open(
+            partition="tt90",
+            prediction_set_hash="a" * 64,
+            audit_export_hash="b" * 64,
+            manual_audit_hash="c" * 64,
+            lease_token=opened.lease_token,
+            expected_label_manifest_hash="2" * 64,
+        )
+    with pytest.raises(ValueError, match="anchor|seal|tamper"):
+        ledger.mark_evaluation_completed("9" * 64, lease_token=opened.lease_token)
+    with pytest.raises(ValueError, match="anchor|seal|tamper"):
+        ledger.recover_expired(now=time.time() + 10)
+
+    # 伪造回 PREDICTIONS_FROZEN 后 reserve 也不得通过
+    _forge_appended_seal(
+        ledger,
+        (
+            "UPDATE pair_ledger SET state = ?, label_ever_opened = 0, "
+            "label_open_count = 0, lease_kind = NULL, lease_token_hash = NULL, "
+            "lease_expires_at = NULL WHERE id = 1",
+            (LedgerState.PREDICTIONS_FROZEN.value,),
+        ),
+    )
+    with pytest.raises(ValueError, match="anchor|seal|tamper"):
+        ledger.reserve_evaluation(audit_export_hash="b" * 64, manual_audit_hash="c" * 64)
+
+
+def test_missing_seal_anchor_refuses_seal_rebuild(tmp_path):
+    """外部 anchor 被删除时不得仅凭 SQLite 状态重建 seal。"""
+    ledger = _new_ledger(tmp_path)
+    lease = ledger.record_side_started(
+        "single_intended", str(ledger.canonical_root / "output-a")
+    )
+    anchor = ledger.seal_anchor_path
+    assert anchor.is_file()
+    anchor.unlink()
+    with pytest.raises(ValueError, match="anchor"):
+        ledger.record_side_completed("single_intended", "d" * 64, lease_token=lease)
+    with pytest.raises(ValueError, match="anchor"):
+        ledger.heartbeat(lease)
+
+
+def test_forged_anchor_line_without_key_fails_closed(tmp_path):
+    """攻击者在 anchor 尾部追加无 MAC 行也必须被拒。"""
+    ledger = _new_ledger(tmp_path)
+    lease = ledger.record_side_started(
+        "single_intended", str(ledger.canonical_root / "output-a")
+    )
+    with ledger.seal_anchor_path.open("a", encoding="utf-8", newline="") as handle:
+        handle.write('{"event_hash":"' + "0" * 64 + '","mac":"' + "0" * 64 + '","seq":2}\n')
+    with pytest.raises(ValueError, match="anchor"):
+        ledger.heartbeat(lease)
+
+
+def test_anchor_key_is_required_for_ledger_access(tmp_path):
+    manifest = create_custodian_manifest(
+        tmp_path / "custodian-root",
+        runtime_manifest_hash="1" * 64,
+        label_manifest_hash="2" * 64,
+    )
+    ledger = CustodianPairLedger.from_manifest(manifest)
+    ledger.initialize(
+        partition="tt90",
+        prediction_set_hash="a" * 64,
+        expected_sides=("single_intended", "multi_intended"),
+    )
+    ledger.seal_key_path.unlink()
+    with pytest.raises(ValueError, match="seal key|anchor"):
+        CustodianPairLedger.from_manifest(manifest)
+
+
+def test_reconcile_pending_failure_converges_expired_label_lease(tmp_path):
+    """重启统一 reconcile 必须幂等收敛过期 in-flight 状态，不依赖未来业务命令。"""
+    ledger = _new_ledger(tmp_path, lease_seconds=1)
+    _freeze_and_open(ledger)
+    assert (
+        ledger.reconcile_pending_failure(now=time.time() + 10)
+        == LedgerState.FAILED_NON_RESUMABLE
+    )
+    assert ledger.snapshot()["label_ever_opened"] == 1
+    with pytest.raises(ValueError, match="revealed|reauthor"):
+        ledger.reauthorize("owner", authorized_evaluation_identity="f" * 64)
+
+
+def test_heartbeat_lock_exhaustion_persists_failure_intent(tmp_path):
+    ledger = _new_ledger(tmp_path, lease_seconds=30)
+    lease = ledger.record_side_started(
+        "single_intended", str(ledger.canonical_root / "output-a")
+    )
+    ledger.SQLITE_BUSY_TIMEOUT_SECONDS = 0.05
+    blocker = sqlite3.connect(ledger.path, timeout=0, isolation_level=None)
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            ledger.heartbeat(lease)
+        assert ledger.failure_intent_path.is_file()
+    finally:
+        blocker.rollback()
+        blocker.close()
+    assert ledger.snapshot()["state"] == LedgerState.FAILED_NON_RESUMABLE.value
+    assert not ledger.failure_intent_path.exists()
+
+
+def test_label_open_lock_exhaustion_consumes_pair_via_intent(tmp_path):
+    ledger = _new_ledger(tmp_path, lease_seconds=30)
+    for side, bundle_hash in (("single_intended", "d" * 64), ("multi_intended", "e" * 64)):
+        lease = ledger.record_side_started(side, str(ledger.canonical_root / side))
+        ledger.record_side_completed(side, bundle_hash, lease_token=lease)
+    ledger.prepare_prediction_set_freeze(
+        prediction_set_hash="a" * 64,
+        root_locator=str(ledger.canonical_root / "predictions"),
+    )
+    ledger.bind_prediction_set_hash("a" * 64)
+    reservation = ledger.reserve_evaluation(
+        audit_export_hash="b" * 64, manual_audit_hash="c" * 64
+    )
+    ledger.SQLITE_BUSY_TIMEOUT_SECONDS = 0.05
+    blocker = sqlite3.connect(ledger.path, timeout=0, isolation_level=None)
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            ledger.reserve_label_open(
+                audit_export_hash="b" * 64,
+                manual_audit_hash="c" * 64,
+                reservation_token=reservation.reservation_token,
+            )
+        assert ledger.failure_intent_path.is_file()
+    finally:
+        blocker.rollback()
+        blocker.close()
+    snapshot = ledger.snapshot()
+    assert snapshot["state"] == LedgerState.FAILED_NON_RESUMABLE.value
+    # label 未揭盲时显式 reauthorization 仍可恢复 pair
+    ledger.reauthorize("owner-after-lock", authorized_evaluation_identity="f" * 64)
+    assert ledger.snapshot()["state"] == LedgerState.NEW.value
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction semantics")
+def test_custodian_manifest_loader_rejects_junction_root(tmp_path):
+    real = tmp_path / "real-root"
+    manifest = create_custodian_manifest(
+        real,
+        runtime_manifest_hash="1" * 64,
+        label_manifest_hash="2" * 64,
+    )
+    junction = tmp_path / "junction-root"
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(real)],
+        check=True,
+        capture_output=True,
+    )
+    with pytest.raises(ValueError, match="reparse|junction|symlink|canonical"):
+        CustodianPairLedger.from_manifest(junction / manifest.name)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics")
+def test_custodian_manifest_loader_rejects_symlink_root(tmp_path):
+    real = tmp_path / "real-root"
+    manifest = create_custodian_manifest(
+        real,
+        runtime_manifest_hash="1" * 64,
+        label_manifest_hash="2" * 64,
+    )
+    link = tmp_path / "symlink-root"
+    link.symlink_to(real, target_is_directory=True)
+    with pytest.raises(ValueError, match="reparse|junction|symlink|canonical"):
+        CustodianPairLedger.from_manifest(link / manifest.name)
+
+
+def test_assert_label_open_binds_custodian_label_manifest_hash(tmp_path):
+    """H1: child fence 只信固定 custodian manifest，不信调用方传入的 label 身份。"""
+    ledger = _new_ledger(tmp_path)
+    opened = _freeze_and_open(ledger)
+    assert ledger.label_manifest_hash == "2" * 64
+
+    # 合法但属于另一份 labels 的 hash 必须被拒，且原 CLI 参数路径不得绕过
+    with pytest.raises(ValueError, match="label manifest"):
+        ledger.assert_label_open(
+            partition="tt90",
+            prediction_set_hash="a" * 64,
+            audit_export_hash="b" * 64,
+            manual_audit_hash="c" * 64,
+            lease_token=opened.lease_token,
+            expected_label_manifest_hash="d" * 64,
+        )
+    ledger.assert_label_open(
+        partition="tt90",
+        prediction_set_hash="a" * 64,
+        audit_export_hash="b" * 64,
+        manual_audit_hash="c" * 64,
+        lease_token=opened.lease_token,
+        expected_label_manifest_hash="2" * 64,
+    )

@@ -482,10 +482,24 @@ def main() -> None:
     arguments = parser.parse_args()
     if arguments.output.exists():
         raise ValueError("evaluation output already exists; labels will not be reopened")
-    bundles = [
-        PredictionBundle.model_validate_json(path.read_text(encoding="utf-8"))
-        for path in arguments.bundle
-    ]
+    # H2: child 首个副作用前独立复验冻结 root——canonical SHA256SUMS bytes/hash
+    # 与全部 bundle bytes；launch spec 创建后的任何替换都在此 fail closed。
+    # 之后的 bundle 解析只消费已验证字节，verify→parse 之间不存在替换窗口。
+    from backend.benchmarks.rcaeval.isolation import verify_frozen_prediction_root
+
+    bundle_paths = [Path(path).resolve() for path in arguments.bundle]
+    if not bundle_paths or any(path.name != "predictions.json" for path in bundle_paths):
+        raise ValueError("evaluator bundles must be frozen predictions.json files")
+    roots = {path.parent.parent for path in bundle_paths}
+    if len(roots) != 1:
+        raise ValueError("evaluator bundles must share one frozen prediction root")
+    verified_files = verify_frozen_prediction_root(
+        roots.pop(), arguments.prediction_set_hash
+    )
+    bundles = []
+    for path in bundle_paths:
+        relative = path.relative_to(path.parent.parent).as_posix()
+        bundles.append(PredictionBundle.model_validate_json(verified_files[relative]))
     _validate_scorer_dependency_identity(bundles)
     export = EvidenceAuditExport.model_validate_json(
         arguments.audit_export.read_text(encoding="utf-8")
@@ -521,6 +535,7 @@ def main() -> None:
         audit_export_hash=export.export_hash,
         manual_audit_hash=manual.artifact_hash,
         lease_token=arguments.label_open_token,
+        expected_label_manifest_hash=arguments.expected_label_manifest_hash,
     )
     # 标签文件在 evaluator 进程中只打开这一次；custodian 身份匹配前不构造
     # scorer 结果，也不写任何 evaluator artifact。

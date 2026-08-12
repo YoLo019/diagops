@@ -50,12 +50,12 @@ def _write_json(path: Path, value: object) -> None:
 
 
 def _write_checksums(package_dir: Path) -> None:
-    lines = []
-    for path in sorted(package_dir.rglob("*")):
+    entries: list[tuple[str, str]] = []
+    for path in package_dir.rglob("*"):
         if path.is_file() and path.name != "SHA256SUMS":
             relative = path.relative_to(package_dir).as_posix()
-            digest = hashlib.sha256(path.read_bytes()).hexdigest()
-            lines.append(f"{digest}  {relative}")
+            entries.append((relative, hashlib.sha256(path.read_bytes()).hexdigest()))
+    lines = [f"{digest}  {relative}" for relative, digest in sorted(entries)]
     (package_dir / "SHA256SUMS").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -661,6 +661,323 @@ def test_canonical_locator_rejects_case_alias(tmp_path):
     alias = Path(str(actual).lower())
     with pytest.raises(ValueError, match="canonical|locator"):
         canonical_locator(alias)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows drive-letter semantics")
+def test_canonical_locator_rejects_drive_letter_alias(tmp_path):
+    from backend.benchmarks.rcaeval.ledger import canonical_locator
+
+    drive, rest = os.path.splitdrive(str(tmp_path))
+    assert drive and drive[0].isupper()
+    alias = Path(drive.lower() + rest)
+    with pytest.raises(ValueError, match="canonical|locator"):
+        canonical_locator(alias)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows UNC semantics")
+def test_canonical_locator_rejects_unc_paths():
+    from backend.benchmarks.rcaeval.ledger import canonical_locator
+
+    with pytest.raises(ValueError, match="UNC|locator"):
+        canonical_locator(Path(r"\\definitely-not-a-real-host-xyz\share\inexistent"))
+
+
+def test_canonical_locator_rejects_missing_paths(tmp_path):
+    from backend.benchmarks.rcaeval.ledger import canonical_locator
+
+    with pytest.raises(ValueError, match="exist|locator"):
+        canonical_locator(tmp_path / "missing" / "leaf")
+
+
+def test_canonical_locator_accepts_normal_spelling(tmp_path):
+    from backend.benchmarks.rcaeval.ledger import canonical_locator
+
+    assert canonical_locator(tmp_path) == os.path.normpath(str(tmp_path.resolve()))
+
+
+def test_canonical_creation_locator_binds_existing_ancestor(tmp_path):
+    from backend.benchmarks.rcaeval.ledger import canonical_creation_locator
+
+    pending = tmp_path / "pending" / "leaf"
+    expected = os.path.normpath(str(tmp_path.resolve() / "pending" / "leaf"))
+    assert canonical_creation_locator(pending) == expected
+    with pytest.raises(ValueError, match="absolute|traversal|locator"):
+        canonical_creation_locator(Path("relative-output"))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction semantics")
+def test_canonical_creation_locator_rejects_junction_ancestor(tmp_path):
+    from backend.benchmarks.rcaeval.ledger import (
+        canonical_creation_locator,
+        canonical_locator,
+    )
+
+    target = tmp_path / "target"
+    target.mkdir()
+    junction = tmp_path / "junction"
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(target)],
+        check=True,
+        capture_output=True,
+    )
+    with pytest.raises(ValueError, match="reparse|junction|symlink|canonical"):
+        canonical_locator(junction)
+    with pytest.raises(ValueError, match="reparse|junction|symlink|canonical"):
+        canonical_creation_locator(junction / "leaf")
+
+
+def _frozen_prediction_root(
+    root: Path, bundle_payloads: dict[str, bytes] | None = None
+) -> str:
+    """构造两侧已冻结的 prediction root 并返回 root checksum（SHA256SUMS 字节哈希）。"""
+    for name in ("multi_intended", "single_intended"):
+        side = root / name
+        side.mkdir(parents=True, exist_ok=True)
+        if bundle_payloads is not None and name in bundle_payloads:
+            (side / "predictions.json").write_bytes(bundle_payloads[name])
+        elif not (side / "predictions.json").exists():
+            (side / "predictions.json").write_text(
+                f'{{"configuration": "{name}"}}', encoding="utf-8"
+            )
+        digest = hashlib.sha256((side / "predictions.json").read_bytes()).hexdigest()
+        (side / "SHA256SUMS").write_text(
+            f"{digest}  predictions.json\n", encoding="utf-8"
+        )
+    entries: list[tuple[str, str]] = []
+    for path in root.rglob("*"):
+        if path.is_file() and path != root / "SHA256SUMS":
+            relative = path.relative_to(root).as_posix()
+            entries.append((relative, hashlib.sha256(path.read_bytes()).hexdigest()))
+    lines = [f"{digest}  {relative}" for relative, digest in sorted(entries)]
+    data = ("\n".join(lines) + "\n").encode("utf-8")
+    (root / "SHA256SUMS").write_bytes(data)
+    return hashlib.sha256(data).hexdigest()
+
+
+def test_child_frozen_root_verification_binds_canonical_bytes(tmp_path):
+    from backend.benchmarks.rcaeval.isolation import verify_frozen_prediction_root
+
+    root = tmp_path / "predictions"
+    root_hash = _frozen_prediction_root(root)
+    verified = verify_frozen_prediction_root(root, root_hash)
+    assert verified["single_intended/predictions.json"].startswith(b'{"configuration"')
+    assert "multi_intended/SHA256SUMS" in verified
+    with pytest.raises(ValueError, match="sha256|hash|checksum"):
+        verify_frozen_prediction_root(root, "0" * 64)
+
+
+def test_child_frozen_root_rejects_post_freeze_replacement(tmp_path):
+    from backend.benchmarks.rcaeval.isolation import verify_frozen_prediction_root
+
+    root = tmp_path / "predictions"
+    root_hash = _frozen_prediction_root(root)
+    (root / "single_intended" / "predictions.json").write_text(
+        '{"tampered": true}', encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="changed|mismatch|checksum|tamper"):
+        verify_frozen_prediction_root(root, root_hash)
+
+
+def test_child_frozen_root_rejects_replaced_checksum_manifest(tmp_path):
+    from backend.benchmarks.rcaeval.isolation import verify_frozen_prediction_root
+
+    root = tmp_path / "predictions"
+    root_hash = _frozen_prediction_root(root)
+    (root / "single_intended" / "predictions.json").write_text(
+        '{"tampered": 1}', encoding="utf-8"
+    )
+    # 攻击者在 freeze 后同时替换 bundle 与 SHA256SUMS；root 哈希绑定必须拒绝
+    _frozen_prediction_root(root)
+    with pytest.raises(ValueError, match="hash|checksum"):
+        verify_frozen_prediction_root(root, root_hash)
+
+
+def test_child_frozen_root_rejects_extra_and_missing_entries(tmp_path):
+    from backend.benchmarks.rcaeval.isolation import verify_frozen_prediction_root
+
+    root = tmp_path / "predictions"
+    root_hash = _frozen_prediction_root(root)
+    (root / "single_intended" / "extra.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="set|extra|missing|checksum|changed"):
+        verify_frozen_prediction_root(root, root_hash)
+    (root / "single_intended" / "extra.json").unlink()
+    (root / "single_intended" / "predictions.json").unlink()
+    with pytest.raises(ValueError, match="set|extra|missing|checksum|changed"):
+        verify_frozen_prediction_root(root, root_hash)
+
+
+def test_child_frozen_root_rejects_noncanonical_checksum_paths(tmp_path):
+    from backend.benchmarks.rcaeval.isolation import verify_frozen_prediction_root
+
+    root = tmp_path / "predictions"
+    _frozen_prediction_root(root)
+    sums_path = root / "SHA256SUMS"
+    canonical = sums_path.read_bytes().decode("utf-8")
+    aliased = canonical.replace("  single_intended/", "  ./single_intended/")
+    assert aliased != canonical
+    sums_path.write_bytes(aliased.encode("utf-8"))
+    aliased_hash = hashlib.sha256(sums_path.read_bytes()).hexdigest()
+    with pytest.raises(ValueError, match="canonical|checksum|path"):
+        verify_frozen_prediction_root(root, aliased_hash)
+
+
+def _evaluator_argv(root: Path, root_hash: str, tmp_path: Path) -> list[str]:
+    return [
+        "evaluator",
+        "--bundle",
+        str(root / "single_intended" / "predictions.json"),
+        "--bundle",
+        str(root / "multi_intended" / "predictions.json"),
+        "--labels",
+        str(tmp_path / "labels" / "labels.json"),
+        "--output",
+        str(tmp_path / "out" / "evaluation.json"),
+        "--ledger",
+        str(tmp_path / "pair-ledger.sqlite3"),
+        "--custodian-manifest",
+        str(tmp_path / "custodian-manifest.json"),
+        "--partition",
+        "tt90",
+        "--prediction-set-hash",
+        root_hash,
+        "--audit-export",
+        str(tmp_path / "audit.json"),
+        "--manual-audit",
+        str(tmp_path / "manual.json"),
+        "--label-open-token",
+        "token",
+        "--expected-label-manifest-hash",
+        "1" * 64,
+        "--expected-runtime-manifest-hash",
+        "2" * 64,
+    ]
+
+
+def test_evaluator_child_rejects_post_freeze_bundle_before_any_artifact(
+    tmp_path, monkeypatch
+):
+    from backend.benchmarks.rcaeval import evaluator
+
+    root = tmp_path / "predictions"
+    root_hash = _frozen_prediction_root(root)
+    # launch spec 创建后替换 predictions.json：spec 哈希不变，child 必须独立复验
+    (root / "single_intended" / "predictions.json").write_text(
+        '{"tampered": true}', encoding="utf-8"
+    )
+    monkeypatch.setattr(sys, "argv", _evaluator_argv(root, root_hash, tmp_path))
+    with pytest.raises(ValueError, match="checksum|changed|mismatch|tamper"):
+        evaluator.main()
+    assert not (tmp_path / "out" / "evaluation.json").exists()
+
+
+def _parseable_bundle_bytes(configuration: RcaEvalConfiguration) -> bytes:
+    """最小可解析 PredictionBundle 字节；评分/cardinality gate 不在本测试面内。"""
+    capability = EndpointCapabilityIdentity(
+        provider="fixture",
+        model="fixture-model",
+        api_mode="responses",
+        endpoint_id="fixture",
+        artifact_hash="3" * 64,
+    )
+    identity = FrozenRunIdentity(
+        source_commit="1" * 40,
+        source_manifest_hash="c" * 64,
+        runtime_manifest_hash="2" * 64,
+        capability=capability,
+        prompt_hash="4" * 64,
+        tool_manifest_hash="5" * 64,
+        skill_catalog_hash="6" * 64,
+        prediction_schema_hash="7" * 64,
+        normalizer_hash="8" * 64,
+        scorer_dependency_hash="9" * 64,
+        dependency_lock_hash="a" * 64,
+        memory_snapshot_hash="b" * 64,
+        retry_policy_hash="d" * 64,
+    )
+    budget = EvaluationBudget(
+        configuration=configuration,
+        token_budget=4_000,
+        max_turns=8,
+        tool_budget=8,
+        timeout_seconds=120,
+        max_investigators=1,
+        max_rounds=1,
+    )
+    bundle = PredictionBundle(
+        partition=RcaEvalPartition.TT90,
+        configuration=configuration,
+        identity=identity,
+        budget=budget,
+        predictions=[],
+        frozen_at=datetime(2026, 8, 10, tzinfo=UTC),
+        bundle_hash="e" * 64,
+    )
+    return bundle.model_dump_json().encode("utf-8")
+
+
+def test_evaluator_child_binds_label_hash_through_custodian_fence(tmp_path, monkeypatch):
+    """H1 wiring: child 把 CLI 期望哈希交给 custodian fence，而不是直接相信。"""
+    from backend.benchmarks.rcaeval import evaluator
+
+    root = tmp_path / "predictions"
+    root_hash = _frozen_prediction_root(
+        root,
+        bundle_payloads={
+            "single_intended": _parseable_bundle_bytes(
+                RcaEvalConfiguration.SINGLE_INTENDED
+            ),
+            "multi_intended": _parseable_bundle_bytes(
+                RcaEvalConfiguration.MULTI_INTENDED
+            ),
+        },
+    )
+    captured = {}
+
+    class Sentinel(Exception):
+        pass
+
+    fake_ledger = SimpleNamespace(
+        path=(tmp_path / "pair-ledger.sqlite3").resolve(),
+    )
+
+    def capture_assert(**kwargs):
+        captured.update(kwargs)
+        raise Sentinel
+
+    fake_ledger.assert_label_open = capture_assert
+    monkeypatch.setattr(
+        evaluator.CustodianPairLedger,
+        "from_manifest",
+        classmethod(lambda cls, path: fake_ledger),
+    )
+    # 以下 gate 各有专属测试（scorer 身份、prelabel audit、formal cardinality）；
+    # 本测试只隔离 H1 接线：CLI 期望哈希必须原样进入 custodian fence。
+    monkeypatch.setattr(evaluator, "_validate_scorer_dependency_identity", lambda b: None)
+    monkeypatch.setattr(evaluator, "validate_prelabel_audit", lambda *a, **k: None)
+    monkeypatch.setattr(evaluator, "_validate_formal_configuration_set", lambda *a: None)
+    monkeypatch.setattr(evaluator, "_validate_frozen_bundle", lambda b: None)
+    monkeypatch.setattr(
+        evaluator, "_validate_formal_bundle_cardinality", lambda *a: None
+    )
+    monkeypatch.setattr(
+        evaluator.EvidenceAuditExport,
+        "model_validate_json",
+        classmethod(lambda cls, raw: SimpleNamespace(export_hash="f" * 64)),
+    )
+    monkeypatch.setattr(
+        evaluator.ManualAuditArtifact,
+        "model_validate_json",
+        classmethod(lambda cls, raw: SimpleNamespace(artifact_hash="0" * 64)),
+    )
+    (tmp_path / "audit.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "manual.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", _evaluator_argv(root, root_hash, tmp_path))
+    with pytest.raises(Sentinel):
+        evaluator.main()
+    assert captured["expected_label_manifest_hash"] == "1" * 64
+    assert captured["prediction_set_hash"] == root_hash
+    assert captured["partition"] == "tt90"
+    assert not (tmp_path / "out" / "evaluation.json").exists()
 
 
 def test_evaluator_launch_rejects_malformed_expected_runtime_hash(packages):

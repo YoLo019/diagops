@@ -166,15 +166,18 @@ def _launch_predict(arguments) -> None:
         build_prediction_launch,
         verify_runtime_package,
     )
-    from backend.benchmarks.rcaeval.ledger import CustodianPairLedger, canonical_locator
+    from backend.benchmarks.rcaeval.ledger import (
+        CustodianPairLedger,
+        canonical_creation_locator,
+    )
     from backend.benchmarks.rcaeval.runner import _reject_reparse_path
 
     _reject_reparse_path(arguments.output, "prediction output")
     _reject_reparse_path(arguments.pair_root, "prediction pair root")
     # 两个调用方 root 都会成为持久化身份输入；先拒绝相对/别名拼写，
-    # 再禁止按进程 cwd 解析。
-    canonical_locator(arguments.output)
-    canonical_locator(arguments.pair_root)
+    # 再禁止按进程 cwd 解析。输出此时允许尚未创建，绑定最近存在祖先。
+    canonical_creation_locator(arguments.output)
+    canonical_creation_locator(arguments.pair_root)
     output = arguments.output.resolve()
     pair_root = arguments.pair_root.resolve()
     if not _within(output, pair_root):
@@ -380,11 +383,13 @@ def _predict(arguments) -> None:
 
 
 def _freeze_set(arguments) -> None:
-    from backend.benchmarks.rcaeval.ledger import CustodianPairLedger
+    from backend.benchmarks.rcaeval.ledger import (
+        CustodianPairLedger,
+        canonical_creation_locator,
+    )
     from backend.benchmarks.rcaeval.models import RcaEvalConfiguration
     from backend.benchmarks.rcaeval.runner import (
         _reject_reparse_path,
-        canonical_locator,
         freeze_prediction_set,
     )
 
@@ -399,7 +404,7 @@ def _freeze_set(arguments) -> None:
         count = 90
     ledger = CustodianPairLedger.from_manifest(arguments.custodian_manifest)
     _reject_reparse_path(arguments.root, "prediction set root")
-    canonical_locator(arguments.root)
+    canonical_creation_locator(arguments.root)
     root = arguments.root.resolve()
     if not _within(root, ledger.canonical_root):
         raise ValueError("prediction root must stay inside the canonical custodian root")

@@ -400,6 +400,13 @@ class OpenRcaDiagnosisRunner:
                 "max_tool_calls_per_specialist": runtime.max_tool_calls_per_specialist,
                 "tool_timeout_seconds": runtime.tool_timeout_seconds,
             },
+            "topology": {
+                "mode": "multi_lead_investigators_critic",
+                "one_context": False,
+                "critic": True,
+                "subagent": False,
+                "hidden_model_calls": False,
+            },
             "retry_policy": {
                 "max_retries": 1,
                 "retryable_categories": ["transport", "rate_limit"],

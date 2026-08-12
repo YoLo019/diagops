@@ -464,13 +464,16 @@ def test_frozen_bundle_evaluation_and_acceptance_policy(tmp_path: Path):
         "cpu",
         partition=RcaEvalPartition.TT90,
     )
+    # custodian root 必须是专属目录：以共享 pytest 基目录为 root 会把其他测试的
+    # 临时 entries 纳入 custodian 递归检查面。
+    pair_root = tmp_path / "pair"
     single = _frozen_bundle(
-        tmp_path,
+        pair_root,
         RcaEvalConfiguration.SINGLE_INTENDED,
         _prediction(label.case_id, "wrong", "wrong"),
     )
     multi = _frozen_bundle(
-        tmp_path,
+        pair_root,
         RcaEvalConfiguration.MULTI_INTENDED,
         _prediction(label.case_id, "checkout", "cpu"),
     )
@@ -534,7 +537,7 @@ def test_frozen_bundle_evaluation_and_acceptance_policy(tmp_path: Path):
     )
 
     manifest = create_custodian_manifest(
-        tmp_path.parent,
+        tmp_path,
         runtime_manifest_hash="2" * 64,
         label_manifest_hash="2" * 64,
     )
@@ -562,7 +565,7 @@ def test_frozen_bundle_evaluation_and_acceptance_policy(tmp_path: Path):
         expected_sides=tuple(item.value for item in expected_configurations),
     )
     for configuration in sorted(expected_configurations, key=lambda item: item.value):
-        side_dir = tmp_path / configuration.value
+        side_dir = pair_root / configuration.value
         lease = ledger.record_side_started(configuration.value, str(side_dir))
         ledger.record_side_completed(
             configuration.value,
@@ -571,21 +574,21 @@ def test_frozen_bundle_evaluation_and_acceptance_policy(tmp_path: Path):
         )
 
     set_hash = freeze_prediction_set(
-        tmp_path,
+        pair_root,
         expected_configurations=expected_configurations,
         expected_case_count=90,
         ledger=ledger,
     )
     assert len(set_hash) == 64
     assert freeze_prediction_set(
-        tmp_path,
+        pair_root,
         expected_configurations=expected_configurations,
         expected_case_count=90,
         ledger=ledger,
     ) == set_hash
     ledger.bind_prediction_set_hash(set_hash)
     assert freeze_prediction_set(
-        tmp_path,
+        pair_root,
         expected_configurations=expected_configurations,
         expected_case_count=90,
         ledger=ledger,

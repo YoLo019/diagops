@@ -37,9 +37,9 @@ provider contracts.
 
 Iteration status: `blocked`
 
-Spec status: `review_required` (fourth-round ledger/package contract fixes await independent re-review)
+Spec status: `review_required` (sixth-round ledger/evaluator/contract fixes await independent re-review)
 
-Plan status: `review_required` (fourth-round ledger/package contract fixes await independent re-review)
+Plan status: `review_required` (sixth-round ledger/evaluator/contract fixes await independent re-review)
 
 Implementation status: `blocked` (M5 engineering fixes implemented/verifying; capability and independent-review gates remain open)
 
@@ -271,6 +271,40 @@ and 135 files. Formal predictions, paired attempts, label opens, and label
 consumption remain `0`; M5 is still blocked at T12 pending capability
 admission and the next independent review, with no accuracy claim.
 
+Verification evidence (M5 sixth-round review-fix, 2026-08-12): base was
+`cf5e4295e96e2fb8067d719e088afdbad0fc9dc2`; the sixth independent review
+returned `changes_required`/`blocked` (1 blocking, 5 high, 3 medium). All nine
+findings were reproduced RED and closed GREEN: the custodian ledger seal is
+authenticated by an external append-only HMAC-chained anchor keyed by a
+one-time random seal key (raw SQLite tamper, forged appended seals, and reveal
+clearing fail closed at every write boundary; anchor/key absence refuses seal
+rebuild); the evaluator child re-verifies the frozen prediction root's
+canonical SHA256SUMS bytes/hash and every bundle byte before its first side
+effect, parses bundles only from verified bytes, and passes the expected
+custodian label manifest hash through the ledger fence (mismatch/replacement
+leave zero artifact); one guarded write boundary persists verifiable failure
+intent on lock/exception exhaustion and startup reconcile converges intents
+plus expired leases; custodian/locator paths reject reparse/junction/symlink,
+drive-alias, UNC, and nonexistent spellings before resolve; side/root checksum
+manifests share one strict canonical parser; `topology` is a required
+mechanically validated V11 contract key and `validate_configuration_set`
+freezes per-configuration topology limits; and `setup.py` `build_py`
+regenerates the wheel package manifest from final `build_lib` content while
+dependency-lock identity fails closed without `uv.lock`/`pyproject.toml`.
+Repository gates on the final state: focused M5 group `379 passed, 1
+skipped`; full pytest `2210 passed, 4 skipped, 1 warning` (the fourth skip is
+the new POSIX-only custodian symlink regression; the other three are
+pre-existing allowed skips); `uv run ruff check .` clean; frontend build
+green; offline acceptance `rows=80 failed=0` in a temp dir; runtime acceptance
+`14/14` with privacy scan passed; wheel external-cwd smoke passed (no Git, no
+`.pth`, external cwd) with installed-file tamper and missing-manifest cases
+refused; `git diff --check` clean. Docker Linux daemon preflight is
+unavailable and remains an unmet milestone gate. These are engineering gates
+only: formal SS30/TT90 predictions, paired attempts, and label opens remain
+`0` (`D:\data\RCAEval\v11-m5` absent); capability artifact, endpoint/model,
+and process-only credentials remain absent. M5 stays blocked at T12 awaiting
+independent seventh-round review; no accuracy or completion claim is made.
+
 Allowed values:
 
 ```text
@@ -340,7 +374,7 @@ artifact、endpoint/model 与 process-only credential，再从 OB30/SS30 继续�
 | M2/T4–T6 | Execute | 九工具离线事件包与 data-only skills、File/Tempo trace 平价、模型边界与能力认证 | implemented / verified | 独立复审重跑：T4 336 passed + 离线验收 rows=80 failed=0；T5 17 passed + Docker gate blocked（daemon 不可用）；T6 106→110 passed（M2R-1 补 4 条 slow-endpoint 测试）；全量 1927 passed/3 skipped、Ruff clean、runtime acceptance exit=0；复审 approve_with_followups，M2R-1 closed；M2 基线 `c2245ac` 已单独提交，M2R-2/3 在 M3 T7 中关闭，M2R-4 跟踪 | 保持基线提交，不修改 dirty main |
 | M3/T7–T8 | Execute / Verify | Lead/Investigators/Critic/Lead V11 authority runtime | implemented / verifying | fifth-round base `e52e47984c4b460ed3b06dc4147d3d3b0532345b`; T7 91 passed、T8 207 passed；M2R/隔离 84 passed/3 skipped；变更相关 102 passed/2 skipped；全量 1995 passed/3 skipped/1 warning；两套全仓 Ruff clean；H1 usage/audit RED→GREEN | 等待同一审查线程复审；不 merge/push，不进入 M4/M5 |
 | M4/T9–T10 | Execute / Verify | Reports/actions, human transitions, API/UI, OpenRCA compatibility, recovery/privacy/offline gates | implemented / verified | 最终提交 `7539c7fd8b707fc54cf2ed75a7d9fcba13d7618c` 已获独立 review approve；第五轮 High RED→GREEN 与 focused/full/offline/runtime/frontend/Ruff/diff-check 证据沿用 M4 handoff | M5 worktree 精确从该提交创建；不 merge/push |
-| M5/T11–T13 | Execute / Verify | Frozen RCAEval control, sealed validation, one TT90 paired result | blocked at T12 capability admission | 第五轮 review-fix 提交 `0bb9c4e2`：稳定单次 label read/替换竞态零 artifact、freeze intent 幂等恢复、sealed ledger/lock reconciliation、reparse/junction 防护、wheel manifest relocation、topology/onset/checksum 机械校验均 RED→GREEN；RCAEval focused 123、full 2176/3 skip/1 warning；SS30/TT90 无模型结果，labels 未正式打开 | 缺 passed capability artifact/endpoint/credential；T13 未开始、TT90 未消耗；等待独立 M5 re-review |
+| M5/T11–T13 | Execute / Verify | Frozen RCAEval control, sealed validation, one TT90 paired result | blocked at T12 capability admission | 第六轮 review-fix（base `cf5e4295`）：外部 HMAC 链 seal anchor（一次性随机 key）、evaluator child 冻结根复验+仅消费已验证字节、custodian label hash 经 fence 绑定、统一写边界 failure intent+启动 reconcile 收敛、reparse/drive-alias/UNC 严格 locator、统一严格 checksum parser、V11 contract topology 机械校验、wheel 内容 manifest 重生成+dependency lock fail-closed，全部 RED→GREEN；focused 379 passed/1 skip、full 2210 passed/4 skip/1 warning；SS30/TT90 无模型结果，labels 未正式打开 | 缺 passed capability artifact/endpoint/credential；T13 未开始、TT90 未消耗；等待独立第七轮 M5 re-review |
 
 M1 review-fix record (2026-08-06): High 1–6 and Medium 7–10 were reproduced
 with focused regressions, fixed at shared profile/ownership/transaction/entry
