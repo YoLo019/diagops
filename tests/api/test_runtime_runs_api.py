@@ -617,6 +617,6 @@ def test_v11_run_binds_latest_certified_transport_atomically(
         "structured_output_transport"
     ] == "strict_output_tool"
     assert container.orchestrator.v11_runtime.model.structured_output_transport == (
-        "strict_output_tool"
+        "native_json_schema"
     )
 

@@ -301,7 +301,7 @@ async def test_strict_output_tool_transport_completes_real_sdk_tool_loop(monkeyp
 
 
 @pytest.mark.anyio
-async def test_budget_reservation_counts_strict_transport_tool_schemas(monkeypatch):
+async def test_budget_reservation_counts_projected_strict_transport_tools(monkeypatch):
     captured = {}
 
     async def fake_reserve(requested_budget, prompt, context, **_kwargs):
@@ -323,7 +323,17 @@ async def test_budget_reservation_counts_strict_transport_tool_schemas(monkeypat
             if False:
                 yield None
 
-    runtime = V11Runtime(model=Delegate(), token_budget=1000)
+    compatible_delegate = OpenAICompatibleChatCompletionsModel(
+        model="compat-model",
+        api_key="local-secret",
+        base_url="http://127.0.0.1:8000/v1",
+        structured_output_transport="strict_output_tool",
+    )
+    async def fake_delegate_response(*_args, **_kwargs):
+        return ModelResponse(output=[], usage=Usage(), response_id=None)
+
+    monkeypatch.setattr(compatible_delegate, "get_response", fake_delegate_response)
+    runtime = V11Runtime(model=compatible_delegate, token_budget=1000)
     monkeypatch.setattr(runtime, "_reserve_model_budget", fake_reserve)
     monkeypatch.setattr(runtime, "_settle_model_budget", fake_settle)
     schema_heavy_tool = FunctionTool(
@@ -339,7 +349,7 @@ async def test_budget_reservation_counts_strict_transport_tool_schemas(monkeypat
         strict_json_schema=True,
     )
     output_schema = AgentOutputSchema(LeadPlanningOutput)
-    budgeted = _V11BudgetedModel(Delegate(), runtime)
+    budgeted = _V11BudgetedModel(compatible_delegate, runtime)
 
     await budgeted.get_response(
         system_instructions="plan",
@@ -354,10 +364,10 @@ async def test_budget_reservation_counts_strict_transport_tool_schemas(monkeypat
         prompt=None,
     )
 
-    assert captured["context"]["tools"][0]["schema"] == (
-        schema_heavy_tool.params_json_schema
-    )
-    assert captured["context"]["output_schema"] == output_schema.json_schema()
+    projected = captured["context"]["tools"][0]
+    assert projected["schema"] == compatible_model_module.STRICT_TOOL_ENVELOPE_SCHEMA
+    assert '"maxLength": 240' in projected["description"]
+    assert captured["context"]["output_schema"] is None
 
 
 def _event() -> IncidentEvent:

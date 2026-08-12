@@ -49,6 +49,7 @@ from backend.diagnosis.diagnostic_skills import (
 from backend.diagnosis.openai_compatible_model import (
     STRICT_TOOL_ENVELOPE_SCHEMA,
     OpenAICompatibleChatCompletionsModel,
+    strict_transport_tools,
 )
 from backend.diagnosis.openai_model import OFFICIAL_OPENAI_BASE_URL
 from backend.diagnosis.result_validation import (
@@ -326,6 +327,14 @@ class _V11BudgetedModel(Model):
 
     async def get_response(self, *args: Any, **kwargs: Any) -> Any:
         model_settings = kwargs["model_settings"]
+        tools = kwargs.get("tools", [])
+        output_schema = kwargs.get("output_schema")
+        if (
+            isinstance(self._delegate, OpenAICompatibleChatCompletionsModel)
+            and self._delegate.structured_output_transport == "strict_output_tool"
+        ):
+            tools = strict_transport_tools(tools)
+            output_schema = None
         request_index = self._request_index
         self._request_index += 1
         reservation_id = self._runtime._model_request_reservation_id(
@@ -343,12 +352,12 @@ class _V11BudgetedModel(Model):
                         "description": tool.description,
                         "schema": tool.params_json_schema,
                     }
-                    for tool in kwargs.get("tools", [])
+                    for tool in tools
                     if isinstance(tool, FunctionTool)
                 ],
                 "output_schema": (
-                    kwargs["output_schema"].json_schema()
-                    if kwargs.get("output_schema") is not None
+                    output_schema.json_schema()
+                    if output_schema is not None
                     else None
                 ),
             },

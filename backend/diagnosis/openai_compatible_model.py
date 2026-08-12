@@ -39,7 +39,7 @@ def _unwrap_strict_tool_payload(raw_input: str) -> str:
     return envelope["payload_json"]
 
 
-def _strict_transport_tools(tools: list[Any]) -> list[Any]:
+def strict_transport_tools(tools: list[Any]) -> list[Any]:
     projected = []
     for tool in tools:
         if (
@@ -116,10 +116,10 @@ class OpenAICompatibleChatCompletionsModel(OpenAIChatCompletionsModel):
                 args = list(args)
                 kwargs = dict(kwargs)
                 if len(args) >= 5:
-                    args[3] = _strict_transport_tools(args[3])
+                    args[3] = strict_transport_tools(args[3])
                     args[4] = None
                 else:
-                    kwargs["tools"] = _strict_transport_tools(kwargs.get("tools", []))
+                    kwargs["tools"] = strict_transport_tools(kwargs.get("tools", []))
                     kwargs["output_schema"] = None
             response = await delegate.get_response(*args, **kwargs)
             if (

@@ -433,6 +433,10 @@ class OpenRcaDiagnosisRunner:
         """冻结 OpenRCA V11 的端点身份；兼容端点必须先通过 capability gate。"""
         if self.provider == ModelProvider.OPENAI:
             return endpoint_id(OFFICIAL_OPENAI_BASE_URL), None
+        if self.provider == ModelProvider.DEEPSEEK:
+            raise ValueError(
+                "OpenRCA V11 DeepSeek requires a certified openai_compatible endpoint"
+            )
         if self.provider != ModelProvider.OPENAI_COMPATIBLE:
             return f"openrca-{self.provider.value}", None
         if not isinstance(self.model, OpenAICompatibleChatCompletionsModel):

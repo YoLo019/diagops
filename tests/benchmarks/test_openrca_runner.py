@@ -648,6 +648,20 @@ def test_v11_compatible_runner_requires_the_configured_adapter():
         runner._v11_model_identity("test-model")
 
 
+def test_v11_deepseek_runner_requires_certified_compatible_path():
+    runner = OpenRcaDiagnosisRunner(
+        Path("."),
+        "deepseek-v4-pro",
+        repository=None,
+        runtime_store=None,
+        provider=ModelProvider.DEEPSEEK,
+        mode="v11-agent",
+    )
+
+    with pytest.raises(ValueError, match="certified openai_compatible"):
+        runner._v11_model_identity("deepseek-v4-pro")
+
+
 def test_deterministic_run_rejects_legacy_index_without_expected_count(
     tmp_path: Path,
 ):

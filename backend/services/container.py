@@ -21,10 +21,7 @@ from backend.diagnosis.agents_runtime import AgentsRcaRuntime
 from backend.diagnosis.coordinator import DiagnosisCoordinator
 from backend.diagnosis.deepseek_model import create_deepseek_model
 from backend.diagnosis.diagnostic_skills import skill_catalog_identity
-from backend.diagnosis.openai_compatible_model import (
-    OpenAICompatibleChatCompletionsModel,
-    create_openai_compatible_model,
-)
+from backend.diagnosis.openai_compatible_model import create_openai_compatible_model
 from backend.diagnosis.openai_model import OFFICIAL_OPENAI_BASE_URL
 from backend.diagnosis.orchestrator import DiagnosisOrchestrator
 from backend.diagnosis.v11_runtime import V11Runtime
@@ -421,8 +418,10 @@ class AppContainer:
         )
         contract = {}
         if version == ExecutionContractVersion.V11:
-            endpoint_identity, capability_hash = self._v11_model_identity(
+            endpoint_identity, capability_hash, structured_output_transport = (
+                self._v11_model_identity(
                 effective_provider, effective_model
+                )
             )
             tool_manifest = self.tool_registry.agent_manifest()
             if len(tool_manifest) != 9:
@@ -450,17 +449,7 @@ class AppContainer:
                     ),
                     "model": effective_model,
                     "api_mode": self._api_mode_for(effective_provider),
-                    "structured_output_transport": (
-                        self.orchestrator.v11_runtime.model.structured_output_transport
-                        if (
-                            effective_provider == ModelProvider.OPENAI_COMPATIBLE
-                            and isinstance(
-                                self.orchestrator.v11_runtime.model,
-                                OpenAICompatibleChatCompletionsModel,
-                            )
-                        )
-                        else "native_json_schema"
-                    ),
+                    "structured_output_transport": structured_output_transport,
                     "endpoint_id": endpoint_identity,
                     "artifact_hash": capability_hash,
                 },
@@ -521,13 +510,13 @@ class AppContainer:
     def _v11_model_identity(self, provider, model_name: str | None):
         """返回 admission 固定的 endpoint/capability 身份。"""
         if provider == ModelProvider.OPENAI:
-            return endpoint_id(OFFICIAL_OPENAI_BASE_URL), None
+            return endpoint_id(OFFICIAL_OPENAI_BASE_URL), None, "native_json_schema"
         if provider == ModelProvider.DEEPSEEK:
             raise RuntimeContractError(
                 "V11 DeepSeek requires a certified openai_compatible endpoint"
             )
         if provider != ModelProvider.OPENAI_COMPATIBLE:
-            return None, None
+            return None, None, "native_json_schema"
         base_url = self.settings.agents.openai_compatible.base_url
         if not base_url or not model_name:
             raise RuntimeContractError(
@@ -555,10 +544,11 @@ class AppContainer:
             )
         except ValueError as exc:
             raise RuntimeContractError(str(exc)) from exc
-        adapter = getattr(self.orchestrator.v11_runtime, "model", None)
-        if isinstance(adapter, OpenAICompatibleChatCompletionsModel):
-            adapter.structured_output_transport = artifact.structured_output_transport
-        return identity, artifact.artifact_hash
+        return (
+            identity,
+            artifact.artifact_hash,
+            artifact.structured_output_transport,
+        )
 
     @staticmethod
     def _capability_directory() -> Path:
