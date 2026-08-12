@@ -14,6 +14,17 @@ OB30 `single_intended` 生成了 30 条冻结预测，但全部在第一次模�
 4. 阻止“案例全部失败但预测包仍被冻结为成功产物”的同类误判。
 5. 修复后重新认证当前 endpoint/model，并从干净身份重新运行 OB30 Single。
 
+## 跨模型适配与准入
+
+实现不绑定某个模型名称。每个 `(canonical endpoint, model, API mode, adapter/SDK/code identity)` 组合必须分别通过能力认证，才能进入 prediction：
+
+- 通过 `strict_json_schema_output` 与 `strict_json_schema_with_tools` 的模型可以使用。
+- 未实现 `json_schema`、只实现旧 JSON mode，或无法同时使用 tools 与 Structured Outputs 的模型认证失败，不得启动评测。
+- 同一模型名经不同 OpenAI-compatible endpoint 暴露时视为不同能力主体，不复用认证结果。
+- endpoint 或模型升级后必须重新认证，避免用名称推断实际协议行为。
+
+因此该方案可适配 OpenAI 模型和其它实现了相同严格协议的兼容模型，但不承诺所有模型均可用。
+
 ## 方案比较
 
 ### 方案 A：显式类型化 schema，并补强认证（采用）
@@ -29,6 +40,8 @@ OB30 `single_intended` 生成了 30 条冻结预测，但全部在第一次模�
 ### 方案 C：退回 `json_object`
 
 仅保证输出是 JSON 对象，无法可靠约束嵌套字段、类型和必填项。它也是现有能力认证与生产路径发生偏差的原因之一，不采用。
+
+“不降级”表示 strict 能力认证失败时明确拒绝运行，而不是静默改发 `json_object`；“不关闭 strict”表示不把 `strict: true` 改成 `false` 来绕过 schema 错误。这样所有被准入的模型都遵守同一输出契约，评测结果不会因模型不同而使用强弱不一的解析规则。
 
 ## 设计
 
