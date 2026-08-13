@@ -22,10 +22,12 @@ from pathlib import Path
 from typing import Literal
 
 import openai
+from agents import AgentOutputSchema
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.config.settings import canonicalize_endpoint, endpoint_id
 from backend.diagnosis.openai_compatible_model import COMPATIBLE_ADAPTER_VERSION
+from backend.diagnosis.v11_runtime import V11SingleControlOutput
 from backend.safety.redaction import redact_text
 from backend.services.source_identity import resolve_source_identity
 
@@ -52,65 +54,40 @@ REQUIRED_CONTRACTS = (
     "chat_completions.configured_parallelism",
 )
 STRUCTURED_OUTPUT_TRANSPORTS = ("native_json_schema", "strict_output_tool")
-_STRICT_OK_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "ok": {"type": "boolean"},
-        "scope": {
-            "anyOf": [
-                {
-                    "type": "object",
-                    "properties": {
-                        "entity_ids": {
-                            "type": "array",
-                            "items": {"type": "string", "maxLength": 160},
-                            "maxItems": 20,
-                        },
-                        "start_time": {
-                            "anyOf": [
-                                {"type": "string", "format": "date-time"},
-                                {"type": "null"},
-                            ]
-                        },
-                        "end_time": {
-                            "anyOf": [
-                                {"type": "string", "format": "date-time"},
-                                {"type": "null"},
-                            ]
-                        },
-                    },
-                    "required": ["entity_ids", "start_time", "end_time"],
-                    "additionalProperties": False,
-                },
-                {"type": "null"},
-            ]
+_NATIVE_PROBE_RESULT = {
+    "planning": {
+        "decision": {
+            "action": "inconclusive",
+            "summary": "Capability probe completed.",
+            "task_ids": [],
+            "candidate_ids": [],
+            "evidence_ids": [],
+            "selected_skills": [],
+            "stop_reason": "Capability probe only.",
         },
-        "items": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "kind": {"type": "string", "enum": ["log", "metric"]},
-                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-                },
-                "required": ["kind", "confidence"],
-                "additionalProperties": False,
-            },
-            "maxItems": 8,
+        "tasks": [],
+    },
+    "investigator": {"summary": "", "findings": [], "candidates": []},
+}
+
+
+def _native_production_schema() -> dict[str, object]:
+    return AgentOutputSchema(
+        V11SingleControlOutput, strict_json_schema=True
+    ).json_schema()
+
+
+def _native_response_format() -> dict[str, object]:
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "final_output",
+            "strict": True,
+            "schema": _native_production_schema(),
         },
-    },
-    "required": ["ok", "scope", "items"],
-    "additionalProperties": False,
-}
-_STRICT_OK_RESULT = {"ok": True, "scope": None, "items": []}
-_STRICT_OK_RESPONSE_FORMAT = {
-    "type": "json_schema",
-    "json_schema": {
-        "name": "capability_ok",
-        "strict": True,
-        "schema": _STRICT_OK_SCHEMA,
-    },
-}
+    }
+
+
 _STRICT_OUTPUT_TOOL = {
     "type": "function",
     "function": {
@@ -157,7 +134,13 @@ _READ_LOGS_TOOL = {
 
 def capability_manifest_hash() -> str:
     canonical = json.dumps(
-        list(CAPABILITY_MANIFEST), ensure_ascii=True, separators=(",", ":")
+        {
+            "capabilities": list(CAPABILITY_MANIFEST),
+            "native_output_schema": _native_production_schema(),
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -417,18 +400,21 @@ async def _probe_capabilities(
                 {
                     "role": "user",
                     "content": (
-                        "Do not call read_logs. Return ok=true, scope=null, and "
-                        "an empty items array."
+                        "Do not call read_logs. Return the minimal inconclusive "
+                        "planning and empty investigator result required by the schema."
                     ),
                 }
             ],
-            response_format=_STRICT_OK_RESPONSE_FORMAT,
+            response_format=_native_response_format(),
             tools=[_READ_LOGS_TOOL],
             tool_choice="auto",
-            max_tokens=64,
+            max_tokens=256,
         )
         content = response.choices[0].message.content if response.choices else None
-        return isinstance(content, str) and json.loads(content) == _STRICT_OK_RESULT
+        if not isinstance(content, str):
+            return False
+        parsed = AgentOutputSchema(V11SingleControlOutput).validate_json(content)
+        return parsed.model_dump(mode="json") == _NATIVE_PROBE_RESULT
 
     async def strict_output_tool() -> bool:
         first = await client.chat.completions.create(

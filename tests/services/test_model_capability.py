@@ -5,8 +5,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from agents import AgentOutputSchema
 
 from backend.config.settings import endpoint_id
+from backend.diagnosis.v11_runtime import V11SingleControlOutput
 from backend.services.model_capability import (
     CAPABILITY_MANIFEST,
     REQUIRED_CONTRACTS,
@@ -25,6 +27,22 @@ from backend.services.model_capability import (
 _CANONICAL_URL = "http://127.0.0.1:8000/v1"
 _ENDPOINT_ID = endpoint_id(_CANONICAL_URL)
 _TESTED_AT = datetime(2026, 8, 7, 12, 0, tzinfo=UTC)
+
+_PRODUCTION_RESULT = {
+    "planning": {
+        "decision": {
+            "action": "inconclusive",
+            "summary": "Capability probe completed.",
+            "task_ids": [],
+            "candidate_ids": [],
+            "evidence_ids": [],
+            "selected_skills": [],
+            "stop_reason": "Capability probe only.",
+        },
+        "tasks": [],
+    },
+    "investigator": {"summary": "", "findings": [], "candidates": []},
+}
 
 
 def _artifact(**overrides):
@@ -202,7 +220,7 @@ class _FakeCompletions:
             if not self._supports_native_schema:
                 raise RuntimeError("native schema unsupported")
             return _FakeResponse(
-                _FakeMessage(content='{"ok":true,"scope":null,"items":[]}')
+                _FakeMessage(content=json.dumps(_PRODUCTION_RESULT))
             )
         if response_format:
             return _FakeResponse(_FakeMessage(content='{"ok": true}'))
@@ -286,6 +304,37 @@ async def test_certify_passes_against_fake_endpoint():
         "native_json_schema_with_tools",
         "strict_output_tool",
     } <= set(CAPABILITY_MANIFEST)
+
+
+@pytest.mark.anyio
+async def test_native_certification_uses_exact_single_production_schema():
+    completions = _FakeCompletions()
+
+    artifact = await certify_endpoint_async(
+        base_url=_CANONICAL_URL,
+        model="compat-model",
+        api_key="local-secret",
+        client_factory=lambda: _FakeClient(completions),
+    )
+
+    request = next(
+        item
+        for item in completions.requests
+        if item.get("response_format", {}).get("type") == "json_schema"
+    )
+    expected = AgentOutputSchema(
+        V11SingleControlOutput, strict_json_schema=True
+    ).json_schema()
+
+    assert artifact.structured_output_transport == "native_json_schema"
+    assert request["response_format"]["json_schema"] == {
+        "name": "final_output",
+        "strict": True,
+        "schema": expected,
+    }
+    AgentOutputSchema(V11SingleControlOutput).validate_json(
+        json.dumps(_PRODUCTION_RESULT)
+    )
 
 
 @pytest.mark.anyio
