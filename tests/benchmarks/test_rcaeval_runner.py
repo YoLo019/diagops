@@ -49,6 +49,23 @@ def test_safe_exception_diagnostic_redacts_message_and_reports_relative_location
     assert diagnostic["location"].startswith("tests/benchmarks/test_rcaeval_runner.py:")
 
 
+def test_safe_exception_diagnostic_extracts_pydantic_detail_from_long_message():
+    detail = (
+        "1 validation error for V11SingleControlOutput "
+        "investigator.candidates.0 Value error, "
+        "onset window start must not be later than end "
+        "[type=value_error, input_value={...}, input_type=dict] "
+        "For further information visit https://errors.pydantic.dev/2.13/v/value_error"
+    )
+    try:
+        raise ValueError(f"Invalid JSON when parsing {'x' * 600} for adapter; {detail}")
+    except ValueError as exc:
+        diagnostic = _safe_exception_diagnostic(exc, Path.cwd())
+
+    assert len(diagnostic["message"]) <= 256
+    assert "onset window start must not be later than end" in diagnostic["message"]
+
+
 def test_single_control_output_is_a_valid_strict_json_schema():
     schema = AgentOutputSchema(
         V11SingleControlOutput, strict_json_schema=True

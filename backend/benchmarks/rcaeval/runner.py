@@ -103,7 +103,11 @@ logger = logging.getLogger(__name__)
 def _safe_exception_diagnostic(exc: BaseException, repository_root: Path) -> dict[str, str]:
     text = " ".join(redact_text(str(exc)).split())
     if len(text) > 256:
-        text = f"{text[:187]} ... {text[-64:]}"
+        marker = text.find(" validation error")
+        if marker != -1:
+            text = f"{text[:64]} ... {text[marker:marker + 186]}"
+        else:
+            text = f"{text[:187]} ... {text[-64:]}"
     message = text
     location = "unknown"
     for frame in reversed(traceback.extract_tb(exc.__traceback__)):
