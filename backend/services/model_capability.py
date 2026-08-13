@@ -400,8 +400,12 @@ async def _probe_capabilities(
                 {
                     "role": "user",
                     "content": (
-                        "Do not call read_logs. Return the minimal inconclusive "
-                        "planning and empty investigator result required by the schema."
+                        "Do not call read_logs. Return exactly this JSON result: "
+                        "planning.decision with action=\"inconclusive\", "
+                        "summary=\"Capability probe completed.\", empty task_ids, "
+                        "candidate_ids, evidence_ids, selected_skills, and "
+                        "stop_reason=\"Capability probe only.\"; planning.tasks empty; "
+                        "investigator with summary=\"\" and empty findings and candidates."
                     ),
                 }
             ],

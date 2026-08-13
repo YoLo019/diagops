@@ -337,6 +337,23 @@ async def test_native_certification_uses_exact_single_production_schema():
     )
 
 
+def test_capability_manifest_hash_tracks_the_shared_production_schema(monkeypatch):
+    import backend.services.model_capability as module
+
+    baseline = capability_manifest_hash()
+    assert capability_manifest_hash() == baseline  # 确定性
+
+    def mutated_schema() -> dict[str, object]:
+        schema = AgentOutputSchema(
+            V11SingleControlOutput, strict_json_schema=True
+        ).json_schema()
+        schema["$defs"]["InvestigatorOutput"]["properties"]["summary"]["maxLength"] = 1
+        return schema
+
+    monkeypatch.setattr(module, "_native_production_schema", mutated_schema)
+    assert capability_manifest_hash() != baseline
+
+
 @pytest.mark.anyio
 async def test_certify_selects_strict_output_tool_when_native_schema_is_unavailable():
     completions = _FakeCompletions(supports_native_schema=False)

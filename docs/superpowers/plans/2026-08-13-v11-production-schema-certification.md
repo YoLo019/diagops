@@ -299,8 +299,12 @@ async def native_json_schema_with_tools() -> bool:
             {
                 "role": "user",
                 "content": (
-                    "Do not call read_logs. Return the minimal inconclusive "
-                    "planning and empty investigator result required by the schema."
+                    "Do not call read_logs. Return exactly this JSON result: "
+                    "planning.decision with action=\"inconclusive\", "
+                    "summary=\"Capability probe completed.\", empty task_ids, "
+                    "candidate_ids, evidence_ids, selected_skills, and "
+                    "stop_reason=\"Capability probe only.\"; planning.tasks empty; "
+                    "investigator with summary=\"\" and empty findings and candidates."
                 ),
             }
         ],
@@ -452,3 +456,11 @@ Read the smoke JSON and SQLite runtime events. Require at least one `model.start
 - [ ] **Step 4: Stop before formal reauthorization**
 
 Report the measured input, output, total tokens, tool calls, duration, transport, and number of model turns. Do not generate a reauthorization token, change the formal ledger, or start a 30-case prediction until the user approves a new formal Single/Multi/equal-token budget design.
+
+## Review ledger
+
+| finding_id | origin | severity | root cause | disposition | resolution | regression check | status |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| R1 | missed | high | Task 2 Step 3 原 prompt 未钉死逐字相等门禁要求的固定字符串，真实模型几乎不可能复述，live 时 native_json_schema 几乎不可能被选中（fail closed，不会误认证） | accepted | prompt 改为逐字规定探针返回内容（`model_capability.py`），保持精确相等门禁不变；用户 2026-08-13 确认最小修复 | `uv run pytest tests/services/test_model_capability.py -q` → 15 passed | closed |
+| R2 | missed | low | `test_rcaeval_runner.py` 保留旧 `additionalProperties` 弱断言，与 runtime 强化遍历重复 | accepted | 保留为冗余防御，不扩大本次范围 | — | closed |
+| R3 | missed | low | `capability_manifest_hash` 绑定 `native_output_schema` 后无 hash 敏感性自动化测试 | accepted | 新增 `test_capability_manifest_hash_tracks_the_shared_production_schema`（确定性 + 变异 schema 必改 hash） | 同上 15 passed | closed |
