@@ -17,18 +17,18 @@ from backend.benchmarks.rcaeval.models import (
 from backend.benchmarks.rcaeval.providers import incident_event_for_case
 from backend.benchmarks.rcaeval.runner import (
     RcaEvalCaseRunner,
-    SingleControlOutput,
     validate_configuration_set,
 )
 from backend.db.session import create_db_engine, initialize_database
 from backend.db.sqlite_repository import SQLiteInvestigationRepository
+from backend.diagnosis.v11_runtime import V11SingleControlOutput
 from backend.domain.runtime import RuntimeEventType, RuntimeRunStatus
 from backend.runtime.sqlite_store import SQLiteRuntimeStore
 
 
 def test_single_control_output_is_a_valid_strict_json_schema():
     schema = AgentOutputSchema(
-        SingleControlOutput, strict_json_schema=True
+        V11SingleControlOutput, strict_json_schema=True
     ).json_schema()
 
     def assert_strict(value):
@@ -127,7 +127,7 @@ def _write_runtime_package(root: Path) -> RuntimeCaseEntry:
 
 def _single_turn(**kwargs):
     output_type = kwargs["output_type"].__name__
-    if output_type == "SingleControlOutput":
+    if output_type == "V11SingleControlOutput":
         return {
             "planning": {
                 "decision": {

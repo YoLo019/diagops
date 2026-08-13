@@ -11,8 +11,6 @@ from time import perf_counter
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict
-
 from backend.benchmarks.rcaeval.dependency import scorer_dependency_hash
 from backend.benchmarks.rcaeval.isolation import parse_canonical_checksum_bytes
 from backend.benchmarks.rcaeval.ledger import (
@@ -42,11 +40,11 @@ from backend.diagnosis.coordinator import DiagnosisCoordinator
 from backend.diagnosis.diagnostic_skills import skill_catalog_identity
 from backend.diagnosis.orchestrator import DiagnosisOrchestrator
 from backend.diagnosis.v11_runtime import (
-    InvestigatorOutput,
     LeadPlanningOutput,
     LeadTaskDraft,
     V11Runtime,
     V11RuntimeContractError,
+    V11SingleControlOutput,
     _InvestigatorResult,
 )
 from backend.domain.agent_findings import CoordinationReview
@@ -101,15 +99,6 @@ RETRY_POLICY = {
     "provider_max_retries": 0,
     "sdk_max_retries": 0,
 }
-
-
-class SingleControlOutput(BaseModel):
-    """Single control's planning and investigation result in one model context."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    planning: LeadPlanningOutput
-    investigator: InvestigatorOutput
 
 
 class EmptyRunOwnedMemory(VerifiedMemoryLookup):
@@ -237,7 +226,7 @@ class SingleInvestigatorAgent(V11Runtime):
             turn = await self._call_model(
                 actor=ExecutionActor.INVESTIGATOR.value,
                 prompt=prompt,
-                output_type=SingleControlOutput,
+                output_type=V11SingleControlOutput,
                 context={
                     "incident": event.model_dump(mode="json"),
                     "task": task.model_dump(mode="json"),
@@ -260,7 +249,7 @@ class SingleInvestigatorAgent(V11Runtime):
                 analysis_round=1,
             )
             await self._commit_session(repository, investigation_id, session)
-            output = self._parse_output(turn.output, SingleControlOutput)
+            output = self._parse_output(turn.output, V11SingleControlOutput)
             if output.planning.tasks:
                 if len(output.planning.tasks) != 1:
                     raise V11RuntimeContractError(

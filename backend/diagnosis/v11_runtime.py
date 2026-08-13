@@ -75,6 +75,7 @@ from backend.domain.agent_plan import (
 )
 from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem, EvidenceStatus
+from backend.domain.hypotheses import CauseType
 from backend.domain.multi_agent import (
     AgentExecutionLayer,
     AuthorityMode,
@@ -143,7 +144,7 @@ class InvestigatorFindingDraft(BaseModel):
     summary: str = Field(min_length=1, max_length=512)
     confidence: float = Field(ge=0, le=1, allow_inf_nan=False)
     evidence_ids: list[str] = Field(default_factory=list, max_length=32)
-    related_cause_type: Any = None
+    related_cause_type: CauseType | None = None
     severity: AgentFindingSeverity = AgentFindingSeverity.MEDIUM
     rationale: str = Field(default="", max_length=512)
     gaps: list[str] = Field(default_factory=list, max_length=8)
@@ -159,6 +160,15 @@ class InvestigatorOutput(BaseModel):
     summary: str = Field(default="", max_length=512)
     findings: list[InvestigatorFindingDraft] = Field(default_factory=list, max_length=8)
     candidates: list[RootCauseCandidate] = Field(default_factory=list, max_length=3)
+
+
+class V11SingleControlOutput(BaseModel):
+    """Single control 的 planning 与 investigation 共用一个模型上下文。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    planning: LeadPlanningOutput
+    investigator: InvestigatorOutput
 
 
 class CriticOutput(BaseModel):

@@ -53,6 +53,7 @@ from backend.diagnosis.v11_runtime import (
     LeadPlanningOutput,
     V11Runtime,
     V11RuntimeContractError,
+    V11SingleControlOutput,
     _V11BudgetedModel,
 )
 from backend.domain.agent_findings import (
@@ -107,6 +108,27 @@ from backend.tools.provider_tools import (
 )
 from backend.tools.registry import agent_manifest_hash
 
+_SCHEMA_VALUE_KEYS = {"items", "additionalProperties", "contains", "not"}
+_SCHEMA_LIST_KEYS = {"allOf", "anyOf", "oneOf", "prefixItems"}
+
+
+def _assert_explicit_schema_semantics(schema: dict, path: tuple[str, ...] = ()) -> None:
+    semantic_keys = {"type", "$ref", "allOf", "anyOf", "oneOf", "enum", "const"}
+    assert semantic_keys & schema.keys(), ".".join(path) or "<root>"
+    if schema.get("type") == "object":
+        assert schema.get("additionalProperties") is False
+
+    for key in ("$defs", "definitions", "properties", "patternProperties"):
+        for name, child in schema.get(key, {}).items():
+            _assert_explicit_schema_semantics(child, (*path, key, name))
+    for key in _SCHEMA_VALUE_KEYS:
+        child = schema.get(key)
+        if isinstance(child, dict):
+            _assert_explicit_schema_semantics(child, (*path, key))
+    for key in _SCHEMA_LIST_KEYS:
+        for index, child in enumerate(schema.get(key, [])):
+            _assert_explicit_schema_semantics(child, (*path, key, str(index)))
+
 
 @pytest.mark.parametrize(
     "output_type",
@@ -115,22 +137,12 @@ from backend.tools.registry import agent_manifest_hash
         InvestigatorOutput,
         CriticOutput,
         LeadAdjudicationOutput,
+        V11SingleControlOutput,
     ],
 )
 def test_v11_model_output_types_are_valid_strict_json_schemas(output_type):
     schema = AgentOutputSchema(output_type, strict_json_schema=True).json_schema()
-
-    def assert_strict(value):
-        if isinstance(value, dict):
-            if value.get("type") == "object":
-                assert value.get("additionalProperties") is False
-            for child in value.values():
-                assert_strict(child)
-        elif isinstance(value, list):
-            for child in value:
-                assert_strict(child)
-
-    assert_strict(schema)
+    _assert_explicit_schema_semantics(schema)
 
 
 def test_strict_output_tool_uses_provider_subset_and_full_local_validation():
