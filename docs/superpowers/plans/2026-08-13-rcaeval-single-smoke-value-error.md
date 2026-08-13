@@ -147,7 +147,7 @@ git commit -m "fix(rcaeval): expose safe single smoke failures"
 - Read: `C:/Users/林佳威/.codex/attachments/96cda2c5-d476-4422-82fd-86b4e3ef7933/pasted-text.txt`
 - Modify: `docs/superpowers/plans/2026-08-13-rcaeval-single-smoke-value-error.md`
 
-- [ ] **Step 1: Verify prerequisites without printing secrets**
+- [x] **Step 1: Verify prerequisites without printing secrets**
 
 Run:
 
@@ -159,7 +159,7 @@ Test-Path -LiteralPath 'D:\agent\sre-agent\output\model_capability\349d8f7aeba75
 
 Expected: both path checks print `True`; the key value is never printed.
 
-- [ ] **Step 2: Run exactly one diagnostic smoke in an isolated PowerShell process**
+- [x] **Step 2: Run exactly one diagnostic smoke in an isolated PowerShell process**
 
 Normalize the attachment's two-space paste indentation, encode the script, and execute it as one child process:
 
@@ -174,16 +174,64 @@ if ($diagnosticExit -eq 0) { throw 'Diagnostic smoke unexpectedly passed; inspec
 
 Expected: nonzero exit plus one `rcaeval single control failed` warning containing exception type, bounded message, and repository-relative location.
 
-- [ ] **Step 3: Record the exact root cause and write the follow-up plan**
+- [x] **Step 3: Record the exact root cause and write the follow-up plan**
 
 Append to this plan a `Diagnostic Result` section containing only the safe warning fields and event counts. Then create `docs/superpowers/plans/2026-08-13-rcaeval-single-smoke-root-cause-fix.md` with the exact failing test, production edit, verification commands, final authorized smoke command, and expected RED/GREEN results. Do not change the root-cause production boundary until that plan contains no placeholders.
 
 The follow-up plan's final acceptance must require `completed=true`, persisted run status `completed`, at least one `model.completed`, at least one `tool.completed`, zero `model.failed`, and zero read-only violations.
 
-- [ ] **Step 4: Commit the evidence-backed plan amendment**
+- [x] **Step 4: Commit the evidence-backed plan amendment**
 
 ```powershell
 git add -- docs/superpowers/plans/2026-08-13-rcaeval-single-smoke-value-error.md
 git add -- docs/superpowers/plans/2026-08-13-rcaeval-single-smoke-root-cause-fix.md
 git commit -m "docs(rcaeval): plan proven single smoke fix"
 ```
+
+## Diagnostic Result
+
+Diagnostic smoke executed 2026-08-13 in the user's secret-bearing PowerShell
+(capability re-certified at `c90aa6c`, artifact hash
+`bfd1cf692f0b9e4d4b13ec3ba7a2cea6a4aecb51c0f41531eb46de25b682ccfe`,
+transport `native_json_schema`). One `rcaeval single control failed` warning
+was captured with exactly three safe fields:
+
+```text
+exception_type=UserError
+message=Error running tool query_related_alerts: 'RelatedAlertQuery' object has no attribute 'end_time'
+location=.venv/Lib/site-packages/agents/run_internal/tool_execution.py:1623
+```
+
+Known location limitation: the innermost repository-relative frame is the
+Agents SDK frame because `.venv` lives under the repository root; the message
+field, not the location, carries the root cause.
+
+Smoke summary (case `re2-11caeecc5351ba99`, run
+`7d54c7fd-5cae-453e-af4e-2c03da8a719e`, `completed=false`,
+`run_status=failed`, `failure_category=ValueError`, duration 17219 ms,
+tokens 5210 in / 511 out, 2 tool calls, 0 read-only violations):
+
+```text
+agent.failed=1 agent.started=1 attempt.started=1 checkpoint.created=3
+model.completed=1 model.started=1 phase.completed=3 phase.failed=1
+phase.started=4 run.failed=1 run.started=1 tool.failed=2 tool.started=2
+model.failed=0
+```
+
+Evidence preserved at
+`D:\data\RCAEval\v11-smoke\ob30-single-24k-production-schema-cb1017b4d80c4944b45378248371b632.{db,json}`.
+
+Root cause (code-verified): `AdaptiveToolSession.invoke`
+(`backend/diagnosis/adaptive_tools.py:271-284`) routes every tool through
+`_validate_scope` (`adaptive_tools.py:623-631`) and `_query_fingerprint`
+(`adaptive_tools.py:696-709`), which hard-access `query.start_time` /
+`query.end_time` from the `QueryWindow` contract. Four of the nine frozen
+tools use different query contracts — `query_traces`, `read_runtime_state`,
+and `query_related_alerts` use `ScopedTelemetryQuery`
+(`window_start`/`window_end`, optional pair), and `lookup_memory` uses
+`MemoryQuery` (no window). Dispatching any of them raises `AttributeError`,
+which is not covered by the `except (KeyError, TypeError, ValueError)` clause,
+escapes `invoke`, and is wrapped by the Agents SDK as `UserError`, failing the
+entire single control. No existing test dispatches these four tools through
+`AdaptiveToolSession.invoke` (registry/manifest metadata tests only), which is
+why the defect survived until the first live Single smoke.
