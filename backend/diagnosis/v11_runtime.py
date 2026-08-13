@@ -137,6 +137,29 @@ class LeadPlanningOutput(BaseModel):
     tasks: list[LeadTaskDraft] = Field(default_factory=list, max_length=3)
 
 
+class LeadDecisionDraft(BaseModel):
+    """Single control 的 decision 草稿：仅字段级约束，语义由确定性边界裁决。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: LeadAction
+    summary: str = Field(min_length=1, max_length=512)
+    task_ids: list[str] = Field(default_factory=list, max_length=3)
+    candidate_ids: list[str] = Field(default_factory=list, max_length=32)
+    evidence_ids: list[str] = Field(default_factory=list, max_length=32)
+    selected_skills: list[str] = Field(default_factory=list, max_length=4)
+    stop_reason: str | None = Field(default=None, max_length=256)
+
+
+class SingleControlPlanningOutput(BaseModel):
+    """Single control 的 planning 契约；decision 草稿不参与最终裁决。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    decision: LeadDecisionDraft
+    tasks: list[LeadTaskDraft] = Field(default_factory=list, max_length=3)
+
+
 class InvestigatorFindingDraft(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -167,7 +190,7 @@ class V11SingleControlOutput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    planning: LeadPlanningOutput
+    planning: SingleControlPlanningOutput
     investigator: InvestigatorOutput
 
 

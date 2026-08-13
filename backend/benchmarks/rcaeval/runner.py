@@ -44,6 +44,7 @@ from backend.diagnosis.orchestrator import DiagnosisOrchestrator
 from backend.diagnosis.v11_runtime import (
     LeadPlanningOutput,
     LeadTaskDraft,
+    SingleControlPlanningOutput,
     V11Runtime,
     V11RuntimeContractError,
     V11SingleControlOutput,
@@ -122,6 +123,41 @@ def _safe_exception_diagnostic(exc: BaseException, repository_root: Path) -> dic
         "message": message,
         "location": location,
     }
+
+
+def _single_control_planning(
+    planning: SingleControlPlanningOutput, *, task_id: str
+) -> LeadPlanningOutput:
+    """Single control 的 decision 不参与裁决（result_validation 强制 inconclusive
+    收口），这里把草稿归一化为领域合法形态；任务语义门禁仍由 _build_plan 执行。"""
+    decision = planning.decision
+    if decision.action == LeadAction.INCONCLUSIVE:
+        return LeadPlanningOutput(
+            decision=LeadDecision(
+                action=LeadAction.INCONCLUSIVE,
+                summary=decision.summary,
+                stop_reason=decision.stop_reason or "single_control_inconclusive",
+                evidence_ids=decision.evidence_ids,
+                selected_skills=decision.selected_skills,
+            ),
+            tasks=[],
+        )
+    if len(planning.tasks) != 1:
+        raise V11RuntimeContractError(
+            "single control planning must contain its one owned task"
+        )
+    return LeadPlanningOutput(
+        decision=LeadDecision(
+            action=decision.action,
+            summary=decision.summary,
+            task_ids=[task_id],
+            candidate_ids=decision.candidate_ids,
+            evidence_ids=decision.evidence_ids,
+            selected_skills=decision.selected_skills,
+            stop_reason=decision.stop_reason,
+        ),
+        tasks=[planning.tasks[0].model_copy(update={"id": task_id})],
+    )
 RETRY_POLICY = {
     "max_retries": 1,
     "retryable_categories": ["transport", "rate_limit"],
@@ -279,29 +315,9 @@ class SingleInvestigatorAgent(V11Runtime):
             )
             await self._commit_session(repository, investigation_id, session)
             output = self._parse_output(turn.output, V11SingleControlOutput)
-            if output.planning.tasks:
-                if len(output.planning.tasks) != 1:
-                    raise V11RuntimeContractError(
-                        "single control planning must contain its one owned task"
-                    )
-                output = output.model_copy(
-                    update={
-                        "planning": output.planning.model_copy(
-                            update={
-                                "tasks": [
-                                    output.planning.tasks[0].model_copy(
-                                        update={"id": task_id}
-                                    )
-                                ],
-                                "decision": output.planning.decision.model_copy(
-                                    update={"task_ids": [task_id]}
-                                ),
-                            }
-                        )
-                    }
-                )
+            planning = _single_control_planning(output.planning, task_id=task_id)
             plan = self._build_plan(
-                output.planning,
+                planning,
                 investigation_id=investigation_id,
                 runtime_run_id=self.runtime_run_id or "",
                 manifest=manifest,

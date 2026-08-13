@@ -22,7 +22,7 @@ from openai.types.responses import (
     ResponseOutputMessage,
     ResponseOutputText,
 )
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from backend.config.settings import (
     AgentsSettings,
@@ -143,6 +143,47 @@ def _assert_explicit_schema_semantics(schema: dict, path: tuple[str, ...] = ()) 
 def test_v11_model_output_types_are_valid_strict_json_schemas(output_type):
     schema = AgentOutputSchema(output_type, strict_json_schema=True).json_schema()
     _assert_explicit_schema_semantics(schema)
+
+
+def test_single_control_planning_draft_tolerates_inconclusive_with_candidates():
+    payload = {
+        "planning": {
+            "decision": {
+                "action": "inconclusive",
+                "summary": "Investigated but evidence is insufficient.",
+                "task_ids": [],
+                "candidate_ids": ["candidate-1"],
+                "evidence_ids": ["ev-1"],
+                "selected_skills": [],
+                "stop_reason": None,
+            },
+            "tasks": [],
+        },
+        "investigator": {"summary": "", "findings": [], "candidates": []},
+    }
+
+    output = V11SingleControlOutput.model_validate(payload)
+
+    assert output.planning.decision.action == LeadAction.INCONCLUSIVE
+    assert output.planning.decision.candidate_ids == ["candidate-1"]
+
+
+def test_multi_planning_output_still_rejects_inconclusive_with_candidates():
+    with pytest.raises(ValidationError):
+        LeadPlanningOutput.model_validate(
+            {
+                "decision": {
+                    "action": "inconclusive",
+                    "summary": "Investigated but evidence is insufficient.",
+                    "task_ids": [],
+                    "candidate_ids": ["candidate-1"],
+                    "evidence_ids": [],
+                    "selected_skills": [],
+                    "stop_reason": None,
+                },
+                "tasks": [],
+            }
+        )
 
 
 def test_strict_output_tool_uses_provider_subset_and_full_local_validation():

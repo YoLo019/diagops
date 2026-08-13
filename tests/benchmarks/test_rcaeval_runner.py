@@ -24,6 +24,7 @@ from backend.benchmarks.rcaeval.runner import (
 from backend.db.session import create_db_engine, initialize_database
 from backend.db.sqlite_repository import SQLiteInvestigationRepository
 from backend.diagnosis.v11_runtime import V11SingleControlOutput
+from backend.domain.multi_agent import LeadAction
 from backend.domain.runtime import RuntimeEventType, RuntimeRunStatus
 from backend.runtime.sqlite_store import SQLiteRuntimeStore
 
@@ -203,6 +204,29 @@ def _failing_single_turn(**kwargs):
     )
 
 
+def _inconclusive_single_turn(**kwargs):
+    output_type = kwargs["output_type"].__name__
+    if output_type == "V11SingleControlOutput":
+        return {
+            "planning": {
+                "decision": {
+                    "action": "inconclusive",
+                    "summary": "Investigated but evidence is insufficient.",
+                    "task_ids": [],
+                    "candidate_ids": ["candidate-1"],
+                    "selected_skills": ["first_failure_timeline@1.0.0"],
+                },
+                "tasks": [],
+            },
+            "investigator": {
+                "summary": "No supported candidate.",
+                "findings": [],
+                "candidates": [],
+            },
+        }
+    raise AssertionError(f"unexpected single output type: {output_type}")
+
+
 def _multi_turn(**kwargs):
     output_type = kwargs["output_type"].__name__
     if output_type == "LeadPlanningOutput":
@@ -295,6 +319,52 @@ def test_single_control_runs_through_persisted_sqlite_v11_runtime(tmp_path: Path
         "runtime_manifest_hash": "c" * 64,
         "execution_contract_hash": prediction.execution_contract_hash,
     }
+
+
+def test_single_control_normalizes_inconclusive_decision_with_candidate_refs(tmp_path: Path):
+    runtime_package = tmp_path / "runtime"
+    case = _write_runtime_package(runtime_package)
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'runtime.db'}")
+    initialize_database(engine)
+    repository = SQLiteInvestigationRepository(engine)
+    runtime_store = SQLiteRuntimeStore(engine, repository)
+    runner = RcaEvalCaseRunner(
+        runtime_package=runtime_package,
+        model="bounded-test-model",
+        capability=EndpointCapabilityIdentity(
+            provider="deepseek",
+            model="bounded-test-model",
+            api_mode="chat_completions",
+            endpoint_id="bounded-test-endpoint",
+            artifact_hash="d" * 64,
+        ),
+        repository=repository,
+        runtime_store=runtime_store,
+        turn=_inconclusive_single_turn,
+    )
+    budget = EvaluationBudget(
+        configuration=RcaEvalConfiguration.SINGLE_INTENDED,
+        token_budget=4_000,
+        max_turns=8,
+        tool_budget=8,
+        timeout_seconds=120,
+        max_investigators=1,
+        max_rounds=1,
+    )
+
+    prediction = runner.run_case(case, budget)
+
+    persisted = runtime_store.get_run(prediction.runtime_run_id)
+    assert prediction.completed is True
+    assert persisted.status == RuntimeRunStatus.COMPLETED
+    plan = repository.get_plan(persisted.investigation_id)
+    assert plan is not None
+    assert plan.lead_decision is not None
+    assert plan.lead_decision.action == LeadAction.INCONCLUSIVE
+    assert plan.lead_decision.task_ids == []
+    assert plan.lead_decision.candidate_ids == []
+    assert plan.lead_decision.stop_reason == "single_control_inconclusive"
+    assert plan.tasks == []
 
 
 def test_single_control_logs_safe_exception_diagnostic(tmp_path: Path, caplog):
