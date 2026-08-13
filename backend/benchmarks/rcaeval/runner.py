@@ -101,7 +101,10 @@ logger = logging.getLogger(__name__)
 
 
 def _safe_exception_diagnostic(exc: BaseException, repository_root: Path) -> dict[str, str]:
-    message = " ".join(redact_text(str(exc)).split())[:256]
+    text = " ".join(redact_text(str(exc)).split())
+    if len(text) > 256:
+        text = f"{text[:187]} ... {text[-64:]}"
+    message = text
     location = "unknown"
     for frame in reversed(traceback.extract_tb(exc.__traceback__)):
         try:

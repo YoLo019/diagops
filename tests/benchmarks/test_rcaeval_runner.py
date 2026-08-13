@@ -35,6 +35,7 @@ def test_safe_exception_diagnostic_redacts_message_and_reports_relative_location
             "base_url=https://user:pass@example.test/v1 "
             "path=C:\\private\\case.json "
             + "x" * 600
+            + " TAIL-MARKER"
         )
     except ValueError as exc:
         diagnostic = _safe_exception_diagnostic(exc, Path.cwd())
@@ -44,6 +45,7 @@ def test_safe_exception_diagnostic_redacts_message_and_reports_relative_location
     assert "user:pass" not in diagnostic["message"]
     assert "C:\\private" not in diagnostic["message"]
     assert len(diagnostic["message"]) <= 256
+    assert diagnostic["message"].endswith("TAIL-MARKER")  # 长消息保留尾部，便于定位截断点
     assert diagnostic["location"].startswith("tests/benchmarks/test_rcaeval_runner.py:")
 
 
