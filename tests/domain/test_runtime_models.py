@@ -159,6 +159,102 @@ def test_runtime_event_accepts_allowlisted_structured_tool_payload() -> None:
     assert event.safe_payload["metadata"]["result_count"] == 2
 
 
+@pytest.mark.parametrize(
+    ("tool_name", "normalized_inputs"),
+    [
+        (
+            "query_related_alerts",
+            {
+                "window_start": "2026-07-15T07:50:00+00:00",
+                "window_end": "2026-07-15T08:10:00+00:00",
+                "limit": 50,
+                "severities": ["critical"],
+                "statuses": ["firing", "resolved"],
+                "entity_ids": ["checkout-service"],
+            },
+        ),
+        (
+            "query_traces",
+            {
+                "window_start": "2026-07-15T07:50:00+00:00",
+                "window_end": "2026-07-15T08:10:00+00:00",
+                "limit": 50,
+                "service": "checkout-service",
+                "trace_id": "a" * 32,
+                "error_only": False,
+                "min_duration_ms": 12.5,
+                "direction": "both",
+            },
+        ),
+        (
+            "read_runtime_state",
+            {
+                "limit": 50,
+                "states": ["crash_loop", "oom_killed"],
+                "include_healthy": False,
+            },
+        ),
+        (
+            "lookup_memory",
+            {
+                "affected_entity": "checkout-service",
+                "failure_mechanism": "database connection pool exhausted",
+                "limit": 5,
+            },
+        ),
+    ],
+)
+def test_runtime_event_accepts_scoped_tool_payloads(
+    tool_name, normalized_inputs
+) -> None:
+    event = RuntimeEvent(
+        run_id="run-1",
+        attempt_id="attempt-1",
+        sequence=1,
+        event_type=RuntimeEventType.TOOL_COMPLETED,
+        actor_type=RuntimeActorType.TOOL,
+        safe_payload={
+            "status": "success",
+            "tool_name": tool_name,
+            "idempotency_key": "run-1:tool:1",
+            "normalized_inputs": normalized_inputs,
+        },
+    )
+
+    reloaded = RuntimeEvent.model_validate(event.model_dump(mode="json"))
+    assert reloaded.safe_payload["normalized_inputs"] == normalized_inputs
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "normalized_inputs"),
+    [
+        ("query_related_alerts", {"query": "error OR panic"}),
+        ("query_related_alerts", {"severities": ["critical; drop"]}),
+        ("query_traces", {"min_duration_ms": -1}),
+        ("query_traces", {"min_duration_ms": "fast"}),
+        ("query_traces", {"direction": "sideways"}),
+        ("lookup_memory", {"failure_mechanism": "x" * 257}),
+        ("made_up_tool", {"limit": 1}),
+    ],
+)
+def test_runtime_event_rejects_out_of_contract_scoped_tool_payloads(
+    tool_name, normalized_inputs
+) -> None:
+    with pytest.raises(ValidationError):
+        RuntimeEvent(
+            run_id="run-1",
+            attempt_id="attempt-1",
+            sequence=1,
+            event_type=RuntimeEventType.TOOL_COMPLETED,
+            actor_type=RuntimeActorType.TOOL,
+            safe_payload={
+                "status": "success",
+                "tool_name": tool_name,
+                "normalized_inputs": normalized_inputs,
+            },
+        )
+
+
 def test_checkpoint_contains_control_state_not_business_payload() -> None:
     checkpoint = RuntimeCheckpoint(
         run_id="run-1",

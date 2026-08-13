@@ -146,6 +146,99 @@ def test_v11_tool_budget_reservation_is_atomic_and_durable(runtime_store) -> Non
         commit("tool-reservation-2")
 
 
+@pytest.mark.parametrize(
+    ("tool_name", "normalized_input"),
+    [
+        (
+            "query_related_alerts",
+            {
+                "window_start": "2026-07-15T07:50:00+00:00",
+                "window_end": "2026-07-15T08:10:00+00:00",
+                "limit": 50,
+                "severities": ["critical"],
+                "statuses": ["firing", "resolved"],
+                "entity_ids": ["checkout-service"],
+            },
+        ),
+        (
+            "query_traces",
+            {
+                "window_start": "2026-07-15T07:50:00+00:00",
+                "window_end": "2026-07-15T08:10:00+00:00",
+                "limit": 50,
+                "service": "checkout-service",
+                "error_only": False,
+                "min_duration_ms": 12.5,
+                "direction": "both",
+            },
+        ),
+        (
+            "read_runtime_state",
+            {"limit": 50, "states": ["crash_loop"], "include_healthy": False},
+        ),
+        (
+            "lookup_memory",
+            {
+                "affected_entity": "checkout-service",
+                "failure_mechanism": "database connection pool exhausted",
+                "limit": 5,
+            },
+        ),
+    ],
+)
+def test_v11_scoped_tool_commits_persist_normalized_inputs(
+    runtime_store, tool_name, normalized_input
+) -> None:
+    run = runtime_store.create_run(_v11_run(run_id=f"run-scoped-{tool_name}"))
+    leased, attempt = runtime_store.acquire_lease_and_create_attempt(
+        run.id,
+        attempt=RuntimeAttempt(
+            run_id=run.id,
+            attempt_number=1,
+            status=RuntimeAttemptStatus.RUNNING,
+        ),
+        owner="worker-scoped-tool",
+        expected_status=RuntimeRunStatus.CREATED,
+    )
+    runtime_store.investigation_repository.activate_projection("inv-1", run.id)
+
+    call = ToolCallRecord(
+        id=f"call-{tool_name}",
+        task_id=f"task-{tool_name}",
+        agent_name="InvestigatorAgent",
+        tool_name=tool_name,
+        input=normalized_input,
+        status=ToolCallStatus.SUCCESS,
+        runtime_run_id=run.id,
+        logical_call_id=f"logical-{tool_name}",
+        idempotency_key=f"idem-{tool_name}",
+        execution_id=f"execution-{tool_name}",
+    )
+    runtime_store.commit_tool(
+        ToolCommit(
+            run_id=run.id,
+            attempt_id=attempt.id,
+            lease_owner="worker-scoped-tool",
+            lease_version=leased.lease_version,
+            business_mutation=BusinessMutation(
+                investigation_id="inv-1",
+                tool_calls=(call,),
+            ),
+            call=call,
+            phase=RuntimePhase.INVESTIGATOR_ROUND_1,
+        )
+    )
+
+    events = [
+        event
+        for event in runtime_store.list_events(run.id)
+        if event.event_type == RuntimeEventType.TOOL_COMPLETED
+    ]
+    assert len(events) == 1
+    assert events[0].safe_payload["tool_name"] == tool_name
+    assert events[0].safe_payload["normalized_inputs"] == normalized_input
+
+
 def test_v11_transport_retry_reuses_one_durable_tool_reservation(runtime_store) -> None:
     contract = {
         **_v11_run().execution_contract,

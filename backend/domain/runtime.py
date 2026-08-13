@@ -735,7 +735,41 @@ _TOOL_NORMALIZED_INPUT_KEYS: dict[str, frozenset[str]] = {
     "query_dependencies": frozenset(
         {"start_time", "end_time", "limit", "direction", "target", "depth"}
     ),
-    "lookup_memory": frozenset(),
+    "query_traces": frozenset(
+        {
+            "entity_ids",
+            "window_start",
+            "window_end",
+            "limit",
+            "service",
+            "operation",
+            "trace_id",
+            "error_only",
+            "min_duration_ms",
+            "direction",
+        }
+    ),
+    "read_runtime_state": frozenset(
+        {
+            "entity_ids",
+            "window_start",
+            "window_end",
+            "limit",
+            "states",
+            "include_healthy",
+        }
+    ),
+    "query_related_alerts": frozenset(
+        {
+            "entity_ids",
+            "window_start",
+            "window_end",
+            "limit",
+            "severities",
+            "statuses",
+        }
+    ),
+    "lookup_memory": frozenset({"affected_entity", "failure_mechanism", "limit"}),
 }
 _COMMON_TOOL_METADATA_KEYS = frozenset(
     {
@@ -754,11 +788,25 @@ _TOOL_METADATA_KEYS = {
 _TOOL_INTEGER_FIELDS = frozenset(
     {"depth", "duration_ms", "evidence_count", "limit", "result_count"}
 )
-_TOOL_BOOLEAN_FIELDS = frozenset({"include_dependencies", "reused"})
-_TOOL_LIST_FIELDS = frozenset({"keywords", "levels", "metric_names"})
+_TOOL_NUMBER_FIELDS = frozenset({"min_duration_ms"})
+_TOOL_BOOLEAN_FIELDS = frozenset(
+    {"include_dependencies", "reused", "error_only", "include_healthy"}
+)
+_TOOL_LIST_FIELDS = frozenset(
+    {
+        "keywords",
+        "levels",
+        "metric_names",
+        "entity_ids",
+        "severities",
+        "statuses",
+        "states",
+    }
+)
+_TOOL_TEXT_FIELDS = frozenset({"affected_entity", "failure_mechanism"})
 _TOOL_ENUM_FIELDS: dict[str, frozenset[str]] = {
     "aggregation": frozenset({"avg", "max", "sum"}),
-    "direction": frozenset({"upstream", "downstream"}),
+    "direction": frozenset({"upstream", "downstream", "both"}),
     "provider_status": frozenset(
         {"success", "failed", "partial", "skipped", "not_configured"}
     ),
@@ -867,15 +915,27 @@ def _validate_tool_scalar(value: Any, *, field_name: str, path: str) -> None:
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             raise ValueError(f"{path} must be a non-negative integer")
         return
+    if field_name in _TOOL_NUMBER_FIELDS:
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or value < 0
+        ):
+            raise ValueError(f"{path} must be a non-negative number")
+        return
     if field_name in _TOOL_BOOLEAN_FIELDS:
         if not isinstance(value, bool):
             raise ValueError(f"{path} must be a boolean")
+        return
+    if field_name in _TOOL_TEXT_FIELDS:
+        if not isinstance(value, str) or not 1 <= len(value) <= _MAX_STRUCTURED_STRING_LENGTH:
+            raise ValueError(f"{path} must be a bounded string")
         return
     if field_name in _TOOL_ENUM_FIELDS:
         if value not in _TOOL_ENUM_FIELDS[field_name]:
             raise ValueError(f"{path} contains an unsupported value")
         return
-    if field_name in {"start_time", "end_time"}:
+    if field_name in {"start_time", "end_time", "window_start", "window_end"}:
         if not isinstance(value, str) or _ISO_TIMESTAMP.fullmatch(value) is None:
             raise ValueError(f"{path} must be an ISO-8601 timestamp")
         return
