@@ -17,7 +17,12 @@ from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem, JsonValue
 from backend.domain.multi_agent import AdaptiveStopReason, FailureCategory
 from backend.domain.tool_calls import ToolCallRecord, ToolCallStatus
-from backend.domain.tool_queries import DependencyQuery, QueryWindow
+from backend.domain.tool_queries import (
+    DependencyQuery,
+    MemoryQuery,
+    QueryWindow,
+    ScopedTelemetryQuery,
+)
 from backend.providers.results import ProviderResult, ProviderStatus
 from backend.runtime.concurrency import RunStepGate
 from backend.safety.redaction import redact_value
@@ -620,12 +625,16 @@ class AdaptiveToolSession:
             return identity[0], identity[1], 1
         return None
 
-    def _validate_scope(self, query: QueryWindow) -> None:
-        window = timedelta(minutes=self.event.time_window_minutes)
-        incident_start = self.event.started_at - window
-        incident_end = self.event.started_at + window
-        if query.end_time < incident_start or query.start_time > incident_end:
-            raise ValueError("query window does not intersect incident window")
+    def _validate_scope(
+        self, query: QueryWindow | ScopedTelemetryQuery | MemoryQuery
+    ) -> None:
+        window = _query_window(query)
+        if window is not None:
+            incident_span = timedelta(minutes=self.event.time_window_minutes)
+            incident_start = self.event.started_at - incident_span
+            incident_end = self.event.started_at + incident_span
+            if window[1] < incident_start or window[0] > incident_end:
+                raise ValueError("query window does not intersect incident window")
         if isinstance(query, DependencyQuery):
             if query.target and query.target not in self._allowed_targets:
                 raise ValueError("dependency target outside investigation scope")
@@ -693,10 +702,30 @@ def project_tool_evidence(evidence: list[EvidenceItem]) -> list[dict[str, JsonVa
     ]
 
 
-def _query_fingerprint(tool_name: str, query: QueryWindow) -> str:
+def _query_window(
+    query: QueryWindow | ScopedTelemetryQuery | MemoryQuery,
+) -> tuple[datetime, datetime] | None:
+    if isinstance(query, QueryWindow):
+        return query.start_time, query.end_time
+    if isinstance(query, ScopedTelemetryQuery):
+        if query.window_start is None or query.window_end is None:
+            return None
+        return query.window_start, query.window_end
+    return None
+
+
+def _query_fingerprint(
+    tool_name: str, query: QueryWindow | ScopedTelemetryQuery | MemoryQuery
+) -> str:
     values = query.model_dump(mode="json", exclude={"reason"})
-    values["start_time"] = query.start_time.astimezone(UTC).isoformat()
-    values["end_time"] = query.end_time.astimezone(UTC).isoformat()
+    window = _query_window(query)
+    if window is not None:
+        if isinstance(query, QueryWindow):
+            values["start_time"] = window[0].astimezone(UTC).isoformat()
+            values["end_time"] = window[1].astimezone(UTC).isoformat()
+        else:
+            values["window_start"] = window[0].astimezone(UTC).isoformat()
+            values["window_end"] = window[1].astimezone(UTC).isoformat()
     for name in ("keywords", "levels", "metric_names"):
         items = values.get(name)
         if not isinstance(items, list):

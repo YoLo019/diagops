@@ -66,6 +66,97 @@ async def test_session_enforces_scope_budget_and_duplicate_fingerprint():
 
 
 @pytest.mark.anyio
+async def test_scoped_telemetry_and_memory_tools_dispatch_without_window():
+    session = _manifest_session(
+        [
+            QueryProvider("query_related_alerts", EvidenceProvider.RELATED_ALERT, None),
+            QueryProvider("query_traces", EvidenceProvider.TRACE, None),
+            QueryProvider("read_runtime_state", EvidenceProvider.RUNTIME_STATE, None),
+            QueryProvider("lookup_memory", EvidenceProvider.VERIFIED_INCIDENT, None),
+        ]
+    )
+
+    for index, tool_name in enumerate(
+        (
+            "query_related_alerts",
+            "query_traces",
+            "read_runtime_state",
+            "lookup_memory",
+        ),
+        start=1,
+    ):
+        # 空证据成功会触发 no_new_evidence 停止该 agent；每个工具用独立身份。
+        response = json.loads(
+            await session.invoke(
+                f"investigator-{index}", tool_name, json.dumps({}), 1
+            )
+        )
+        assert response["status"] == "success", tool_name
+
+
+@pytest.mark.anyio
+async def test_scoped_window_intersection_is_enforced_without_attribute_error():
+    provider = QueryProvider(
+        "query_related_alerts", EvidenceProvider.RELATED_ALERT, None
+    )
+    session = _manifest_session([provider])
+
+    outside = json.loads(
+        await session.invoke(
+            "investigator-1",
+            "query_related_alerts",
+            json.dumps(
+                {
+                    "window_start": "2026-07-15T06:00:00+00:00",
+                    "window_end": "2026-07-15T06:30:00+00:00",
+                }
+            ),
+            1,
+        )
+    )
+    assert outside["status"] == "failed"
+    assert outside["warning"] == "tool input outside investigation scope"
+    assert provider.calls == 0
+
+
+@pytest.mark.anyio
+async def test_scoped_window_fingerprint_normalizes_timezone_spelling():
+    provider = QueryProvider(
+        "query_related_alerts", EvidenceProvider.RELATED_ALERT, None
+    )
+    session = _manifest_session([provider])
+    base = {
+        "window_start": "2026-07-15T07:50:00+00:00",
+        "window_end": "2026-07-15T08:10:00+00:00",
+    }
+
+    first = json.loads(
+        await session.invoke(
+            "investigator-1",
+            "query_related_alerts",
+            json.dumps(base),
+            1,
+        )
+    )
+    duplicate = json.loads(
+        await session.invoke(
+            "investigator-1",
+            "query_related_alerts",
+            json.dumps(
+                {
+                    "window_start": "2026-07-15T15:50:00+08:00",
+                    "window_end": "2026-07-15T16:10:00+08:00",
+                }
+            ),
+            1,
+        )
+    )
+    assert first["status"] == "success"
+    assert duplicate["status"] == "skipped"
+    assert provider.calls == 1
+
+
+@pytest.mark.anyio
 async def test_session_enforces_per_specialist_budget():
     provider = QueryProvider("read_logs", EvidenceProvider.LOG, "ev-log")
     session = _session([provider], per_agent=1)
@@ -569,6 +660,19 @@ def _session(providers, *, seed=None, per_agent=3, total=8):
         task_ids=_task_ids(),
         max_tool_calls_per_specialist=per_agent,
         max_total_tool_calls=total,
+    )
+
+
+def _manifest_session(providers):
+    registry = build_provider_tool_registry(ProviderRegistry(providers))
+    return AdaptiveToolSession(
+        event=_event(),
+        seed_evidence=[],
+        registry=registry,
+        task_ids={
+            f"investigator-{index}": f"task-timeline-{index}" for index in range(1, 5)
+        },
+        agent_manifest=registry.agent_manifest(),
     )
 
 
