@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import math
+import traceback
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -86,6 +88,7 @@ from backend.runtime.phase_executor import DiagnosisPhaseExecutor
 from backend.runtime.sqlite_store import SQLiteRuntimeStore
 from backend.runtime.telemetry import RuntimeTelemetry
 from backend.runtime.writer import RuntimeWriter
+from backend.safety.redaction import redact_text
 from backend.services.source_identity import reject_reparse_path, resolve_source_identity
 from backend.services.v11_projection import ensure_v11_projection_owner
 from backend.tools.provider_tools import VerifiedMemoryLookup, build_provider_tool_registry
@@ -93,6 +96,25 @@ from backend.tools.registry import agent_manifest_hash
 
 PROMPT_VERSION = "v11-rcaeval-v1"
 EMPTY_MEMORY_IDENTITY = {"schema_version": "empty-run-owned-memory-v1", "entries": []}
+
+logger = logging.getLogger(__name__)
+
+
+def _safe_exception_diagnostic(exc: BaseException, repository_root: Path) -> dict[str, str]:
+    message = " ".join(redact_text(str(exc)).split())[:256]
+    location = "unknown"
+    for frame in reversed(traceback.extract_tb(exc.__traceback__)):
+        try:
+            relative = Path(frame.filename).resolve().relative_to(repository_root.resolve())
+        except ValueError:
+            continue
+        location = f"{relative.as_posix()}:{frame.lineno}"
+        break
+    return {
+        "exception_type": type(exc).__name__[:128],
+        "message": message,
+        "location": location,
+    }
 RETRY_POLICY = {
     "max_retries": 1,
     "retryable_categories": ["transport", "rate_limit"],
@@ -329,6 +351,13 @@ class SingleInvestigatorAgent(V11Runtime):
             raise
         except Exception as exc:
             self._failures.append(type(exc).__name__)
+            diagnostic = _safe_exception_diagnostic(exc, Path.cwd())
+            logger.warning(
+                "rcaeval single control failed exception_type=%s message=%s location=%s",
+                diagnostic["exception_type"],
+                diagnostic["message"],
+                diagnostic["location"],
+            )
             failed = self._failed_execution(
                 task_id=task.id,
                 actor=instance_id,

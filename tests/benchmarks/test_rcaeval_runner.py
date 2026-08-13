@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from backend.benchmarks.rcaeval.models import (
 from backend.benchmarks.rcaeval.providers import incident_event_for_case
 from backend.benchmarks.rcaeval.runner import (
     RcaEvalCaseRunner,
+    _safe_exception_diagnostic,
     validate_configuration_set,
 )
 from backend.db.session import create_db_engine, initialize_database
@@ -24,6 +26,25 @@ from backend.db.sqlite_repository import SQLiteInvestigationRepository
 from backend.diagnosis.v11_runtime import V11SingleControlOutput
 from backend.domain.runtime import RuntimeEventType, RuntimeRunStatus
 from backend.runtime.sqlite_store import SQLiteRuntimeStore
+
+
+def test_safe_exception_diagnostic_redacts_message_and_reports_relative_location():
+    try:
+        raise ValueError(
+            "api_key=sk-abcdefghijklmnopqrstuvwxyz "
+            "base_url=https://user:pass@example.test/v1 "
+            "path=C:\\private\\case.json "
+            + "x" * 600
+        )
+    except ValueError as exc:
+        diagnostic = _safe_exception_diagnostic(exc, Path.cwd())
+
+    assert diagnostic["exception_type"] == "ValueError"
+    assert "sk-" not in diagnostic["message"]
+    assert "user:pass" not in diagnostic["message"]
+    assert "C:\\private" not in diagnostic["message"]
+    assert len(diagnostic["message"]) <= 256
+    assert diagnostic["location"].startswith("tests/benchmarks/test_rcaeval_runner.py:")
 
 
 def test_single_control_output_is_a_valid_strict_json_schema():
@@ -156,6 +177,13 @@ def _single_turn(**kwargs):
     raise AssertionError(f"unexpected single output type: {output_type}")
 
 
+def _failing_single_turn(**kwargs):
+    raise ValueError(
+        "api_key=sk-abcdefghijklmnopqrstuvwxyz "
+        "base_url=https://user:pass@example.test/v1"
+    )
+
+
 def _multi_turn(**kwargs):
     output_type = kwargs["output_type"].__name__
     if output_type == "LeadPlanningOutput":
@@ -248,6 +276,47 @@ def test_single_control_runs_through_persisted_sqlite_v11_runtime(tmp_path: Path
         "runtime_manifest_hash": "c" * 64,
         "execution_contract_hash": prediction.execution_contract_hash,
     }
+
+
+def test_single_control_logs_safe_exception_diagnostic(tmp_path: Path, caplog):
+    runtime_package = tmp_path / "runtime"
+    case = _write_runtime_package(runtime_package)
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'runtime.db'}")
+    initialize_database(engine)
+    repository = SQLiteInvestigationRepository(engine)
+    runtime_store = SQLiteRuntimeStore(engine, repository)
+    runner = RcaEvalCaseRunner(
+        runtime_package=runtime_package,
+        model="bounded-test-model",
+        capability=EndpointCapabilityIdentity(
+            provider="deepseek",
+            model="bounded-test-model",
+            api_mode="chat_completions",
+            endpoint_id="bounded-test-endpoint",
+            artifact_hash="d" * 64,
+        ),
+        repository=repository,
+        runtime_store=runtime_store,
+        turn=_failing_single_turn,
+    )
+    budget = EvaluationBudget(
+        configuration=RcaEvalConfiguration.SINGLE_INTENDED,
+        token_budget=4_000,
+        max_turns=8,
+        tool_budget=8,
+        timeout_seconds=120,
+        max_investigators=1,
+        max_rounds=1,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        prediction = runner.run_case(case, budget)
+
+    assert prediction.completed is False
+    assert "rcaeval single control failed" in caplog.text
+    assert "exception_type=ValueError" in caplog.text
+    assert "tests/benchmarks/test_rcaeval_runner.py:" in caplog.text
+    assert "sk-abcdefghijklmnopqrstuvwxyz" not in caplog.text
 
 
 def test_multi_configuration_uses_same_persisted_production_entry(tmp_path: Path):
