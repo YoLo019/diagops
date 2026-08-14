@@ -48,6 +48,7 @@ from backend.diagnosis.openai_compatible_model import (
 from backend.diagnosis.openai_model import OFFICIAL_OPENAI_BASE_URL
 from backend.diagnosis.v11_runtime import (
     CriticOutput,
+    InvestigatorFindingDraft,
     InvestigatorOutput,
     LeadAdjudicationOutput,
     LeadPlanningOutput,
@@ -73,7 +74,12 @@ from backend.domain.agent_plan import (
     LeadDecision,
 )
 from backend.domain.events import IncidentEvent, IncidentSource, Severity
-from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceProvider
+from backend.domain.evidence import (
+    EvidenceItem,
+    EvidenceKind,
+    EvidenceProvider,
+    EvidenceStatus,
+)
 from backend.domain.multi_agent import (
     AgentExecutionLayer,
     CausalCheckStatus,
@@ -183,6 +189,105 @@ def test_multi_planning_output_still_rejects_inconclusive_with_candidates():
                 },
                 "tasks": [],
             }
+        )
+
+
+def _finding_gate_harness():
+    runtime = V11Runtime(model=None)
+    runtime.runtime_run_id = "run-1"
+    task = DiagnosisTask(
+        id="task-1",
+        title="bounded investigation",
+        description="inspect one isolated signal",
+        task_type=DiagnosisTaskType.GENERAL_INVESTIGATION,
+        agent_name="InvestigatorAgent",
+        analysis_round=1,
+        runtime_run_id="run-1",
+        information_gap="alert telemetry availability",
+    )
+    skipped = EvidenceItem(
+        id="ev-skipped",
+        provider=EvidenceProvider.RELATED_ALERT,
+        kind=EvidenceKind.PROVIDER_ERROR,
+        timestamp=datetime(2026, 8, 14, 10, tzinfo=UTC),
+        summary="related_alert provider skipped",
+        status=EvidenceStatus.SKIPPED,
+        error_message="query_related_alerts provider not configured",
+    )
+    success = EvidenceItem(
+        id="ev-success",
+        provider=EvidenceProvider.LOG,
+        kind=EvidenceKind.LOG_PATTERN,
+        timestamp=datetime(2026, 8, 14, 10, tzinfo=UTC),
+        summary="error rate spiked",
+        status=EvidenceStatus.SUCCESS,
+    )
+    return runtime, task, [skipped, success]
+
+
+def test_gap_finding_may_cite_committed_failed_or_skipped_evidence():
+    """GAP finding 的语义是“证据缺失”；引用已提交的 skipped/failed 证据是
+    其正确出处（spec §7.2 只约束非 gap finding 与未提交输出）。"""
+    runtime, task, evidence = _finding_gate_harness()
+    draft = InvestigatorFindingDraft(
+        finding_type=AgentFindingType.GAP,
+        summary="Related-alert telemetry was not collected.",
+        confidence=1.0,
+        evidence_ids=["ev-skipped"],
+    )
+
+    finding = runtime._finding_from_draft(
+        draft,
+        investigation_id="inv-1",
+        task=task,
+        instance_id="investigator-1",
+        round_number=1,
+        assessment=None,
+        evidence=evidence,
+    )
+
+    assert finding.evidence_ids == ["ev-skipped"]
+
+
+def test_non_gap_finding_still_rejects_failed_or_skipped_evidence():
+    runtime, task, evidence = _finding_gate_harness()
+    draft = InvestigatorFindingDraft(
+        finding_type=AgentFindingType.SIGNAL,
+        summary="Alert telemetry proves the failure.",
+        confidence=0.9,
+        evidence_ids=["ev-skipped"],
+    )
+
+    with pytest.raises(V11RuntimeContractError, match="uncommitted evidence"):
+        runtime._finding_from_draft(
+            draft,
+            investigation_id="inv-1",
+            task=task,
+            instance_id="investigator-1",
+            round_number=1,
+            assessment=None,
+            evidence=evidence,
+        )
+
+
+def test_gap_finding_still_rejects_truly_uncommitted_evidence():
+    runtime, task, evidence = _finding_gate_harness()
+    draft = InvestigatorFindingDraft(
+        finding_type=AgentFindingType.GAP,
+        summary="Missing telemetry.",
+        confidence=1.0,
+        evidence_ids=["ev-hallucinated"],
+    )
+
+    with pytest.raises(V11RuntimeContractError, match="uncommitted evidence"):
+        runtime._finding_from_draft(
+            draft,
+            investigation_id="inv-1",
+            task=task,
+            instance_id="investigator-1",
+            round_number=1,
+            assessment=None,
+            evidence=evidence,
         )
 
 

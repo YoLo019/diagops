@@ -2067,13 +2067,21 @@ class V11Runtime:
         assessment: CriticAssessment | None,
         evidence: list[EvidenceItem],
     ) -> AgentFinding:
-        available = {
+        usable = {
             item.id
             for item in evidence
             if item.status in {EvidenceStatus.SUCCESS, EvidenceStatus.PARTIAL}
         }
-        references = [*draft.evidence_ids, *draft.contradicting_evidence_ids]
-        if not set(references) <= available:
+        references = {*draft.evidence_ids, *draft.contradicting_evidence_ids}
+        if draft.finding_type == AgentFindingType.GAP:
+            # GAP 的语义是“证据缺失”；引用已提交的 failed/skipped 证据正是其
+            # 正确出处（spec §7.2 只约束非 gap finding 与未提交输出）。
+            committed = {item.id for item in evidence}
+            if not references <= committed:
+                raise V11RuntimeContractError(
+                    "Investigator referenced uncommitted evidence"
+                )
+        elif not references <= usable:
             raise V11RuntimeContractError("Investigator referenced uncommitted evidence")
         if draft.finding_type != AgentFindingType.GAP and not draft.evidence_ids:
             raise V11RuntimeContractError("non-gap finding requires evidence")
