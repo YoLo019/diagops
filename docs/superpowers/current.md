@@ -226,9 +226,11 @@ and a fresh independent re-review; no accuracy or completion claim is made.
 Blocker: `T12 capability admission 的外部前置（endpoint/model、process-only
 credential、绑定干净 HEAD 584b4b0 的 passed artifact）已于 2026-08-14 具备，
 OB30 Single 24k live smoke 验收通过；修复链 b80a418..584b4b0 独立复审
-approve_with_followups（无 blocking/high/medium，三条 Low 入 T13）。恢复正式
-预测只待用户授权消耗不可重来的正式 SS30/TT90 预算。SS30/TT90 不得以任务线程
-模型或 test double 替代。`
+approve_with_followups（无 blocking/high/medium，三条 Low 入 T13）；后续修复链
+45ccde1..fc20b4a 独立复审 approve_with_followups，其 H1（最终校验层 GAP 引用契约
+不一致）已 RED→GREEN 修复并获跟进复审 approve（修复已提交 `788a0b3`）。恢复正式预测还差：
+capability artifact 绑定新干净 HEAD 重新认证、用户授权消耗不可重来
+的正式 SS30/TT90 预算。SS30/TT90 不得以任务线程模型或 test double 替代。`
 
 Verification evidence (M5 fifth-round review-fix, 2026-08-12): base was
 `75f964495d6e6f391ebd8eef4c2170ba982d53ea`; code commit is
@@ -457,11 +459,13 @@ Medium 已按 §9.2 RED→GREEN 关闭并获独立复审 approve，分支已按�
 T12 外部前置已具备（2026-08-14 live smoke 验收通过 + 修复链独立复审
 approve_with_followups），正式预算消耗待授权
 
-Next action: 用户授权消耗正式 SS30/TT90 预算后，从 OB30/SS30 恢复 T12；
-T13 对账清单纳入六条 Low（leakage 运行期检测空转、production_acceptance
+Next action: H1 修复已提交 `788a0b3`（result_validation GAP 豁免，跟进复审 approve）；
+按契约重新认证 capability artifact（绑定新干净 HEAD，需含 process-only credential 的
+环境）；用户授权消耗正式 SS30/TT90 预算后，从 OB30/SS30 恢复 T12；
+T13 对账清单纳入七条 Low（leakage 运行期检测空转、production_acceptance
 preflight、M2R-4 跟踪，及修复链复审的 capability artifact 重认证提醒、
-inconclusive 丢弃 tasks 审计日志、fingerprint 列表归一化）；不打开
-TT90 labels，不做任何准确率声称。
+inconclusive 丢弃 tasks 审计日志、fingerprint 列表归一化、极短 lease heartbeat
+边界）；不打开 TT90 labels，不做任何准确率声称。
 
 | ID | Phase | Task | Status | Evidence or result | Next action or blocker |
 | --- | --- | --- | --- | --- | --- |
@@ -535,6 +539,26 @@ SUCCESS/PARTIAL 可引用集硬杀，运行结果随模型引用行为抽签；s
 已提交证据，非 gap 仍限 SUCCESS/PARTIAL，编造 ID 仍硬拒绝；RED 复现原错误后
 GREEN，3 新测试（含两条守卫），全量 `2272 passed, 4 skipped`。待独立复审的
 修复链现为 `45ccde1..fc20b4a`。正式计数仍为 0；M5 仍 blocked。
+
+独立复审 (2026-08-14，范围 `45ccde1..fc20b4a`)：**approve_with_followups**（1 High +
+1 Low，复审员实跑目标套件 125 passed、tests/diagnosis 528 passed、Ruff clean）。
+H1：GAP 放宽只改了准入层 `_finding_from_draft`，最终校验层 `validate_v11_result`
+的 `_require_committed_refs` 仍要求所有 finding（含 GAP）仅引用 SUCCESS/PARTIAL
+证据，两层契约互相矛盾；Multi 正式路径（基类 `V11Runtime.result_validation`）会把
+合法 GAP finding 以 `finding_evidence_reference` 终态杀 run，且 Lead correction
+改不了 finding——失败模式从"investigator 级失败、run 继续"恶化为"整 run FAILED"。
+当日按 Light 路径 RED→GREEN 修复（已提交 `788a0b3`）：`result_validation.py` 新增同 run
+`committed_evidence` 集合，finding 引用校验改为 GAP → refs ⊆ committed、非 GAP →
+refs ⊆ usable（逐字节不变），candidate/assessment/lead 路径未动。RED 确认目标测试
+修复前以 `finding_evidence_reference` 失败；4 条新测试含三条硬拒绝守卫（非 GAP
+引用 skipped、GAP 引用未提交 ID、GAP 引用跨 run failed 证据均仍拒绝）。门禁：
+focused 17 passed、tests/diagnosis 532 passed、全量 `2276 passed, 4 skipped,
+1 warning`、Ruff 与 `git diff --check` clean。跟进复审（同一审查线程）：**approve**，
+确认两层契约一致、无新豁免面、RED 可信，无 blocking/high/medium/low 遗留。
+L1（lease ≤1.5s 时 heartbeat 下限边界；实际 manifest 默认 900s 不可达）按复审员
+建议记录不改码，入 T13 对账。正式 SS30/TT90 预测、paired attempts、label opens
+仍为 `0`；H1 修复提交后 capability artifact 需绑定新的干净 HEAD 重新认证；
+M5 仍 blocked。
 
 M1 review-fix record (2026-08-06): High 1–6 and Medium 7–10 were reproduced
 with focused regressions, fixed at shared profile/ownership/transaction/entry
