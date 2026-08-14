@@ -4,7 +4,7 @@ This file is the mutable routing and status entry point for the current version.
 
 It does not override an approved spec or plan, current code contracts, or the long-term product goal and production safety boundary in `AGENT.md`.
 
-Updated: 2026-08-12
+Updated: 2026-08-14
 
 ## Implemented Baseline
 
@@ -37,11 +37,11 @@ provider contracts.
 
 Iteration status: `blocked`
 
-Spec status: `review_required` (sixth-round ledger/evaluator/contract fixes await independent re-review)
+Spec status: `approved`（第八轮全量复审 approve_with_followups，两条 Medium 修复后独立复审 approve；此前顶部字段停留在第六轮 re-review 等待期，本次对账校正）
 
-Plan status: `review_required` (sixth-round ledger/evaluator/contract fixes await independent re-review)
+Plan status: `approved`（同 Spec status 校正依据）
 
-Implementation status: `blocked` (M5 engineering fixes implemented/verifying; capability and independent-review gates remain open)
+Implementation status: `blocked`（M5 T12 capability admission 的三个外部前置——可调用 endpoint/model、process-only credential、绑定干净 HEAD `584b4b0` 的 passed capability artifact——现已具备；正式预算消耗授权与修复链复审决定仍待用户）
 
 Completion commit: `none`（M5 尚未完成正式 SS30/TT90）
 
@@ -223,9 +223,12 @@ environment variables are absent, and formal predictions, paired attempts,
 and label opens remain `0`. M5 remains blocked and awaits capability admission
 and a fresh independent re-review; no accuracy or completion claim is made.
 
-Blocker: `T12 capability admission：缺少 exact passed model-capability artifact、
-可调用 endpoint/model 与 process-only credential；SS30/TT90 不得以任务线程模型
-或 test double 替代。外部 owner：父任务/用户提供已认证本机端点后另行恢复。`
+Blocker: `T12 capability admission 的外部前置（endpoint/model、process-only
+credential、绑定干净 HEAD 584b4b0 的 passed artifact）已于 2026-08-14 具备，
+OB30 Single 24k live smoke 验收通过；恢复正式预测前仍待用户两项决定：
+(a) 是否对晚于第八轮复审的修复链 b80a418..584b4b0 补独立复审；
+(b) 授权消耗不可重来的正式 SS30/TT90 预算。SS30/TT90 不得以任务线程模型
+或 test double 替代。`
 
 Verification evidence (M5 fifth-round review-fix, 2026-08-12): base was
 `75f964495d6e6f391ebd8eef4c2170ba982d53ea`; code commit is
@@ -451,10 +454,11 @@ pytest 2097 passed with only the recorded skips/warning.
 
 Current phase: Full iteration / M5 第八轮全量复审 approve_with_followups 且两条
 Medium 已按 §9.2 RED→GREEN 关闭并获独立复审 approve，分支已按用户指示合并 main；
-T12 capability stop gate 仍 blocked
+T12 外部前置已具备（2026-08-14 live smoke 验收通过），正式预算消耗待授权
 
-Next action: 若后续提供 exact passed capability artifact、endpoint/model 与
-process-only credential，再从 OB30/SS30 继续 T12；T13 对账清单纳入三条 Low
+Next action: 用户对两项门禁做决定——(a) 是否对修复链 `b80a418..584b4b0`
+（Single control 被评测路径，晚于第八轮复审）补独立复审；(b) 授权消耗正式
+SS30/TT90 预算后再从 OB30/SS30 继续 T12；T13 对账清单纳入三条 Low
 （leakage 运行期检测空转、production_acceptance preflight、M2R-4 跟踪）；不打开
 TT90 labels，不做任何准确率声称。
 
@@ -471,6 +475,36 @@ TT90 labels，不做任何准确率声称。
 | M3/T7–T8 | Execute / Verify | Lead/Investigators/Critic/Lead V11 authority runtime | implemented / verifying | fifth-round base `e52e47984c4b460ed3b06dc4147d3d3b0532345b`; T7 91 passed、T8 207 passed；M2R/隔离 84 passed/3 skipped；变更相关 102 passed/2 skipped；全量 1995 passed/3 skipped/1 warning；两套全仓 Ruff clean；H1 usage/audit RED→GREEN | 等待同一审查线程复审；不 merge/push，不进入 M4/M5 |
 | M4/T9–T10 | Execute / Verify | Reports/actions, human transitions, API/UI, OpenRCA compatibility, recovery/privacy/offline gates | implemented / verified | 最终提交 `7539c7fd8b707fc54cf2ed75a7d9fcba13d7618c` 已获独立 review approve；第五轮 High RED→GREEN 与 focused/full/offline/runtime/frontend/Ruff/diff-check 证据沿用 M4 handoff | M5 worktree 精确从该提交创建；不 merge/push |
 | M5/T11–T13 | Execute / Verify | Frozen RCAEval control, sealed validation, one TT90 paired result | blocked at T12 capability admission | 第八轮全量复审（`58c6382..2b42b0f`）approve_with_followups：Medium-1（§9.2 partial 三条件候选级对齐、round-2 linkage 移除、不足降级 inconclusive）与 Medium-2（resume 失败记忆回填）RED 7 例→GREEN，focused 60 passed、full `2220 passed/4 skipped/1 warning`，独立复审 approve；三条 Low 入 T13 对账；SS30/TT90 无模型结果，labels 未正式打开 | 已按用户指示合并 main；缺 passed capability artifact/endpoint/credential；T13 未开始、TT90 未消耗 |
+
+Verification evidence (M5 Single control live smoke fix chain, 2026-08-13/14):
+用户在含 process-only credential 的本机 PowerShell 提供已认证 endpoint
+（gpt-5.6-terra @ cctq.ai）后，OB30 Single 24k 诊断 smoke 逐层暴露并修复了
+三层契约恢复级根因，全部按 Light 路径 RED→GREEN 执行：
+(1) dispatch 对 4 个非 QueryWindow 工具硬编码 start_time/end_time 字段导致
+AttributeError → `b80a418`（`_query_window` 统一三契约）；
+(2) 持久化 `_TOOL_NORMALIZED_INPUT_KEYS` 白名单缺同 4 工具导致
+safe_payload ValidationError → `f9ddd38`（加性扩展白名单 + 字段类型表）；
+(3) 模型输出 inconclusive+ candidate_ids 被 Single 模型侧输出契约内的领域
+validator 杀死（该 decision 按设计本就被 result_validation 丢弃）→
+`584b4b0`（Single 专用 `SingleControlPlanningOutput`/`LeadDecisionDraft`
+草稿契约 + runner 内确定性归一化 `_single_control_planning`；Multi 路径
+`LeadPlanningOutput` 领域校验不变并有守卫测试）。辅助诊断加固：
+`cf1b737`（异常诊断 head+tail 截断）、`1de1c30`（pydantic 明细提取）。
+工程门禁：受影响套件 1036 passed/1 skipped；全量 `2268 passed, 4 skipped,
+1 warning`；Ruff 与 `git diff --check` clean。
+Live 验收（用户侧执行并回贴）：capability 认证在干净 HEAD `584b4b0` passed
+（transport `native_json_schema`，artifact_hash
+`cfa4944b99daa98258b766bf788777995e5f4e9019235da36efae6d29b9623c9`）；
+OB30 Single 24k 验收 smoke run `3f3c130a-a871-4dce-afee-1dd33b278fbe`
+（case re2-11caeecc5351ba99）：completed=true、run_status=completed、
+model.completed=2、model.failed=0、tool.completed=2、tool.failed=1
+（`query_related_alerts` 收到 `entity_ids=[]` 空范围后按契约显式 skipped，
+独立工具照常完成，非缺陷）、read_only_violations=0、15294 tokens、36.5s；
+结果库 `D:\data\RCAEval\v11-smoke\ob30-single-24k-production-schema-63c9843bf6c5413db4afce5928d20c52.db`。
+这些是工程与单次 smoke 证据：正式 SS30/TT90 预测、paired attempts、
+label opens 仍为 `0`。注意：本组修复触碰的是被评测的 Single control 边界
+本身，且晚于第八轮全量复审；是否在消耗正式预算前补一次针对
+`b80a418..584b4b0` 的独立复审，为 T12 恢复前的待决门禁。M5 仍 blocked。
 
 M1 review-fix record (2026-08-06): High 1–6 and Medium 7–10 were reproduced
 with focused regressions, fixed at shared profile/ownership/transaction/entry
