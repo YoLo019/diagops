@@ -5,6 +5,7 @@ from collections.abc import Iterable
 
 from backend.domain.agent_findings import (
     AgentFinding,
+    AgentFindingType,
     CoordinationReview,
     FindingActor,
 )
@@ -82,6 +83,9 @@ def validate_v11_result(
         if item.status in {EvidenceStatus.SUCCESS, EvidenceStatus.PARTIAL}
         and item.runtime_run_id == runtime_run_id
     }
+    committed_evidence = {
+        item.id for item in evidence_items if item.runtime_run_id == runtime_run_id
+    }
 
     _validate_safe_texts(finding_items, candidate_items, review, execution_items)
     finding_ids = {item.id for item in finding_items}
@@ -98,9 +102,14 @@ def validate_v11_result(
             raise V11ResultValidationError("finding_runtime_owner")
         if finding.runtime_run_id not in {None, runtime_run_id}:
             raise V11ResultValidationError("finding_runtime_owner")
+        # 与准入层 _finding_from_draft 同一契约（spec §7.2）：GAP 的语义是
+        # 证据缺失，可引用同 run 已提交的任何状态证据；非 gap 仍限 usable，
+        # 编造/跨 run ID 在两条路径均硬拒绝。
         _require_committed_refs(
             [*finding.evidence_ids, *finding.contradicting_evidence_ids],
-            usable_evidence,
+            committed_evidence
+            if finding.finding_type == AgentFindingType.GAP
+            else usable_evidence,
             "finding_evidence_reference",
         )
         if finding.analysis_round == 2 and (

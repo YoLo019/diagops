@@ -8,10 +8,13 @@ from backend.diagnosis.evidence_validation import (
 )
 from backend.diagnosis.result_validation import validate_v11_result
 from backend.domain.agent_findings import (
+    AgentFinding,
+    AgentFindingType,
     CausalCheck,
     CoordinationReview,
     CriticAssessment,
     CriticVerdict,
+    FindingActor,
     RootCauseAttribution,
     RootCauseCandidate,
 )
@@ -531,4 +534,90 @@ def test_v11_complete_requires_final_critic_and_lead_execution_audit():
             review=review,
             evidence=[evidence],
             status=DiagnosticStatus.COMPLETE,
+        )
+
+
+def _skipped_evidence(*, runtime_run_id: str = "run-v11") -> EvidenceItem:
+    return _validation_evidence(runtime_run_id=runtime_run_id).model_copy(
+        update={"id": "ev-skipped", "status": EvidenceStatus.SKIPPED}
+    )
+
+
+def _investigator_finding(
+    evidence_id: str, *, finding_type: AgentFindingType = AgentFindingType.GAP
+) -> AgentFinding:
+    return AgentFinding(
+        investigation_id="inv-1",
+        agent_name=FindingActor.INVESTIGATOR,
+        agent_instance_id="inst-1",
+        task_id="task-1",
+        runtime_run_id="run-v11",
+        finding_type=finding_type,
+        summary="finding",
+        confidence=0.4,
+        evidence_ids=[evidence_id],
+        gaps=["related alerts unavailable"]
+        if finding_type == AgentFindingType.GAP
+        else [],
+    )
+
+
+def test_v11_gap_finding_may_cite_committed_failed_evidence():
+    # spec §7.2 只约束非 gap finding 与未提交输出：GAP 的语义是证据缺失，
+    # 引用同 run 已提交的 skipped/failed 证据正是其正确出处（与准入层
+    # _finding_from_draft 同一契约）。
+    evidence = _skipped_evidence()
+    finding = _investigator_finding(evidence.id)
+
+    validate_v11_result(
+        investigation_id="inv-1",
+        runtime_run_id="run-v11",
+        findings=[finding],
+        candidates=[],
+        review=None,
+        evidence=[evidence],
+    )
+
+
+def test_v11_non_gap_finding_still_rejects_committed_failed_evidence():
+    evidence = _skipped_evidence()
+    finding = _investigator_finding(evidence.id, finding_type=AgentFindingType.SIGNAL)
+
+    with pytest.raises(Exception, match="finding_evidence_reference"):
+        validate_v11_result(
+            investigation_id="inv-1",
+            runtime_run_id="run-v11",
+            findings=[finding],
+            candidates=[],
+            review=None,
+            evidence=[evidence],
+        )
+
+
+def test_v11_gap_finding_rejects_uncommitted_evidence():
+    finding = _investigator_finding("ev-missing")
+
+    with pytest.raises(Exception, match="finding_evidence_reference"):
+        validate_v11_result(
+            investigation_id="inv-1",
+            runtime_run_id="run-v11",
+            findings=[finding],
+            candidates=[],
+            review=None,
+            evidence=[],
+        )
+
+
+def test_v11_gap_finding_rejects_failed_evidence_from_another_run():
+    evidence = _skipped_evidence(runtime_run_id="run-other")
+    finding = _investigator_finding(evidence.id)
+
+    with pytest.raises(Exception, match="finding_evidence_reference"):
+        validate_v11_result(
+            investigation_id="inv-1",
+            runtime_run_id="run-v11",
+            findings=[finding],
+            candidates=[],
+            review=None,
+            evidence=[evidence],
         )
