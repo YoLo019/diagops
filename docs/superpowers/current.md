@@ -519,6 +519,23 @@ inconclusive 分支丢弃非空 tasks 不留审计痕迹（可选加 warning 日
 (3) `_query_fingerprint` 对 `entity_ids/severities/statuses/states` 列表顺序
 敏感，重复查询去重不生效（可选归一化；预算硬上限不受影响）。
 
+Verification evidence (M5 pre-T12 live diagnosis chain continued, 2026-08-14):
+OB30 Single 24k smoke 在 `45ccde1` 又暴露两层问题并完成定位/修复。
+(1) 长生成传输失败：走本地代理时长输出调用 7/8 "Server disconnected"，
+直连（`NO_PROXY="*"`）8/8 成功且 11.5k-14.2k 字符严格解析全绿；capability
+execution-environment 指纹不含代理变量，直连不需重新认证。同窗口两次
+"trailing characters"（col 3234/2997）也高度疑似代理破坏响应，直连后未复现。
+捕获工具链记录：实例级 client 包装会被 SDK
+`should_disable_provider_managed_retries` 的 `with_options(max_retries=0)`
+客户端副本绕过，类级 `AsyncCompletions.create` 包装经哨兵实验确认在调用链上。
+(2) 根因 #4（契约层）：GAP finding 引用已提交的 skipped provider_error 证据
+（related_alert 未配置的显式失败产物）被 `_finding_from_draft` 的
+SUCCESS/PARTIAL 可引用集硬杀，运行结果随模型引用行为抽签；spec §7.2 只约束
+非 gap finding 与未提交输出。用户批准选项 A 后修复 `fc20b4a`：GAP 可引用任何
+已提交证据，非 gap 仍限 SUCCESS/PARTIAL，编造 ID 仍硬拒绝；RED 复现原错误后
+GREEN，3 新测试（含两条守卫），全量 `2272 passed, 4 skipped`。待独立复审的
+修复链现为 `45ccde1..fc20b4a`。正式计数仍为 0；M5 仍 blocked。
+
 M1 review-fix record (2026-08-06): High 1–6 and Medium 7–10 were reproduced
 with focused regressions, fixed at shared profile/ownership/transaction/entry
 boundaries, and rerun GREEN. The review-fix worktree contains no M2 or main
