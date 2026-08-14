@@ -1375,9 +1375,23 @@ def test_prediction_launcher_sanitizes_child_and_never_passes_label_locator(
     output = tmp_path / "single_intended"
     pair_root = tmp_path / "pair-root"
     output = pair_root / "single_intended"
-    def run_child(*_, **__):
-        output.mkdir()
-        (output / "SHA256SUMS").write_text("frozen\n", encoding="utf-8")
+
+    class FakeProcess:
+        def __init__(self, args, cwd=None, env=None):
+            self.args = args
+            self.returncode = None
+
+        def wait(self, timeout=None):
+            output.mkdir()
+            (output / "SHA256SUMS").write_text("frozen\n", encoding="utf-8")
+            self.returncode = 0
+            return 0
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
 
     monkeypatch.setattr(isolation, "build_prediction_launch", build_spec)
     monkeypatch.setattr(
@@ -1385,7 +1399,7 @@ def test_prediction_launcher_sanitizes_child_and_never_passes_label_locator(
         "verify_runtime_package",
         lambda _: SimpleNamespace(manifest_hash="1" * 64),
     )
-    monkeypatch.setattr("subprocess.run", run_child)
+    monkeypatch.setattr("subprocess.Popen", FakeProcess)
     monkeypatch.setattr(
         "backend.benchmarks.rcaeval.__main__._prediction_pair_identity",
         lambda _: "a" * 64,
@@ -1452,13 +1466,24 @@ def test_prediction_completion_failure_invalidates_pair_without_future_recovery(
         "verify_runtime_package",
         lambda _: SimpleNamespace(manifest_hash="1" * 64),
     )
-    monkeypatch.setattr(
-        "subprocess.run",
-        lambda *_, **__: (
-            output.mkdir(parents=True),
-            (output / "SHA256SUMS").write_text("frozen\n", encoding="utf-8"),
-        ),
-    )
+    class FakeProcess:
+        def __init__(self, args, cwd=None, env=None):
+            self.args = args
+            self.returncode = None
+
+        def wait(self, timeout=None):
+            output.mkdir(parents=True)
+            (output / "SHA256SUMS").write_text("frozen\n", encoding="utf-8")
+            self.returncode = 0
+            return 0
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    monkeypatch.setattr("subprocess.Popen", FakeProcess)
     monkeypatch.setattr(
         "backend.benchmarks.rcaeval.__main__._prediction_pair_identity",
         lambda _: "a" * 64,
@@ -1490,6 +1515,103 @@ def test_prediction_completion_failure_invalidates_pair_without_future_recovery(
         )
     snapshot = CustodianPairLedger.from_manifest(manifest).snapshot()
     assert snapshot["state"] == LedgerState.FAILED_NON_RESUMABLE.value
+
+
+def test_prediction_launcher_heartbeats_lease_while_child_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """正式 30/90 例子进程运行远超默认 900s lease；子进程存活期间启动器必须
+    持续续租，否则完成时 lease 过期会被收敛为 FAILED_NON_RESUMABLE。"""
+    from backend.benchmarks.rcaeval import isolation
+    from backend.benchmarks.rcaeval.ledger import (
+        CustodianPairLedger,
+        create_custodian_manifest,
+    )
+
+    pair_root = tmp_path / "pair-root"
+    output = pair_root / "single_intended"
+    label_path = tmp_path / "labels"
+    manifest = create_custodian_manifest(
+        tmp_path,
+        runtime_manifest_hash="1" * 64,
+        label_manifest_hash="2" * 64,
+    )
+    monkeypatch.setattr(
+        isolation,
+        "build_prediction_launch",
+        lambda **kwargs: SimpleNamespace(
+            argv=("fake-child",), cwd=str(tmp_path), env={}
+        ),
+    )
+    monkeypatch.setattr(
+        isolation,
+        "verify_runtime_package",
+        lambda _: SimpleNamespace(manifest_hash="1" * 64),
+    )
+    monkeypatch.setattr(
+        "backend.benchmarks.rcaeval.__main__._prediction_pair_identity",
+        lambda _: "a" * 64,
+    )
+
+    heartbeats = 0
+    real_heartbeat = CustodianPairLedger.heartbeat
+
+    def counted_heartbeat(self, *args, **kwargs):
+        nonlocal heartbeats
+        heartbeats += 1
+        return real_heartbeat(self, *args, **kwargs)
+
+    monkeypatch.setattr(CustodianPairLedger, "heartbeat", counted_heartbeat)
+
+    class FakeProcess:
+        """子进程两次 wait 超时（模拟长运行）后才写出冻结产物。"""
+
+        def __init__(self, args, cwd=None, env=None):
+            self.args = args
+            self.returncode = None
+            self._timeouts = 2
+
+        def wait(self, timeout=None):
+            if self._timeouts:
+                self._timeouts -= 1
+                raise subprocess.TimeoutExpired(self.args, timeout)
+            output.mkdir(parents=True)
+            (output / "SHA256SUMS").write_text("frozen\n", encoding="utf-8")
+            self.returncode = 0
+            return 0
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    monkeypatch.setattr("subprocess.Popen", FakeProcess)
+
+    _launch_predict(
+        SimpleNamespace(
+            runtime=tmp_path / "runtime",
+            pair_root=pair_root,
+            custodian_manifest=manifest,
+            partition="ss30",
+            configuration="single_intended",
+            base_url="https://endpoint.invalid/v1",
+            capability_artifact=tmp_path / "capability.json",
+            database=tmp_path / "runtime.db",
+            output=output,
+            token_budget=4_000,
+            max_turns=8,
+            tool_budget=8,
+            timeout_seconds=120,
+            label_package=label_path,
+            reauthorization_token=None,
+        )
+    )
+
+    # 预约后 1 次 + 每次 wait 超时各 1 次；缺任一次续租即回退为旧行为。
+    assert heartbeats == 3
+    sides = CustodianPairLedger.from_manifest(manifest).side_snapshot()
+    assert sides["single_intended"] == "completed"
 
 
 def test_formal_evaluation_rejects_child_artifact_with_wrong_label_binding(

@@ -253,7 +253,24 @@ def _launch_predict(arguments) -> None:
             cwd=arguments.runtime,
             environ=child_environ,
         )
-        subprocess.run(spec.argv, cwd=spec.cwd, env=spec.env, check=True)
+        heartbeat_seconds = max(1.0, float(ledger.snapshot()["lease_seconds"]) / 3.0)
+        process = subprocess.Popen(spec.argv, cwd=spec.cwd, env=spec.env)
+        try:
+            while True:
+                try:
+                    process.wait(timeout=heartbeat_seconds)
+                    break
+                except subprocess.TimeoutExpired:
+                    # 正式 30/90 例运行远超默认 900s lease；子进程存活期间必须
+                    # 持续续租，否则完成时 lease 过期会被判为不可恢复失败。
+                    ledger.heartbeat(prediction_lease)
+        except BaseException:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            raise
+        if process.returncode != 0:
+            raise subprocess.CalledProcessError(process.returncode, process.args)
         sums_path = output / "SHA256SUMS"
         bundle_hash = hashlib.sha256(sums_path.read_bytes()).hexdigest()
         ledger.record_side_completed(
