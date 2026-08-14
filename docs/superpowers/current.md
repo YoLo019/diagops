@@ -225,10 +225,10 @@ and a fresh independent re-review; no accuracy or completion claim is made.
 
 Blocker: `T12 capability admission 的外部前置（endpoint/model、process-only
 credential、绑定干净 HEAD 584b4b0 的 passed artifact）已于 2026-08-14 具备，
-OB30 Single 24k live smoke 验收通过；恢复正式预测前仍待用户两项决定：
-(a) 是否对晚于第八轮复审的修复链 b80a418..584b4b0 补独立复审；
-(b) 授权消耗不可重来的正式 SS30/TT90 预算。SS30/TT90 不得以任务线程模型
-或 test double 替代。`
+OB30 Single 24k live smoke 验收通过；修复链 b80a418..584b4b0 独立复审
+approve_with_followups（无 blocking/high/medium，三条 Low 入 T13）。恢复正式
+预测只待用户授权消耗不可重来的正式 SS30/TT90 预算。SS30/TT90 不得以任务线程
+模型或 test double 替代。`
 
 Verification evidence (M5 fifth-round review-fix, 2026-08-12): base was
 `75f964495d6e6f391ebd8eef4c2170ba982d53ea`; code commit is
@@ -454,12 +454,13 @@ pytest 2097 passed with only the recorded skips/warning.
 
 Current phase: Full iteration / M5 第八轮全量复审 approve_with_followups 且两条
 Medium 已按 §9.2 RED→GREEN 关闭并获独立复审 approve，分支已按用户指示合并 main；
-T12 外部前置已具备（2026-08-14 live smoke 验收通过），正式预算消耗待授权
+T12 外部前置已具备（2026-08-14 live smoke 验收通过 + 修复链独立复审
+approve_with_followups），正式预算消耗待授权
 
-Next action: 用户对两项门禁做决定——(a) 是否对修复链 `b80a418..584b4b0`
-（Single control 被评测路径，晚于第八轮复审）补独立复审；(b) 授权消耗正式
-SS30/TT90 预算后再从 OB30/SS30 继续 T12；T13 对账清单纳入三条 Low
-（leakage 运行期检测空转、production_acceptance preflight、M2R-4 跟踪）；不打开
+Next action: 用户授权消耗正式 SS30/TT90 预算后，从 OB30/SS30 恢复 T12；
+T13 对账清单纳入六条 Low（leakage 运行期检测空转、production_acceptance
+preflight、M2R-4 跟踪，及修复链复审的 capability artifact 重认证提醒、
+inconclusive 丢弃 tasks 审计日志、fingerprint 列表归一化）；不打开
 TT90 labels，不做任何准确率声称。
 
 | ID | Phase | Task | Status | Evidence or result | Next action or blocker |
@@ -505,6 +506,18 @@ model.completed=2、model.failed=0、tool.completed=2、tool.failed=1
 label opens 仍为 `0`。注意：本组修复触碰的是被评测的 Single control 边界
 本身，且晚于第八轮全量复审；是否在消耗正式预算前补一次针对
 `b80a418..584b4b0` 的独立复审，为 T12 恢复前的待决门禁。M5 仍 blocked。
+
+独立复审 (2026-08-14，范围 `b80a418..584b4b0`)：**approve_with_followups**。
+复审员独立核对调用链与持久化边界并实跑目标测试 `176 passed, 2 skipped`、
+`ruff check backend tests` 全绿；确认 result_validation 强制收口属实、草稿
+契约不泄漏到持久化/对外契约、Multi 领域契约未松绑、归一化边界全部
+fail-closed、白名单与真实模型字段精确一致、诊断截断先脱敏后截断且无多字节
+切裂、NaN/Infinity 纪律保持。无 blocking/high/medium。三条 Low 入 T13 对账：
+(1) 草稿契约变更使旧 capability artifact schema hash 过期（预期后果，重跑
+smoke 前重新认证即可，本轮已做到）；(2) `_single_control_planning`
+inconclusive 分支丢弃非空 tasks 不留审计痕迹（可选加 warning 日志）；
+(3) `_query_fingerprint` 对 `entity_ids/severities/statuses/states` 列表顺序
+敏感，重复查询去重不生效（可选归一化；预算硬上限不受影响）。
 
 M1 review-fix record (2026-08-06): High 1–6 and Medium 7–10 were reproduced
 with focused regressions, fixed at shared profile/ownership/transaction/entry
