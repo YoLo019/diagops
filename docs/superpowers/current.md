@@ -380,11 +380,33 @@ predicting epoch 5 + 过期 lease。修复：`EvaluationBudget.timeout_seconds` 
 deadline 回归 348 passed；全量 **2340 passed, 4 skipped, 1 warning**。正式计数：
 SS30 paired attempts=6（epoch 5 为空转烧毁），label opens 仍为 `0`。
 
-Blocker: `T12 预算 timeout 上限修复（le 120→300）已完成。恢复正式评测还差：(1) 提交本
-修复；(2) 对最终干净 HEAD 重新认证 capability；(3) 用户签发第六个 reauthorization token
-（pair 现为 predicting epoch 5 + 过期 lease，reconcile 后 failed_non_resumable epoch 5、
-label_ever_opened=0）后以 48k 预算 + 300s timeout 跑 SS30 single_intended epoch 6，
-再续剩余 3 侧。`
+Verification evidence (M5 SS30 epoch-6 aborted launch and launch-preflight chain, 2026-08-16):
+epoch-6 启动再次在 worker 构造期 fail-fast——`V11Runtime.__init__` 的
+`timeout > 120` 校验是第二道 120 守卫，上一链只修了 EvaluationBudget。
+**零预测零模型调用零 token 燃烧**，但 epoch-6 token 已消耗（reauthorize 在 worker
+启动前）。同类错误连续两次说明启动路径守卫必须一次性扫清 + 结构性防复发。修复链：
+① 全路径扫荡发现第三道守卫 `RuntimeRun.validate_execution_identity`（domain V11
+契约 >120 拒收，本应是 epoch-7 炸点）；② 三道守卫统一引用 domain 常量
+`V11_RUN_DEADLINE_MAX_SECONDS = 300.0`（产品/server 创建路径 container 层
+min(120, settings) clamp 不变，spec §9.1 默认/上限语义不变）；③ **结构性修复**：
+`_preflight_capability_admission`（artifact 准入 + API key 存在性）与
+`_preflight_launch_construction`（预算模型 → runtime __init__ → RuntimeRun V11
+契约校验，与 runner 构造同构）在 `ledger.reauthorize()` **之前**离线执行——本地
+可判的失败永远不再空烧 epoch；docstring 约定今后新增启动期守卫必须同步进
+preflight。独立复审 **approve**（无 blocking/high；3 low 当日全部关闭：sealed
+契约守卫漂移窗口→docstring 约定；capability/key 准入在 token 后→已前移；multi
+分支无测试→已补参数化）。TDD：V11Runtime 守卫、preflight 构造/multi 配置/key、
+**preflight 失败不消耗 token 的顺序保证**（spy reauthorize 禁止调用）等新增测试；
+旧钉 121 拒收的 deadline 测试更新为 300 收/301 拒；3 个 launcher 隔离测试
+（职责在隔离/ledger 语义）打桩 preflight。门禁：ruff clean；全量
+**2345 passed, 4 skipped, 1 warning**。正式计数：SS30 paired attempts=7
+（epoch 5/6 均为零预测空转），label opens 仍为 `0`。
+
+Blocker: `T12 启动预检链已完成并获独立复审 approve。恢复正式评测还差：(1) 提交本
+修复链；(2) 对最终干净 HEAD 重新认证 capability；(3) 用户签发第七个
+reauthorization token（pair 现为 predicting epoch 6 + 过期 lease，reconcile 后
+failed_non_resumable epoch 6、label_ever_opened=0）后以 48k 预算 + 300s timeout 跑
+SS30 single_intended epoch 7，再续剩余 3 侧。`
 
 Verification evidence (M5 fifth-round review-fix, 2026-08-12): base was
 `75f964495d6e6f391ebd8eef4c2170ba982d53ea`; code commit is
@@ -615,8 +637,8 @@ epoch 4（手动止损，纯运营噪声）均失败，五轮根因均已离线�
 案例级 best-of-2 有界重试）完成并获独立复审 approve_with_followups（无 blocking/high
 遗留），复审 H1/M1/L1/L2 当日关闭，全量 2339 passed、Ruff clean、spec §9.1 已同步
 
-Next action: 提交修复链 → 对最终干净 HEAD 重新认证 capability artifact → 用户签发第六个
-reauthorization token 后以 48k 预算 + 300s timeout 跑 SS30 single_intended epoch 6 →
+Next action: 提交修复链 → 对最终干净 HEAD 重新认证 capability artifact → 用户签发第七个
+reauthorization token 后以 48k 预算 + 300s timeout 跑 SS30 single_intended epoch 7 →
 续剩余 3 侧；T13 对账清单新增本轮记录项（退避 sleep 先于 before_retry 栅栏的白等取舍；
 前轮遗留：_draft_rejection_code 子串匹配可改结构化 code）；不打开 TT90 labels，不做任何
 准确率声称。
