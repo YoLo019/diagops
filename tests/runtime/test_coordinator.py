@@ -893,6 +893,31 @@ async def test_phase_failure_emits_safe_phase_and_run_failure_events() -> None:
 
 
 @pytest.mark.anyio
+async def test_escaping_contract_error_marks_run_contract_integrity() -> None:
+    """逃逸出 phase 的模型输出契约违约应分类为 contract_integrity 而非 unknown。"""
+    from backend.diagnosis.v11_runtime import V11RuntimeContractError
+
+    store, run, _executor, coordinator = _services()
+
+    class ContractFailingExecutor(RecordingPhaseExecutor):
+        async def execute_phase(self, phase_input) -> PhaseOutput:
+            if phase_input.phase == RuntimePhase.DETERMINISTIC_RCA:
+                raise V11RuntimeContractError("Investigator referenced uncommitted evidence")
+            return await super().execute_phase(phase_input)
+
+    coordinator.phase_executor = ContractFailingExecutor("inv-1")
+
+    with pytest.raises(V11RuntimeContractError):
+        await coordinator.execute(run.id, owner="worker-a")
+
+    assert store.get_run(run.id).status == RuntimeRunStatus.FAILED
+    assert (
+        store.get_run(run.id).failure_category.value == "contract_integrity"
+    )
+    await coordinator.shutdown()
+
+
+@pytest.mark.anyio
 async def test_duplicate_cancel_is_idempotent_and_emits_one_request_event() -> None:
     store, run, _executor, _coordinator = _services()
     executor = BlockingPhaseExecutor("inv-1")

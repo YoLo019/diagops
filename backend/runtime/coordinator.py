@@ -55,6 +55,23 @@ class _RuntimeDeadlineExceeded(Exception):
     """表示 Run 的绝对 deadline 已到，禁止继续产生业务提交。"""
 
 
+def _escape_failure_category(exc: BaseException) -> RuntimeFailureCategory:
+    """逃逸出 phase 的模型输出契约违约映射为显式类别，其余保持 UNKNOWN。
+
+    延迟 import：runtime 基础设施层不应对 diagnosis/reports 形成模块级依赖。
+    """
+    from backend.diagnosis.result_validation import V11ResultValidationError
+    from backend.diagnosis.v11_runtime import V11RuntimeContractError
+    from backend.reports.generator import ReportReferenceError
+
+    if isinstance(
+        exc,
+        (V11ResultValidationError, V11RuntimeContractError, ReportReferenceError),
+    ):
+        return RuntimeFailureCategory.CONTRACT_INTEGRITY
+    return RuntimeFailureCategory.UNKNOWN
+
+
 class RuntimeCoordinator:
     """管理 Run/Attempt 生命周期；RCA 决策仍由注入的 PhaseExecutor 负责。"""
 
@@ -479,7 +496,7 @@ class RuntimeCoordinator:
             if isinstance(exc.__cause__, RuntimeInjectedFault):
                 return self.store.get_run(run.id)
             raise
-        except Exception:
+        except Exception as exc:
             self.fault_injector.hit("parallel_session_failure")
             await self._fail_if_owned(
                 run.id,
@@ -487,6 +504,7 @@ class RuntimeCoordinator:
                 owner,
                 run.lease_version,
                 phase=active_phase,
+                failure_category=_escape_failure_category(exc),
             )
             raise
         finally:

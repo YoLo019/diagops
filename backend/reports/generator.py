@@ -3,11 +3,16 @@ import re
 from backend.domain.actions import RecommendedAction, VerificationSuggestion
 from backend.domain.agent_findings import (
     AgentFinding,
+    AgentFindingType,
     CoordinationReview,
     RootCauseCandidate,
 )
 from backend.domain.events import IncidentEvent
-from backend.domain.evidence import EvidenceItem, validate_usable_evidence
+from backend.domain.evidence import (
+    EvidenceItem,
+    validate_committed_evidence,
+    validate_usable_evidence,
+)
 from backend.domain.hypotheses import Hypothesis
 from backend.domain.multi_agent import (
     AgentExecutionLayer,
@@ -55,6 +60,10 @@ DECISION_LABELS = {
     "agent_leads": "多 Agent 主要候选，尚未确认",
     "fallback": "多 Agent 复核未完成，以下为确定性 RCA 结果",
 }
+
+
+class ReportReferenceError(ValueError):
+    """报告层的机械引用违约（缺失/不可用/跨 run 的证据或 finding 引用）。"""
 
 
 class ReportGenerator:
@@ -914,6 +923,7 @@ class ReportGenerator:
                     raise ValueError("Critic references an unknown candidate")
 
         referenced_ids: list[str] = []
+        gap_referenced_ids: list[str] = []
 
         for hypothesis in hypotheses:
             referenced_ids.extend(hypothesis.supporting_evidence_ids)
@@ -926,7 +936,13 @@ class ReportGenerator:
             referenced_ids.extend(suggestion.result_evidence_ids)
 
         for finding in agent_findings:
-            referenced_ids.extend(finding.evidence_ids)
+            # GAP 的语义是"证据缺失"，引用同 run 已提交的 failed/skipped 证据
+            # 正是其正确出处（与准入层 _finding_from_draft、终态校验同一契约，
+            # spec §7.2/§8.2）；非 GAP 仍限 usable。
+            if finding.finding_type == AgentFindingType.GAP:
+                gap_referenced_ids.extend(finding.evidence_ids)
+            else:
+                referenced_ids.extend(finding.evidence_ids)
 
         if coordination_review is not None:
             for candidate in coordination_review.candidates:
@@ -942,14 +958,25 @@ class ReportGenerator:
             coordination_review is not None
             and coordination_review.authority_mode == AuthorityMode.AGENT
         ):
-            validate_usable_evidence(
-                evidence,
-                referenced_ids,
-                runtime_run_id=coordination_review.runtime_run_id,
-            )
+            try:
+                validate_usable_evidence(
+                    evidence,
+                    referenced_ids,
+                    runtime_run_id=coordination_review.runtime_run_id,
+                )
+                validate_committed_evidence(
+                    evidence,
+                    gap_referenced_ids,
+                    runtime_run_id=coordination_review.runtime_run_id,
+                )
+            except ValueError as exc:
+                # 类型化子类让 runtime 兜底能把"报告层引用违约"分类为
+                # contract_integrity，而不是落入 unknown。
+                raise ReportReferenceError(str(exc)) from exc
         else:
             evidence_ids = {item.id for item in evidence}
-            for evidence_id in referenced_ids:
+            # legacy 分支只校验存在性；GAP 引用同样不能悬空。
+            for evidence_id in referenced_ids + gap_referenced_ids:
                 if evidence_id not in evidence_ids:
                     raise ValueError(f"missing evidence id: {evidence_id}")
 

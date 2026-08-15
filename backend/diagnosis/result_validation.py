@@ -127,7 +127,12 @@ def validate_v11_result(
             if task is not None and finding.analysis_round == 2:
                 if task.critic_assessment_id != finding.critic_assessment_id:
                     raise V11ResultValidationError("finding_assessment_contract")
-        _validate_scope_consistency(finding.affected_entity, finding.evidence_ids, evidence_by_id)
+        # GAP 断言的是"该 entity 证据缺失"，被引用 skipped/failed 证据的 scope
+        # 不覆盖 affected_entity 不改变其语义（spec §8.2 GAP 豁免）。
+        if finding.finding_type != AgentFindingType.GAP:
+            _validate_scope_consistency(
+                finding.affected_entity, finding.evidence_ids, evidence_by_id
+            )
 
     candidate_ids = [candidate.id for candidate in candidate_items]
     if len(set(candidate_ids)) != len(candidate_ids):

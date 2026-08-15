@@ -536,6 +536,15 @@ class _InvestigatorResult:
     findings: tuple[AgentFinding, ...]
     candidates: tuple[RootCauseCandidate, ...]
     execution: AgentExecution
+    # 草稿级拒绝的持久化审计（模型输出违约 ≠ investigator 失败）。
+    audit_executions: tuple[AgentExecution, ...] = ()
+
+
+def _draft_rejection_code(exc: V11RuntimeContractError) -> str:
+    """把 draft 违约映射为固定审计 code（不带任何模型文本）。"""
+    if "non-gap finding requires evidence" in str(exc):
+        return "finding draft rejected: non_gap_requires_evidence"
+    return "finding draft rejected: uncommitted_evidence"
 
 
 TurnCallable = Callable[..., Awaitable[Any]]
@@ -1681,6 +1690,14 @@ class V11Runtime:
             self._failures.append(first_error.code)
             # Validator 本身不修改任何 Agent 字段，correction 也只能改变 Lead decision。
             try:
+                if (
+                    self._remaining_token_budget is not None
+                    and self._remaining_token_budget <= 0
+                ):
+                    # 预算耗尽时 correction 必败（预算门 fail-closed）；跳过
+                    # 这次必败调用，直接落入下方既有 terminal 路径。
+                    self._failures.append("correction_budget_exhausted")
+                    raise V11RuntimeContractError("correction budget exhausted")
                 turn = await self._call_model(
                     actor=ExecutionActor.LEAD.value,
                     prompt="Return a mechanically valid inconclusive V11 Lead decision.",
@@ -1906,19 +1923,68 @@ class V11Runtime:
             # 任何 finding 引用前，先收口 tool/evidence 的 durable 投影。
             await self._commit_session(repository, investigation_id, session)
             output = self._parse_output(turn.output, InvestigatorOutput)
-            findings = tuple(
-                self._finding_from_draft(
-                    draft,
+            committed_evidence = repository.get(investigation_id).evidence
+            # 模型输出是不可信数据：单个 draft 违约只拒绝该 draft 并留持久化
+            # 审计（spec §7.4 校验器可拒绝输出），不让同批合法 finding 陪葬。
+            findings: list[AgentFinding] = []
+            audit_executions: list[AgentExecution] = []
+            rejected = 0
+            for draft in output.findings:
+                try:
+                    findings.append(
+                        self._finding_from_draft(
+                            draft,
+                            investigation_id=investigation_id,
+                            task=task,
+                            instance_id=instance_id,
+                            round_number=round_number,
+                            assessment=assessment,
+                            evidence=committed_evidence,
+                        )
+                    )
+                except V11RuntimeContractError as exc:
+                    rejected += 1
+                    self._failures.append("investigator_finding_draft_rejected")
+                    audit_executions.append(
+                        self._failed_execution(
+                            task_id=task.id,
+                            actor=instance_id,
+                            step_kind=ExecutionStepKind.INVESTIGATOR_ANALYSIS,
+                            message=_draft_rejection_code(exc),
+                            analysis_round=round_number,
+                            failure_category=FailureCategory.INVALID_REFERENCE,
+                        )
+                    )
+            candidates = (
+                self._admit_candidates(
+                    tuple(output.candidates),
+                    batch_findings=findings,
+                    committed_evidence=committed_evidence,
+                    repository=repository,
                     investigation_id=investigation_id,
                     task=task,
                     instance_id=instance_id,
-                    round_number=round_number,
-                    assessment=assessment,
-                    evidence=repository.get(investigation_id).evidence,
+                    audit_executions=audit_executions,
                 )
-                for draft in output.findings
+                if round_number == 1
+                else ()
             )
-            candidates = tuple(output.candidates) if round_number == 1 else ()
+            if rejected and not findings and not candidates:
+                # 整批违约全灭：维持现行 investigator 失败语义（single 配置下
+                # 由 round 层的 all-failed 检查收敛 terminal）。
+                self._failures.append("investigator_batch_rejected")
+                return _InvestigatorResult(
+                    (),
+                    (),
+                    self._failed_execution(
+                        task_id=task.id,
+                        actor=instance_id,
+                        step_kind=ExecutionStepKind.INVESTIGATOR_ANALYSIS,
+                        message="investigator findings rejected",
+                        analysis_round=round_number,
+                    ),
+                    tuple(audit_executions),
+                )
             execution = next(
                 (
                     item
@@ -1950,7 +2016,9 @@ class V11Runtime:
                     "summary": output.summary or "Investigator completed.",
                 }
             )
-            return _InvestigatorResult(findings, candidates, execution)
+            return _InvestigatorResult(
+                tuple(findings), candidates, execution, tuple(audit_executions)
+            )
         except asyncio.CancelledError:
             self._cleanup_session(session)
             raise
@@ -1967,6 +2035,64 @@ class V11Runtime:
         finally:
             self._cleanup_session(session)
 
+    def _admit_candidates(
+        self,
+        drafts: tuple[RootCauseCandidate, ...],
+        *,
+        batch_findings: list[AgentFinding],
+        committed_evidence: list[EvidenceItem],
+        repository,
+        investigation_id: str,
+        task: DiagnosisTask,
+        instance_id: str,
+        audit_executions: list[AgentExecution],
+    ) -> tuple[RootCauseCandidate, ...]:
+        """candidate 草稿的准入校验：违约候选丢弃并留审计，绝不改写引用。
+
+        finding ID 在服务端生成，模型填的引用几乎必然无效；终态校验
+        （candidate_finding_reference / candidate_evidence_reference）会把
+        这类违约升级为 run 失败。准入层提前丢弃违约候选（spec §7.4 校验器
+        可拒绝输出、不得注入引用），让诊断收敛到 inconclusive 而非杀 run。
+        """
+        legal_finding_ids = {
+            item.id for item in repository.list_agent_findings(investigation_id)
+        } | {item.id for item in batch_findings}
+        usable_evidence = {
+            item.id
+            for item in committed_evidence
+            if item.status in {EvidenceStatus.SUCCESS, EvidenceStatus.PARTIAL}
+            and item.runtime_run_id == self.runtime_run_id
+        }
+        admitted: list[RootCauseCandidate] = []
+        for candidate in drafts:
+            finding_refs = {
+                *candidate.supporting_finding_ids,
+                *candidate.contradicting_finding_ids,
+            }
+            evidence_refs = {
+                *candidate.supporting_evidence_ids,
+                *candidate.contradicting_evidence_ids,
+            }
+            if not finding_refs <= legal_finding_ids:
+                code = "candidate draft rejected: candidate_finding_reference"
+            elif not evidence_refs <= usable_evidence:
+                code = "candidate draft rejected: candidate_evidence_reference"
+            else:
+                admitted.append(candidate)
+                continue
+            self._failures.append("investigator_candidate_draft_rejected")
+            audit_executions.append(
+                self._failed_execution(
+                    task_id=task.id,
+                    actor=instance_id,
+                    step_kind=ExecutionStepKind.INVESTIGATOR_ANALYSIS,
+                    message=code,
+                    analysis_round=task.analysis_round,
+                    failure_category=FailureCategory.INVALID_REFERENCE,
+                )
+            )
+        return tuple(admitted)
+
     def _persist_investigator_result(
         self, repository, investigation_id: str, result: _InvestigatorResult
     ) -> None:
@@ -1976,6 +2102,8 @@ class V11Runtime:
         findings_by_id.update({item.id: item for item in result.findings})
         executions_by_id = {item.id: item for item in executions}
         executions_by_id[result.execution.id] = result.execution
+        for audit in result.audit_executions:
+            executions_by_id[audit.id] = audit
         review = repository.get_coordination_review(investigation_id)
         repository.save_multi_agent_result(
             investigation_id,
@@ -2228,6 +2356,7 @@ class V11Runtime:
         step_kind: ExecutionStepKind,
         message: str,
         analysis_round: int = 1,
+        failure_category: FailureCategory = FailureCategory.UNKNOWN,
     ) -> AgentExecution:
         now = datetime.now(UTC)
         return AgentExecution(
@@ -2239,7 +2368,7 @@ class V11Runtime:
             analysis_round=analysis_round,
             step_kind=step_kind,
             runtime_attempt_id=f"manual-{uuid4().hex}",
-            failure_category=FailureCategory.UNKNOWN,
+            failure_category=failure_category,
             model_provider=self.model_provider,
             model_name=self.model_name,
             error_message=message,
@@ -2556,7 +2685,10 @@ class V11Runtime:
             "critic_assessment": (
                 assessment.model_dump(mode="json") if assessment is not None else None
             ),
-            "rule": "Do not use sibling drafts or invent evidence IDs.",
+            "rule": "Do not use sibling drafts or invent evidence IDs. Leave "
+            "candidate supporting_finding_ids and contradicting_finding_ids "
+            "empty; cite only committed usable evidence IDs in candidate "
+            "evidence fields.",
         }
         return json.dumps(redact_value(payload), ensure_ascii=False, sort_keys=True)
 

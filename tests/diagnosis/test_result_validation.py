@@ -29,6 +29,7 @@ from backend.domain.evidence import (
     EvidenceItem,
     EvidenceKind,
     EvidenceProvider,
+    EvidenceScope,
     EvidenceStatus,
 )
 from backend.domain.multi_agent import (
@@ -618,6 +619,69 @@ def test_v11_gap_finding_rejects_failed_evidence_from_another_run():
             runtime_run_id="run-v11",
             findings=[finding],
             candidates=[],
+            review=None,
+            evidence=[evidence],
+        )
+
+
+def _scoped_evidence(
+    entity_ids: list[str], *, status: EvidenceStatus = EvidenceStatus.SUCCESS
+) -> EvidenceItem:
+    return _validation_evidence().model_copy(
+        update={
+            "status": status,
+            "scope": EvidenceScope(entity_ids=entity_ids),
+        }
+    )
+
+
+def test_v11_gap_finding_skips_scope_entity_check():
+    # GAP 的语义是"该 entity 的证据缺失"；被引用的 skipped 证据的 scope 不覆盖
+    # affected_entity 不改变这一语义（spec §8.2 GAP 豁免）。
+    evidence = _scoped_evidence(["redis-cart"], status=EvidenceStatus.SKIPPED)
+    finding = _investigator_finding(evidence.id).model_copy(
+        update={"affected_entity": "checkout-api"}
+    )
+
+    validate_v11_result(
+        investigation_id="inv-1",
+        runtime_run_id="run-v11",
+        findings=[finding],
+        candidates=[],
+        review=None,
+        evidence=[evidence],
+    )
+
+
+def test_v11_non_gap_finding_scope_mismatch_rejected():
+    evidence = _scoped_evidence(["redis-cart"])
+    finding = _investigator_finding(
+        evidence.id, finding_type=AgentFindingType.SIGNAL
+    ).model_copy(update={"affected_entity": "checkout-api"})
+
+    with pytest.raises(Exception, match="scope_entity_mismatch"):
+        validate_v11_result(
+            investigation_id="inv-1",
+            runtime_run_id="run-v11",
+            findings=[finding],
+            candidates=[],
+            review=None,
+            evidence=[evidence],
+        )
+
+
+def test_v11_candidate_scope_mismatch_still_rejected():
+    evidence = _scoped_evidence(["redis-cart"])
+    candidate = _validation_candidate(evidence.id).model_copy(
+        update={"affected_entity": "checkout-api"}
+    )
+
+    with pytest.raises(Exception, match="scope_entity_mismatch"):
+        validate_v11_result(
+            investigation_id="inv-1",
+            runtime_run_id="run-v11",
+            findings=[],
+            candidates=[candidate],
             review=None,
             evidence=[evidence],
         )

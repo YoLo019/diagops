@@ -377,7 +377,9 @@ Critic stage. Each returns structured findings:
 
 Every non-gap finding cites evidence IDs. Tool output first enters the shared
 evidence ledger through the existing validator and single-writer path; an Agent
-cannot cite raw, uncommitted output.
+cannot cite raw, uncommitted output. A gap finding may additionally cite
+committed evidence of any status (including skipped or failed), because the gap
+statement describes the missing or unusable evidence itself.
 
 ### 7.3 Critic
 
@@ -807,7 +809,9 @@ scope is allowed and remains visible as an evidence gap.
 The deterministic validator checks only mechanically decidable facts:
 
 - referenced IDs exist, belong to the investigation, are committed, and have
-  success or explicitly allowed partial status;
+  success or explicitly allowed partial status; gap-finding references are
+  exempt from the status requirement (committed is sufficient, per §7.2), and
+  gap findings are exempt from structured entity/scope consistency;
 - structured entity/time scope is internally valid and does not contradict the
   candidate's structured entity/time claim;
 - ranks, bounds, task ownership, rounds, permissions, budgets, and safe-text
@@ -1064,6 +1068,15 @@ Required-actor failure behavior is also fixed:
 | Supplemental Investigator/tool | Return `inconclusive` when the missing discriminating evidence is the only blocker; transport/model corruption fails |
 | Lead adjudication | Fail |
 | Result validator | One schema-correction attempt without new tools; then fail, never substitute a cause |
+
+Model-output contract violations are rejected at the output-unit level wherever
+the run can continue: a violating Investigator finding draft is dropped (a fully
+rejected batch fails the Investigator), and a candidate citing non-existent
+findings or unusable evidence is dropped at admission before adjudication. Every
+such rejection is persisted as a failed `AgentExecution` audit record; the
+runtime never rewrites the violating content. Only violations that survive to
+terminal validation take the correction-then-fail path above, consistent with
+the §7.4 authority invariant (reject or downgrade, never alter).
 
 “Sufficient independent evidence” for `partial` means the accepted candidate
 has at least one Critic `accept`, no failed causal check, and supporting

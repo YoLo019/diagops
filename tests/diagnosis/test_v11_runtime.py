@@ -58,11 +58,13 @@ from backend.diagnosis.v11_runtime import (
     _V11BudgetedModel,
 )
 from backend.domain.agent_findings import (
+    AgentFinding,
     AgentFindingType,
     CausalCheck,
     CausalCheckName,
     CoordinationReview,
     CriticAssessment,
+    FindingActor,
     RootCauseCandidate,
 )
 from backend.domain.agent_plan import (
@@ -289,6 +291,337 @@ def test_gap_finding_still_rejects_truly_uncommitted_evidence():
             assessment=None,
             evidence=evidence,
         )
+
+
+def _investigator_round_harness(runtime_run_id: str):
+    repository, record = _repository()
+    task = DiagnosisTask(
+        id="task-round-1",
+        title="bounded investigation",
+        description="inspect one isolated signal",
+        task_type=DiagnosisTaskType.GENERAL_INVESTIGATION,
+        agent_name="InvestigatorAgent",
+        analysis_round=1,
+        evidence_scope={"entity_ids": [record.event.service]},
+        runtime_run_id=runtime_run_id,
+    )
+    repository.save_plan(
+        DiagnosisPlan(
+            investigation_id=record.id,
+            runtime_run_id=runtime_run_id,
+            tasks=[task],
+            lead_decision=LeadDecision(
+                action=LeadAction.INVESTIGATE,
+                summary="run investigator",
+                task_ids=[task.id],
+            ),
+        )
+    )
+    return repository, record
+
+
+@pytest.mark.anyio
+async def test_rejected_finding_draft_does_not_discard_valid_findings():
+    """模型输出是不可信数据：单个 draft 违约只拒绝该 draft（持久化审计），
+    同批合法 finding 照常提交（spec §7.4 校验器可拒绝输出）。"""
+    runtime_run_id = "run-draft-partial-reject"
+    repository, record = _investigator_round_harness(runtime_run_id)
+
+    async def turn(**_kwargs):
+        return {
+            "summary": "done",
+            "findings": [
+                {
+                    "finding_type": "gap",
+                    "summary": "deployment history is unavailable",
+                    "confidence": 0.4,
+                    "evidence_ids": [],
+                    "gaps": ["deployment history unavailable"],
+                },
+                {
+                    "finding_type": "signal",
+                    "summary": "claims a signal without any evidence",
+                    "confidence": 0.9,
+                    "evidence_ids": [],
+                },
+            ],
+            "candidates": [],
+        }
+
+    runtime = V11Runtime(
+        model="fake",
+        model_provider=ModelProvider.OPENAI,
+        model_name="fake",
+        tool_registry=build_provider_tool_registry(build_mock_provider_registry()),
+        turn=turn,
+        max_investigators=1,
+    )
+    runtime.runtime_run_id = runtime_run_id
+
+    findings = await runtime.investigator_round_1(
+        repository=repository,
+        investigation_id=record.id,
+        event=record.event,
+    )
+
+    assert [finding.finding_type for finding in findings] == [AgentFindingType.GAP]
+    executions = repository.list_executions(record.id)
+    completed = [
+        item for item in executions if item.status == AgentExecutionStatus.COMPLETED
+    ]
+    audits = [
+        item for item in executions if item.status == AgentExecutionStatus.FAILED
+    ]
+    assert len(completed) == 1
+    assert len(audits) == 1
+    assert audits[0].failure_category == FailureCategory.INVALID_REFERENCE
+    assert audits[0].error_message == "finding draft rejected: non_gap_requires_evidence"
+    assert repository.get(record.id).status != InvestigationStatus.FAILED
+
+
+@pytest.mark.anyio
+async def test_all_finding_drafts_rejected_keeps_batch_failure_semantics():
+    """整批 draft 全违约 = investigator 失败；single 配置下 round 收敛 terminal。"""
+    runtime_run_id = "run-draft-full-reject"
+    repository, record = _investigator_round_harness(runtime_run_id)
+
+    async def turn(**_kwargs):
+        return {
+            "summary": "done",
+            "findings": [
+                {
+                    "finding_type": "signal",
+                    "summary": "claims a signal without any evidence",
+                    "confidence": 0.9,
+                    "evidence_ids": [],
+                },
+            ],
+            "candidates": [],
+        }
+
+    runtime = V11Runtime(
+        model="fake",
+        model_provider=ModelProvider.OPENAI,
+        model_name="fake",
+        tool_registry=build_provider_tool_registry(build_mock_provider_registry()),
+        turn=turn,
+        max_investigators=1,
+    )
+    runtime.runtime_run_id = runtime_run_id
+
+    findings = await runtime.investigator_round_1(
+        repository=repository,
+        investigation_id=record.id,
+        event=record.event,
+    )
+
+    assert findings == ()
+    assert repository.get(record.id).status == InvestigationStatus.FAILED
+    audits = [
+        item
+        for item in repository.list_executions(record.id)
+        if item.status == AgentExecutionStatus.FAILED
+        and item.error_message == "finding draft rejected: non_gap_requires_evidence"
+    ]
+    assert len(audits) == 1
+
+
+def _candidate_draft(
+    *,
+    supporting_finding_ids: list[str] | None = None,
+    supporting_evidence_ids: list[str] | None = None,
+) -> dict:
+    return {
+        "summary": "candidate from investigator",
+        "rank": 1,
+        "confidence": 0.6,
+        "supporting_finding_ids": supporting_finding_ids or [],
+        "supporting_evidence_ids": supporting_evidence_ids or [],
+    }
+
+
+async def _run_candidate_round(runtime_run_id: str, turn, seed=None):
+    repository, record = _investigator_round_harness(runtime_run_id)
+    if seed is not None:
+        repository.save(record.model_copy(update={"evidence": seed}))
+    runtime = V11Runtime(
+        model="fake",
+        model_provider=ModelProvider.OPENAI,
+        model_name="fake",
+        tool_registry=build_provider_tool_registry(build_mock_provider_registry()),
+        turn=turn,
+        max_investigators=1,
+    )
+    runtime.runtime_run_id = runtime_run_id
+    await runtime.investigator_round_1(
+        repository=repository,
+        investigation_id=record.id,
+        event=record.event,
+    )
+    return repository, record
+
+
+@pytest.mark.anyio
+async def test_candidate_with_unknown_finding_reference_is_dropped_and_audited():
+    """finding ID 由服务端生成，模型填的引用几乎必然无效；准入层丢弃违约
+    candidate 并留审计，不让它在终态校验升级为 run 失败（spec §7.4）。"""
+
+    async def turn(**_kwargs):
+        return {
+            "summary": "done",
+            "findings": [],
+            "candidates": [
+                _candidate_draft(supporting_finding_ids=["finding-bogus"])
+            ],
+        }
+
+    repository, record = await _run_candidate_round(
+        "run-candidate-bogus-finding", turn
+    )
+
+    review = repository.get_coordination_review(record.id)
+    assert review is None or review.candidates == []
+    audits = [
+        item
+        for item in repository.list_executions(record.id)
+        if item.error_message == "candidate draft rejected: candidate_finding_reference"
+    ]
+    assert len(audits) == 1
+    assert audits[0].failure_category == FailureCategory.INVALID_REFERENCE
+    assert repository.get(record.id).status != InvestigationStatus.FAILED
+
+
+@pytest.mark.anyio
+async def test_candidate_referencing_persisted_finding_is_kept():
+    runtime_run_id = "run-candidate-known-finding"
+    repository, record = _investigator_round_harness(runtime_run_id)
+    plan = repository.get_plan(record.id)
+    prior_task = DiagnosisTask(
+        id="task-prior",
+        title="earlier bounded investigation",
+        description="already investigated",
+        task_type=DiagnosisTaskType.GENERAL_INVESTIGATION,
+        agent_name="InvestigatorAgent",
+        analysis_round=1,
+        runtime_run_id=runtime_run_id,
+        information_gap="already-resolved gap",
+    )
+    repository.save_plan(
+        plan.model_copy(update={"tasks": [*plan.tasks, prior_task]})
+    )
+    seeded_evidence = EvidenceItem(
+        id="ev-committed-signal",
+        provider=EvidenceProvider.LOG,
+        kind=EvidenceKind.LOG_PATTERN,
+        timestamp=datetime(2026, 8, 15, 10, tzinfo=UTC),
+        summary="error rate spiked",
+        status=EvidenceStatus.SUCCESS,
+        runtime_run_id=runtime_run_id,
+    )
+    repository.save(record.model_copy(update={"evidence": [seeded_evidence]}))
+    persisted = AgentFinding(
+        investigation_id=record.id,
+        agent_name=FindingActor.INVESTIGATOR,
+        agent_instance_id="inst-seed",
+        # 属于另一个任务，避免触发 _run_investigator 的重放短路。
+        task_id="task-prior",
+        runtime_run_id=runtime_run_id,
+        finding_type=AgentFindingType.SIGNAL,
+        summary="committed signal",
+        confidence=0.7,
+        evidence_ids=[seeded_evidence.id],
+        execution_layer=AgentExecutionLayer.OPENAI_AGENTS_SDK,
+        analysis_round=1,
+    )
+    repository.save_agent_findings(record.id, [persisted])
+
+    async def turn(**_kwargs):
+        return {
+            "summary": "done",
+            "findings": [],
+            "candidates": [
+                _candidate_draft(supporting_finding_ids=[persisted.id])
+            ],
+        }
+
+    runtime = V11Runtime(
+        model="fake",
+        model_provider=ModelProvider.OPENAI,
+        model_name="fake",
+        tool_registry=build_provider_tool_registry(build_mock_provider_registry()),
+        turn=turn,
+        max_investigators=1,
+    )
+    runtime.runtime_run_id = runtime_run_id
+    await runtime.investigator_round_1(
+        repository=repository,
+        investigation_id=record.id,
+        event=record.event,
+    )
+
+    review = repository.get_coordination_review(record.id)
+    assert review is not None
+    assert [item.supporting_finding_ids for item in review.candidates] == [
+        [persisted.id]
+    ]
+
+
+@pytest.mark.anyio
+async def test_candidate_citing_skipped_evidence_is_dropped():
+    skipped = EvidenceItem(
+        id="ev-skipped-candidate",
+        provider=EvidenceProvider.DEPLOY,
+        kind=EvidenceKind.PROVIDER_ERROR,
+        timestamp=datetime(2026, 8, 15, 10, tzinfo=UTC),
+        summary="deploy provider skipped",
+        status=EvidenceStatus.SKIPPED,
+        runtime_run_id="run-candidate-skipped-evidence",
+    )
+
+    async def turn(**_kwargs):
+        return {
+            "summary": "done",
+            "findings": [],
+            "candidates": [
+                _candidate_draft(supporting_evidence_ids=[skipped.id])
+            ],
+        }
+
+    repository, record = await _run_candidate_round(
+        "run-candidate-skipped-evidence", turn, seed=[skipped]
+    )
+
+    review = repository.get_coordination_review(record.id)
+    assert review is None or review.candidates == []
+    audits = [
+        item
+        for item in repository.list_executions(record.id)
+        if item.error_message
+        == "candidate draft rejected: candidate_evidence_reference"
+    ]
+    assert len(audits) == 1
+
+
+@pytest.mark.anyio
+async def test_candidate_drop_does_not_fail_sibling_candidates():
+    async def turn(**_kwargs):
+        return {
+            "summary": "done",
+            "findings": [],
+            "candidates": [
+                _candidate_draft(supporting_finding_ids=["finding-bogus"]),
+                _candidate_draft(),
+            ],
+        }
+
+    repository, record = await _run_candidate_round(
+        "run-candidate-sibling", turn
+    )
+
+    review = repository.get_coordination_review(record.id)
+    assert review is not None
+    assert len(review.candidates) == 1
+    assert review.candidates[0].supporting_finding_ids == []
 
 
 def test_strict_output_tool_uses_provider_subset_and_full_local_validation():
@@ -2629,6 +2962,58 @@ async def test_v11_required_lead_failure_is_failed_without_inconclusive_fallback
     assert review.critic_assessments == []
     assert review.lead_decision is None
     assert review.diagnostic_status is None
+    assert repository.get(record.id).status == InvestigationStatus.FAILED
+
+
+@pytest.mark.anyio
+async def test_v11_validator_correction_skipped_when_budget_exhausted():
+    """预算耗尽时 correction 调用必败；跳过它直接 terminal，不发起模型调用。"""
+    repository, record = _repository()
+    candidate = RootCauseCandidate(
+        id="candidate-budget-correction",
+        summary="candidate",
+        rank=1,
+        confidence=0.5,
+    )
+    repository.save_coordination_review(
+        CoordinationReview(
+            investigation_id=record.id,
+            runtime_run_id="run-budget-correction",
+            authority_mode="agent",
+            candidates=[candidate],
+            lead_decision=LeadDecision(
+                action=LeadAction.INCONCLUSIVE,
+                summary="not enough evidence",
+                stop_reason="insufficient_evidence",
+            ),
+            diagnostic_status="inconclusive",
+        )
+    )
+    calls = 0
+
+    async def turn(**_kwargs):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("correction must not be attempted without budget")
+
+    runtime = V11Runtime(
+        model="fake",
+        model_provider=ModelProvider.OPENAI,
+        model_name="fake",
+        tool_registry=build_provider_tool_registry(build_mock_provider_registry()),
+        turn=turn,
+        token_budget=0,
+    )
+    runtime.runtime_run_id = "run-budget-correction"
+
+    await runtime.result_validation(
+        repository=repository,
+        investigation_id=record.id,
+        event=record.event,
+    )
+
+    assert calls == 0
+    assert "correction_budget_exhausted" in runtime._failures
     assert repository.get(record.id).status == InvestigationStatus.FAILED
 
 

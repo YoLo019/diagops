@@ -73,6 +73,7 @@ from backend.domain.multi_agent import (
 )
 from backend.domain.runtime import (
     RuntimeEventType,
+    RuntimeFailureCategory,
     RuntimeRun,
     RuntimeRunKind,
     RuntimeRunReason,
@@ -95,7 +96,7 @@ from backend.services.v11_projection import ensure_v11_projection_owner
 from backend.tools.provider_tools import VerifiedMemoryLookup, build_provider_tool_registry
 from backend.tools.registry import agent_manifest_hash
 
-PROMPT_VERSION = "v11-rcaeval-v1"
+PROMPT_VERSION = "v11-rcaeval-v2"
 EMPTY_MEMORY_IDENTITY = {"schema_version": "empty-run-owned-memory-v1", "entries": []}
 
 logger = logging.getLogger(__name__)
@@ -647,12 +648,23 @@ class RcaEvalCaseRunner:
             except ValueError:
                 read_only_violations += 1
         input_tokens, output_tokens = _runtime_token_usage(self.runtime_store, run.id)
-        if not completed and failure_category is None:
-            failure_category = (
+        if not completed:
+            # 持久化的显式类别优先于逃逸异常类名；unknown 不携带信息，
+            # 让位给异常类名，再以 failure_reason 兜底。
+            persisted_category = (
                 persisted.failure_category.value
                 if persisted.failure_category is not None
-                else record.failure_reason or "failed"
+                else None
             )
+            if (
+                persisted_category is not None
+                and persisted_category != RuntimeFailureCategory.UNKNOWN.value
+            ):
+                failure_category = persisted_category
+            elif failure_category is None:
+                failure_category = (
+                    persisted_category or record.failure_reason or "failed"
+                )
         prediction = CasePrediction(
             case_id=case.case_id,
             configuration=budget.configuration,

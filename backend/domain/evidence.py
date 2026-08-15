@@ -253,3 +253,23 @@ def validate_usable_evidence(
             )
         if runtime_run_id is not None and item.runtime_run_id != runtime_run_id:
             raise ValueError(f"evidence {evidence_id} owner mismatch")
+
+
+def validate_committed_evidence(
+    evidence: Iterable[EvidenceItem],
+    evidence_ids: Iterable[str],
+    *,
+    runtime_run_id: str | None = None,
+) -> None:
+    """校验引用指向同 run 已提交证据，不限状态（GAP finding 的引用口径）。
+
+    GAP 的语义是"证据缺失"，引用采集 failed/skipped 的已提交记录正是其正确
+    出处（spec §7.2/§8.2）；此函数只做存在性与 owner 校验，不做 usable 要求。
+    """
+    evidence_by_id = {item.id: item for item in evidence}
+    for evidence_id in evidence_ids:
+        item = evidence_by_id.get(evidence_id)
+        if item is None:
+            raise ValueError(f"missing evidence id: {evidence_id}")
+        if runtime_run_id is not None and item.runtime_run_id != runtime_run_id:
+            raise ValueError(f"evidence {evidence_id} owner mismatch")
