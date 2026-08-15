@@ -253,13 +253,38 @@ candidate 审计 round 来源统一建议）。最终门禁：`uv run pytest -q`
 4 skipped, 1 warning**；`uv run ruff check .` 与 `git diff --check` clean。正式计数：
 SS30 paired attempts=1（failed_non_resumable），label opens 仍为 `0`。
 
-Blocker: `T12 epoch-0 失败修复链已完成并获独立复审 approve（见上）。恢复正式评测还差：
-(1) 提交本修复链（code revision 变化 → 现 capability artifact 作废）；
-(2) 对最终干净 HEAD 重新认证 capability（需含 process-only credential 的环境）；
-(3) 用户签发 reauthorization token（pair 现 FAILED_NON_RESUMABLE 且
-label_ever_opened=0，partition 保留）后用 `--reauthorization-token` 跑 SS30
-single_intended epoch 1，再续剩余 3 侧。SS30/TT90 不得以任务线程模型或 test double
-替代。`
+Verification evidence (M5 SS30 epoch-1 failure and Single-path fix chain, 2026-08-15):
+epoch-1 启动后用户在 ~12/30 例时贴回失败日志并决策立即停止（省 ~0.3M tokens）；
+停止时 snapshot 5 completed / 9 failed / 1 running（contract_integrity ×5 +
+unknown ×4）。生产 DB 取证 + 测试 harness 复现确认四条根因：
+(1) Single 对照路径（`SingleInvestigatorAgent.investigator_round_1`）未获得 M3/M4
+语义——裸 tuple 推导任一违约 draft 即逃逸杀 run，candidates 无准入校验；
+(2) Single 特有完整性要求（entity/mechanism/supporting evidence 非空）只在终态
+校验把关，不完整 candidate 必死（contract_integrity ×5）；
+(3) **更深的共享运行时缺陷（影响所有 V11 路径）**：phase 内 `_mark_terminal_failure`
+后 phase 输出 status="failed"，但 `PhaseCommit` 契约只接受 completed/skipped →
+ValueError 逃逸 → InMemory staging 的暂存业务变更（失败审计、清空 review）永不落库、
+run 归类 unknown（epoch-0 全部 24 例失败也是同一机制）；
+(4) 报告层三处引用完整性检查抛裸 ValueError → 逃逸归类 unknown（d6dce2c5 实证：
+模型编造 finding ID 的 candidate 在 report_generation 死亡）。
+修复链：F1/F2 Single 路径 per-draft 拒绝+审计、`_admit_candidates` 准入、Single 特有
+"candidate_incomplete" 准入丢弃（刻意不进共享 `_admit_candidates`，Multi 语义不变）；
+F3 `PhaseCommit` 接受 failed、两 store 后端映射 PHASE_FAILED、coordinator 去重后归类
+OUTPUT_VALIDATION（失败审计随事务原子落库）；F4 三处改 ReportReferenceError（逃逸归
+contract_integrity）；F5 Single prompt 规则扩写 + PROMPT_VERSION `v11-rcaeval-v3`。
+TDD：4 个 harness 测试先 RED（复现 draft 杀 run、bad-ref candidate 杀 run、不完整
+candidate 杀 run、批次全灭审计丢失）后 GREEN；内存后端分叉测试经 stash 验证 RED→
+GREEN。独立复审 **APPROVE**（无 blocking/high；1 medium——InMemoryRuntimeStore 未同步
+failed 映射——当日修复+测试；1 low 经实证不成立：Single result_validation 最终
+`_update_summary` 在 INCONCLUSIVE 写入后重算，终态摘要 COMPLETED 正确；1 informational
+记录：rank 违约仍留终态校验，与 Multi 一致）。最终门禁：`uv run pytest -q` →
+**2299 passed, 4 skipped, 1 warning**；ruff 与 `git diff --check` clean。正式计数：
+SS30 paired attempts=2（两 epoch 均 failed_non_resumable），label opens 仍为 `0`。
+
+Blocker: `T12 第二修复链（Single 路径 + failed PhaseCommit）已完成并获独立复审 approve
+（见上）。恢复正式评测还差：(1) 提交本修复链；(2) 对最终干净 HEAD 重新认证 capability；
+(3) 用户签发第二个 reauthorization token（pair 现 failed_non_resumable、
+label_ever_opened=0）后跑 SS30 single_intended epoch 2，再续剩余 3 侧。`
 
 Verification evidence (M5 fifth-round review-fix, 2026-08-12): base was
 `75f964495d6e6f391ebd8eef4c2170ba982d53ea`; code commit is
@@ -484,17 +509,14 @@ legacy output remains unchanged. M4 focused 137, T9 289, T10 881, and full
 pytest 2097 passed with only the recorded skips/warning.
 
 Current phase: Full iteration / M5 T12 正式评测进行中：SS30 single_intended epoch 0
-失败（6/30 completed，bundle fail-closed 拒收，labels 未开封），根因已离线归因，
-GAP/skipped 证据引用分层一致性修复链（M1–M7）完成并获独立复审 approve，全量
-2293 passed、Ruff clean
+（6/30）与 epoch 1（用户止损于 ~12/30）均失败，两轮根因均已离线归因；第二轮修复链
+（Single 路径输出单元级拒绝 + failed PhaseCommit 合法化）完成并获独立复审 approve，
+全量 2299 passed、Ruff clean
 
-Next action: 提交修复链 → 对最终干净 HEAD 重新认证 capability artifact（需含
-process-only credential 的环境）→ 用户签发 reauthorization token 后用
-`--reauthorization-token` 重跑 SS30 single_intended epoch 1 → 续剩余 3 侧；
-T13 对账清单纳入既有 Low（leakage 运行期检测空转、production_acceptance preflight、
-M2R-4、capability 重认证提醒、inconclusive 丢弃 tasks 审计日志、fingerprint 归一化、
-极短 lease heartbeat 边界）及本轮复审两条 Low（预算门逃逸归类、审计 round 来源）；
-不打开 TT90 labels，不做任何准确率声称。
+Next action: 提交修复链 → 对最终干净 HEAD 重新认证 capability artifact → 用户签发第二个
+reauthorization token 后跑 SS30 single_intended epoch 2 → 续剩余 3 侧；T13 对账清单纳入
+既有 Low 及本轮 informational（rank 违约留终态校验为既定语义）；不打开 TT90 labels，
+不做任何准确率声称。
 
 | ID | Phase | Task | Status | Evidence or result | Next action or blocker |
 | --- | --- | --- | --- | --- | --- |
