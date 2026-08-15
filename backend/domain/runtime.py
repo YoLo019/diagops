@@ -730,7 +730,7 @@ _TOOL_NORMALIZED_INPUT_KEYS: dict[str, frozenset[str]] = {
         {"start_time", "end_time", "limit", "version", "instance"}
     ),
     "read_service_catalog": frozenset(
-        {"start_time", "end_time", "limit", "include_dependencies"}
+        {"start_time", "end_time", "limit", "include_dependencies", "name"}
     ),
     "query_dependencies": frozenset(
         {"start_time", "end_time", "limit", "direction", "target", "depth"}
@@ -803,7 +803,14 @@ _TOOL_LIST_FIELDS = frozenset(
         "states",
     }
 )
-_TOOL_TEXT_FIELDS = frozenset({"affected_entity", "failure_mechanism"})
+_TOOL_TEXT_FIELDS = frozenset({"affected_entity", "failure_mechanism", "keyword"})
+# 这些字段在 query 契约里是自由文本（无 pattern，可含空格）：
+# keywords/levels/metric_names 为非空列表项（query 侧 min_length=1），
+# instance/version/target/name 为可空标量（query 侧无 min_length）。
+# 投影校验必须与 query 契约同向（接受 ⊇ query 合法值），否则模型合法的
+# 自由文本会在持久化投影层炸开杀 run。
+_TOOL_TEXT_LIST_FIELDS = frozenset({"keywords", "levels", "metric_names"})
+_TOOL_OPTIONAL_TEXT_FIELDS = frozenset({"instance", "version", "target", "name"})
 _TOOL_ENUM_FIELDS: dict[str, frozenset[str]] = {
     "aggregation": frozenset({"avg", "max", "sum"}),
     "direction": frozenset({"upstream", "downstream", "both"}),
@@ -931,6 +938,10 @@ def _validate_tool_scalar(value: Any, *, field_name: str, path: str) -> None:
         if not isinstance(value, str) or not 1 <= len(value) <= _MAX_STRUCTURED_STRING_LENGTH:
             raise ValueError(f"{path} must be a bounded string")
         return
+    if field_name in _TOOL_OPTIONAL_TEXT_FIELDS:
+        if not isinstance(value, str) or len(value) > _MAX_STRUCTURED_STRING_LENGTH:
+            raise ValueError(f"{path} must be a bounded string")
+        return
     if field_name in _TOOL_ENUM_FIELDS:
         if value not in _TOOL_ENUM_FIELDS[field_name]:
             raise ValueError(f"{path} contains an unsupported value")
@@ -957,7 +968,13 @@ def _validate_tool_object(
                 raise ValueError(f"{field_path} must be a bounded list")
             for index, item in enumerate(field_value):
                 _validate_tool_scalar(
-                    item, field_name="identifier", path=f"{field_path}[{index}]"
+                    item,
+                    field_name=(
+                        "keyword"
+                        if field_name in _TOOL_TEXT_LIST_FIELDS
+                        else "identifier"
+                    ),
+                    path=f"{field_path}[{index}]",
                 )
             continue
         _validate_tool_scalar(field_value, field_name=field_name, path=field_path)

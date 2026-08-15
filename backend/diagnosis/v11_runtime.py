@@ -29,7 +29,7 @@ from agents import (
 from agents.models.interface import ModelProvider as AgentsModelProvider
 from agents.models.multi_provider import MultiProvider
 from openai import AsyncOpenAI
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from backend.config.settings import canonicalize_endpoint, endpoint_id
 from backend.db.models import InvestigationStatus
@@ -544,6 +544,8 @@ def _draft_rejection_code(exc: V11RuntimeContractError) -> str:
     """把 draft 违约映射为固定审计 code（不带任何模型文本）。"""
     if "non-gap finding requires evidence" in str(exc):
         return "finding draft rejected: non_gap_requires_evidence"
+    if "finding draft violates finding contract" in str(exc):
+        return "finding draft rejected: invalid_finding_contract"
     return "finding draft rejected: uncommitted_evidence"
 
 
@@ -2213,30 +2215,47 @@ class V11Runtime:
             raise V11RuntimeContractError("Investigator referenced uncommitted evidence")
         if draft.finding_type != AgentFindingType.GAP and not draft.evidence_ids:
             raise V11RuntimeContractError("non-gap finding requires evidence")
-        return AgentFinding(
-            investigation_id=investigation_id,
-            agent_name=FindingActor.INVESTIGATOR,
-            agent_instance_id=instance_id,
-            finding_type=draft.finding_type,
-            summary=draft.summary,
-            confidence=draft.confidence,
-            evidence_ids=draft.evidence_ids,
-            related_cause_type=draft.related_cause_type,
-            severity=draft.severity,
-            rationale=draft.rationale,
-            gaps=draft.gaps,
-            blocking=draft.blocking,
-            execution_layer=AgentExecutionLayer.OPENAI_AGENTS_SDK,
-            analysis_round=round_number,
-            task_id=task.id,
-            runtime_run_id=self.runtime_run_id,
-            critic_assessment_id=(
-                assessment.id if assessment is not None else None
-            ),
-            affected_entity=draft.affected_entity,
-            failure_mechanism=draft.failure_mechanism,
-            contradicting_evidence_ids=draft.contradicting_evidence_ids,
-        )
+        try:
+            return AgentFinding(
+                investigation_id=investigation_id,
+                agent_name=FindingActor.INVESTIGATOR,
+                agent_instance_id=instance_id,
+                finding_type=draft.finding_type,
+                summary=draft.summary,
+                confidence=draft.confidence,
+                evidence_ids=draft.evidence_ids,
+                related_cause_type=draft.related_cause_type,
+                severity=draft.severity,
+                rationale=draft.rationale,
+                gaps=draft.gaps,
+                blocking=draft.blocking,
+                execution_layer=AgentExecutionLayer.OPENAI_AGENTS_SDK,
+                analysis_round=round_number,
+                task_id=task.id,
+                runtime_run_id=self.runtime_run_id,
+                critic_assessment_id=(
+                    assessment.id if assessment is not None else None
+                ),
+                affected_entity=draft.affected_entity,
+                failure_mechanism=draft.failure_mechanism,
+                contradicting_evidence_ids=draft.contradicting_evidence_ids,
+            )
+        except ValidationError as exc:
+            # 领域规则违约（如 blocking 要求 gap+非空 gaps）与引用违约同级：
+            # 包装为契约错误走 per-draft 拒绝，而不是漏网 ValidationError 杀 run。
+            # validator 消息是固定字符串（非模型文本），保留以便区分模型违约与
+            # 未来调用方 bug；截断兜底防御异常消息形态变化。
+            detail = next(
+                (
+                    str(error["msg"]).removeprefix("Value error, ")
+                    for error in exc.errors()
+                    if error.get("type") == "value_error"
+                ),
+                "unknown",
+            )
+            raise V11RuntimeContractError(
+                f"finding draft violates finding contract: {detail[:120]}"
+            ) from exc
 
     def _normalize_assessments(
         self,

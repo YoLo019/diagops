@@ -817,3 +817,43 @@ def test_frozen_run_identity_fails_closed_without_dependency_lock(tmp_path: Path
         expected.update((tmp_path / name).read_bytes())
     assert identity.dependency_lock_hash == expected.hexdigest()
     assert identity.dependency_lock_hash != identity.source_manifest_hash
+
+
+def test_single_control_rejects_domain_violating_draft(tmp_path: Path):
+    turn = _single_turn_with_investigator(
+        {
+            "summary": "One domain-violating draft, one legal gap.",
+            "findings": [
+                {
+                    "finding_type": "gap",
+                    "summary": "blocking gap without gaps list",
+                    "confidence": 0.5,
+                    "blocking": True,
+                },
+                {
+                    "finding_type": "gap",
+                    "summary": "deployment evidence is unavailable",
+                    "confidence": 0.2,
+                    "gaps": ["deployment history unavailable"],
+                },
+            ],
+            "candidates": [],
+        }
+    )
+    prediction, repository, runtime_store = _run_single_case(tmp_path, turn)
+
+    # 领域规则违约（blocking 要求 gap+非空 gaps）同样走 per-draft 拒绝+审计，
+    # 合法 finding 保留，run 不陪葬。
+    assert prediction.completed is True
+    persisted = runtime_store.get_run(prediction.runtime_run_id)
+    assert persisted.status == RuntimeRunStatus.COMPLETED
+    findings = repository.list_agent_findings(persisted.investigation_id)
+    assert [item.finding_type.value for item in findings] == ["gap"]
+    audits = [
+        item
+        for item in repository.list_executions(persisted.investigation_id)
+        if item.status == AgentExecutionStatus.FAILED
+    ]
+    assert len(audits) == 1
+    assert audits[0].failure_category == FailureCategory.INVALID_REFERENCE
+    assert audits[0].error_message == "finding draft rejected: invalid_finding_contract"

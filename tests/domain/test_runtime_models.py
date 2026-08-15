@@ -202,6 +202,57 @@ def test_runtime_event_accepts_allowlisted_structured_tool_payload() -> None:
                 "limit": 5,
             },
         ),
+        (
+            "read_logs",
+            {
+                "start_time": "2026-07-17T00:00:00Z",
+                "end_time": "2026-07-17T00:05:00Z",
+                "limit": 20,
+                "keywords": ["connection timeout", "pool exhausted"],
+            },
+        ),
+        (
+            "read_logs",
+            {
+                "start_time": "2026-07-17T00:00:00Z",
+                "end_time": "2026-07-17T00:05:00Z",
+                "levels": ["free text level"],
+                "instance": "checkout pod 01",
+            },
+        ),
+        (
+            "query_metrics",
+            {
+                "start_time": "2026-07-17T00:00:00Z",
+                "end_time": "2026-07-17T00:05:00Z",
+                "metric_names": ["custom.metric rate"],
+                "instance": "",
+            },
+        ),
+        (
+            "read_deployments",
+            {
+                "start_time": "2026-07-17T00:00:00Z",
+                "end_time": "2026-07-17T00:05:00Z",
+                "version": "v1.2.3 canary",
+            },
+        ),
+        (
+            "query_dependencies",
+            {
+                "start_time": "2026-07-17T00:00:00Z",
+                "end_time": "2026-07-17T00:05:00Z",
+                "target": "checkout service",
+            },
+        ),
+        (
+            "read_service_catalog",
+            {
+                "start_time": "2026-07-17T00:00:00Z",
+                "end_time": "2026-07-17T00:05:00Z",
+                "name": "checkout service",
+            },
+        ),
     ],
 )
 def test_runtime_event_accepts_scoped_tool_payloads(
@@ -234,6 +285,13 @@ def test_runtime_event_accepts_scoped_tool_payloads(
         ("query_traces", {"min_duration_ms": "fast"}),
         ("query_traces", {"direction": "sideways"}),
         ("lookup_memory", {"failure_mechanism": "x" * 257}),
+        ("read_logs", {"keywords": ["x" * 257]}),
+        ("read_logs", {"keywords": [""]}),
+        ("read_logs", {"instance": "x" * 257}),
+        ("query_metrics", {"metric_names": ["x" * 257]}),
+        ("read_service_catalog", {"name": "x" * 257}),
+        ("read_service_catalog", {"bogus": 1}),
+        ("query_related_alerts", {"entity_ids": ["has space"]}),
         ("made_up_tool", {"limit": 1}),
     ],
 )

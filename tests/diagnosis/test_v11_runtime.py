@@ -4162,3 +4162,31 @@ async def test_v11_concurrent_model_reservations_cannot_oversell_token_ceiling()
             reservation_status="completed",
         )
     assert runtime.remaining_token_budget == 90
+
+
+def test_domain_violating_draft_raises_contract_error_not_validation_error():
+    """模型产出违反领域规则的 draft（如 blocking 的非 GAP/无 gaps），
+    构造 AgentFinding 的 pydantic ValidationError 必须包装为
+    V11RuntimeContractError 走 per-draft 拒绝，而不是漏网杀 run。"""
+    runtime, task, evidence = _finding_gate_harness()
+    draft = InvestigatorFindingDraft(
+        finding_type=AgentFindingType.GAP,
+        summary="blocking gap without gaps list",
+        confidence=0.5,
+        blocking=True,
+    )
+
+    with pytest.raises(V11RuntimeContractError, match="finding contract") as captured:
+        runtime._finding_from_draft(
+            draft,
+            investigation_id="inv-1",
+            task=task,
+            instance_id="investigator-1",
+            round_number=1,
+            assessment=None,
+            evidence=evidence,
+        )
+
+    # validator 消息是固定字符串（非模型文本），必须保留在契约错误里，
+    # 否则未来调用方 bug 与模型违约在审计上不可区分。
+    assert "blocking requires a gap finding" in str(captured.value)
