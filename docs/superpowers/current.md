@@ -228,9 +228,11 @@ credential、绑定干净 HEAD 584b4b0 的 passed artifact）已于 2026-08-14 �
 OB30 Single 24k live smoke 验收通过；修复链 b80a418..584b4b0 独立复审
 approve_with_followups（无 blocking/high/medium，三条 Low 入 T13）；后续修复链
 45ccde1..fc20b4a 独立复审 approve_with_followups，其 H1（最终校验层 GAP 引用契约
-不一致）已 RED→GREEN 修复并获跟进复审 approve（修复已提交 `788a0b3`）。恢复正式预测还差：
-capability artifact 绑定新干净 HEAD 重新认证、用户授权消耗不可重来
-的正式 SS30/TT90 预算。SS30/TT90 不得以任务线程模型或 test double 替代。`
+不一致）已 RED→GREEN 修复并获跟进复审 approve（修复已提交 `788a0b3`）；OB30
+Single 24k 验收 smoke 已于 2026-08-15 在 `36f03a1` 通过（run `d94dda42`）。恢复
+正式预测还差：提交 docs 后 capability artifact 绑定最终干净 HEAD 重新认证
+（现 artifact `4d6e11f9` 的 git_dirty=true 会被正式准入拒绝）、用户授权消耗不可
+重来的正式 SS30/TT90 预算。SS30/TT90 不得以任务线程模型或 test double 替代。`
 
 Verification evidence (M5 fifth-round review-fix, 2026-08-12): base was
 `75f964495d6e6f391ebd8eef4c2170ba982d53ea`; code commit is
@@ -459,9 +461,9 @@ Medium 已按 §9.2 RED→GREEN 关闭并获独立复审 approve，分支已按�
 T12 外部前置已具备（2026-08-14 live smoke 验收通过 + 修复链独立复审
 approve_with_followups），正式预算消耗待授权
 
-Next action: H1 修复已提交 `788a0b3`（result_validation GAP 豁免，跟进复审 approve）；
-按契约重新认证 capability artifact（绑定新干净 HEAD，需含 process-only credential 的
-环境）；用户授权消耗正式 SS30/TT90 预算后，从 OB30/SS30 恢复 T12；
+Next action: OB30 Single 24k 验收 smoke 已通过（2026-08-15，run `d94dda42`，证据见上）；
+提交 current.md 后按契约重新认证 capability artifact（绑定最终干净 HEAD，需含
+process-only credential 的环境）；用户授权消耗正式 SS30/TT90 预算后，从 SS30 恢复 T12；
 T13 对账清单纳入七条 Low（leakage 运行期检测空转、production_acceptance
 preflight、M2R-4 跟踪，及修复链复审的 capability artifact 重认证提醒、
 inconclusive 丢弃 tasks 审计日志、fingerprint 列表归一化、极短 lease heartbeat
@@ -559,6 +561,42 @@ L1（lease ≤1.5s 时 heartbeat 下限边界；实际 manifest 默认 900s 不�
 建议记录不改码，入 T13 对账。正式 SS30/TT90 预测、paired attempts、label opens
 仍为 `0`；H1 修复提交后 capability artifact 需绑定新的干净 HEAD 重新认证；
 M5 仍 blocked。
+
+Verification evidence (M5 capability re-certification, 2026-08-15): 用户在含
+process-only credential 的 PowerShell（隐藏输入密钥与 base_url、NO_PROXY="*" 直连）
+对干净 HEAD `36f03a1` 重新认证 gpt-5.6-terra @ cctq.ai：**result=passed**，全部 7 项
+observation 通过，transport `native_json_schema`，tested_parallelism=3，
+`git_dirty=false`，code_revision=`36f03a141d84f75d45b3833b2090bbb76d6ef9e5`，
+endpoint_id=`349d8f7aeba75e46…`（与既往同一 endpoint），adapter
+`openai-compatible-adapter-v2`、openai SDK 2.45.0、agents SDK 0.18.1，artifact_hash
+`048e371b00f82e66a1d4822eda8ccd25d2fa3ca76dee766dd1ec6e0b3ed7c4c0`，artifact 位于
+`D:\data\RCAEval\v11-m5\model-capability\349d8f7aeba75e46-gpt-5.6-terra\result.json`。
+同日早些时候仓库 `output/model_capability/` 下的两次工程尝试（terra 全 probe 超
+30s 死线、kimi-k3 全 AuthenticationError）均为 failed artifact，不具正式效力；
+用户已决定正式 run 继续走 gpt-5.6-terra。首次 OB30 smoke 尝试因 PowerShell 窗口
+残留旧 base_url 环境变量在 capability 准入处 fail-closed（`endpoint identity is
+stale`，未发生任何模型调用，无预算消耗）；第二次因仓库存在未提交 docs 改动触发
+`code revision is stale or dirty` fail-closed（同样零模型调用）。经用户指示，
+smoke 级准入松绑为 `result=passed` + endpoint_id 匹配 + model 匹配（桌面 harness
+`task4-ob30-acceptance-smoke.txt` v3，加非明文 endpoint 预检与整体脚本块防级联）；
+**正式 SS30/TT90 准入契约（code revision/git_dirty/SDK 版本/环境指纹绑定）不变**，
+正式 run 前仍需对最终干净 HEAD 重新认证一次。
+
+Verification evidence (M5 OB30 Single 24k smoke passed, 2026-08-15): 2026-08-14 晚
+provider 网关出现持续约 12 小时的退化——输入计费翻倍（同 prompt actual 4221→8608，
+08-14 16:32 起，4 次运行稳定复现）且长结构化响应以两份 JSON 拼接返回（capture
+`0df22f35` 两条 raw 均 Extra data/trailing characters，SDK 解析失败→重试→第三次
+请求撞 24k 预算墙 fail-closed；预算门禁行为正确，零正式预算消耗）。2026-08-15 上午
+网关自行恢复（actual 回落至 4213，单份合法 JSON），capture smoke
+`d94dda42-17e0-46e9-bdef-4fac99105c92` **验收全门槛通过**：completed=true、
+run_status=completed、model.completed=2/failed=0、tool.completed=2/failed=1（契约内
+skipped）、read_only_violations=0、input 13507 + output 1395 = total 14902、33.4s、
+transport native_json_schema、artifact_hash `4d6e11f9db4dd2c035e19d42ce2e03e536b28640018d1d69cdbee420839cd53b`（gpt-5.6-terra @ 349d8f7a…，code_revision `36f03a1`，parallelism 3；**git_dirty=true**——认证时 current.md 有未提交 docs 改动，smoke 级准入不查此项，正式准入会拒，正式 run 前需提交 docs 后对最终干净 HEAD 重认证）。证据：`D:\data\RCAEval\v11-smoke\capture-02b52ddab4a441fd8ad3df6183bee61f.{db,json,raw.jsonl}`。
+同日用户在其它端点的认证尝试（gpt-5.6-terra/kimi-k3 @ 882e677d…、deepseek-v4-flash
+@ a34e2a47…）均 failed，其中 deepseek-v4-flash 经隔离 probe 证实为端点能力边界
+（不支持 response_format json_schema 且 thinking 模式禁 tool_choice=required），
+认证正确 fail-closed。正式计数仍为 0；M5 仍 blocked，只待 docs 提交 + 终态重认证 +
+用户授权正式预算。
 
 M1 review-fix record (2026-08-06): High 1–6 and Medium 7–10 were reproduced
 with focused regressions, fixed at shared profile/ownership/transaction/entry
