@@ -956,3 +956,33 @@ def test_case_retry_rejects_max_attempts_beyond_contract_bound():
     with pytest.raises(ValueError, match="max_attempts"):
         run_case_with_bounded_retry(runner, object(), object(), max_attempts=0)
     assert runner.calls == 0
+
+
+def test_evaluation_budget_timeout_cap_allows_authorized_300s():
+    # 运营噪声链：正式 run 的 run deadline 经用户逐次授权可放宽至 300s
+    # （spec §9.1 默认 120s 不变）；超过 300 仍 fail-closed。
+    from pydantic import ValidationError
+
+    from backend.benchmarks.rcaeval.models import EvaluationBudget
+
+    budget = EvaluationBudget(
+        configuration=RcaEvalConfiguration.SINGLE_INTENDED,
+        token_budget=48_000,
+        max_turns=8,
+        tool_budget=8,
+        timeout_seconds=300,
+        max_investigators=1,
+        max_rounds=1,
+    )
+    assert budget.timeout_seconds == 300
+
+    with pytest.raises(ValidationError):
+        EvaluationBudget(
+            configuration=RcaEvalConfiguration.SINGLE_INTENDED,
+            token_budget=48_000,
+            max_turns=8,
+            tool_budget=8,
+            timeout_seconds=301,
+            max_investigators=1,
+            max_rounds=1,
+        )

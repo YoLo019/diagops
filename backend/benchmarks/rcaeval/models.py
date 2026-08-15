@@ -233,7 +233,9 @@ class EvaluationBudget(BaseModel):
     token_budget: int = Field(gt=0)
     max_turns: int = Field(gt=0)
     tool_budget: int = Field(gt=0)
-    timeout_seconds: float = Field(gt=0, le=120, allow_inf_nan=False)
+    # spec §9.1 默认 run deadline 120s；正式评测经逐次授权可放宽至 300s
+    # （2026-08-15 运营噪声链，网关长生成/慢响应超出 120s 是运营噪声）。
+    timeout_seconds: float = Field(gt=0, le=300, allow_inf_nan=False)
     max_investigators: int = Field(ge=1, le=3)
     max_rounds: int = Field(ge=1, le=2)
 
