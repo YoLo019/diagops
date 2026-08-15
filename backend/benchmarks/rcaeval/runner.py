@@ -48,9 +48,10 @@ from backend.diagnosis.v11_runtime import (
     V11Runtime,
     V11RuntimeContractError,
     V11SingleControlOutput,
+    _draft_rejection_code,
     _InvestigatorResult,
 )
-from backend.domain.agent_findings import CoordinationReview
+from backend.domain.agent_findings import AgentFinding, CoordinationReview
 from backend.domain.agent_plan import (
     AgentExecution,
     AgentExecutionStatus,
@@ -66,6 +67,7 @@ from backend.domain.multi_agent import (
     ExecutionActor,
     ExecutionContractVersion,
     ExecutionStepKind,
+    FailureCategory,
     InvestigationStrategy,
     LeadAction,
     ModelProvider,
@@ -96,7 +98,7 @@ from backend.services.v11_projection import ensure_v11_projection_owner
 from backend.tools.provider_tools import VerifiedMemoryLookup, build_provider_tool_registry
 from backend.tools.registry import agent_manifest_hash
 
-PROMPT_VERSION = "v11-rcaeval-v2"
+PROMPT_VERSION = "v11-rcaeval-v3"
 EMPTY_MEMORY_IDENTITY = {"schema_version": "empty-run-owned-memory-v1", "entries": []}
 
 logger = logging.getLogger(__name__)
@@ -283,7 +285,11 @@ class SingleInvestigatorAgent(V11Runtime):
                     "committed_evidence": [item.id for item in base_evidence],
                     "rule": (
                         "Return planning and investigator fields from this one context. "
-                        f"The only task id is {task_id!r}; do not use sibling agents."
+                        f"The only task id is {task_id!r}; do not use sibling agents. "
+                        "Do not invent evidence IDs. Leave candidate "
+                        "supporting_finding_ids and contradicting_finding_ids empty; "
+                        "cite only committed usable evidence IDs in candidate "
+                        "evidence fields."
                     ),
                 },
                 ensure_ascii=False,
@@ -324,19 +330,97 @@ class SingleInvestigatorAgent(V11Runtime):
                 manifest=manifest,
             )
             repository.save_plan(plan)
-            findings = tuple(
-                self._finding_from_draft(
-                    draft,
-                    investigation_id=investigation_id,
-                    task=task,
-                    instance_id=instance_id,
-                    round_number=1,
-                    assessment=None,
-                    evidence=repository.get(investigation_id).evidence,
-                )
-                for draft in output.investigator.findings
+            committed_evidence = repository.get(investigation_id).evidence
+            # 模型输出是不可信数据：单个 draft 违约只拒绝该 draft 并留持久化
+            # 审计（spec §7.4 校验器可拒绝输出），不让同批合法 finding 陪葬
+            # （与 Multi 路径 _run_investigator 同一语义）。
+            findings: list[AgentFinding] = []
+            audit_executions: list[AgentExecution] = []
+            rejected = 0
+            for draft in output.investigator.findings:
+                try:
+                    findings.append(
+                        self._finding_from_draft(
+                            draft,
+                            investigation_id=investigation_id,
+                            task=task,
+                            instance_id=instance_id,
+                            round_number=1,
+                            assessment=None,
+                            evidence=committed_evidence,
+                        )
+                    )
+                except V11RuntimeContractError as exc:
+                    rejected += 1
+                    self._failures.append("investigator_finding_draft_rejected")
+                    audit_executions.append(
+                        self._failed_execution(
+                            task_id=task.id,
+                            actor=instance_id,
+                            step_kind=ExecutionStepKind.INVESTIGATOR_ANALYSIS,
+                            message=_draft_rejection_code(exc),
+                            analysis_round=1,
+                            failure_category=FailureCategory.INVALID_REFERENCE,
+                        )
+                    )
+            candidates = self._admit_candidates(
+                tuple(output.investigator.candidates),
+                batch_findings=findings,
+                committed_evidence=committed_evidence,
+                repository=repository,
+                investigation_id=investigation_id,
+                task=task,
+                instance_id=instance_id,
+                audit_executions=audit_executions,
             )
-            candidates = tuple(output.investigator.candidates)
+            # Single 终态校验（见下方 result_validation）要求 candidate 完整：
+            # entity/mechanism/supporting evidence 任一缺失在终态只能杀 run，
+            # 提前在准入层丢弃+审计，让诊断收敛 inconclusive（spec §7.4）。
+            complete_candidates = []
+            for candidate in candidates:
+                if (
+                    not candidate.affected_entity
+                    or not candidate.failure_mechanism
+                    or not candidate.supporting_evidence_ids
+                ):
+                    self._failures.append("investigator_candidate_draft_rejected")
+                    audit_executions.append(
+                        self._failed_execution(
+                            task_id=task.id,
+                            actor=instance_id,
+                            step_kind=ExecutionStepKind.INVESTIGATOR_ANALYSIS,
+                            message="candidate draft rejected: candidate_incomplete",
+                            analysis_round=1,
+                            failure_category=FailureCategory.INVALID_REFERENCE,
+                        )
+                    )
+                    continue
+                complete_candidates.append(candidate)
+            candidates = tuple(complete_candidates)
+            if rejected and not findings and not candidates:
+                # 整批违约全灭：维持 investigator 失败语义（terminal failed），
+                # 失败审计随 failed PhaseCommit 原子落库。
+                self._failures.append("investigator_batch_rejected")
+                self._persist_investigator_result(
+                    repository,
+                    investigation_id,
+                    _InvestigatorResult(
+                        (),
+                        (),
+                        self._failed_execution(
+                            task_id=task.id,
+                            actor=instance_id,
+                            step_kind=ExecutionStepKind.INVESTIGATOR_ANALYSIS,
+                            message="investigator findings rejected",
+                            analysis_round=1,
+                        ),
+                        tuple(audit_executions),
+                    ),
+                )
+                self._mark_terminal_failure(
+                    repository, investigation_id, "investigator findings rejected"
+                )
+                return ()
             execution = next(
                 (
                     item
@@ -364,7 +448,9 @@ class SingleInvestigatorAgent(V11Runtime):
                     "summary": output.investigator.summary or "Single control completed.",
                 }
             )
-            result = _InvestigatorResult(findings, candidates, execution)
+            result = _InvestigatorResult(
+                tuple(findings), candidates, execution, tuple(audit_executions)
+            )
             self._persist_investigator_result(repository, investigation_id, result)
             self._persist_candidate_projection(repository, investigation_id, candidates)
             self._completed_rounds = 1

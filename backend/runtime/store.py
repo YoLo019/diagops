@@ -1248,6 +1248,8 @@ class InMemoryRuntimeStore:
                     event_type=(
                         RuntimeEventType.PHASE_SKIPPED
                         if commit.status == "skipped"
+                        else RuntimeEventType.PHASE_FAILED
+                        if commit.status == "failed"
                         else RuntimeEventType.PHASE_COMPLETED
                     ),
                     phase=commit.phase,

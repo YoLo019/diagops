@@ -48,6 +48,54 @@ REFERENCE_FIELDS = (
 
 
 @pytest.mark.anyio
+async def test_failed_phase_commit_records_phase_failed_event(runtime_store) -> None:
+    # phase 内收敛 terminal（investigation FAILED）的 failed PhaseCommit 必须在
+    # 两个 store 后端都记录 PHASE_FAILED，而不是静默记成 PHASE_COMPLETED。
+    store = runtime_store
+    run = store.create_run(
+        RuntimeRun(
+            id="run-failed-phase-commit",
+            investigation_id="inv-1",
+            run_kind=RuntimeRunKind.LIVE,
+            strategy=InvestigationStrategy.FIXED,
+            run_reason=RuntimeRunReason.INITIAL,
+        )
+    )
+    leased, attempt = store.acquire_lease_and_create_attempt(
+        run.id,
+        attempt=RuntimeAttempt(
+            run_id=run.id,
+            attempt_number=1,
+            status=RuntimeAttemptStatus.RUNNING,
+        ),
+        owner="worker-a",
+        expected_status=RuntimeRunStatus.CREATED,
+    )
+    commit = PhaseCommit(
+        run_id=run.id,
+        attempt_id=attempt.id,
+        lease_owner="worker-a",
+        lease_version=leased.lease_version,
+        phase=RuntimePhase.INTAKE,
+        business_mutation=BusinessMutation(investigation_id="inv-1"),
+        safe_payload={"status": "failed"},
+        resume_state=RuntimeResumeState(),
+        status="failed",
+    )
+
+    store.commit_phase(commit)
+
+    events = store.list_events(run.id, limit=100)
+    phase_events = [
+        event for event in events if event.phase == RuntimePhase.INTAKE
+    ]
+    assert [event.event_type for event in phase_events] == [
+        RuntimeEventType.PHASE_FAILED,
+        RuntimeEventType.CHECKPOINT_CREATED,
+    ]
+
+
+@pytest.mark.anyio
 async def test_checkpoint_token_budget_matches_durable_model_usage(runtime_store) -> None:
     store = runtime_store
     run = store.create_run(

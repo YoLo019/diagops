@@ -917,10 +917,10 @@ class ReportGenerator:
                     )
             for finding in agent_findings:
                 if finding.runtime_run_id != runtime_run_id:
-                    raise ValueError("V11 finding owner mismatch")
+                    raise ReportReferenceError("V11 finding owner mismatch")
             for assessment in coordination_review.critic_assessments:
                 if assessment.candidate_id not in candidate_ids:
-                    raise ValueError("Critic references an unknown candidate")
+                    raise ReportReferenceError("Critic references an unknown candidate")
 
         referenced_ids: list[str] = []
         gap_referenced_ids: list[str] = []
@@ -987,7 +987,7 @@ class ReportGenerator:
                     + candidate.contradicting_finding_ids
                 ):
                     if finding_id not in finding_by_id:
-                        raise ValueError(f"missing finding id: {finding_id}")
+                        raise ReportReferenceError(f"missing finding id: {finding_id}")
 
 
 def _safe_v7_text(text: str) -> str:

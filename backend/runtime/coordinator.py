@@ -447,7 +447,8 @@ class RuntimeCoordinator:
                         attempt,
                         owner,
                         run.lease_version,
-                        phase=phase,
+                        # failed 的 PhaseCommit 已记录 phase.failed 事件，避免重复。
+                        phase=phase if output.status != "failed" else None,
                         failure_category=RuntimeFailureCategory.OUTPUT_VALIDATION,
                     )
                     return self.store.get_run(run.id)

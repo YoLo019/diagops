@@ -231,8 +231,11 @@ class PhaseCommit:
     schema_version: int = 1
 
     def __post_init__(self) -> None:
-        if self.status not in {"completed", "skipped"}:
-            raise ValueError("phase commit status must be completed or skipped")
+        # failed 也可提交：phase 内收敛 terminal（investigation FAILED）时，
+        # 暂存的业务变更（失败审计、清空 review）必须随事务原子落库，
+        # 否则失败审计丢失且逃逸异常掩盖真实失败类别。
+        if self.status not in {"completed", "skipped", "failed"}:
+            raise ValueError("phase commit status must be completed, skipped, or failed")
 
 
 V10_PHASE_ORDER: tuple[RuntimePhase, ...] = (
