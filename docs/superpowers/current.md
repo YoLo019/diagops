@@ -4,7 +4,7 @@ This file is the mutable routing and status entry point for the current version.
 
 It does not override an approved spec or plan, current code contracts, or the long-term product goal and production safety boundary in `AGENT.md`.
 
-Updated: 2026-08-14
+Updated: 2026-08-15
 
 ## Implemented Baseline
 
@@ -223,16 +223,43 @@ environment variables are absent, and formal predictions, paired attempts,
 and label opens remain `0`. M5 remains blocked and awaits capability admission
 and a fresh independent re-review; no accuracy or completion claim is made.
 
-Blocker: `T12 capability admission 的外部前置（endpoint/model、process-only
-credential、绑定干净 HEAD 584b4b0 的 passed artifact）已于 2026-08-14 具备，
-OB30 Single 24k live smoke 验收通过；修复链 b80a418..584b4b0 独立复审
-approve_with_followups（无 blocking/high/medium，三条 Low 入 T13）；后续修复链
-45ccde1..fc20b4a 独立复审 approve_with_followups，其 H1（最终校验层 GAP 引用契约
-不一致）已 RED→GREEN 修复并获跟进复审 approve（修复已提交 `788a0b3`）；OB30
-Single 24k 验收 smoke 已于 2026-08-15 在 `36f03a1` 通过（run `d94dda42`）。恢复
-正式预测还差：提交 docs 后 capability artifact 绑定最终干净 HEAD 重新认证
-（现 artifact `4d6e11f9` 的 git_dirty=true 会被正式准入拒绝）、用户授权消耗不可
-重来的正式 SS30/TT90 预算。SS30/TT90 不得以任务线程模型或 test double 替代。`
+Verification evidence (M5 SS30 epoch-0 failure and contract fix chain, 2026-08-15):
+用户授权正式预算后，SS30 第 1 侧（single_intended, B=24000）epoch 0 在干净 HEAD
+`06901ab` 启动：30 例全部跑完但 **6 completed / 24 failed**（failure_category 全为
+unknown），`validate_prediction_bundle` 全量 completed 语义 fail-closed 拒收 bundle，
+pair FAILED_NON_RESUMABLE（labels 未开封，reauthorization 通道可用，partition 保留）。
+实际消耗 68 次模型调用、452,970 input + 43,168 output ≈ 0.5M tokens（授权 ~5M）。
+对失败 DB 做零模型调用的离线复算完成根因归因：RCAEval runtime 包 deploy provider
+未配置 → 每例存在 status=skipped 证据，模型按 spec §7.2 语义让 GAP finding 引用它
+（H1 已修终态校验 finding 层），但下游各层未同步该契约——报告层 usable-only 无 GAP
+豁免（15/20）、candidate_finding_reference（5）、candidate_evidence_reference（2）、
+非 GAP signal finding 的 scope_entity_mismatch（2，复合 affected_entity，契约硬拒
+正确）、investigator draft 违约杀 run（3）、预算门（1）。用户决策：系统性修复 +
+保持 bundle 全量 completed fail-closed 语义不变。修复链 M1–M7：M1 报告层 GAP 引用走
+新增 `validate_committed_evidence`（committed 任意状态 + 同 run ownership），非 GAP 仍
+usable-only，`ReportReferenceError(ValueError)` 类型化；M2 GAP 跳过 scope 一致性校验；
+M3 investigator draft 级拒绝（违约 draft 丢弃 + FAILED AgentExecution 审计，整批全灭
+才杀 run）；M4 `_admit_candidates` 准入校验（finding 引用 ⊆ 本批+已持久化、evidence ⊆
+usable，违约 candidate 丢弃+审计不改写），prompt rule 扩写 + PROMPT_VERSION 升
+`v11-rcaeval-v2`；M5 coordinator 逃逸契约异常映射 CONTRACT_INTEGRITY + runner
+failure_category 优先取 persisted；M6 correction 预算耗尽前置 terminal；M7 离线回放复算 +
+spec §7.2/§8.2/§9.2 文本同步（GAP 可引用 committed 任意状态、GAP 豁免 status/scope、
+输出单元级拒绝语义）。回放断言全绿：24 failed run 报告层转绿（其中 3 例
+candidate_evidence_reference 的报告层持续拒绝为两层一致的正确行为）、10 例违约持久化
+数据仍以原 code 失败（无过度豁免）、6 completed 保持全绿。独立复审 **APPROVE**（无
+blocking/high；1 medium——legacy authority 分支不再校验 GAP 引用存在性——当日修复并补
+RED 结构可信测试；2 low 记录不改码：预算门逃逸错误归入 contract_integrity 可辩护、
+candidate 审计 round 来源统一建议）。最终门禁：`uv run pytest -q` → **2293 passed,
+4 skipped, 1 warning**；`uv run ruff check .` 与 `git diff --check` clean。正式计数：
+SS30 paired attempts=1（failed_non_resumable），label opens 仍为 `0`。
+
+Blocker: `T12 epoch-0 失败修复链已完成并获独立复审 approve（见上）。恢复正式评测还差：
+(1) 提交本修复链（code revision 变化 → 现 capability artifact 作废）；
+(2) 对最终干净 HEAD 重新认证 capability（需含 process-only credential 的环境）；
+(3) 用户签发 reauthorization token（pair 现 FAILED_NON_RESUMABLE 且
+label_ever_opened=0，partition 保留）后用 `--reauthorization-token` 跑 SS30
+single_intended epoch 1，再续剩余 3 侧。SS30/TT90 不得以任务线程模型或 test double
+替代。`
 
 Verification evidence (M5 fifth-round review-fix, 2026-08-12): base was
 `75f964495d6e6f391ebd8eef4c2170ba982d53ea`; code commit is
@@ -456,18 +483,18 @@ produce empty prediction/CSV output with an explicit failure category; V10
 legacy output remains unchanged. M4 focused 137, T9 289, T10 881, and full
 pytest 2097 passed with only the recorded skips/warning.
 
-Current phase: Full iteration / M5 第八轮全量复审 approve_with_followups 且两条
-Medium 已按 §9.2 RED→GREEN 关闭并获独立复审 approve，分支已按用户指示合并 main；
-T12 外部前置已具备（2026-08-14 live smoke 验收通过 + 修复链独立复审
-approve_with_followups），正式预算消耗待授权
+Current phase: Full iteration / M5 T12 正式评测进行中：SS30 single_intended epoch 0
+失败（6/30 completed，bundle fail-closed 拒收，labels 未开封），根因已离线归因，
+GAP/skipped 证据引用分层一致性修复链（M1–M7）完成并获独立复审 approve，全量
+2293 passed、Ruff clean
 
-Next action: OB30 Single 24k 验收 smoke 已通过（2026-08-15，run `d94dda42`，证据见上）；
-提交 current.md 后按契约重新认证 capability artifact（绑定最终干净 HEAD，需含
-process-only credential 的环境）；用户授权消耗正式 SS30/TT90 预算后，从 SS30 恢复 T12；
-T13 对账清单纳入七条 Low（leakage 运行期检测空转、production_acceptance
-preflight、M2R-4 跟踪，及修复链复审的 capability artifact 重认证提醒、
-inconclusive 丢弃 tasks 审计日志、fingerprint 列表归一化、极短 lease heartbeat
-边界）；不打开 TT90 labels，不做任何准确率声称。
+Next action: 提交修复链 → 对最终干净 HEAD 重新认证 capability artifact（需含
+process-only credential 的环境）→ 用户签发 reauthorization token 后用
+`--reauthorization-token` 重跑 SS30 single_intended epoch 1 → 续剩余 3 侧；
+T13 对账清单纳入既有 Low（leakage 运行期检测空转、production_acceptance preflight、
+M2R-4、capability 重认证提醒、inconclusive 丢弃 tasks 审计日志、fingerprint 归一化、
+极短 lease heartbeat 边界）及本轮复审两条 Low（预算门逃逸归类、审计 round 来源）；
+不打开 TT90 labels，不做任何准确率声称。
 
 | ID | Phase | Task | Status | Evidence or result | Next action or blocker |
 | --- | --- | --- | --- | --- | --- |
