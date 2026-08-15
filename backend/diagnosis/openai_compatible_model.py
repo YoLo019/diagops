@@ -30,13 +30,60 @@ STRICT_TOOL_ENVELOPE_SCHEMA = {
 }
 
 
+def _salvage_json_text(text: str) -> str:
+    """截掉完整 JSON 值之后追加的垃圾（网关联发双份、尾括号等）。
+
+    只在文本整体不是合法 JSON、但以完整 JSON 值开头且其后还有非空白内容时
+    改写；截断 JSON、前导垃圾、纯文本一律原样返回。确定性修复，不猜内容。
+    """
+    stripped = text.lstrip()
+    if not stripped.startswith(("{", "[")):
+        return text
+    try:
+        json.loads(text)
+        return text
+    except json.JSONDecodeError:
+        pass
+    try:
+        _, end = json.JSONDecoder().raw_decode(text, len(text) - len(stripped))
+    except json.JSONDecodeError:
+        return text
+    if text[end:].strip():
+        return text[:end]
+    return text
+
+
+def _salvage_response_json(
+    response: ModelResponse, *, structured_output: bool
+) -> ModelResponse:
+    """清洗响应里契约上必须是 JSON 的字段。
+
+    function_call arguments 恒为 JSON；message 文本只在期望结构化输出
+    （output_schema 非空）时才按 JSON salvage，纯文本输出绝不触碰。
+    取证取舍：原地改写后持久化的 model event 是清洗后形态，网关原始垃圾
+    字节不再可见——与执行语义一致，畸形取证需在适配器之外抓包。
+    """
+    for item in response.output:
+        item_type = getattr(item, "type", None)
+        if item_type == "function_call":
+            arguments = getattr(item, "arguments", None)
+            if isinstance(arguments, str):
+                item.arguments = _salvage_json_text(arguments)
+        elif structured_output and item_type == "message":
+            for content in getattr(item, "content", []):
+                text = getattr(content, "text", None)
+                if isinstance(text, str):
+                    content.text = _salvage_json_text(text)
+    return response
+
+
 def _unwrap_strict_tool_payload(raw_input: str) -> str:
     envelope = json.loads(raw_input)
     if set(envelope) != {"payload_json"} or not isinstance(
         envelope["payload_json"], str
     ):
         raise ValueError("strict tool envelope is invalid")
-    return envelope["payload_json"]
+    return _salvage_json_text(envelope["payload_json"])
 
 
 def strict_transport_tools(tools: list[Any]) -> list[Any]:
@@ -112,6 +159,7 @@ class OpenAICompatibleChatCompletionsModel(OpenAIChatCompletionsModel):
         client = self._create_client()
         try:
             delegate = self._create_delegate(client)
+            output_schema = args[4] if len(args) >= 5 else kwargs.get("output_schema")
             if self.structured_output_transport == "strict_output_tool":
                 args = list(args)
                 kwargs = dict(kwargs)
@@ -122,17 +170,23 @@ class OpenAICompatibleChatCompletionsModel(OpenAIChatCompletionsModel):
                     kwargs["tools"] = strict_transport_tools(kwargs.get("tools", []))
                     kwargs["output_schema"] = None
             response = await delegate.get_response(*args, **kwargs)
-            if (
-                self.structured_output_transport == "strict_output_tool"
-                and isinstance(response, ModelResponse)
-            ):
-                return _restore_strict_tool_arguments(response)
+            if isinstance(response, ModelResponse):
+                # 先 salvage 再拆 strict envelope：垃圾可能附在 envelope 外层。
+                response = _salvage_response_json(
+                    response, structured_output=output_schema is not None
+                )
+                if self.structured_output_transport == "strict_output_tool":
+                    return _restore_strict_tool_arguments(response)
             return response
         finally:
             await client.close()
 
     async def stream_response(self, *args: Any, **kwargs: Any):
-        """在消费或取消流后，于创建 transport 的 event loop 内关闭它。"""
+        """在消费或取消流后，于创建 transport 的 event loop 内关闭它。
+
+        注意：本路径未做 JSON salvage；V11 当前全部走非流式 Runner.run，
+        未来启用 run_streamed 前必须先在流式聚合处补齐等价清洗。
+        """
         client = self._create_client()
         try:
             delegate = self._create_delegate(client)

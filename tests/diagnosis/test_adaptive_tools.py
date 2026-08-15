@@ -15,6 +15,7 @@ from backend.domain.evidence import (
     EvidenceKind,
     EvidenceProvider,
 )
+from backend.domain.multi_agent import FailureCategory
 from backend.domain.tool_calls import ToolCallRecord, ToolCallStatus, ToolSpec
 from backend.providers.registry import ProviderRegistry
 from backend.providers.results import ProviderResult
@@ -712,3 +713,41 @@ def _evidence(evidence_id, provider, kind, *, payload=None, timestamp=None):
         summary="bounded evidence",
         payload=payload or {},
     )
+
+
+def test_model_behavior_error_is_retryable_invalid_output():
+    # 网关/模型输出畸形 JSON（ModelBehaviorError）应分类为 invalid_output 并允许
+    # 一次重试；不再一次畸形响应直接杀 run。
+    from agents.exceptions import ModelBehaviorError
+
+    from backend.diagnosis.adaptive_tools import retryable_failure_category
+
+    assert (
+        retryable_failure_category(ModelBehaviorError("bad json"))
+        == FailureCategory.INVALID_OUTPUT
+    )
+
+
+@pytest.mark.anyio
+async def test_retry_coordinator_retries_model_behavior_error_once():
+    from agents.exceptions import ModelBehaviorError
+
+    from backend.diagnosis.adaptive_tools import RetryCoordinator
+
+    calls = 0
+
+    async def operation(attempt):
+        nonlocal calls
+        calls += 1
+        if attempt == 1:
+            raise ModelBehaviorError("bad json")
+        return "ok"
+
+    assert await RetryCoordinator(max_retries=1).run(operation) == "ok"
+    assert calls == 2
+
+    async def always_bad(attempt):
+        raise ModelBehaviorError("bad json")
+
+    with pytest.raises(ModelBehaviorError):
+        await RetryCoordinator(max_retries=1).run(always_bad)

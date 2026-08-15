@@ -8,7 +8,11 @@ import openai
 import pytest
 from agents import FunctionTool, ModelResponse, ModelSettings, Usage
 from agents.models.interface import ModelTracing
-from openai.types.responses import ResponseFunctionToolCall
+from openai.types.responses import (
+    ResponseFunctionToolCall,
+    ResponseOutputMessage,
+    ResponseOutputText,
+)
 
 import backend.diagnosis.openai_compatible_model as compatible_model
 from backend.diagnosis.agents_runtime import _disables_sdk_tracing, _is_deepseek
@@ -583,3 +587,203 @@ async def test_slow_endpoint_cancellation_closes_request_transport(monkeypatch):
 
     assert len(clients) == 1
     assert clients[0].closed is True
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ('{"a": 1}', '{"a": 1}'),
+        ('{"a": 1}{"a": 1}', '{"a": 1}'),
+        ('{"a": 1}}', '{"a": 1}'),
+        ('  {"a": 1} trailing', '  {"a": 1}'),
+        ('[1, 2][3]', '[1, 2]'),
+        ('{"a": "unterminated', '{"a": "unterminated'),
+        ('garbage {"a": 1}', 'garbage {"a": 1}'),
+        ("plain text", "plain text"),
+    ],
+)
+def test_salvage_json_text(raw, expected):
+    # 网关/模型在完整 JSON 后追加垃圾（双份拼接、多余括号）时截到第一个完整值；
+    # 截断 JSON、前导垃圾、纯文本一律原样返回。
+    assert compatible_model._salvage_json_text(raw) == expected
+
+
+@pytest.mark.anyio
+async def test_get_response_salvages_trailing_garbage_in_structured_output(monkeypatch):
+    class FakeClient:
+        async def close(self):
+            pass
+
+    class FakeDelegate:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def get_response(self, *_args, **_kwargs):
+            return ModelResponse(
+                output=[
+                    ResponseOutputMessage(
+                        id="msg-1",
+                        content=[
+                            ResponseOutputText(
+                                annotations=[],
+                                text='{"decision":"conclude"}{"decision":"conclude"}',
+                                type="output_text",
+                            )
+                        ],
+                        role="assistant",
+                        status="completed",
+                        type="message",
+                    )
+                ],
+                usage=Usage(),
+                response_id=None,
+            )
+
+    monkeypatch.setattr(compatible_model, "AsyncOpenAI", lambda **_kwargs: FakeClient())
+    monkeypatch.setattr(compatible_model, "OpenAIChatCompletionsModel", FakeDelegate)
+    model = _create()
+
+    structured = await model.get_response(
+        None, "input", object(), [], {"type": "object"}, [], object()
+    )
+    assert structured.output[0].content[0].text == '{"decision":"conclude"}'
+
+    unstructured = await model.get_response(
+        None, "input", object(), [], None, [], object()
+    )
+    assert (
+        unstructured.output[0].content[0].text
+        == '{"decision":"conclude"}{"decision":"conclude"}'
+    )
+
+
+@pytest.mark.anyio
+async def test_get_response_salvages_tool_call_arguments(monkeypatch):
+    class FakeClient:
+        async def close(self):
+            pass
+
+    class FakeDelegate:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def get_response(self, *_args, **_kwargs):
+            return ModelResponse(
+                output=[
+                    ResponseFunctionToolCall(
+                        arguments='{"reason":"inspect"}}{"reason":"inspect"}',
+                        call_id="call-1",
+                        name="read_logs",
+                        type="function_call",
+                    )
+                ],
+                usage=Usage(),
+                response_id=None,
+            )
+
+    monkeypatch.setattr(compatible_model, "AsyncOpenAI", lambda **_kwargs: FakeClient())
+    monkeypatch.setattr(compatible_model, "OpenAIChatCompletionsModel", FakeDelegate)
+
+    response = await _create().get_response(
+        None, "input", object(), [], None, [], object()
+    )
+
+    assert response.output[0].arguments == '{"reason":"inspect"}'
+
+
+@pytest.mark.anyio
+async def test_strict_transport_salvages_dirty_envelope_arguments(monkeypatch):
+    class FakeClient:
+        async def close(self):
+            pass
+
+    class FakeDelegate:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def get_response(self, *_args, **_kwargs):
+            return ModelResponse(
+                output=[
+                    ResponseFunctionToolCall(
+                        arguments=(
+                            '{"payload_json":"{\\"reason\\":\\"inspect\\"}"}'
+                            + '{"payload_json":"{\\"reason\\":\\"inspect\\"}"}'
+                        ),
+                        call_id="call-1",
+                        name="read_logs",
+                        type="function_call",
+                    ),
+                    ResponseFunctionToolCall(
+                        arguments=(
+                            '{"payload_json":"{\\"reason\\":\\"inspect\\"}'
+                            + ' trailing"}'
+                        ),
+                        call_id="call-2",
+                        name="read_logs",
+                        type="function_call",
+                    ),
+                ],
+                usage=Usage(),
+                response_id=None,
+            )
+
+    monkeypatch.setattr(compatible_model, "AsyncOpenAI", lambda **_kwargs: FakeClient())
+    monkeypatch.setattr(compatible_model, "OpenAIChatCompletionsModel", FakeDelegate)
+
+    response = await _create(
+        structured_output_transport="strict_output_tool"
+    ).get_response(None, "input", object(), [], object(), [], object())
+
+    # 第一份：envelope 外层被双份拼接，salvage 截断后正常拆封。
+    assert response.output[0].arguments == '{"reason":"inspect"}'
+    # 第二份：envelope 合法但 payload 内层带垃圾，拆封时 salvage 内层。
+    assert response.output[1].arguments == '{"reason":"inspect"}'
+
+
+@pytest.mark.anyio
+async def test_get_response_salvages_structured_output_with_kwargs_call(monkeypatch):
+    # V11 生产路径经 _V11BudgetedModel 以全关键字转发，必须覆盖 kwargs 分支。
+    class FakeClient:
+        async def close(self):
+            pass
+
+    class FakeDelegate:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def get_response(self, *_args, **_kwargs):
+            return ModelResponse(
+                output=[
+                    ResponseOutputMessage(
+                        id="msg-1",
+                        content=[
+                            ResponseOutputText(
+                                annotations=[],
+                                text='{"decision":"conclude"}}',
+                                type="output_text",
+                            )
+                        ],
+                        role="assistant",
+                        status="completed",
+                        type="message",
+                    )
+                ],
+                usage=Usage(),
+                response_id=None,
+            )
+
+    monkeypatch.setattr(compatible_model, "AsyncOpenAI", lambda **_kwargs: FakeClient())
+    monkeypatch.setattr(compatible_model, "OpenAIChatCompletionsModel", FakeDelegate)
+    model = _create()
+
+    response = await model.get_response(
+        system_instructions=None,
+        input="input",
+        model_settings=object(),
+        tools=[],
+        output_schema={"type": "object"},
+        handoffs=[],
+        tracing=object(),
+    )
+
+    assert response.output[0].content[0].text == '{"decision":"conclude"}'

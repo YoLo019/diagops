@@ -10,6 +10,7 @@ from typing import Any
 from uuid import uuid4
 
 from agents import FunctionTool
+from agents.exceptions import ModelBehaviorError
 from openai import APIConnectionError, RateLimitError
 
 from backend.domain.agent_findings import AgentName
@@ -48,11 +49,15 @@ class ClassifiedRetryableError(RuntimeError):
 
 
 def retryable_failure_category(exc: BaseException) -> FailureCategory | None:
-    """只把明确的 transport/rate-limit 异常交给统一 retry coordinator。"""
+    """只把明确的 transport/rate-limit/畸形输出异常交给统一 retry coordinator。"""
     if isinstance(exc, RateLimitError):
         return FailureCategory.RATE_LIMIT
     if isinstance(exc, APIConnectionError):
         return FailureCategory.TRANSPORT
+    if isinstance(exc, ModelBehaviorError):
+        # 模型/网关输出畸形（JSON 垃圾、schema 漂移）：重试一次换一批生成，
+        # 不再让单次畸形响应直接杀 run。
+        return FailureCategory.INVALID_OUTPUT
     if isinstance(exc, ClassifiedRetryableError):
         return exc.category
     return None
