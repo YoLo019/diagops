@@ -369,12 +369,22 @@ phase 逃逸的 ClassifiedRetryableError(TIMEOUT) 落入 UNKNOWN、案例重试�
 正式计数：SS30 paired attempts=5（五 epoch 均 failed_non_resumable），label opens
 仍为 `0`。
 
-Blocker: `T12 第五修复链（运营噪声一体化：timeout 300s + 模型重试 1→3 指数退避 +
-模型超时可重试 + 案例级 best-of-2）已完成并获独立复审 approve_with_followups
-（无 blocking/high 遗留，见上）。恢复正式评测还差：(1) 提交本修复链；(2) 对最终干净
-HEAD 重新认证 capability；(3) 用户签发第五个 reauthorization token（pair 现为
-predicting+过期 lease，reconcile 后 failed_non_resumable epoch 4、label_ever_opened=0）
-后以 48k 预算 + 300s timeout 跑 SS30 single_intended epoch 5，再续剩余 3 侧。`
+Verification evidence (M5 SS30 epoch-5 aborted launch and budget timeout-cap fix, 2026-08-15):
+epoch-5 启动在 worker 构造 `EvaluationBudget` 时 fail-fast 拒收——`timeout_seconds`
+契约上限 le=120 与已授权的 300s 启动参数冲突。**零预测、零模型调用、零 token 燃烧**，
+但 `ledger.reauthorize()` 在 worker 启动前已执行：epoch-5 token 已消耗，pair 进入
+predicting epoch 5 + 过期 lease。修复：`EvaluationBudget.timeout_seconds` le=120→300
+（spec §9.1 deadline 行同步：产品与 server 默认/上限仍 120s，仅 benchmark 正式 run
+经逐次授权可放宽至 300s）；TDD 1 例 RED→GREEN（接受 300/拒绝 301）。此增量为单行
+契约上限放宽（用户已显式授权该数值），未跑独立复审。门禁：ruff clean；benchmarks+
+deadline 回归 348 passed；全量 **2340 passed, 4 skipped, 1 warning**。正式计数：
+SS30 paired attempts=6（epoch 5 为空转烧毁），label opens 仍为 `0`。
+
+Blocker: `T12 预算 timeout 上限修复（le 120→300）已完成。恢复正式评测还差：(1) 提交本
+修复；(2) 对最终干净 HEAD 重新认证 capability；(3) 用户签发第六个 reauthorization token
+（pair 现为 predicting epoch 5 + 过期 lease，reconcile 后 failed_non_resumable epoch 5、
+label_ever_opened=0）后以 48k 预算 + 300s timeout 跑 SS30 single_intended epoch 6，
+再续剩余 3 侧。`
 
 Verification evidence (M5 fifth-round review-fix, 2026-08-12): base was
 `75f964495d6e6f391ebd8eef4c2170ba982d53ea`; code commit is
@@ -605,8 +615,8 @@ epoch 4（手动止损，纯运营噪声）均失败，五轮根因均已离线�
 案例级 best-of-2 有界重试）完成并获独立复审 approve_with_followups（无 blocking/high
 遗留），复审 H1/M1/L1/L2 当日关闭，全量 2339 passed、Ruff clean、spec §9.1 已同步
 
-Next action: 提交修复链 → 对最终干净 HEAD 重新认证 capability artifact → 用户签发第五个
-reauthorization token 后以 48k 预算 + 300s timeout 跑 SS30 single_intended epoch 5 →
+Next action: 提交修复链 → 对最终干净 HEAD 重新认证 capability artifact → 用户签发第六个
+reauthorization token 后以 48k 预算 + 300s timeout 跑 SS30 single_intended epoch 6 →
 续剩余 3 侧；T13 对账清单新增本轮记录项（退避 sleep 先于 before_retry 栅栏的白等取舍；
 前轮遗留：_draft_rejection_code 子串匹配可改结构化 code）；不打开 TT90 labels，不做任何
 准确率声称。
