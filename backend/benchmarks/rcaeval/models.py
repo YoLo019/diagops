@@ -329,6 +329,9 @@ class CasePrediction(BaseModel):
     read_only_violations: int = Field(default=0, ge=0)
     leakage_violations: int = Field(default=0, ge=0)
     failure_category: str | None = Field(default=None, max_length=128)
+    # 案例级有界重试（best-of-2）：记录产出本预测的 attempt 数；
+    # 每次 attempt 的完整 run 都在侧库中持久化可审计，bundle 语义不变。
+    attempts: int = Field(default=1, ge=1, le=2)
 
 
 class FrozenRunIdentity(BaseModel):

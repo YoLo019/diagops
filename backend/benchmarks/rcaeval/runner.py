@@ -792,6 +792,47 @@ class RcaEvalCaseRunner:
         return prediction
 
 
+# 案例级有界重试的资格集：只覆盖运营噪声（超时，与模型输出违约类——含网关
+# 抖动、长生成、investigation 内被吞的预算耗尽）。CONTRACT_INTEGRITY/UNKNOWN
+# 等代码缺陷信号不重试——重试必然再败且会掩盖 bug，保持 fail-closed
+# （每次 attempt 均持久化可审计）。
+CASE_RETRYABLE_FAILURE_CATEGORIES = frozenset(
+    {
+        RuntimeFailureCategory.TIMEOUT.value,
+        RuntimeFailureCategory.OUTPUT_VALIDATION.value,
+    }
+)
+
+
+def run_case_with_bounded_retry(
+    runner: RcaEvalCaseRunner,
+    case: RuntimeCaseEntry,
+    budget: EvaluationBudget,
+    *,
+    max_attempts: int = 2,
+) -> CasePrediction:
+    """同一 epoch 内对运营噪声失败的案例做有界重试（best-of-2）。
+
+    每次 attempt 都是全新 investigation/run（benchmark 用 EmptyRunOwnedMemory，
+    无跨案例记忆污染）；bundle 记录最后一次 attempt 的预测与 attempts 计数，
+    失败 attempt 留在侧库作为审计。30/30 全量 completed 语义不变。
+    """
+    # CasePrediction.attempts 契约上限为 2；model_copy(update=...) 不做校验，
+    # 必须在构造侧挡住更大的 max_attempts，否则冻结成功、评测期才被拒。
+    if not 1 <= max_attempts <= 2:
+        raise ValueError("max_attempts must be 1 or 2 (CasePrediction.attempts bound)")
+    attempts = 1
+    prediction = runner.run_case(case, budget)
+    while (
+        not prediction.completed
+        and attempts < max_attempts
+        and prediction.failure_category in CASE_RETRYABLE_FAILURE_CATEGORIES
+    ):
+        attempts += 1
+        prediction = runner.run_case(case, budget)
+    return prediction.model_copy(update={"attempts": attempts})
+
+
 def build_execution_contract(
     runtime: V11Runtime,
     budget: EvaluationBudget,

@@ -857,3 +857,102 @@ def test_single_control_rejects_domain_violating_draft(tmp_path: Path):
     assert len(audits) == 1
     assert audits[0].failure_category == FailureCategory.INVALID_REFERENCE
     assert audits[0].error_message == "finding draft rejected: invalid_finding_contract"
+
+
+def _stub_prediction(completed: bool, category: str | None, run_suffix: str):
+    from backend.benchmarks.rcaeval.models import CasePrediction
+
+    return CasePrediction(
+        case_id="re2-0123456789abcdef",
+        configuration=RcaEvalConfiguration.SINGLE_INTENDED,
+        completed=completed,
+        runtime_run_id=f"run-{run_suffix}",
+        execution_contract_hash="a" * 64,
+        failure_category=category,
+    )
+
+
+class _StubRunner:
+    def __init__(self, outcomes):
+        self._outcomes = list(outcomes)
+        self.calls = 0
+
+    def run_case(self, case, budget):
+        del case, budget
+        self.calls += 1
+        return self._outcomes.pop(0)
+
+
+def test_case_retry_retries_operational_failure_once():
+    from backend.benchmarks.rcaeval.runner import run_case_with_bounded_retry
+
+    runner = _StubRunner(
+        [
+            _stub_prediction(False, "timeout", "a1"),
+            _stub_prediction(True, None, "a2"),
+        ]
+    )
+
+    prediction = run_case_with_bounded_retry(runner, object(), object())
+
+    assert prediction.completed is True
+    assert prediction.runtime_run_id == "run-a2"
+    assert prediction.attempts == 2
+    assert runner.calls == 2
+
+
+def test_case_retry_does_not_retry_contract_integrity():
+    from backend.benchmarks.rcaeval.runner import run_case_with_bounded_retry
+
+    runner = _StubRunner([_stub_prediction(False, "contract_integrity", "a1")])
+
+    prediction = run_case_with_bounded_retry(runner, object(), object())
+
+    # 代码缺陷信号不重试：避免烧双倍预算掩盖 bug，保持 fail-closed。
+    assert runner.calls == 1
+    assert prediction.attempts == 1
+
+
+def test_case_retry_returns_last_attempt_when_both_fail():
+    from backend.benchmarks.rcaeval.runner import run_case_with_bounded_retry
+
+    runner = _StubRunner(
+        [
+            _stub_prediction(False, "output_validation", "a1"),
+            _stub_prediction(False, "timeout", "a2"),
+        ]
+    )
+
+    prediction = run_case_with_bounded_retry(runner, object(), object())
+
+    assert runner.calls == 2
+    assert prediction.runtime_run_id == "run-a2"
+    assert prediction.attempts == 2
+    assert prediction.completed is False
+
+
+def test_case_retry_skips_when_first_attempt_completes():
+    from backend.benchmarks.rcaeval.runner import run_case_with_bounded_retry
+
+    runner = _StubRunner([_stub_prediction(True, None, "a1")])
+
+    prediction = run_case_with_bounded_retry(runner, object(), object())
+
+    assert runner.calls == 1
+    assert prediction.attempts == 1
+
+
+def test_case_retry_rejects_max_attempts_beyond_contract_bound():
+    # 复审 M1：CasePrediction.attempts 上限为 2，model_copy 不校验；
+    # 构造侧必须挡住 max_attempts>2，避免冻结成功、评测期才被拒。
+    import pytest
+
+    from backend.benchmarks.rcaeval.runner import run_case_with_bounded_retry
+
+    runner = _StubRunner([_stub_prediction(True, None, "a1")])
+
+    with pytest.raises(ValueError, match="max_attempts"):
+        run_case_with_bounded_retry(runner, object(), object(), max_attempts=3)
+    with pytest.raises(ValueError, match="max_attempts"):
+        run_case_with_bounded_retry(runner, object(), object(), max_attempts=0)
+    assert runner.calls == 0

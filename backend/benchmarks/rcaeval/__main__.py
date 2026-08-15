@@ -301,6 +301,7 @@ def _predict(arguments) -> None:
         RcaEvalCaseRunner,
         freeze_prediction_bundle,
         frozen_run_identity,
+        run_case_with_bounded_retry,
     )
     from backend.config.settings import canonicalize_endpoint, endpoint_id
     from backend.db.session import create_db_engine, initialize_database
@@ -372,7 +373,9 @@ def _predict(arguments) -> None:
     cases = [item for item in manifest.cases if item.partition == partition]
     if len(cases) != EXPECTED_PARTITION_COUNTS[partition]:
         raise ValueError("prediction partition case count is not frozen")
-    predictions = [runner.run_case(case, budget) for case in cases]
+    predictions = [
+        run_case_with_bounded_retry(runner, case, budget) for case in cases
+    ]
     contracts = {
         prediction.execution_contract_hash: runtime_store.get_run(
             prediction.runtime_run_id

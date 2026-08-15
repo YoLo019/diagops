@@ -751,3 +751,102 @@ async def test_retry_coordinator_retries_model_behavior_error_once():
 
     with pytest.raises(ModelBehaviorError):
         await RetryCoordinator(max_retries=1).run(always_bad)
+
+
+def test_bare_timeout_error_is_not_generically_retryable():
+    # 工具路径对裸 TimeoutError 有显式不重试契约（SDK 取消语义）；模型调用超时
+    # 在 v11_runtime 的 re-raise 处转换为 ClassifiedRetryableError(TIMEOUT)，
+    # 不经过本函数。
+    from backend.diagnosis.adaptive_tools import retryable_failure_category
+
+    assert retryable_failure_category(TimeoutError()) is None
+
+
+def test_model_retryable_exception_converts_timeout_only():
+    # 模型调用超时是网关慢/长生成的运营噪声：转换为可重试的 TIMEOUT；
+    # 其他异常原样透传，不改变既有分类。
+    from backend.diagnosis.adaptive_tools import ClassifiedRetryableError
+    from backend.diagnosis.v11_runtime import _model_retryable_exception
+
+    converted = _model_retryable_exception(TimeoutError("slow gateway"))
+    assert isinstance(converted, ClassifiedRetryableError)
+    assert converted.category == FailureCategory.TIMEOUT
+
+    other = ValueError("nope")
+    assert _model_retryable_exception(other) is other
+
+
+def test_retry_coordinator_requires_cap_when_backoff_base_set():
+    # 复审 L1：cap 缺省为 0 会让 min(cap, ...) 恒为 0，静默关闭退避；
+    # 构造侧 fail fast。
+    from backend.diagnosis.adaptive_tools import RetryCoordinator
+
+    with pytest.raises(ValueError, match="backoff_cap"):
+        RetryCoordinator(backoff_base_seconds=5.0)
+
+    coordinator = RetryCoordinator(backoff_base_seconds=0.0)
+    assert coordinator.backoff_cap_seconds == 0.0
+
+
+@pytest.mark.anyio
+async def test_retry_coordinator_applies_bounded_exponential_backoff(monkeypatch):
+    from backend.diagnosis.adaptive_tools import (
+        ClassifiedRetryableError,
+        RetryCoordinator,
+    )
+
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    calls = 0
+
+    async def operation(attempt):
+        nonlocal calls
+        calls += 1
+        if attempt <= 3:
+            raise ClassifiedRetryableError(FailureCategory.TIMEOUT)
+        return "ok"
+
+    result = await RetryCoordinator(
+        max_retries=3, backoff_base_seconds=5.0, backoff_cap_seconds=30.0
+    ).run(operation)
+
+    assert result == "ok"
+    assert calls == 4
+    assert sleeps == [5.0, 10.0, 20.0]
+
+
+@pytest.mark.anyio
+async def test_retry_coordinator_backoff_cap_and_default_off(monkeypatch):
+    from backend.diagnosis.adaptive_tools import (
+        ClassifiedRetryableError,
+        RetryCoordinator,
+    )
+
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    async def operation(attempt):
+        raise ClassifiedRetryableError(FailureCategory.TIMEOUT)
+
+    with pytest.raises(ClassifiedRetryableError):
+        await RetryCoordinator(
+            max_retries=3, backoff_base_seconds=100.0, backoff_cap_seconds=7.0
+        ).run(operation)
+    assert sleeps == [7.0, 7.0, 7.0]
+
+    sleeps.clear()
+
+    async def failing(attempt):
+        raise ClassifiedRetryableError(FailureCategory.TIMEOUT)
+
+    with pytest.raises(ClassifiedRetryableError):
+        await RetryCoordinator(max_retries=1).run(failing)
+    assert sleeps == []

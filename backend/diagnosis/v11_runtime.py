@@ -35,6 +35,7 @@ from backend.config.settings import canonicalize_endpoint, endpoint_id
 from backend.db.models import InvestigationStatus
 from backend.diagnosis.adaptive_tools import (
     AdaptiveToolSession,
+    ClassifiedRetryableError,
     RetryCoordinator,
     retryable_failure_category,
 )
@@ -547,6 +548,14 @@ def _draft_rejection_code(exc: V11RuntimeContractError) -> str:
     if "finding draft violates finding contract" in str(exc):
         return "finding draft rejected: invalid_finding_contract"
     return "finding draft rejected: uncommitted_evidence"
+
+
+def _model_retryable_exception(exc: BaseException) -> BaseException:
+    """模型调用超时可重试（网关慢/长生成是运营噪声）；工具路径的裸
+    TimeoutError 契约不受影响——转换只发生在模型调用的 re-raise 处。"""
+    if isinstance(exc, TimeoutError):
+        return ClassifiedRetryableError(FailureCategory.TIMEOUT)
+    return exc
 
 
 TurnCallable = Callable[..., Awaitable[Any]]
@@ -3509,7 +3518,7 @@ class V11Runtime:
                         input_tokens=input_estimate,
                     )
                     previous_execution_id = current_execution_id
-                    raise
+                    raise _model_retryable_exception(exc) from exc
 
             async def before_retry(_attempt: int, _category) -> None:
                 self._check_execution()
@@ -3522,7 +3531,11 @@ class V11Runtime:
                 if self.tool_registry is not None:
                     self._agent_manifest()
 
-            raw = await RetryCoordinator(max_retries=1).run(
+            raw = await RetryCoordinator(
+                max_retries=3,
+                backoff_base_seconds=5.0,
+                backoff_cap_seconds=30.0,
+            ).run(
                 invoke_model,
                 before_retry=before_retry,
             )

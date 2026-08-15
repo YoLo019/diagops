@@ -7,6 +7,7 @@ import time
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 
+from backend.domain.multi_agent import FailureCategory
 from backend.domain.runtime import (
     RuntimeActorType,
     RuntimeAttempt,
@@ -60,6 +61,7 @@ def _escape_failure_category(exc: BaseException) -> RuntimeFailureCategory:
 
     延迟 import：runtime 基础设施层不应对 diagnosis/reports 形成模块级依赖。
     """
+    from backend.diagnosis.adaptive_tools import ClassifiedRetryableError
     from backend.diagnosis.result_validation import V11ResultValidationError
     from backend.diagnosis.v11_runtime import V11RuntimeContractError
     from backend.reports.generator import ReportReferenceError
@@ -69,6 +71,14 @@ def _escape_failure_category(exc: BaseException) -> RuntimeFailureCategory:
         (V11ResultValidationError, V11RuntimeContractError, ReportReferenceError),
     ):
         return RuntimeFailureCategory.CONTRACT_INTEGRITY
+    if (
+        isinstance(exc, ClassifiedRetryableError)
+        and exc.category is FailureCategory.TIMEOUT
+    ):
+        # 模型调用重试耗尽后从无 turn 级 catch 的 phase 逃逸的超时：与 run
+        # deadline 的 TIMEOUT 同属运营噪声，归一以保持案例级有界重试的
+        # phase 中立性。
+        return RuntimeFailureCategory.TIMEOUT
     return RuntimeFailureCategory.UNKNOWN
 
 

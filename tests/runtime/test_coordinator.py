@@ -980,3 +980,23 @@ async def test_cancel_between_final_checkpoint_and_terminal_commit_wins() -> Non
     assert store.list_attempts(run.id)[0].status == RuntimeAttemptStatus.CANCELLED
     assert store.investigation_repository.get("inv-1").status.value == "cancelled"
     await coordinator.shutdown()
+
+
+def test_escape_failure_category_maps_model_timeout_to_timeout():
+    # 复审 H1：模型重试耗尽后从无 turn 级 catch 的 phase 逃逸的
+    # ClassifiedRetryableError(TIMEOUT) 必须归一为 run 级 TIMEOUT，
+    # 保持案例级有界重试的 phase 中立性；其他可重试类别仍保持 UNKNOWN。
+    from backend.diagnosis.adaptive_tools import ClassifiedRetryableError
+    from backend.domain.multi_agent import FailureCategory
+    from backend.domain.runtime import RuntimeFailureCategory
+    from backend.runtime.coordinator import _escape_failure_category
+
+    assert (
+        _escape_failure_category(ClassifiedRetryableError(FailureCategory.TIMEOUT))
+        is RuntimeFailureCategory.TIMEOUT
+    )
+    assert (
+        _escape_failure_category(ClassifiedRetryableError(FailureCategory.TRANSPORT))
+        is RuntimeFailureCategory.UNKNOWN
+    )
+    assert _escape_failure_category(ValueError("x")) is RuntimeFailureCategory.UNKNOWN

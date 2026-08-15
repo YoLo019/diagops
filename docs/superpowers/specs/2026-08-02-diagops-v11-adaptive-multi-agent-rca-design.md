@@ -1004,7 +1004,7 @@ V11 models; a V11 projection cannot coerce free-text candidates back into
 | Critic supplemental requests | maximum 1 batch |
 | Run hard deadline | 120 seconds |
 | Per-tool timeout | existing configured timeout, maximum 10 seconds by default |
-| Model/tool retries | one retry for classified transient transport/rate-limit failure |
+| Model/tool retries | tool path: one retry for classified transient transport/rate-limit failure (bare timeout is never retried on the tool path); model path (amended 2026-08-15, SS30 operational-noise chain): up to three retries with bounded exponential backoff (5s base, 30s cap) for classified transient transport/rate-limit/invalid-output failures, and model-call timeout is classified as retryable `timeout` at the model-call boundary only |
 | Tool calls | existing global configurable budget; no per-Agent budget may exceed it |
 | Tokens | frozen per run; Multi-Agent benchmark total must be ≤3x paired single-Agent total |
 

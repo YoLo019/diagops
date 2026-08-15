@@ -1421,6 +1421,12 @@ async def test_v11_sdk_provider_retry_is_only_the_persisted_outer_retry(monkeypa
     monkeypatch.setattr(
         "backend.diagnosis.openai_compatible_model.AsyncOpenAI", build_client
     )
+
+    async def _no_sleep(_seconds):
+        return None
+
+    # 外层重试预算 1→3（运营噪声链），退避 sleep 打桩掉以保持测试速度
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
     runtime = V11Runtime(
         model=OpenAICompatibleChatCompletionsModel(
             model="compat-model",
@@ -1443,7 +1449,8 @@ async def test_v11_sdk_provider_retry_is_only_the_persisted_outer_retry(monkeypa
             remaining_tool_budget=8,
         )
 
-    assert request_count == 2
+    # 外层持久化重试预算为 3：1 次首发 + 3 次重试 = 4 个请求
+    assert request_count == 4
 
 
 @pytest.mark.anyio
@@ -1810,7 +1817,15 @@ async def test_v11_single_sdk_request_usage_is_not_counted_twice():
 
 
 @pytest.mark.anyio
-async def test_v11_all_failed_sdk_retry_records_estimate_without_summary_usage():
+async def test_v11_all_failed_sdk_retry_records_estimate_without_summary_usage(
+    monkeypatch,
+):
+    async def _no_sleep(_seconds):
+        return None
+
+    # 外层重试预算 1→3（运营噪声链），退避 sleep 打桩掉以保持测试速度
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
     class AlwaysFailModel(Model):
         def __init__(self) -> None:
             self.calls = 0
@@ -1864,7 +1879,8 @@ async def test_v11_all_failed_sdk_retry_records_estimate_without_summary_usage()
     runtime._update_summary(repository, record.id)
     summary = repository.get(record.id).multi_agent_run
     assert summary is not None
-    assert model.calls == 2
+    # 外层持久化重试预算为 3：1 次首发 + 3 次重试 = 4 次调用 / 4 条 FAILED 审计
+    assert model.calls == 4
     assert summary.total_input_tokens == 0
     assert summary.total_output_tokens == 0
     assert runtime._input_tokens == 0
@@ -1872,7 +1888,7 @@ async def test_v11_all_failed_sdk_retry_records_estimate_without_summary_usage()
     assert runtime._model_reservations == {}
     assert not [status for status, _payload in events if status == "completed"]
     executions = repository.list_executions(record.id)
-    assert len(executions) == 2
+    assert len(executions) == 4
     assert all(item.status == AgentExecutionStatus.FAILED for item in executions)
     assert all(item.input_tokens > 0 for item in executions)
     assert all(item.output_tokens == 0 for item in executions)

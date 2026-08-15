@@ -49,7 +49,12 @@ class ClassifiedRetryableError(RuntimeError):
 
 
 def retryable_failure_category(exc: BaseException) -> FailureCategory | None:
-    """只把明确的 transport/rate-limit/畸形输出异常交给统一 retry coordinator。"""
+    """只把明确的 transport/rate-limit/畸形输出异常交给统一 retry coordinator。
+
+    裸 TimeoutError 不在此处放行：工具路径的超时契约是不重试（有测试围栏）；
+    模型调用的超时由 v11_runtime 在持久化后包装为 ClassifiedRetryableError
+    再进入本函数。
+    """
     if isinstance(exc, RateLimitError):
         return FailureCategory.RATE_LIMIT
     if isinstance(exc, APIConnectionError):
@@ -72,12 +77,25 @@ class ActionDeadlineExceeded(RuntimeError):
 
 
 class RetryCoordinator:
-    """为 model/tool provider 调用提供最多一次、分类明确的 retry。"""
+    """为 model/tool provider 调用提供有界、分类明确、可带退避的 retry。"""
 
-    def __init__(self, *, max_retries: int = 1) -> None:
+    def __init__(
+        self,
+        *,
+        max_retries: int = 1,
+        backoff_base_seconds: float = 0.0,
+        backoff_cap_seconds: float = 0.0,
+    ) -> None:
         if max_retries < 0:
             raise ValueError("max_retries must be non-negative")
+        if backoff_base_seconds < 0 or backoff_cap_seconds < 0:
+            raise ValueError("backoff must be non-negative")
+        if backoff_base_seconds > 0 and backoff_cap_seconds == 0:
+            # min(cap=0, ...) 恒为 0，等价于静默关闭退避；要求显式传 cap。
+            raise ValueError("backoff_cap_seconds must be positive when base is set")
         self.max_retries = max_retries
+        self.backoff_base_seconds = backoff_base_seconds
+        self.backoff_cap_seconds = backoff_cap_seconds
 
     async def run(
         self,
@@ -99,6 +117,15 @@ class RetryCoordinator:
                 category = retryable_failure_category(exc)
                 if category is None or attempt > self.max_retries:
                     raise
+                if self.backoff_base_seconds > 0:
+                    # 指数退避吸收网关抖动窗口；sleep 可取消，预算/死线栅栏
+                    # 由 before_retry 在退避后、下次尝试前重新把关。
+                    await asyncio.sleep(
+                        min(
+                            self.backoff_cap_seconds,
+                            self.backoff_base_seconds * 2 ** (attempt - 1),
+                        )
+                    )
                 if before_retry is not None:
                     await _maybe_await(before_retry(attempt, category))
                 attempt += 1
