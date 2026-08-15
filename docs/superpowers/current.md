@@ -338,11 +338,43 @@ TDD：9 例 RED→GREEN（domain 违约 draft 契约化、Single 路径拒绝+�
 门禁：focused 916 passed/2 skipped；全量 **2328 passed, 4 skipped, 1 warning**；ruff 与
 `git diff --check` clean。正式计数：SS30 paired attempts=4，label opens 仍为 `0`。
 
-Blocker: `T12 第四修复链（构造期 ValidationError 包装 + 投影/query 契约对齐）已完成并获
-独立复审 approve_with_followups（无 blocking/high 遗留，见上）。恢复正式评测还差：
-(1) 提交本修复链；(2) 对最终干净 HEAD 重新认证 capability；(3) 用户签发第四个
-reauthorization token（pair 现为 predicting+过期 lease，reconcile 后 failed_non_resumable
-epoch 3、label_ever_opened=0）后以 48k 预算跑 SS30 single_intended epoch 4，再续剩余 3 侧。`
+Verification evidence (M5 SS30 epoch-4 failure and operational-noise fix chain, 2026-08-15):
+epoch-4 在干净 HEAD `34941b9`（重认证 passed，artifact_hash
+`8c159119222e57b92530f01023290c1f912c3617c38d7825d0f8f49fc10f7aa2`）以 48k 预算启动；
+用户在多条失败后手动止损。console 取证：失败全部为**纯运营噪声**——TimeoutError ×2
+（网关长生成/慢响应，模型重试 1 次后仍败）、APIConnectionError、预算耗尽与
+response exceeded（output_validation 类）；前四条修复链的契约类失败**零复发**
+（链有效性获经验证实）。结构经济学：bundle 30/30 fail-closed × 单例运营噪声
+≈ 每 epoch 一次 ~1M token 的掷硬币。用户决策（"一步到位，学习优秀 agent 项目经验"）：
+整类吸收运营噪声。修复链（对照 OpenDerisk checkpoint 隔离、itops 有界重试+审计、
+指数退避+上限、graceful degradation 等行业模式）：(1) run timeout 启动参数
+120→300s（脚本层，不改 spec 默认值）；(2) 模型调用重试 1→3 次 + 有界指数退避
+（RetryCoordinator 新增 backoff_base/cap，默认 0 不 sleep 保持既有行为；v11 模型
+调用点 5s 起 30s 封顶）；(3) 模型调用超时纳入可重试——`retryable_failure_category`
+对裸 TimeoutError **仍返回 None**（工具路径不重试契约不变，测试守护），新增
+`_model_retryable_exception` 仅在 invoke_model re-raise 处转换为
+`ClassifiedRetryableError(TIMEOUT)`；(4) 案例级有界重试 best-of-2——
+`run_case_with_bounded_retry` 仅对 {timeout, output_validation} 换全新 run 重试 1 次
+（EmptyRunOwnedMemory 无跨 attempt 记忆污染），CONTRACT_INTEGRITY/UNKNOWN 不重试
+保留代码缺陷信号；CasePrediction 新增 `attempts` 字段（1..2）。独立复审
+**approve_with_followups**（无 blocking）：H1（模型重试耗尽后从无 turn 级 catch 的
+phase 逃逸的 ClassifiedRetryableError(TIMEOUT) 落入 UNKNOWN、案例重试不触发且内部
+类名污染 failure_category）以 `_escape_failure_category` 增加 TIMEOUT 归一映射关闭，
+保持案例重试 phase 中立；M1（`attempts` le=2 与开放 max_attempts 参数错位，冻结成功
+评测期才炸）以构造侧 1..2 校验关闭；L1（base>0 而 cap=0 静默关闭退避）以构造 fail-fast
+关闭；L2（资格集注释夸大覆盖）改注释关闭；L3（退避 sleep 先于 before_retry 栅栏的
+白等取舍）记录入 T13 对账。TDD：复审修复 3 例 RED→GREEN；既有 2 测试按新契约更新
+（外层重试 1→3：4 请求/4 条 FAILED 审计，sleep 打桩）。门禁：focused 81 passed；
+全量 **2339 passed, 4 skipped, 1 warning**；ruff clean；spec §9.1 重试行已同步。
+正式计数：SS30 paired attempts=5（五 epoch 均 failed_non_resumable），label opens
+仍为 `0`。
+
+Blocker: `T12 第五修复链（运营噪声一体化：timeout 300s + 模型重试 1→3 指数退避 +
+模型超时可重试 + 案例级 best-of-2）已完成并获独立复审 approve_with_followups
+（无 blocking/high 遗留，见上）。恢复正式评测还差：(1) 提交本修复链；(2) 对最终干净
+HEAD 重新认证 capability；(3) 用户签发第五个 reauthorization token（pair 现为
+predicting+过期 lease，reconcile 后 failed_non_resumable epoch 4、label_ever_opened=0）
+后以 48k 预算 + 300s timeout 跑 SS30 single_intended epoch 5，再续剩余 3 侧。`
 
 Verification evidence (M5 fifth-round review-fix, 2026-08-12): base was
 `75f964495d6e6f391ebd8eef4c2170ba982d53ea`; code commit is
@@ -567,14 +599,17 @@ legacy output remains unchanged. M4 focused 137, T9 289, T10 881, and full
 pytest 2097 passed with only the recorded skips/warning.
 
 Current phase: Full iteration / M5 T12 正式评测进行中：SS30 single_intended epoch 0
-（6/30）、epoch 1（止损于 ~12/30）、epoch 2（11/30）、epoch 3（止损于 7 例失败）均
-失败，四轮根因均已离线归因；第四轮修复链（构造期 ValidationError 契约化 + 投影/query
-契约逐字段对齐）完成并获独立复审 approve_with_followups，全量 2328 passed、Ruff clean
+（6/30）、epoch 1（止损于 ~12/30）、epoch 2（11/30）、epoch 3（止损于 7 例失败）、
+epoch 4（手动止损，纯运营噪声）均失败，五轮根因均已离线归因；第五轮修复链
+（运营噪声一体化：timeout 300s 启动参数 + 模型重试 1→3 指数退避 + 模型超时可重试 +
+案例级 best-of-2 有界重试）完成并获独立复审 approve_with_followups（无 blocking/high
+遗留），复审 H1/M1/L1/L2 当日关闭，全量 2339 passed、Ruff clean、spec §9.1 已同步
 
-Next action: 提交修复链 → 对最终干净 HEAD 重新认证 capability artifact → 用户签发第四个
-reauthorization token 后以 48k 预算跑 SS30 single_intended epoch 4 → 续剩余 3 侧；T13
-对账清单新增本轮记录项（_draft_rejection_code 子串匹配可改结构化 code）；不打开 TT90
-labels，不做任何准确率声称。
+Next action: 提交修复链 → 对最终干净 HEAD 重新认证 capability artifact → 用户签发第五个
+reauthorization token 后以 48k 预算 + 300s timeout 跑 SS30 single_intended epoch 5 →
+续剩余 3 侧；T13 对账清单新增本轮记录项（退避 sleep 先于 before_retry 栅栏的白等取舍；
+前轮遗留：_draft_rejection_code 子串匹配可改结构化 code）；不打开 TT90 labels，不做任何
+准确率声称。
 
 | ID | Phase | Task | Status | Evidence or result | Next action or blocker |
 | --- | --- | --- | --- | --- | --- |
