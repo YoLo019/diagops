@@ -281,10 +281,43 @@ failed 映射——当日修复+测试；1 low 经实证不成立：Single resul
 **2299 passed, 4 skipped, 1 warning**；ruff 与 `git diff --check` clean。正式计数：
 SS30 paired attempts=2（两 epoch 均 failed_non_resumable），label opens 仍为 `0`。
 
-Blocker: `T12 第二修复链（Single 路径 + failed PhaseCommit）已完成并获独立复审 approve
-（见上）。恢复正式评测还差：(1) 提交本修复链；(2) 对最终干净 HEAD 重新认证 capability；
-(3) 用户签发第二个 reauthorization token（pair 现 failed_non_resumable、
-label_ever_opened=0）后跑 SS30 single_intended epoch 2，再续剩余 3 侧。`
+Verification evidence (M5 SS30 epoch-2 failure and adapter robustness fix chain, 2026-08-15):
+epoch-2 在干净 HEAD `9ec895f` 启动（capability 重认证 passed，artifact_hash
+`f53d3bb6e30479fba184dc0b91d5be14e198946c219baf6ed9a474be951fcadf`）；启动脚本先以
+`reconcile_pending_failure()` 把 epoch-1 遗留的过期 lease 收敛为 failed_non_resumable，
+再授权 epoch 1→2。30 例跑完：**11 completed / 19 failed**——全部以 output_validation
+分类干净落库、零 unknown，前两条修复链的契约类失败**零复发**；唯一 1 条 candidate
+违约走新审计路径 `candidate draft rejected: candidate_incomplete` 且 run 继续。
+bundle 全量 completed 语义再次 fail-closed 拒收 → pair failed_non_resumable（epoch 2，
+labels 仍未开封）。零模型调用取证（console 19 行 + DB 42 条失败 execution 交叉核对）：
+(1) **10 例** ModelBehaviorError `Invalid JSON: trailing characters`——网关/模型在合法
+JSON 后追加垃圾（尾部多 `}`/双份拼接，与 08-14 网关退化特征一致），而
+`retryable_failure_category` 只放行 rate-limit/connection，单次畸形响应直接杀 run；
+(2) **7 例**预算耗尽（5 exhausted + 2 exceeded）——Single 单上下文累积，失败 attempt
+input 已达 15.5k–19.5k tokens，24k 预算只够约 1.5 轮（OB30 smoke 通过仅因该例 1 轮
+收敛共 14902 tokens）；(3) **3 例** APIConnectionError，重试 1 次后仍失败；
+(4) **1 例** enum 漂移（action='stop'）——证实该网关 json_schema 为透传而非强约束
+解码，长输出时无约束兜底。用户决策：A+B——代码鲁棒性修复 + single_intended 预算
+24k→48k。修复链：`_salvage_json_text`/`_salvage_response_json`（raw_decode 截到第一个
+完整 JSON 值；function_call arguments 恒清洗，message 文本仅在 output_schema 非空时
+清洗，纯文本输出绝不触碰；strict envelope 先 salvage 外层再拆封、payload 内层兜底；
+截断 JSON/前导垃圾原样返回）+ `retryable_failure_category` 纳入
+ModelBehaviorError→INVALID_OUTPUT（RetryCoordinator max_retries=1 不变，失败 attempt
+只计 input estimate、重试前 reservation released，无双重计费）。TDD：13 例 RED→GREEN
+（salvage 参数化 8 例、native/strict/kwargs 三个 get_response 层级、重试分类与一次性
+重试语义）。独立复审 **approve_with_followups**（无 blocking/high）：medium——生产实际
+走的全 kwargs 调用分支补测试关闭；medium（ModelBehaviorError 含确定性误用，重试浪费
+被 max_retries=1+预算闸限住、失败类别已持久化可观测）与 low（strict envelope 结构性
+失败仍无重试；salvage 原地改写后网关原始字节不可见的取证取舍；stream_response 无
+salvage 已加防呆注释）记录入 T13 对账。门禁：focused 50 passed；全量
+**2313 passed, 4 skipped, 1 warning**；ruff 与 `git diff --check` clean。正式计数：SS30 paired
+attempts=3（三 epoch 均 failed_non_resumable），label opens 仍为 `0`。
+
+Blocker: `T12 第三修复链（JSON salvage + ModelBehaviorError 重试分类）已完成并获独立
+复审 approve_with_followups（无 blocking/high 遗留，见上）。恢复正式评测还差：
+(1) 提交本修复链；(2) 对最终干净 HEAD 重新认证 capability；(3) 用户签发第三个
+reauthorization token（pair 现 failed_non_resumable epoch 2、label_ever_opened=0）后
+以 48k 预算跑 SS30 single_intended epoch 3，再续剩余 3 侧。`
 
 Verification evidence (M5 fifth-round review-fix, 2026-08-12): base was
 `75f964495d6e6f391ebd8eef4c2170ba982d53ea`; code commit is
@@ -509,14 +542,15 @@ legacy output remains unchanged. M4 focused 137, T9 289, T10 881, and full
 pytest 2097 passed with only the recorded skips/warning.
 
 Current phase: Full iteration / M5 T12 正式评测进行中：SS30 single_intended epoch 0
-（6/30）与 epoch 1（用户止损于 ~12/30）均失败，两轮根因均已离线归因；第二轮修复链
-（Single 路径输出单元级拒绝 + failed PhaseCommit 合法化）完成并获独立复审 approve，
-全量 2299 passed、Ruff clean
+（6/30）、epoch 1（止损于 ~12/30）、epoch 2（11/30）均失败，三轮根因均已离线归因
+（epoch 2 主体为网关 JSON 畸形 10 例 + 24k 预算结构不足 7 例，契约类缺陷零复发）；
+第三轮修复链（JSON salvage + ModelBehaviorError 重试分类）完成并获独立复审
+approve_with_followups，全量 2313 passed、Ruff clean
 
-Next action: 提交修复链 → 对最终干净 HEAD 重新认证 capability artifact → 用户签发第二个
-reauthorization token 后跑 SS30 single_intended epoch 2 → 续剩余 3 侧；T13 对账清单纳入
-既有 Low 及本轮 informational（rank 违约留终态校验为既定语义）；不打开 TT90 labels，
-不做任何准确率声称。
+Next action: 提交修复链 → 对最终干净 HEAD 重新认证 capability artifact → 用户签发第三个
+reauthorization token 后以 48k 预算跑 SS30 single_intended epoch 3 → 续剩余 3 侧；T13
+对账清单新增本轮记录项（ModelBehaviorError 重试范围观测、strict envelope 结构性失败
+边界）；不打开 TT90 labels，不做任何准确率声称。
 
 | ID | Phase | Task | Status | Evidence or result | Next action or blocker |
 | --- | --- | --- | --- | --- | --- |
