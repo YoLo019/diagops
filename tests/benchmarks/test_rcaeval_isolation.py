@@ -1404,6 +1404,15 @@ def test_prediction_launcher_sanitizes_child_and_never_passes_label_locator(
         "backend.benchmarks.rcaeval.__main__._prediction_pair_identity",
         lambda _: "a" * 64,
     )
+    # capability/key 准入与构造守卫有专项测试；本测试聚焦 launcher 隔离/ledger 语义
+    monkeypatch.setattr(
+        "backend.benchmarks.rcaeval.__main__._preflight_capability_admission",
+        lambda _: None,
+    )
+    monkeypatch.setattr(
+        "backend.benchmarks.rcaeval.__main__._preflight_launch_construction",
+        lambda _: None,
+    )
     label_path = tmp_path / "labels"
     custodian_manifest = create_custodian_manifest(
         tmp_path,
@@ -1488,6 +1497,15 @@ def test_prediction_completion_failure_invalidates_pair_without_future_recovery(
         "backend.benchmarks.rcaeval.__main__._prediction_pair_identity",
         lambda _: "a" * 64,
     )
+    # capability/key 准入与构造守卫有专项测试；本测试聚焦 launcher 隔离/ledger 语义
+    monkeypatch.setattr(
+        "backend.benchmarks.rcaeval.__main__._preflight_capability_admission",
+        lambda _: None,
+    )
+    monkeypatch.setattr(
+        "backend.benchmarks.rcaeval.__main__._preflight_launch_construction",
+        lambda _: None,
+    )
 
     def locked_completion(self, *args, **kwargs):
         raise sqlite3.OperationalError("database is locked")
@@ -1551,6 +1569,15 @@ def test_prediction_launcher_heartbeats_lease_while_child_runs(
     monkeypatch.setattr(
         "backend.benchmarks.rcaeval.__main__._prediction_pair_identity",
         lambda _: "a" * 64,
+    )
+    # capability/key 准入与构造守卫有专项测试；本测试聚焦 launcher 隔离/ledger 语义
+    monkeypatch.setattr(
+        "backend.benchmarks.rcaeval.__main__._preflight_capability_admission",
+        lambda _: None,
+    )
+    monkeypatch.setattr(
+        "backend.benchmarks.rcaeval.__main__._preflight_launch_construction",
+        lambda _: None,
     )
 
     heartbeats = 0
@@ -1710,3 +1737,60 @@ def test_formal_evaluation_rejects_child_artifact_with_wrong_label_binding(
         custodian_manifest=tmp_path / "custodian-manifest.json",
     ).snapshot()
     assert snapshot["state"] == LedgerState.FAILED_NON_RESUMABLE.value
+
+
+def test_launch_preflight_failure_never_consumes_reauthorization_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # epoch-5/6 教训的核心保证：本地可判的预检失败必须发生在 reauthorize
+    # （消耗一次性 token）之前；顺序回退即测试失败。
+    from backend.benchmarks.rcaeval import isolation
+    from backend.benchmarks.rcaeval.ledger import (
+        CustodianPairLedger,
+        create_custodian_manifest,
+    )
+
+    pair_root = tmp_path / "pair-root"
+    output = pair_root / "single_intended"
+    label_path = tmp_path / "labels"
+    manifest = create_custodian_manifest(
+        tmp_path,
+        runtime_manifest_hash="1" * 64,
+        label_manifest_hash="2" * 64,
+    )
+    monkeypatch.setattr(
+        isolation,
+        "verify_runtime_package",
+        lambda _: SimpleNamespace(manifest_hash="1" * 64),
+    )
+    monkeypatch.setattr(
+        "backend.benchmarks.rcaeval.__main__._prediction_pair_identity",
+        lambda _: "a" * 64,
+    )
+
+    def forbidden_reauthorize(self, *args, **kwargs):
+        raise AssertionError("reauthorize must not run after preflight failure")
+
+    monkeypatch.setattr(CustodianPairLedger, "reauthorize", forbidden_reauthorize)
+    monkeypatch.delenv("DIAGOPS_AGENTS_API_KEY", raising=False)
+
+    with pytest.raises(ValueError, match="DIAGOPS_AGENTS_API_KEY"):
+        _launch_predict(
+            SimpleNamespace(
+                runtime=tmp_path / "runtime",
+                pair_root=pair_root,
+                custodian_manifest=manifest,
+                partition="ss30",
+                configuration="single_intended",
+                base_url="https://endpoint.invalid/v1",
+                capability_artifact=tmp_path / "capability.json",
+                database=tmp_path / "runtime.db",
+                output=output,
+                token_budget=4_000,
+                max_turns=8,
+                tool_budget=8,
+                timeout_seconds=120,
+                label_package=label_path,
+                reauthorization_token="epoch-test-token",
+            )
+        )

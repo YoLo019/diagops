@@ -16,6 +16,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from backend.domain.runtime import V11_RUN_DEADLINE_MAX_SECONDS
+
 # 不透明 case ID 的形态：固定前缀 + 16 位十六进制，稳定且不携带源信息。
 OPAQUE_CASE_ID_PATTERN = r"^re2-[0-9a-f]{16}$"
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
@@ -233,9 +235,12 @@ class EvaluationBudget(BaseModel):
     token_budget: int = Field(gt=0)
     max_turns: int = Field(gt=0)
     tool_budget: int = Field(gt=0)
-    # spec §9.1 默认 run deadline 120s；正式评测经逐次授权可放宽至 300s
-    # （2026-08-15 运营噪声链，网关长生成/慢响应超出 120s 是运营噪声）。
-    timeout_seconds: float = Field(gt=0, le=300, allow_inf_nan=False)
+    # spec §9.1 默认 run deadline 120s；正式评测经逐次授权可放宽至
+    # V11_RUN_DEADLINE_MAX_SECONDS（2026-08-15 运营噪声链，网关长生成/慢响应
+    # 超出 120s 是运营噪声）。
+    timeout_seconds: float = Field(
+        gt=0, le=V11_RUN_DEADLINE_MAX_SECONDS, allow_inf_nan=False
+    )
     max_investigators: int = Field(ge=1, le=3)
     max_rounds: int = Field(ge=1, le=2)
 

@@ -89,7 +89,11 @@ from backend.domain.multi_agent import (
     ModelProvider,
     MultiAgentRunStatus,
 )
-from backend.domain.runtime import RuntimePhase, validate_v11_execution_contract
+from backend.domain.runtime import (
+    V11_RUN_DEADLINE_MAX_SECONDS,
+    RuntimePhase,
+    validate_v11_execution_contract,
+)
 from backend.runtime.concurrency import RunStepGate
 from backend.safety.redaction import redact_value
 from backend.tools.provider_tools import (
@@ -593,8 +597,11 @@ class V11Runtime:
             raise ValueError("max_tool_calls_per_specialist must be positive")
         if max_turns < 1:
             raise ValueError("max_turns must be positive")
-        if timeout_seconds < 1 or timeout_seconds > 120:
-            raise ValueError("V11 timeout must be between one and 120 seconds")
+        if timeout_seconds < 1 or timeout_seconds > V11_RUN_DEADLINE_MAX_SECONDS:
+            raise ValueError(
+                "V11 timeout must be between one and "
+                f"{int(V11_RUN_DEADLINE_MAX_SECONDS)} seconds"
+            )
         self.model = model
         self.model_provider = ModelProvider(model_provider)
         self.model_name = model_name

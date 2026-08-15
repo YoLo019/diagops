@@ -309,11 +309,21 @@ async def test_v11_required_investigator_failure_stops_before_critic_or_lead() -
 
 
 def test_v11_run_rejects_timeout_seconds_above_hard_deadline() -> None:
+    # 运营噪声链：V11 run deadline 上限 120→300（domain 常量
+    # V11_RUN_DEADLINE_MAX_SECONDS；产品/server 创建路径仍在 container 层
+    # clamp 到 120）。300 合法，301 仍 fail-closed。
+    run = _v11_run(
+        run_id="run-v11-timeout-authorized-300",
+        timeout_seconds=300,
+        execution_contract={**_contract(), "timeout_seconds": 300.0},
+    )
+    assert run.timeout_seconds == 300
+
     with pytest.raises(ValidationError, match="hard deadline"):
         _v11_run(
             run_id="run-v11-timeout-overflow",
-            timeout_seconds=121,
-            execution_contract={**_contract(), "timeout_seconds": 121.0},
+            timeout_seconds=301,
+            execution_contract={**_contract(), "timeout_seconds": 301.0},
         )
 
 

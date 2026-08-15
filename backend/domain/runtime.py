@@ -162,6 +162,12 @@ class RunOwnership(BaseModel):
 
 
 _EXECUTION_CONTRACT_DIGEST = "execution_contract_digest"
+
+# V11 run deadline 的绝对上限。产品/server 创建路径在 container 层 clamp 到
+# 120s（spec §9.1 默认）；benchmark 正式 run 经逐次授权可放宽至 300s
+# （2026-08-15 运营噪声链）。守卫统一引用此常量，不再各自硬编码。
+V11_RUN_DEADLINE_MAX_SECONDS = 300.0
+
 _V11_CONTRACT_REQUIRED_KEYS = {
     "execution_contract_version",
     "authority_mode",
@@ -486,7 +492,7 @@ class RuntimeRun(RuntimeModel):
             }
             if not required <= self.execution_contract.keys():
                 raise ValueError("V11 execution contract is incomplete")
-            if self.timeout_seconds > 120:
+            if self.timeout_seconds > V11_RUN_DEADLINE_MAX_SECONDS:
                 raise ValueError("V11 timeout_seconds exceeds the hard deadline")
             limits = self.execution_contract.get("limits")
             model_turn_budget = (

@@ -986,3 +986,69 @@ def test_evaluation_budget_timeout_cap_allows_authorized_300s():
             max_investigators=1,
             max_rounds=1,
         )
+
+
+def test_v11_runtime_accepts_authorized_300s_deadline():
+    # 运营噪声链第三道守卫：V11Runtime.__init__ 的 timeout 上限与 domain
+    # 常量对齐；300 合法、301 拒绝。epoch-6 即死于此守卫的旧 120s 上限。
+    from backend.diagnosis.v11_runtime import V11Runtime
+
+    runtime = V11Runtime(model=None, timeout_seconds=300, token_budget=48_000)
+    assert runtime.timeout_seconds == 300
+
+    with pytest.raises(ValueError, match="V11 timeout"):
+        V11Runtime(model=None, timeout_seconds=301, token_budget=48_000)
+
+
+def test_launch_preflight_catches_construction_rejection_before_token():
+    # epoch-5/6 教训：worker 构造期守卫必须在 reauthorization token 消耗前
+    # 触发。preflight 用相同启动参数离线过全部构造守卫。
+    from types import SimpleNamespace
+
+    from pydantic import ValidationError
+
+    from backend.benchmarks.rcaeval.__main__ import _preflight_launch_construction
+
+    base = dict(
+        configuration="single_intended",
+        token_budget=48_000,
+        max_turns=8,
+        tool_budget=8,
+        timeout_seconds=300.0,
+    )
+    _preflight_launch_construction(SimpleNamespace(**base))
+
+    with pytest.raises((ValueError, ValidationError)):
+        _preflight_launch_construction(
+            SimpleNamespace(**{**base, "timeout_seconds": 301.0})
+        )
+
+
+def test_launch_preflight_covers_multi_configuration():
+    # 复审 low-3：multi 分支（SS30 后续侧的正式配置）同参数过构造守卫。
+    from types import SimpleNamespace
+
+    from backend.benchmarks.rcaeval.__main__ import _preflight_launch_construction
+
+    _preflight_launch_construction(
+        SimpleNamespace(
+            configuration="multi_intended",
+            token_budget=48_000,
+            max_turns=8,
+            tool_budget=8,
+            timeout_seconds=300.0,
+        )
+    )
+
+
+def test_launch_preflight_capability_requires_api_key(monkeypatch):
+    # 复审 low-2：capability/key 准入也在 token 消耗前；缺 key 立即失败。
+    from types import SimpleNamespace
+
+    from backend.benchmarks.rcaeval.__main__ import _preflight_capability_admission
+
+    monkeypatch.delenv("DIAGOPS_AGENTS_API_KEY", raising=False)
+    with pytest.raises(ValueError, match="DIAGOPS_AGENTS_API_KEY"):
+        _preflight_capability_admission(
+            SimpleNamespace(capability_artifact="unused", base_url="unused")
+        )

@@ -161,6 +161,112 @@ def _add_prediction_arguments(parser) -> None:
     parser.add_argument("--timeout-seconds", type=float, default=120)
 
 
+def _build_evaluation_budget(configuration, arguments):
+    from backend.benchmarks.rcaeval.models import EvaluationBudget
+
+    return EvaluationBudget(
+        configuration=configuration,
+        token_budget=arguments.token_budget,
+        max_turns=arguments.max_turns,
+        tool_budget=arguments.tool_budget,
+        timeout_seconds=arguments.timeout_seconds,
+        max_investigators=3 if configuration.is_multi else 1,
+        max_rounds=2 if configuration.is_multi else 1,
+    )
+
+
+def _preflight_capability_admission(arguments) -> None:
+    """capability artifact 准入与 API key 存在性的离线预检（token 消耗前）。"""
+    from backend.config.settings import canonicalize_endpoint, endpoint_id
+    from backend.services.model_capability import (
+        read_capability_artifact,
+        validate_capability_for_prediction,
+    )
+
+    if not os.environ.get("DIAGOPS_AGENTS_API_KEY", "").strip():
+        raise ValueError("DIAGOPS_AGENTS_API_KEY is required for prediction")
+    artifact = read_capability_artifact(arguments.capability_artifact)
+    canonical_endpoint = canonicalize_endpoint(arguments.base_url)
+    validate_capability_for_prediction(
+        artifact,
+        provider="openai_compatible",
+        model=artifact.model,
+        endpoint_id_value=endpoint_id(canonical_endpoint),
+        expected_parallelism=3,
+        repository_root=_repository_root(),
+    )
+
+
+def _preflight_launch_construction(arguments) -> None:
+    """reauthorization token 消耗前的离线构造预检。
+
+    epoch-5/6 各有一道 worker 构造期守卫（EvaluationBudget、V11Runtime
+    timeout 上限）在 token 消耗之后才 fail-fast，各空烧一格 epoch。此处用
+    相同启动参数离线过一遍全部构造守卫（预算模型 → runtime __init__ →
+    RuntimeRun V11 契约校验），任何不兼容都在 ledger.reauthorize 之前抛出。
+    无网络、无 DB、无文件写入。约定：今后新增任何启动期/worker 构造期守卫，
+    必须同步进本函数（capability/key 准入见 _preflight_capability_admission）。
+    """
+    from backend.benchmarks.rcaeval.models import RcaEvalConfiguration
+    from backend.benchmarks.rcaeval.runner import SingleInvestigatorAgent
+    from backend.diagnosis.v11_runtime import V11Runtime
+    from backend.domain.multi_agent import InvestigationStrategy, ModelProvider
+    from backend.domain.runtime import (
+        AuthorityMode,
+        ExecutionContractVersion,
+        RuntimeRun,
+        RuntimeRunKind,
+        RuntimeRunReason,
+    )
+
+    configuration = RcaEvalConfiguration(arguments.configuration)
+    budget = _build_evaluation_budget(configuration, arguments)
+    runtime_type = V11Runtime if configuration.is_multi else SingleInvestigatorAgent
+    runtime_kwargs = {
+        "model": None,
+        "model_provider": ModelProvider.OPENAI_COMPATIBLE,
+        "model_name": "launch-preflight",
+        "tool_registry": None,
+        "turn": None,
+        "max_turns": budget.max_turns,
+        "timeout_seconds": budget.timeout_seconds,
+        "max_total_tool_calls": budget.tool_budget,
+        "max_tool_calls_per_specialist": min(3, budget.tool_budget),
+        "token_budget": budget.token_budget,
+    }
+    if configuration.is_multi:
+        runtime_kwargs["max_investigators"] = budget.max_investigators
+        runtime_kwargs["max_rounds"] = budget.max_rounds
+    runtime_type(**runtime_kwargs)
+    RuntimeRun.create_new(
+        id="launch-preflight",
+        investigation_id="launch-preflight",
+        run_kind=RuntimeRunKind.LIVE,
+        strategy=(
+            InvestigationStrategy.ADAPTIVE
+            if configuration.is_multi
+            else InvestigationStrategy.FIXED
+        ),
+        run_reason=RuntimeRunReason.INITIAL,
+        model_provider=ModelProvider.OPENAI_COMPATIBLE,
+        model_name="launch-preflight",
+        prompt_version="launch-preflight",
+        tool_budget=budget.tool_budget,
+        token_budget=budget.token_budget,
+        timeout_seconds=budget.timeout_seconds,
+        execution_contract_version=ExecutionContractVersion.V11,
+        authority_mode=AuthorityMode.AGENT,
+        execution_contract={
+            "model_provider": ModelProvider.OPENAI_COMPATIBLE.value,
+            "model_name": "launch-preflight",
+            "prompt_version": "launch-preflight",
+            "tool_budget": budget.tool_budget,
+            "token_budget": budget.token_budget,
+            "timeout_seconds": budget.timeout_seconds,
+        },
+    )
+
+
 def _launch_predict(arguments) -> None:
     from backend.benchmarks.rcaeval.isolation import (
         build_prediction_launch,
@@ -197,6 +303,10 @@ def _launch_predict(arguments) -> None:
     pair_root.mkdir(parents=True, exist_ok=True)
     pair_identity = _prediction_pair_identity(arguments)
     sides = _formal_configuration_names(arguments.partition)
+    # 离线预检必须在 reauthorize 之前：token 一次性，本地可判的失败
+    # （capability 准入、API key、构造守卫）不允许再空烧 epoch（epoch-5/6 教训）。
+    _preflight_capability_admission(arguments)
+    _preflight_launch_construction(arguments)
     if arguments.reauthorization_token:
         ledger.reauthorize(
             arguments.reauthorization_token,
@@ -292,7 +402,6 @@ def _predict(arguments) -> None:
     from backend.benchmarks.rcaeval.models import (
         EXPECTED_PARTITION_COUNTS,
         EndpointCapabilityIdentity,
-        EvaluationBudget,
         PredictionBundle,
         RcaEvalConfiguration,
         RcaEvalPartition,
@@ -348,15 +457,7 @@ def _predict(arguments) -> None:
         artifact_hash=artifact.artifact_hash,
     )
     configuration = RcaEvalConfiguration(arguments.configuration)
-    budget = EvaluationBudget(
-        configuration=configuration,
-        token_budget=arguments.token_budget,
-        max_turns=arguments.max_turns,
-        tool_budget=arguments.tool_budget,
-        timeout_seconds=arguments.timeout_seconds,
-        max_investigators=3 if configuration.is_multi else 1,
-        max_rounds=2 if configuration.is_multi else 1,
-    )
+    budget = _build_evaluation_budget(configuration, arguments)
     arguments.database.parent.mkdir(parents=True, exist_ok=True)
     engine = create_db_engine(f"sqlite:///{arguments.database.resolve()}")
     initialize_database(engine)
