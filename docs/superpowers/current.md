@@ -313,11 +313,36 @@ salvage 已加防呆注释）记录入 T13 对账。门禁：focused 50 passed�
 **2313 passed, 4 skipped, 1 warning**；ruff 与 `git diff --check` clean。正式计数：SS30 paired
 attempts=3（三 epoch 均 failed_non_resumable），label opens 仍为 `0`。
 
-Blocker: `T12 第三修复链（JSON salvage + ModelBehaviorError 重试分类）已完成并获独立
-复审 approve_with_followups（无 blocking/high 遗留，见上）。恢复正式评测还差：
-(1) 提交本修复链；(2) 对最终干净 HEAD 重新认证 capability；(3) 用户签发第三个
-reauthorization token（pair 现 failed_non_resumable epoch 2、label_ever_opened=0）后
-以 48k 预算跑 SS30 single_intended epoch 3，再续剩余 3 侧。`
+Verification evidence (M5 SS30 epoch-3 failure and draft/projection contract fix chain, 2026-08-15):
+epoch-3 在干净 HEAD `4e975ff`（重认证 passed，artifact_hash
+`66aee122204f727c54b268b66c05e8eab690cf737260cdfbab4271d8afec12c5`）以 48k 预算启动；
+用户在 7 例失败后决策立即止损（省剩余案例预算）。console 取证三条签名：
+(1) `AgentFinding` 构造期 ValidationError ×2——模型产出 blocking=true 但无 gaps 的
+draft，per-draft 拒绝只捕获 V11RuntimeContractError，pydantic ValidationError 漏网杀 run；
+(2) `RuntimeEvent safe_payload.normalized_inputs.keywords[4] must be a bounded identifier`
+×1——模型给 read_logs 传带空格的自由文本 keyword（工具 query 契约合法），持久化投影层
+把所有列表项按标识符（无空格、≤160）校验，ValidationError 在工具调用内炸成 UserError；
+(3) APIConnectionError ×4——网关抖动，重试 1 次后仍败，代码层已尽其责。
+修复链：F1 `_finding_from_draft` 构造期 ValidationError 包装为
+V11RuntimeContractError（保留固定 validator 消息详情以区分模型违约与未来调用方 bug；
+Multi/Single 两条 per-draft 拒绝路径单点覆盖），`_draft_rejection_code` 新增
+`invalid_finding_contract` 审计码；F2 持久化投影与 query 契约逐字段同向对齐
+（投影接受集 ⊇ query 合法集）——keywords/levels/metric_names 列表项按有界非空字符串、
+instance/version/target/name 可空标量按有界字符串、read_service_catalog 允许键补
+`name`；标识符类（entity_ids/service/operation/trace_id）与枚举字段不变。
+独立复审 **approve_with_followups**：H1（同类残余字段 levels/metric_names/instance/
+target/version/name 是 epoch-4 可预见炸点）当日按逐字段对齐关闭，补 5 正 4 负
+RED→GREEN；M1（包装吞掉 validator 消息、调用方 bug 与模型违约不可区分）以保留固定
+消息详情关闭；L1（`_draft_rejection_code` 子串匹配脆弱，可改结构化 code）入 T13。
+TDD：9 例 RED→GREEN（domain 违约 draft 契约化、Single 路径拒绝+审计、投影对齐正负例）。
+门禁：focused 916 passed/2 skipped；全量 **2328 passed, 4 skipped, 1 warning**；ruff 与
+`git diff --check` clean。正式计数：SS30 paired attempts=4，label opens 仍为 `0`。
+
+Blocker: `T12 第四修复链（构造期 ValidationError 包装 + 投影/query 契约对齐）已完成并获
+独立复审 approve_with_followups（无 blocking/high 遗留，见上）。恢复正式评测还差：
+(1) 提交本修复链；(2) 对最终干净 HEAD 重新认证 capability；(3) 用户签发第四个
+reauthorization token（pair 现为 predicting+过期 lease，reconcile 后 failed_non_resumable
+epoch 3、label_ever_opened=0）后以 48k 预算跑 SS30 single_intended epoch 4，再续剩余 3 侧。`
 
 Verification evidence (M5 fifth-round review-fix, 2026-08-12): base was
 `75f964495d6e6f391ebd8eef4c2170ba982d53ea`; code commit is
@@ -542,15 +567,14 @@ legacy output remains unchanged. M4 focused 137, T9 289, T10 881, and full
 pytest 2097 passed with only the recorded skips/warning.
 
 Current phase: Full iteration / M5 T12 正式评测进行中：SS30 single_intended epoch 0
-（6/30）、epoch 1（止损于 ~12/30）、epoch 2（11/30）均失败，三轮根因均已离线归因
-（epoch 2 主体为网关 JSON 畸形 10 例 + 24k 预算结构不足 7 例，契约类缺陷零复发）；
-第三轮修复链（JSON salvage + ModelBehaviorError 重试分类）完成并获独立复审
-approve_with_followups，全量 2313 passed、Ruff clean
+（6/30）、epoch 1（止损于 ~12/30）、epoch 2（11/30）、epoch 3（止损于 7 例失败）均
+失败，四轮根因均已离线归因；第四轮修复链（构造期 ValidationError 契约化 + 投影/query
+契约逐字段对齐）完成并获独立复审 approve_with_followups，全量 2328 passed、Ruff clean
 
-Next action: 提交修复链 → 对最终干净 HEAD 重新认证 capability artifact → 用户签发第三个
-reauthorization token 后以 48k 预算跑 SS30 single_intended epoch 3 → 续剩余 3 侧；T13
-对账清单新增本轮记录项（ModelBehaviorError 重试范围观测、strict envelope 结构性失败
-边界）；不打开 TT90 labels，不做任何准确率声称。
+Next action: 提交修复链 → 对最终干净 HEAD 重新认证 capability artifact → 用户签发第四个
+reauthorization token 后以 48k 预算跑 SS30 single_intended epoch 4 → 续剩余 3 侧；T13
+对账清单新增本轮记录项（_draft_rejection_code 子串匹配可改结构化 code）；不打开 TT90
+labels，不做任何准确率声称。
 
 | ID | Phase | Task | Status | Evidence or result | Next action or blocker |
 | --- | --- | --- | --- | --- | --- |
