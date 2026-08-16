@@ -2604,11 +2604,7 @@ class V11Runtime:
                 }
             ),
             max_tool_calls_per_specialist=self.max_tool_calls_per_specialist,
-            max_total_tool_calls=(
-                self._phase_tool_budget
-                if self._phase_tool_budget is not None
-                else self.max_total_tool_calls
-            ),
+            max_total_tool_calls=self.max_total_tool_calls,
             total_input_tokens=self._input_tokens,
             total_output_tokens=self._output_tokens,
             completed_rounds=self._completed_rounds,

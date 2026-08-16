@@ -18,6 +18,7 @@ from backend.benchmarks.rcaeval.models import (
 from backend.benchmarks.rcaeval.providers import incident_event_for_case
 from backend.benchmarks.rcaeval.runner import (
     RcaEvalCaseRunner,
+    SingleInvestigatorAgent,
     _safe_exception_diagnostic,
     validate_configuration_set,
 )
@@ -582,6 +583,27 @@ def test_single_control_normalizes_inconclusive_decision_with_candidate_refs(tmp
     assert plan.lead_decision.candidate_ids == []
     assert plan.lead_decision.stop_reason == "single_control_inconclusive"
     assert plan.tasks == []
+
+
+def test_run_summary_keeps_total_tool_limit_after_phase_budget_is_exhausted(
+    tmp_path: Path,
+):
+    prediction, repository, runtime_store = _run_single_case(tmp_path, _single_turn)
+    persisted = runtime_store.get_run(prediction.runtime_run_id)
+    runtime = SingleInvestigatorAgent(
+        model="bounded-test-model",
+        model_provider="deepseek",
+        model_name="bounded-test-model",
+        max_total_tool_calls=8,
+    )
+    runtime.runtime_run_id = prediction.runtime_run_id
+    runtime._phase_tool_budget = 0
+
+    runtime._update_summary(repository, persisted.investigation_id)
+
+    summary = repository.get(persisted.investigation_id).multi_agent_run
+    assert summary is not None
+    assert summary.max_total_tool_calls == 8
 
 
 def test_single_control_logs_safe_exception_diagnostic(tmp_path: Path, caplog):
