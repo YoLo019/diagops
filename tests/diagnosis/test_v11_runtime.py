@@ -4149,6 +4149,128 @@ async def test_v11_sdk_reservation_retry_reuses_one_durable_allocation_and_settl
 
 
 @pytest.mark.anyio
+async def test_v11_sdk_over_budget_response_is_audited_before_contract_failure():
+    class OversizedDelegate(Model):
+        async def get_response(self, **_kwargs):
+            return SimpleNamespace(
+                usage=SimpleNamespace(input_tokens=80, output_tokens=30)
+            )
+
+        async def stream_response(self, **_kwargs):
+            if False:
+                yield None
+
+        async def close(self):
+            return None
+
+    events: list[tuple[str, dict[str, object]]] = []
+
+    async def persist_model_event(
+        execution_id,
+        status,
+        input_tokens=0,
+        output_tokens=0,
+        actor_name="CoordinatorAgent",
+        safe_payload=None,
+    ):
+        del execution_id, actor_name
+        events.append(
+            (
+                status,
+                {
+                    **(safe_payload or {}),
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                },
+            )
+        )
+
+    runtime = V11Runtime(model=OversizedDelegate(), token_budget=100)
+    runtime._persist_model_event = persist_model_event
+    model = _V11BudgetedModel(
+        runtime.model,
+        runtime,
+        logical_call_id="logical-call-over-budget",
+        execution_id="execution-over-budget",
+        actor="LeadAgent",
+    )
+
+    with pytest.raises(V11RuntimeContractError, match="exceeded token budget"):
+        await model.get_response(
+            input="one request",
+            system_instructions="system",
+            model_settings=ModelSettings(max_tokens=90),
+        )
+
+    assert [status for status, _payload in events] == ["started", "failed"]
+    failed = events[-1][1]
+    assert failed["reservation_status"] == "rejected"
+    assert failed["actual_input_tokens"] == 80
+    assert failed["input_tokens"] == 80
+    assert failed["output_tokens"] == 30
+    assert failed["budget_overrun_tokens"] == 20
+    assert runtime._model_reservations == {}
+    assert runtime.remaining_token_budget == 0
+
+
+@pytest.mark.anyio
+async def test_v11_sdk_over_budget_rejection_cannot_be_released_by_cancellation():
+    class OversizedDelegate(Model):
+        async def get_response(self, **_kwargs):
+            return SimpleNamespace(
+                usage=SimpleNamespace(input_tokens=80, output_tokens=30)
+            )
+
+        async def stream_response(self, **_kwargs):
+            if False:
+                yield None
+
+        async def close(self):
+            return None
+
+    events: list[str] = []
+    model_task: asyncio.Task[object] | None = None
+
+    async def persist_model_event(
+        _execution_id,
+        status,
+        _input_tokens=0,
+        _output_tokens=0,
+        _actor_name="CoordinatorAgent",
+        safe_payload=None,
+    ):
+        events.append((safe_payload or {}).get("reservation_status", status))
+        if (safe_payload or {}).get("reservation_status") == "rejected":
+            assert model_task is not None
+            model_task.cancel()
+            await asyncio.sleep(0)
+
+    runtime = V11Runtime(model=OversizedDelegate(), token_budget=100)
+    runtime._persist_model_event = persist_model_event
+    model = _V11BudgetedModel(
+        runtime.model,
+        runtime,
+        logical_call_id="logical-call-cancelled-over-budget",
+        execution_id="execution-cancelled-over-budget",
+        actor="LeadAgent",
+    )
+    model_task = asyncio.create_task(
+        model.get_response(
+            input="one request",
+            system_instructions="system",
+            model_settings=ModelSettings(max_tokens=90),
+        )
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await model_task
+
+    assert events == ["reserved", "rejected"]
+    assert runtime._model_reservations == {}
+    assert runtime.remaining_token_budget == 0
+
+
+@pytest.mark.anyio
 async def test_v11_concurrent_model_reservations_cannot_oversell_token_ceiling():
     runtime = V11Runtime(model="fake", token_budget=100)
 

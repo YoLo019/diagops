@@ -1329,7 +1329,7 @@ class SQLiteRuntimeStore:
         from backend.runtime.phases import (
             checkpoint_digest,
             durable_projection_digest,
-            durable_token_usage,
+            durable_remaining_token_budget,
             durable_tool_call_count,
             ensure_phase_precondition,
             phase_profile_for,
@@ -1375,8 +1375,14 @@ class SQLiteRuntimeStore:
                 run_id=run_snapshot.id,
                 mutation=commit.business_mutation,
             )
-            consumed_tokens = durable_token_usage(
-                self.list_events(run_snapshot.id), run_snapshot.id
+            remaining_from_events = (
+                durable_remaining_token_budget(
+                    self.list_events(run_snapshot.id),
+                    run_snapshot.id,
+                    run_snapshot.token_budget,
+                )
+                if run_snapshot.token_budget is not None
+                else None
             )
         except ValueError as exc:
             raise RuntimeIntegrityError(str(exc)) from exc
@@ -1391,7 +1397,7 @@ class SQLiteRuntimeStore:
         if (
             run_snapshot.token_budget is not None
             and commit.resume_state.remaining_token_budget
-            != max(0, run_snapshot.token_budget - consumed_tokens)
+            != remaining_from_events
         ):
             raise RuntimeIntegrityError(
                 "checkpoint remaining token budget differs from durable consumption"

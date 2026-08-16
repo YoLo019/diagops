@@ -646,6 +646,7 @@ for _event_type in (
             "reserved_tokens",
             "input_estimate",
             "actual_input_tokens",
+            "budget_overrun_tokens",
             "attempt",
             "request_index",
             "model_turn_budget",

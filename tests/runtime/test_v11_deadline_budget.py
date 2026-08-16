@@ -386,6 +386,47 @@ def test_v11_started_model_reservation_is_durable_for_resume_reconciliation() ->
     }
 
 
+def test_v11_rejected_model_response_durably_exhausts_token_budget() -> None:
+    _repository, store, run, _executor, coordinator = _v11_services(
+        run_id="run-token-budget-rejected"
+    )
+    _leased, attempt = store.acquire_lease_and_create_attempt(
+        run.id,
+        attempt=RuntimeAttempt(
+            run_id=run.id,
+            attempt_number=1,
+            status=RuntimeAttemptStatus.RUNNING,
+        ),
+        owner="worker-a",
+        expected_status=RuntimeRunStatus.CREATED,
+    )
+    store._append_event_for_test(
+        RuntimeEvent(
+            run_id=run.id,
+            attempt_id=attempt.id,
+            sequence=1,
+            event_type=RuntimeEventType.MODEL_FAILED,
+            actor_type=RuntimeActorType.MODEL,
+            execution_id="execution-rejected",
+            safe_payload={
+                "status": "failed",
+                "input_tokens": 80,
+                "output_tokens": 30,
+                "logical_call_id": "logical-call-rejected",
+                "reservation_id": "reservation-rejected",
+                "reservation_status": "rejected",
+                "reserved_tokens": 90,
+                "input_estimate": 10,
+                "budget_overrun_tokens": 20,
+            },
+        )
+    )
+
+    recovery_state = coordinator._effective_resume_state(run, checkpoint=None)
+
+    assert recovery_state.remaining_token_budget == 0
+
+
 @pytest.mark.anyio
 async def test_v11_resume_releases_crash_window_reservation_once() -> None:
     repository, store, run, _executor, coordinator = _v11_services(

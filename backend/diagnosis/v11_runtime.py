@@ -3131,17 +3131,63 @@ class V11Runtime:
     ) -> None:
         if self._remaining_token_budget is None:
             return
-        if actual_total > reserved_total:
-            raise V11RuntimeContractError("model response exceeded token budget")
         async with self._token_budget_lock:
             if reservation_id is not None:
                 if reservation_id in self._settled_model_reservations:
                     return
                 reservation = self._model_reservations.get(reservation_id)
                 if reservation is None:
+                    if actual_total > reserved_total:
+                        raise V11RuntimeContractError(
+                            "model response exceeded token budget"
+                        )
                     return
                 if reserved_total != reservation.reserved_total:
                     raise V11RuntimeContractError("model reservation total mismatch")
+                if actual_total > reserved_total:
+                    reported_input = (
+                        actual_input_tokens
+                        if actual_input_tokens is not None
+                        else input_tokens or 0
+                    )
+                    self._remaining_token_budget = 0
+                    self._model_reservations.pop(reservation_id, None)
+                    self._settled_model_reservations.add(reservation_id)
+                    persistence = asyncio.ensure_future(
+                        self._emit_model(
+                            execution_id or logical_call_id or reservation_id,
+                            "failed",
+                            actor,
+                            input_tokens=reported_input,
+                            output_tokens=output_tokens,
+                            safe_payload={
+                                "logical_call_id": logical_call_id,
+                                "reservation_id": reservation_id,
+                                "reservation_status": "rejected",
+                                "reserved_tokens": reservation.reserved_total,
+                                "input_estimate": reservation.input_estimate,
+                                "actual_input_tokens": reported_input,
+                                "budget_overrun_tokens": actual_total - reserved_total,
+                                "attempt": attempt,
+                                **self._model_turn_audit_payload(),
+                                **self._request_index_payload(request_index),
+                            },
+                        )
+                    )
+                    cancelled = False
+                    # 终止事件可能已被 RuntimeWriter 接受；必须等落盘后再传播取消，
+                    # 否则异常清理会把已拒绝的 reservation 误释放。
+                    while not persistence.done():
+                        try:
+                            await asyncio.shield(persistence)
+                        except asyncio.CancelledError:
+                            cancelled = True
+                    persistence.result()
+                    if cancelled:
+                        raise asyncio.CancelledError
+                    raise V11RuntimeContractError(
+                        "model response exceeded token budget"
+                    )
                 if reservation_status == "retrying":
                     await self._emit_model(
                         execution_id or logical_call_id or reservation_id,
@@ -3184,6 +3230,8 @@ class V11Runtime:
                 self._model_reservations.pop(reservation_id, None)
                 self._settled_model_reservations.add(reservation_id)
                 return
+            if actual_total > reserved_total:
+                raise V11RuntimeContractError("model response exceeded token budget")
             self._remaining_token_budget += reserved_total - actual_total
 
     @staticmethod

@@ -1105,7 +1105,7 @@ class InMemoryRuntimeStore:
         from backend.runtime.phases import (
             checkpoint_digest,
             durable_projection_digest,
-            durable_token_usage,
+            durable_remaining_token_budget,
             durable_tool_call_count,
             ensure_phase_precondition,
             phase_profile_for,
@@ -1153,8 +1153,14 @@ class InMemoryRuntimeStore:
                     run_id=run.id,
                     mutation=commit.business_mutation,
                 )
-                consumed_tokens = durable_token_usage(
-                    self._events[run.id], run.id
+                remaining_from_events = (
+                    durable_remaining_token_budget(
+                        self._events[run.id],
+                        run.id,
+                        run.token_budget,
+                    )
+                    if run.token_budget is not None
+                    else None
                 )
             except ValueError as exc:
                 raise RuntimeIntegrityError(str(exc)) from exc
@@ -1167,7 +1173,7 @@ class InMemoryRuntimeStore:
             if (
                 run.token_budget is not None
                 and commit.resume_state.remaining_token_budget
-                != max(0, run.token_budget - consumed_tokens)
+                != remaining_from_events
             ):
                 raise RuntimeIntegrityError(
                     "checkpoint remaining token budget differs from durable consumption"

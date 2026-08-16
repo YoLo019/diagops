@@ -29,7 +29,7 @@ from backend.runtime.phases import (
     checkpoint_digest,
     durable_model_reservations,
     durable_projection_digest,
-    durable_token_usage,
+    durable_remaining_token_budget,
     durable_tool_call_count,
     phase_profile_for,
 )
@@ -1227,7 +1227,16 @@ class RuntimeCoordinator:
             run_id=run.id,
             mutation=None,
         )
-        consumed_tokens = durable_token_usage(self.store.list_events(run.id), run.id)
+        durable_events = self.store.list_events(run.id)
+        remaining_from_events = (
+            durable_remaining_token_budget(
+                durable_events,
+                run.id,
+                run.token_budget,
+            )
+            if run.token_budget is not None
+            else None
+        )
         remaining_tool_budget = resume_state.remaining_tool_budget
         if run.tool_budget is not None:
             remaining_tool_budget = min(
@@ -1238,7 +1247,7 @@ class RuntimeCoordinator:
         if run.token_budget is not None:
             remaining_token_budget = min(
                 remaining_token_budget if remaining_token_budget is not None else 0,
-                max(0, run.token_budget - consumed_tokens),
+                remaining_from_events or 0,
             )
         remaining_model_turns = resume_state.remaining_model_turns
         if run.is_v11:

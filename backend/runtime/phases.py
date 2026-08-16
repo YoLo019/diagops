@@ -480,6 +480,24 @@ def durable_token_usage(events, run_id: str) -> int:
     )
 
 
+def durable_remaining_token_budget(events, run_id: str, token_budget: int) -> int:
+    """从 durable 模型事件计算可恢复的剩余 token 预算。
+
+    rejected 表示 provider 报告的 usage 已越过冻结 reservation，无法证明任何
+    未用额度仍安全，因此恢复时必须保持耗尽。
+    """
+    events = tuple(events)
+    if any(
+        event.run_id == run_id
+        and event.schema_version == 1
+        and str(event.event_type) in {"model.completed", "model.failed"}
+        and event.safe_payload.get("reservation_status") == "rejected"
+        for event in events
+    ):
+        return 0
+    return max(0, token_budget - durable_token_usage(events, run_id))
+
+
 def durable_model_reservations(events, run_id: str) -> dict[str, dict[str, object]]:
     """按事件顺序返回尚未结算的模型 token reservation。"""
     active: dict[str, dict[str, object]] = {}
