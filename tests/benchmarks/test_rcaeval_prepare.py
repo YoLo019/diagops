@@ -295,8 +295,8 @@ def test_runtime_and_label_packages_have_zero_file_overlap(prepared):
 
 def test_opaque_case_ids_are_stable_and_unlinkable(prepared):
     case_ids = [case.case_id for case in prepared.runtime_manifest.cases]
-    assert len(case_ids) == 150
-    assert len(set(case_ids)) == 150
+    assert len(case_ids) == 135
+    assert len(set(case_ids)) == 135
     assert all(case_id.startswith("re2-") for case_id in case_ids)
     for case_id, entry in zip(
         sorted(case_ids),

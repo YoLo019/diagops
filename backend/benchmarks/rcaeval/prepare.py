@@ -320,7 +320,7 @@ def _reject_non_finite_json(text: str, case_id: str, name: str) -> None:
 def _select_partitions(
     cases: list[_SourceCase], seed: str
 ) -> dict[RcaEvalPartition, tuple[str, ...]]:
-    """seeded 选择器：OB/SS 每单元格取哈希最小的一例，TT 保留全部重复。"""
+    """seeded 选择器：OB30 每格取一例，SS15 取 15 格各一例，TT 保留重复。"""
     by_system: dict[RcaEvalSystem, list[_SourceCase]] = {system: [] for system in RcaEvalSystem}
     for case in cases:
         by_system[case.descriptor.system].append(case)
@@ -334,12 +334,21 @@ def _select_partitions(
         for case in by_system[system]:
             key = (case.descriptor.service, case.descriptor.fault)
             cells.setdefault(key, []).append(case)
+        if partition is RcaEvalPartition.SS15:
+            cell_keys = sorted(
+                cells,
+                key=lambda cell: _sha256_bytes(
+                    f"{seed}:cell:{system.value}:{cell[0]}:{cell[1]}".encode()
+                ),
+            )[: EXPECTED_PARTITION_COUNTS[partition]]
+        else:
+            cell_keys = sorted(cells)
         chosen = [
             min(
-                cell_cases,
+                cells[cell],
                 key=lambda case: _sha256_bytes(f"{seed}:{case.case_id}".encode()),
             ).case_id
-            for cell_cases in cells.values()
+            for cell in cell_keys
         ]
         selection[partition] = tuple(sorted(chosen))
     for partition, ids in selection.items():

@@ -47,23 +47,24 @@ class RcaEvalSystem(StrEnum):
 
 
 class RcaEvalPartition(StrEnum):
-    """本地留置分区：OB30 开发、SS30 封存验证、TT90 最终留置。"""
+    """本地留置分区：OB30 开发、SS15 封存验证、TT90 最终留置。"""
 
     OB30 = "ob30"
-    SS30 = "ss30"
+    SS15 = "ss15"
     TT90 = "tt90"
 
 
 SYSTEM_TO_PARTITION: dict[RcaEvalSystem, RcaEvalPartition] = {
     RcaEvalSystem.ONLINE_BOUTIQUE: RcaEvalPartition.OB30,
-    RcaEvalSystem.SOCK_SHOP: RcaEvalPartition.SS30,
+    RcaEvalSystem.SOCK_SHOP: RcaEvalPartition.SS15,
     RcaEvalSystem.TRAIN_TICKET: RcaEvalPartition.TT90,
 }
 
-# 分区契约：OB30/SS30 每单元格 1 例共 30 例，TT90 每单元格 3 次重复共 90 例。
+# 分区契约：OB30 每单元格 1 例共 30 例，SS15 选 15 个单元格各 1 例，
+# TT90 每单元格 3 次重复共 90 例。
 EXPECTED_PARTITION_COUNTS: dict[RcaEvalPartition, int] = {
     RcaEvalPartition.OB30: 30,
-    RcaEvalPartition.SS30: 30,
+    RcaEvalPartition.SS15: 15,
     RcaEvalPartition.TT90: 90,
 }
 
@@ -206,7 +207,7 @@ class LabelManifest(BaseModel):
 
 
 class RcaEvalConfiguration(StrEnum):
-    """SS30/TT90 冻结配置；equal-token 只用于 SS30。"""
+    """SS15/TT90 冻结配置；equal-token 只用于 SS15。"""
 
     SINGLE_INTENDED = "single_intended"
     MULTI_INTENDED = "multi_intended"
@@ -261,7 +262,7 @@ class EndpointCapabilityIdentity(BaseModel):
     result: Literal["passed"] = "passed"
 
 
-def materialize_ss30_configurations(
+def materialize_ss15_configurations(
     *,
     single_budget: int,
     multi_budget: int,
