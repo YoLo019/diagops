@@ -4,7 +4,7 @@ This file is the mutable routing and status entry point for the current version.
 
 It does not override an approved spec or plan, current code contracts, or the long-term product goal and production safety boundary in `AGENT.md`.
 
-Updated: 2026-08-15
+Updated: 2026-08-19
 
 ## Implemented Baseline
 
@@ -41,9 +41,20 @@ Spec status: `approved`（第八轮全量复审 approve_with_followups，两条 
 
 Plan status: `approved`（同 Spec status 校正依据）
 
-Implementation status: `blocked`（M5 T12 capability admission 的三个外部前置——可调用 endpoint/model、process-only credential、绑定干净 HEAD `584b4b0` 的 passed capability artifact——现已具备；正式预算消耗授权与修复链复审决定仍待用户）
+Implementation status: `blocked`（M5 SS15 T12 仍需对协议变更后的干净 HEAD 重新生成 passed capability artifact；endpoint/model 与 process-only credential 由桌面脚本在正式准入前检查；正式预算消耗授权与修复链复审决定仍待用户）
 
-Completion commit: `none`（M5 尚未完成正式 SS30/TT90）
+Completion commit: `none`（M5 尚未完成正式 SS15/TT90）
+
+### M5 SS15 Protocol Amendment (2026-08-19)
+
+上游 RCAEval RE2 Sock Shop 源数据仍固定为 90 cases（5 services × 6 faults ×
+3 repetitions）。本项目的本地封存验证协议已从 SS30 改为 SS15：按冻结 seed
+从 30 个服务/故障单元格选择 15 格，每格再选 1 个 repetition。`OB30` 和
+`TT90` 不变；新包使用新的 custodian root、manifest hash 和 pair ledger。
+此前 `v11-m5-ss30` 的 epoch、数据库和 bundle 仍是只读历史证据，不与 SS15
+拼接，也不被本次协议迁移覆盖。权威设计与实施计划分别见
+`docs/superpowers/specs/2026-08-19-rcaeval-ss15-protocol-design.md` 和
+`docs/superpowers/plans/2026-08-19-rcaeval-ss15-protocol-implementation-plan.md`。
 
 M4 approved baseline: `7539c7fd8b707fc54cf2ed75a7d9fcba13d7618c`
 on `codex/v11-m5`; M4 independent review approved before this worktree was

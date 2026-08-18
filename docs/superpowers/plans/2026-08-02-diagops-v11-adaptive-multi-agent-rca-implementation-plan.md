@@ -1498,6 +1498,17 @@ M1 third-round review (migration/runtime, 2026-08-07): conclusion
 
 ## 11. Approval state
 
+### SS15 protocol amendment (2026-08-19)
+
+The project-local Sock Shop sealed-validation partition is now `SS15`, with 15
+selected cases. The upstream `RE2-SS` source remains the complete 90-case set
+(`5 services × 6 faults × 3 repetitions`); source integrity validation still
+requires all 270 RE2 cases. `OB30` and `TT90` remain unchanged. The SS15 selector
+ranks the 30 service/fault cells by the frozen seed, keeps the lowest 15 cells,
+and selects one repetition per retained cell. The new protocol uses a new
+custodian root and identity; historical SS30 epochs are retained as evidence and
+are not migrated or combined.
+
 - Specification: approved by the user on 2026-08-02 after L22–L30 reuse review.
 - Implementation Plan: independently reviewed with H1–H3/M1–M2 closed; approved
   by the user on 2026-08-02 with authorization to begin execution.
