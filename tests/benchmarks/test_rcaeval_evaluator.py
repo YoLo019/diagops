@@ -46,7 +46,7 @@ def _label(
     service: str,
     fault: str,
     *,
-    partition: RcaEvalPartition = RcaEvalPartition.SS30,
+    partition: RcaEvalPartition = RcaEvalPartition.SS15,
 ) -> LabelEntry:
     return LabelEntry(
         case_id=case_id,
@@ -210,7 +210,7 @@ def test_formal_configuration_contract_rejects_swapped_topology_limits(tmp_path:
 def test_acceptance_policy_rejects_self_consistent_stale_scorer_identity(
     tmp_path: Path,
 ):
-    sealed = _synthetic_ss30_artifact(tmp_path)
+    sealed = _synthetic_ss15_artifact(tmp_path)
     stale_identity = sealed.frozen_identity.model_copy(
         update={"scorer_dependency_hash": "e" * 64}
     )
@@ -382,10 +382,19 @@ def _frozen_bundle(
     prediction: CasePrediction,
     *,
     case_count: int = 90,
+    partition: RcaEvalPartition = RcaEvalPartition.TT90,
 ) -> PredictionBundle:
     budget = EvaluationBudget(
         configuration=configuration,
-        token_budget=4_000 if not configuration.is_multi else 10_000,
+        token_budget=(
+            12_000
+            if configuration
+            in {
+                RcaEvalConfiguration.SINGLE_EQUAL_TOKEN,
+                RcaEvalConfiguration.MULTI_EQUAL_TOKEN,
+            }
+            else 4_000 if not configuration.is_multi else 10_000
+        ),
         max_turns=8,
         tool_budget=8,
         timeout_seconds=120,
@@ -393,7 +402,7 @@ def _frozen_bundle(
         max_rounds=2 if configuration.is_multi else 1,
     )
     bundle = PredictionBundle(
-        partition=RcaEvalPartition.TT90,
+        partition=partition,
         configuration=configuration,
         identity=_identity(),
         budget=budget,
@@ -595,6 +604,51 @@ def test_frozen_bundle_evaluation_and_acceptance_policy(tmp_path: Path):
     ) == set_hash
 
 
+def test_ss15_formal_evaluation_requires_exactly_fifteen_cases(tmp_path: Path):
+    label = _label("re2-aaaaaaaaaaaaaaaa", "checkout", "cpu")
+    bundles = [
+        _frozen_bundle(
+            tmp_path / "complete",
+            configuration,
+            _prediction(label.case_id, "checkout", "cpu"),
+            case_count=15,
+            partition=RcaEvalPartition.SS15,
+        )
+        for configuration in RcaEvalConfiguration
+    ]
+    labels = LabelManifest(
+        runtime_manifest_hash="2" * 64,
+        entries=_formal_labels(label, count=15),
+    )
+    labels.manifest_hash = _manifest_hash(labels)
+
+    artifact = evaluate_bundles(bundles, labels)
+
+    assert artifact.partition is RcaEvalPartition.SS15
+    assert set(artifact.summaries) == set(RcaEvalConfiguration)
+    assert {summary.case_count for summary in artifact.summaries.values()} == {15}
+
+    incomplete = _frozen_bundle(
+        tmp_path / "incomplete",
+        RcaEvalConfiguration.SINGLE_INTENDED,
+        _prediction(label.case_id, "checkout", "cpu"),
+        case_count=14,
+        partition=RcaEvalPartition.SS15,
+    )
+    with pytest.raises(ValueError, match="case count|cardinality|15"):
+        evaluate_bundles(
+            [
+                incomplete,
+                *[
+                    bundle
+                    for bundle in bundles
+                    if bundle.configuration != RcaEvalConfiguration.SINGLE_INTENDED
+                ],
+            ],
+            labels,
+        )
+
+
 def test_formal_tt90_rejects_one_case_bundle_before_scoring(tmp_path: Path):
     label = _label(
         "re2-aaaaaaaaaaaaaaaa",
@@ -656,7 +710,7 @@ def test_acceptance_freeze_rejects_nonformal_summary_cardinality(tmp_path: Path)
     )
     malformed.artifact_hash = _artifact_hash(malformed)
 
-    with pytest.raises(ValueError, match="cardinality|30"):
+    with pytest.raises(ValueError, match="cardinality|15"):
         freeze_acceptance_policy(
             sealed_validation=malformed,
             tt90_manifest_hash="2" * 64,
@@ -706,7 +760,7 @@ def test_acceptance_rejects_tampered_policy_wrong_partition_and_mixed_identity(
             manual_audit=_passing_audit(multi)[1],
             frozen_bundles=[multi],
         )
-    wrong_partition = artifact.model_copy(update={"partition": RcaEvalPartition.SS30})
+    wrong_partition = artifact.model_copy(update={"partition": RcaEvalPartition.SS15})
     wrong_partition.artifact_hash = _artifact_hash(wrong_partition)
     with pytest.raises(ValueError, match="TT90"):
         evaluate_acceptance(
@@ -818,14 +872,14 @@ def _manifest_hash(manifest: LabelManifest) -> str:
 def _sealed_validation(artifact, *, multi_exact: float | None = None):
     single_summary = artifact.summaries[RcaEvalConfiguration.SINGLE_INTENDED]
     multi_summary = artifact.summaries[RcaEvalConfiguration.MULTI_INTENDED]
-    single_summary = single_summary.model_copy(update={"case_count": 30})
-    multi_summary = multi_summary.model_copy(update={"case_count": 30})
+    single_summary = single_summary.model_copy(update={"case_count": 15})
+    multi_summary = multi_summary.model_copy(update={"case_count": 15})
     if multi_exact is not None:
         multi_summary = multi_summary.model_copy(update={"exact_top1": multi_exact})
     intended_pair = artifact.paired[0]
     sealed = artifact.model_copy(
         update={
-            "partition": RcaEvalPartition.SS30,
+            "partition": RcaEvalPartition.SS15,
             "prediction_bundle_hashes": {
                 **artifact.prediction_bundle_hashes,
                 RcaEvalConfiguration.SINGLE_EQUAL_TOKEN: "c" * 64,
@@ -876,7 +930,7 @@ def _passing_audit(bundle: PredictionBundle):
     return export, freeze_manual_audit(export, decisions)
 
 
-def _synthetic_ss30_artifact(tmp_path: Path):
+def _synthetic_ss15_artifact(tmp_path: Path):
     label = _label(
         "re2-aaaaaaaaaaaaaaaa",
         "checkout",
@@ -928,10 +982,10 @@ def test_cli_freezes_policy_and_archives_tt90_acceptance(tmp_path: Path):
         ).encode("utf-8")
     ).hexdigest()
     tt90 = evaluate_bundles([single, multi], labels)
-    ss30 = _sealed_validation(tt90)
+    ss15 = _sealed_validation(tt90)
     audit_export, manual_audit = _passing_audit(multi)
     paths = {
-        "sealed": tmp_path / "ss30-evaluation.json",
+        "sealed": tmp_path / "ss15-evaluation.json",
         "policy": tmp_path / "acceptance-policy.json",
         "tt90": tmp_path / "tt90-evaluation.json",
         "export": tmp_path / "evidence-audit-export.json",
@@ -939,7 +993,7 @@ def test_cli_freezes_policy_and_archives_tt90_acceptance(tmp_path: Path):
         "result": tmp_path / "acceptance-result.json",
     }
     for key, artifact in (
-        ("sealed", ss30),
+        ("sealed", ss15),
         ("tt90", tt90),
         ("export", audit_export),
         ("audit", manual_audit),
@@ -970,11 +1024,11 @@ def test_cli_freezes_policy_and_archives_tt90_acceptance(tmp_path: Path):
         paths["result"].read_text(encoding="utf-8")
     )
 
-    assert policy.sealed_validation_artifact_hash == ss30.artifact_hash
+    assert policy.sealed_validation_artifact_hash == ss15.artifact_hash
     assert result.decision.passed is True
 
 
-def test_policy_rejects_incomplete_ss30_artifact(tmp_path: Path):
+def test_policy_rejects_incomplete_ss15_artifact(tmp_path: Path):
     label = _label(
         "re2-aaaaaaaaaaaaaaaa",
         "checkout",
@@ -1001,7 +1055,7 @@ def test_policy_rejects_incomplete_ss30_artifact(tmp_path: Path):
         ).encode("utf-8")
     ).hexdigest()
     incomplete = evaluate_bundles([single, multi], labels).model_copy(
-        update={"partition": RcaEvalPartition.SS30}
+        update={"partition": RcaEvalPartition.SS15}
     )
     incomplete.artifact_hash = _artifact_hash(incomplete)
 

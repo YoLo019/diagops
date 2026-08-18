@@ -555,7 +555,7 @@ def validate_configuration_set(
     configurations: dict[RcaEvalConfiguration, EvaluationBudget],
 ) -> None:
     if set(configurations) != set(RcaEvalConfiguration):
-        raise ValueError("SS30 requires exactly four configurations")
+        raise ValueError("SS15 requires exactly four configurations")
     for key, value in configurations.items():
         if value.configuration != key:
             raise ValueError("configuration identity mismatch")
@@ -610,7 +610,7 @@ class RcaEvalCaseRunner:
         case: RuntimeCaseEntry,
         budget: EvaluationBudget,
     ) -> CasePrediction:
-        if case.partition.value not in {"ob30", "ss30", "tt90"}:
+        if case.partition.value not in {"ob30", "ss15", "tt90"}:
             raise ValueError("unsupported RCAEval partition")
         started = perf_counter()
         case_dir = self.runtime_package / "cases" / case.case_id

@@ -1,3 +1,4 @@
+import argparse
 import ast
 import hashlib
 import json
@@ -43,6 +44,33 @@ OPAQUE_ID = "re2-" + "a" * 16
 REVISION = "0123456789abcdef0123456789abcdef01234567"
 
 
+def test_prediction_cli_uses_ss15_and_rejects_deleted_ss30():
+    from backend.benchmarks.rcaeval.__main__ import _add_prediction_arguments
+
+    parser = argparse.ArgumentParser()
+    _add_prediction_arguments(parser)
+    common = [
+        "--runtime",
+        "runtime",
+        "--configuration",
+        "single_intended",
+        "--base-url",
+        "https://endpoint.invalid/v1",
+        "--capability-artifact",
+        "capability.json",
+        "--database",
+        "runtime.db",
+        "--output",
+        "output",
+        "--token-budget",
+        "4000",
+    ]
+
+    assert parser.parse_args(["--partition", "ss15", *common]).partition == "ss15"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--partition", "ss30", *common])
+
+
 def _write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
@@ -68,7 +96,7 @@ def _runtime_manifest() -> RuntimeManifest:
         selection_seed="synthetic-seed",
         partition_counts={
             RcaEvalPartition.OB30: 1,
-            RcaEvalPartition.SS30: 0,
+            RcaEvalPartition.SS15: 0,
             RcaEvalPartition.TT90: 0,
         },
         cases=[
@@ -148,7 +176,7 @@ def _seed_pair_ledger(predictions_root: Path, partition: str) -> None:
 
     configurations = (
         tuple(item.value for item in RcaEvalConfiguration)
-        if partition == "ss30"
+        if partition == "ss15"
         else ("single_intended", "multi_intended")
     )
     manifest = create_custodian_manifest(
@@ -1424,7 +1452,7 @@ def test_prediction_launcher_sanitizes_child_and_never_passes_label_locator(
         SimpleNamespace(
                 runtime=tmp_path / "runtime",
                 pair_root=pair_root,
-            partition="ss30",
+            partition="ss15",
             configuration="single_intended",
             base_url="https://endpoint.invalid/v1",
             capability_artifact=tmp_path / "capability.json",
@@ -1517,7 +1545,7 @@ def test_prediction_completion_failure_invalidates_pair_without_future_recovery(
                 runtime=tmp_path / "runtime",
                 pair_root=pair_root,
                 custodian_manifest=manifest,
-                partition="ss30",
+                partition="ss15",
                 configuration="single_intended",
                 base_url="https://endpoint.invalid/v1",
                 capability_artifact=tmp_path / "capability.json",
@@ -1620,7 +1648,7 @@ def test_prediction_launcher_heartbeats_lease_while_child_runs(
             runtime=tmp_path / "runtime",
             pair_root=pair_root,
             custodian_manifest=manifest,
-            partition="ss30",
+            partition="ss15",
             configuration="single_intended",
             base_url="https://endpoint.invalid/v1",
             capability_artifact=tmp_path / "capability.json",
@@ -1780,7 +1808,7 @@ def test_launch_preflight_failure_never_consumes_reauthorization_token(
                 runtime=tmp_path / "runtime",
                 pair_root=pair_root,
                 custodian_manifest=manifest,
-                partition="ss30",
+                partition="ss15",
                 configuration="single_intended",
                 base_url="https://endpoint.invalid/v1",
                 capability_artifact=tmp_path / "capability.json",

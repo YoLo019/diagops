@@ -67,14 +67,14 @@ def main() -> None:
     )
     freeze_set.add_argument("--root", type=Path, required=True)
     freeze_set.add_argument("--custodian-manifest", type=Path, required=True)
-    freeze_set.add_argument("--partition", choices=("ss30", "tt90"), required=True)
+    freeze_set.add_argument("--partition", choices=("ss15", "tt90"), required=True)
 
     evaluate = commands.add_parser(
         "evaluate", help="在隔离子进程中只打开一次 labels 并评估冻结 prediction set"
     )
     evaluate.add_argument("--predictions-root", type=Path, required=True)
     evaluate.add_argument("--custodian-manifest", type=Path, required=True)
-    evaluate.add_argument("--partition", choices=("ss30", "tt90"), required=True)
+    evaluate.add_argument("--partition", choices=("ss15", "tt90"), required=True)
     evaluate.add_argument("--prediction-set-hash", required=True)
     evaluate.add_argument("--label-package", type=Path, required=True)
     evaluate.add_argument("--runtime-manifest-hash", required=True)
@@ -85,7 +85,7 @@ def main() -> None:
     evaluate.add_argument("--output-dir", type=Path, required=True)
 
     freeze_policy = commands.add_parser(
-        "freeze-policy", help="从冻结 SS30 evaluation 派生并冻结 TT90 acceptance policy"
+        "freeze-policy", help="从冻结 SS15 evaluation 派生并冻结 TT90 acceptance policy"
     )
     freeze_policy.add_argument("--sealed-validation", type=Path, required=True)
     freeze_policy.add_argument("--tt90-manifest-hash", required=True)
@@ -140,7 +140,7 @@ def main() -> None:
 
 def _add_prediction_arguments(parser) -> None:
     parser.add_argument("--runtime", type=Path, required=True)
-    parser.add_argument("--partition", choices=("ob30", "ss30", "tt90"), required=True)
+    parser.add_argument("--partition", choices=("ob30", "ss15", "tt90"), required=True)
     parser.add_argument(
         "--configuration",
         choices=(
@@ -514,9 +514,9 @@ def _freeze_set(arguments) -> None:
     from backend.benchmarks.rcaeval.runner import freeze_prediction_set
     from backend.services.source_identity import reject_reparse_path
 
-    if arguments.partition == "ss30":
+    if arguments.partition == "ss15":
         configurations = set(RcaEvalConfiguration)
-        count = 30
+        count = 15
     else:
         configurations = {
             RcaEvalConfiguration.SINGLE_INTENDED,
@@ -556,7 +556,7 @@ def _evaluate(arguments) -> None:
 
     configurations = (
         list(RcaEvalConfiguration)
-        if arguments.partition == "ss30"
+        if arguments.partition == "ss15"
         else [
             RcaEvalConfiguration.SINGLE_INTENDED,
             RcaEvalConfiguration.MULTI_INTENDED,
@@ -768,7 +768,7 @@ def _write_new_artifact(path: Path, artifact) -> None:
 def _formal_configuration_names(partition: str) -> tuple[str, ...]:
     from backend.benchmarks.rcaeval.models import RcaEvalConfiguration
 
-    if partition == "ss30":
+    if partition == "ss15":
         return tuple(item.value for item in RcaEvalConfiguration)
     if partition == "tt90":
         return ("single_intended", "multi_intended")

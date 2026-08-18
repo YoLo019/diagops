@@ -44,7 +44,7 @@ BOOTSTRAP_SAMPLES = 10_000
 FORMAL_CASE_COUNTS = {
     partition.value: count
     for partition, count in EXPECTED_PARTITION_COUNTS.items()
-    if partition.value in {"ss30", "tt90"}
+    if partition.value in {"ss15", "tt90"}
 }
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
@@ -279,8 +279,8 @@ def freeze_acceptance_policy(
     sealed_validation: EvaluationArtifact,
     tt90_manifest_hash: str,
 ) -> AcceptancePolicy:
-    if sealed_validation.partition.value != "ss30":
-        raise ValueError("acceptance policy requires the sealed SS30 evaluation")
+    if sealed_validation.partition.value != "ss15":
+        raise ValueError("acceptance policy requires the sealed SS15 evaluation")
     _validate_artifact_hash(sealed_validation)
     _validate_scorer_dependency_identity(
         sealed_validation.frozen_identity.scorer_dependency_hash
@@ -292,10 +292,10 @@ def freeze_acceptance_policy(
     ):
         raise ValueError("acceptance policy requires all four configurations")
     if any(
-        summary.case_count != FORMAL_CASE_COUNTS["ss30"]
+        summary.case_count != FORMAL_CASE_COUNTS["ss15"]
         for summary in sealed_validation.summaries.values()
     ):
-        raise ValueError("acceptance policy SS30 cardinality is not frozen at 30")
+        raise ValueError("acceptance policy SS15 cardinality is not frozen at 15")
     expected_pairs = {
         (
             RcaEvalConfiguration.SINGLE_INTENDED,
@@ -310,7 +310,7 @@ def freeze_acceptance_policy(
         (item.single_configuration, item.multi_configuration)
         for item in sealed_validation.paired
     } != expected_pairs:
-        raise ValueError("acceptance policy requires both SS30 paired statistics")
+        raise ValueError("acceptance policy requires both SS15 paired statistics")
     if (
         sealed_validation.frozen_identity.runtime_manifest_hash
         != sealed_validation.runtime_manifest_hash
@@ -474,7 +474,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--ledger", type=Path, required=True)
     parser.add_argument("--custodian-manifest", type=Path, required=True)
-    parser.add_argument("--partition", choices=("ss30", "tt90"), required=True)
+    parser.add_argument("--partition", choices=("ss15", "tt90"), required=True)
     parser.add_argument("--prediction-set-hash", required=True)
     parser.add_argument("--audit-export", type=Path, required=True)
     parser.add_argument("--manual-audit", type=Path, required=True)
@@ -716,8 +716,8 @@ def _validate_formal_configuration_set(
         RcaEvalConfiguration.SINGLE_INTENDED,
         RcaEvalConfiguration.MULTI_INTENDED,
     }
-    expected = set(RcaEvalConfiguration) if partition == "ss30" else intended
-    if partition not in {"ss30", "tt90"} or set(bundles) != expected:
+    expected = set(RcaEvalConfiguration) if partition == "ss15" else intended
+    if partition not in {"ss15", "tt90"} or set(bundles) != expected:
         raise ValueError("formal evaluation configuration set is incomplete")
     budgets = {name: bundle.budget for name, bundle in bundles.items()}
     single = budgets[RcaEvalConfiguration.SINGLE_INTENDED]
@@ -735,7 +735,7 @@ def _validate_formal_configuration_set(
             configuration
         ]:
             raise ValueError("formal evaluation topology limits are not frozen")
-    if partition == "ss30":
+    if partition == "ss15":
         single_equal = budgets[RcaEvalConfiguration.SINGLE_EQUAL_TOKEN]
         multi_equal = budgets[RcaEvalConfiguration.MULTI_EQUAL_TOKEN]
         if single_equal.token_budget != single.token_budget * 3:

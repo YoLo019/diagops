@@ -13,7 +13,7 @@ from backend.benchmarks.rcaeval.models import (
     RcaEvalPartition,
     RuntimeCaseEntry,
     RuntimeManifest,
-    materialize_ss30_configurations,
+    materialize_ss15_configurations,
 )
 from backend.benchmarks.rcaeval.providers import incident_event_for_case
 from backend.benchmarks.rcaeval.runner import (
@@ -91,8 +91,8 @@ def test_single_control_output_is_a_valid_strict_json_schema():
     assert_strict(schema)
 
 
-def test_ss30_materializes_four_fair_configurations():
-    configurations = materialize_ss30_configurations(
+def test_ss15_materializes_four_fair_configurations():
+    configurations = materialize_ss15_configurations(
         single_budget=4_000,
         multi_budget=10_000,
         max_turns=8,
@@ -112,7 +112,7 @@ def test_ss30_materializes_four_fair_configurations():
 
 
 def test_configuration_set_rejects_over_three_x_and_mixed_non_token_limits():
-    configurations = materialize_ss30_configurations(
+    configurations = materialize_ss15_configurations(
         single_budget=4_000,
         multi_budget=10_000,
         max_turns=8,
@@ -125,7 +125,7 @@ def test_configuration_set_rejects_over_three_x_and_mixed_non_token_limits():
     with pytest.raises(ValueError, match="3x"):
         validate_configuration_set(configurations)
 
-    configurations = materialize_ss30_configurations(
+    configurations = materialize_ss15_configurations(
         single_budget=4_000,
         multi_budget=10_000,
         max_turns=8,
@@ -160,7 +160,7 @@ def _write_runtime_package(root: Path) -> RuntimeCaseEntry:
         selection_seed="fixture-seed",
         partition_counts={
             RcaEvalPartition.OB30: 1,
-            RcaEvalPartition.SS30: 0,
+            RcaEvalPartition.SS15: 0,
             RcaEvalPartition.TT90: 0,
         },
         cases=[case],
@@ -704,7 +704,7 @@ def test_prediction_event_exposes_no_dataset_or_system_identity(tmp_path: Path):
 
 
 def test_configuration_set_rejects_flattened_and_swapped_topology():
-    base = materialize_ss30_configurations(
+    base = materialize_ss15_configurations(
         single_budget=4_000,
         multi_budget=10_000,
         max_turns=8,
@@ -719,7 +719,7 @@ def test_configuration_set_rejects_flattened_and_swapped_topology():
         validate_configuration_set(flattened)
 
     swapped = dict(
-        materialize_ss30_configurations(
+        materialize_ss15_configurations(
             single_budget=4_000,
             multi_budget=10_000,
             max_turns=8,
@@ -1047,7 +1047,7 @@ def test_launch_preflight_catches_construction_rejection_before_token():
 
 
 def test_launch_preflight_covers_multi_configuration():
-    # 复审 low-3：multi 分支（SS30 后续侧的正式配置）同参数过构造守卫。
+    # 复审 low-3：multi 分支（SS15 后续侧的正式配置）同参数过构造守卫。
     from types import SimpleNamespace
 
     from backend.benchmarks.rcaeval.__main__ import _preflight_launch_construction

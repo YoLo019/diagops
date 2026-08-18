@@ -71,7 +71,7 @@ def test_custodian_manifest_cannot_be_rebound_to_another_root(tmp_path):
     )
     ledger = CustodianPairLedger.from_manifest(manifest)
     ledger.initialize(
-        partition="ss30",
+        partition="ss15",
         prediction_set_hash="a" * 64,
         expected_sides=("single_intended", "multi_intended"),
     )
@@ -85,7 +85,7 @@ def test_custodian_manifest_cannot_be_rebound_to_another_root(tmp_path):
 
     with pytest.raises(ValueError, match="custodian manifest"):
         CustodianPairLedger(copied_root / "pair-ledger.sqlite3").initialize(
-            partition="ss30",
+            partition="ss15",
             prediction_set_hash="a" * 64,
             expected_sides=("single_intended", "multi_intended"),
         )
