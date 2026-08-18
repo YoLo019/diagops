@@ -155,6 +155,31 @@ def _expected_selection(system: RcaEvalSystem) -> set[str]:
     return selected
 
 
+def _expected_ss15_selection(system: RcaEvalSystem) -> set[str]:
+    taxonomy = TAXONOMY[system]
+    cells = [
+        (service, fault)
+        for service in taxonomy.services
+        for fault in taxonomy.faults
+    ]
+    selected_cells = sorted(
+        cells,
+        key=lambda cell: _sha256_bytes(
+            f"{TEST_SEED}:cell:{system.value}:{cell[0]}:{cell[1]}".encode()
+        ),
+    )[:15]
+    return {
+        min(
+            (
+                _case_id(system, service, fault, repetition)
+                for repetition in (1, 2, 3)
+            ),
+            key=lambda item: _sha256_bytes(f"{TEST_SEED}:{item}".encode()),
+        )
+        for service, fault in selected_cells
+    }
+
+
 def _package_files(root: Path) -> dict[str, bytes]:
     return {
         path.relative_to(root).as_posix(): path.read_bytes()
@@ -167,7 +192,7 @@ def test_prepare_partition_counts_and_cell_coverage(prepared):
     manifest = prepared.runtime_manifest
     assert manifest.partition_counts == {
         RcaEvalPartition.OB30: 30,
-        RcaEvalPartition.SS30: 30,
+        RcaEvalPartition.SS15: 15,
         RcaEvalPartition.TT90: 90,
     }
     labels_by_partition: dict[RcaEvalPartition, list] = {
@@ -177,17 +202,25 @@ def test_prepare_partition_counts_and_cell_coverage(prepared):
         labels_by_partition[entry.partition].append(entry)
     for partition, system in (
         (RcaEvalPartition.OB30, RcaEvalSystem.ONLINE_BOUTIQUE),
-        (RcaEvalPartition.SS30, RcaEvalSystem.SOCK_SHOP),
+        (RcaEvalPartition.SS15, RcaEvalSystem.SOCK_SHOP),
     ):
         entries = labels_by_partition[partition]
-        assert len(entries) == 30
+        assert len(entries) == 30 if partition is RcaEvalPartition.OB30 else 15
         cells = {(entry.service, entry.fault) for entry in entries}
-        assert cells == {
-            (service, fault)
-            for service in TAXONOMY[system].services
-            for fault in TAXONOMY[system].faults
-        }
-        assert {entry.source_case_id for entry in entries} == _expected_selection(system)
+        if partition is RcaEvalPartition.SS15:
+            assert len(cells) == 15
+            assert {entry.source_case_id for entry in entries} == _expected_ss15_selection(
+                system
+            )
+        else:
+            assert cells == {
+                (service, fault)
+                for service in TAXONOMY[system].services
+                for fault in TAXONOMY[system].faults
+            }
+            assert {entry.source_case_id for entry in entries} == _expected_selection(
+                system
+            )
         assert all(entry.repetition in (1, 2, 3) for entry in entries)
     tt_entries = labels_by_partition[RcaEvalPartition.TT90]
     assert len(tt_entries) == 90
@@ -491,28 +524,28 @@ def test_inspect_reports_selection_without_writing(source_root, pin_path, tmp_pa
     assert report.source_case_count == EXPECTED_SOURCE_CASE_COUNT
     assert report.partition_counts == {
         RcaEvalPartition.OB30: 30,
-        RcaEvalPartition.SS30: 30,
+        RcaEvalPartition.SS15: 15,
         RcaEvalPartition.TT90: 90,
     }
     assert report.selected_source_ids[RcaEvalPartition.OB30] == sorted(
         _expected_selection(RcaEvalSystem.ONLINE_BOUTIQUE)
     )
-    assert report.selected_source_ids[RcaEvalPartition.SS30] == sorted(
-        _expected_selection(RcaEvalSystem.SOCK_SHOP)
+    assert report.selected_source_ids[RcaEvalPartition.SS15] == sorted(
+        _expected_ss15_selection(RcaEvalSystem.SOCK_SHOP)
     )
     assert len(report.selected_source_ids[RcaEvalPartition.TT90]) == 90
     assert not (tmp_path / "out").exists()
 
 
 def test_selector_matches_frozen_golden_vector(source_root, pin_path):
-    golden_path = Path(__file__).parent / "fixtures" / "rcaeval-selector-golden-v1.json"
+    golden_path = Path(__file__).parent / "fixtures" / "rcaeval-selector-golden-v2.json"
     golden = json.loads(golden_path.read_text(encoding="utf-8"))
     report = inspect_source(source_root, load_pin(pin_path))
 
-    assert golden["schema_version"] == "rcaeval-selector-golden-v1"
+    assert golden["schema_version"] == "rcaeval-selector-golden-v2"
     assert golden["selection_seed"] == TEST_SEED
     assert {
         partition.value: source_ids
         for partition, source_ids in report.selected_source_ids.items()
-        if partition in {RcaEvalPartition.OB30, RcaEvalPartition.SS30}
+        if partition in {RcaEvalPartition.OB30, RcaEvalPartition.SS15}
     } == golden["selected_source_ids"]
