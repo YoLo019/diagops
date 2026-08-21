@@ -1,7 +1,7 @@
 import re
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
@@ -48,13 +48,17 @@ class AgentExecutionStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+_SELECTED_SKILL_PATTERN = r"^[A-Za-z0-9_.-]{1,64}@[A-Za-z0-9_.-]{1,32}$"
+SelectedSkill = Annotated[str, Field(pattern=_SELECTED_SKILL_PATTERN)]
+
+
 class LeadDecision(BaseModel):
     action: LeadAction
     summary: str = Field(min_length=1, max_length=512)
     task_ids: list[str] = Field(default_factory=list, max_length=3)
     candidate_ids: list[str] = Field(default_factory=list, max_length=32)
     evidence_ids: list[str] = Field(default_factory=list, max_length=32)
-    selected_skills: list[str] = Field(default_factory=list, max_length=4)
+    selected_skills: list[SelectedSkill] = Field(default_factory=list, max_length=4)
     stop_reason: str | None = Field(default=None, max_length=256)
 
     @model_validator(mode="after")
@@ -64,7 +68,7 @@ class LeadDecision(BaseModel):
         if len(set(self.candidate_ids)) != len(self.candidate_ids):
             raise ValueError("Lead decision candidate_ids must be unique")
         if any(
-            re.fullmatch(r"[A-Za-z0-9_.-]{1,64}@[A-Za-z0-9_.-]{1,32}", item)
+            re.fullmatch(_SELECTED_SKILL_PATTERN, item)
             is None
             for item in self.selected_skills
         ):

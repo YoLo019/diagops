@@ -75,6 +75,7 @@ from backend.domain.agent_plan import (
     DiagnosisTask,
     DiagnosisTaskType,
     LeadDecision,
+    SelectedSkill,
 )
 from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem, EvidenceStatus
@@ -156,7 +157,7 @@ class LeadDecisionDraft(BaseModel):
     task_ids: list[str] = Field(default_factory=list, max_length=3)
     candidate_ids: list[str] = Field(default_factory=list, max_length=32)
     evidence_ids: list[str] = Field(default_factory=list, max_length=32)
-    selected_skills: list[str] = Field(default_factory=list, max_length=4)
+    selected_skills: list[SelectedSkill] = Field(default_factory=list, max_length=4)
     stop_reason: str | None = Field(default=None, max_length=256)
 
 
@@ -2827,7 +2828,9 @@ class V11Runtime:
             "remaining_token_budget": self._remaining_token_budget,
             "rule": (
                 "Persist one to three bounded general Investigator tasks; "
-                "do not conclude during planning."
+                "do not conclude during planning. selected_skills must contain "
+                "only exact skill identifiers from the skills list in name@version "
+                "form, or be empty."
             ),
         }
         return json.dumps(redact_value(payload), ensure_ascii=False, sort_keys=True)
@@ -3776,6 +3779,7 @@ def _evidence_projection(item: EvidenceItem) -> dict[str, Any]:
 
 def _skill_projection(skill: DiagnosticSkill) -> dict[str, Any]:
     return {
+        "identifier": f"{skill.name}@{skill.version}",
         "name": skill.name,
         "version": skill.version,
         "when_to_use": skill.when_to_use,

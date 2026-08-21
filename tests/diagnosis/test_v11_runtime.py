@@ -153,6 +153,43 @@ def test_v11_model_output_types_are_valid_strict_json_schemas(output_type):
     _assert_explicit_schema_semantics(schema)
 
 
+def test_lead_planning_schema_constrains_selected_skill_identifiers():
+    schema = AgentOutputSchema(
+        LeadPlanningOutput, strict_json_schema=True
+    ).json_schema()
+    selected_skills = schema["$defs"]["LeadDecision"]["properties"][
+        "selected_skills"
+    ]["items"]
+
+    assert selected_skills["pattern"] == (
+        r"^[A-Za-z0-9_.-]{1,64}@[A-Za-z0-9_.-]{1,32}$"
+    )
+
+
+def test_single_control_schema_constrains_selected_skill_identifiers():
+    schema = AgentOutputSchema(
+        V11SingleControlOutput, strict_json_schema=True
+    ).json_schema()
+    selected_skills = schema["$defs"]["LeadDecisionDraft"]["properties"][
+        "selected_skills"
+    ]["items"]
+
+    assert selected_skills["pattern"] == (
+        r"^[A-Za-z0-9_.-]{1,64}@[A-Za-z0-9_.-]{1,32}$"
+    )
+
+
+def test_lead_prompt_exposes_exact_skill_identifiers():
+    prompt = json.loads(
+        V11Runtime(model=None)._lead_prompt(_event(), ("read_logs",), 8)
+    )
+
+    assert [item["identifier"] for item in prompt["skills"]] == [
+        f"{skill.name}@{skill.version}" for skill in DIAGNOSTIC_SKILLS
+    ]
+    assert "name@version" in prompt["rule"]
+
+
 def test_single_control_planning_draft_tolerates_inconclusive_with_candidates():
     payload = {
         "planning": {
