@@ -7,7 +7,6 @@ import hashlib
 import json
 import logging
 import math
-import traceback
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -92,7 +91,9 @@ from backend.runtime.phase_executor import DiagnosisPhaseExecutor
 from backend.runtime.sqlite_store import SQLiteRuntimeStore
 from backend.runtime.telemetry import RuntimeTelemetry
 from backend.runtime.writer import RuntimeWriter
-from backend.safety.redaction import redact_text
+from backend.safety.redaction import (
+    safe_exception_diagnostic as _safe_exception_diagnostic,
+)
 from backend.services.source_identity import reject_reparse_path, resolve_source_identity
 from backend.services.v11_projection import ensure_v11_projection_owner
 from backend.tools.provider_tools import VerifiedMemoryLookup, build_provider_tool_registry
@@ -102,30 +103,6 @@ PROMPT_VERSION = "v11-rcaeval-v3"
 EMPTY_MEMORY_IDENTITY = {"schema_version": "empty-run-owned-memory-v1", "entries": []}
 
 logger = logging.getLogger(__name__)
-
-
-def _safe_exception_diagnostic(exc: BaseException, repository_root: Path) -> dict[str, str]:
-    text = " ".join(redact_text(str(exc)).split())
-    if len(text) > 256:
-        marker = text.find(" validation error")
-        if marker != -1:
-            text = f"{text[:64]} ... {text[marker:marker + 186]}"
-        else:
-            text = f"{text[:187]} ... {text[-64:]}"
-    message = text
-    location = "unknown"
-    for frame in reversed(traceback.extract_tb(exc.__traceback__)):
-        try:
-            relative = Path(frame.filename).resolve().relative_to(repository_root.resolve())
-        except ValueError:
-            continue
-        location = f"{relative.as_posix()}:{frame.lineno}"
-        break
-    return {
-        "exception_type": type(exc).__name__[:128],
-        "message": message,
-        "location": location,
-    }
 
 
 def _single_control_planning(

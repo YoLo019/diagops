@@ -11,9 +11,11 @@ import asyncio
 import copy
 import inspect
 import json
+import logging
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -95,12 +97,14 @@ from backend.domain.runtime import (
     validate_v11_execution_contract,
 )
 from backend.runtime.concurrency import RunStepGate
-from backend.safety.redaction import redact_value
+from backend.safety.redaction import redact_value, safe_exception_diagnostic
 from backend.tools.provider_tools import (
     VerifiedMemoryLookup,
     current_investigation_scope,
 )
 from backend.tools.registry import ToolRegistry, agent_manifest_hash
+
+logger = logging.getLogger(__name__)
 
 
 class V11RuntimeContractError(ValueError):
@@ -874,7 +878,15 @@ class V11Runtime:
                 )
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
+            diagnostic = safe_exception_diagnostic(exc, Path.cwd())
+            logger.warning(
+                "v11 phase failed phase=%s exception_type=%s message=%s location=%s",
+                phase.value,
+                diagnostic["exception_type"],
+                diagnostic["message"],
+                diagnostic["location"],
+            )
             self._terminalize_unexpected_failure(repository, investigation_id)
             raise
 

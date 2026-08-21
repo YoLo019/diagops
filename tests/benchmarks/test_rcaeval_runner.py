@@ -210,6 +210,26 @@ def _failing_single_turn(**kwargs):
     )
 
 
+def _invalid_multi_turn(**kwargs):
+    assert kwargs["output_type"].__name__ == "LeadPlanningOutput"
+    return {
+        "decision": {
+            "action": "investigate",
+            "summary": "Inspect bounded offline evidence.",
+            "task_ids": ["wrong-task-id"],
+        },
+        "tasks": [
+            {
+                "id": "multi-task",
+                "title": "Inspect evidence",
+                "description": "Use the frozen read-only tools.",
+                "tool_names": ["read_logs"],
+                "information_gap": "affected service and mechanism",
+            }
+        ],
+    }
+
+
 def _inconclusive_single_turn(**kwargs):
     output_type = kwargs["output_type"].__name__
     if output_type == "V11SingleControlOutput":
@@ -645,6 +665,52 @@ def test_single_control_logs_safe_exception_diagnostic(tmp_path: Path, caplog):
     assert "exception_type=ValueError" in caplog.text
     assert "tests/benchmarks/test_rcaeval_runner.py:" in caplog.text
     assert "sk-abcdefghijklmnopqrstuvwxyz" not in caplog.text
+
+
+def test_multi_control_logs_safe_exception_diagnostic(tmp_path: Path, caplog):
+    runtime_package = tmp_path / "runtime"
+    case = _write_runtime_package(runtime_package)
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'runtime.db'}")
+    initialize_database(engine)
+    repository = SQLiteInvestigationRepository(engine)
+    runtime_store = SQLiteRuntimeStore(engine, repository)
+    runner = RcaEvalCaseRunner(
+        runtime_package=runtime_package,
+        model="bounded-test-model",
+        capability=EndpointCapabilityIdentity(
+            provider="deepseek",
+            model="bounded-test-model",
+            api_mode="chat_completions",
+            endpoint_id="bounded-test-endpoint",
+            artifact_hash="d" * 64,
+        ),
+        repository=repository,
+        runtime_store=runtime_store,
+        turn=_invalid_multi_turn,
+    )
+    budget = EvaluationBudget(
+        configuration=RcaEvalConfiguration.MULTI_INTENDED,
+        token_budget=10_000,
+        max_turns=8,
+        tool_budget=8,
+        timeout_seconds=120,
+        max_investigators=3,
+        max_rounds=2,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        prediction = runner.run_case(case, budget)
+
+    assert prediction.completed is False
+    assert "v11 phase failed phase=lead_planning" in caplog.text
+    assert "exception_type=V11RuntimeContractError" in caplog.text
+    assert "backend/diagnosis/v11_runtime.py:" in caplog.text
+    assert "sk-abcdefghijklmnopqrstuvwxyz" not in caplog.text
+    persisted = runtime_store.get_run(prediction.runtime_run_id)
+    assert any(
+        item.event_type == RuntimeEventType.MODEL_COMPLETED
+        for item in runtime_store.list_events(persisted.id)
+    )
 
 
 def test_multi_configuration_uses_same_persisted_production_entry(tmp_path: Path):

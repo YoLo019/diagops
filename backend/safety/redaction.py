@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import html
 import re
+import traceback
+from pathlib import Path
 from typing import Any, TypeVar
 
 from pydantic import BaseModel
@@ -68,6 +70,32 @@ _FAILURE_LABELS = {
 
 class UnsafePersistenceValue(ValueError):
     """表示写入 payload 仍含可被安全边界识别的敏感值。"""
+
+
+def safe_exception_diagnostic(
+    exc: BaseException, repository_root: Path
+) -> dict[str, str]:
+    """返回可写入日志的异常类型、脱敏摘要和仓库相对位置。"""
+    text = " ".join(redact_text(str(exc)).split())
+    if len(text) > 256:
+        marker = text.find(" validation error")
+        if marker != -1:
+            text = f"{text[:64]} ... {text[marker:marker + 186]}"
+        else:
+            text = f"{text[:187]} ... {text[-64:]}"
+    location = "unknown"
+    for frame in reversed(traceback.extract_tb(exc.__traceback__)):
+        try:
+            relative = Path(frame.filename).resolve().relative_to(repository_root.resolve())
+        except ValueError:
+            continue
+        location = f"{relative.as_posix()}:{frame.lineno}"
+        break
+    return {
+        "exception_type": type(exc).__name__[:128],
+        "message": text,
+        "location": location,
+    }
 
 
 def redact_text(value: str) -> str:
