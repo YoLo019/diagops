@@ -139,13 +139,21 @@ class RuntimeWriter:
                     return
                 try:
                     if isinstance(command.payload, PhaseCommit):
-                        result = self._store.commit_phase(command.payload)
+                        result = await asyncio.to_thread(
+                            self._store.commit_phase, command.payload
+                        )
                     elif isinstance(command.payload, RuntimeTerminalCommit):
-                        result = self._store.commit_terminal(command.payload)
+                        result = await asyncio.to_thread(
+                            self._store.commit_terminal, command.payload
+                        )
                     elif isinstance(command.payload, ToolCommit):
-                        result = self._store.commit_tool(command.payload)
+                        result = await asyncio.to_thread(
+                            self._store.commit_tool, command.payload
+                        )
                     else:
-                        result = self._store.append_event_command(command.payload)
+                        result = await asyncio.to_thread(
+                            self._store.append_event_command, command.payload
+                        )
                 except Exception as exc:
                     if not command.future.done():
                         command.future.set_exception(exc)

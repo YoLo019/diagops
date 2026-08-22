@@ -1,4 +1,6 @@
 import asyncio
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -224,6 +226,48 @@ def test_runtime_writer_serializes_concurrent_phase_results(runtime_store) -> No
 
     asyncio.run(scenario())
     assert [event.sequence for event in runtime_store.list_events(run.id)] == [1, 2, 3, 4]
+
+
+def test_runtime_writer_does_not_block_heartbeat_during_phase_commit(runtime_store):
+    run, attempt = _running_attempt(runtime_store)
+    started = threading.Event()
+    released = threading.Event()
+    release_at: list[float] = []
+    original_commit_phase = runtime_store.commit_phase
+
+    def blocked_commit(commit):
+        started.set()
+        assert released.wait(2)
+        return original_commit_phase(commit)
+
+    runtime_store.commit_phase = blocked_commit
+
+    async def scenario() -> None:
+        writer = RuntimeWriter(runtime_store)
+        await writer.start()
+        tick_at: list[float] = []
+        loop = asyncio.get_running_loop()
+        loop.call_later(0.05, lambda: tick_at.append(time.monotonic()))
+
+        def release_commit() -> None:
+            assert started.wait(1)
+            time.sleep(0.2)
+            release_at.append(time.monotonic())
+            released.set()
+
+        releaser = threading.Thread(target=release_commit)
+        releaser.start()
+        try:
+            await writer.submit(_phase_commit(run, attempt, RuntimePhase.INTAKE))
+        finally:
+            await writer.shutdown()
+            releaser.join()
+
+        assert tick_at
+        assert release_at
+        assert tick_at[0] < release_at[0]
+
+    asyncio.run(scenario())
 
 
 def test_writer_allocates_contiguous_sequences_for_concurrent_producers(
