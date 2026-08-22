@@ -166,6 +166,44 @@ def test_lead_planning_schema_constrains_selected_skill_identifiers():
     )
 
 
+def test_planning_task_schema_requires_first_analysis_round():
+    for output_type, task_path in (
+        (LeadPlanningOutput, ("$defs", "LeadPlanningTaskDraft")),
+        (V11SingleControlOutput, ("$defs", "LeadPlanningTaskDraft")),
+    ):
+        schema = AgentOutputSchema(
+            output_type, strict_json_schema=True
+        ).json_schema()
+        task_schema = schema[task_path[0]][task_path[1]]
+
+        assert task_schema["properties"]["analysis_round"]["const"] == 1
+
+    with pytest.raises(ValidationError):
+        LeadPlanningOutput.model_validate(
+            {
+                "decision": {
+                    "action": "investigate",
+                    "summary": "Inspect evidence.",
+                    "task_ids": ["task-round-two"],
+                    "candidate_ids": [],
+                    "evidence_ids": [],
+                    "selected_skills": [],
+                    "stop_reason": None,
+                },
+                "tasks": [
+                    {
+                        "id": "task-round-two",
+                        "title": "Inspect evidence",
+                        "description": "Inspect one bounded signal.",
+                        "analysis_round": 2,
+                        "tool_names": [],
+                        "information_gap": "missing signal",
+                    }
+                ],
+            }
+        )
+
+
 def test_single_control_schema_constrains_selected_skill_identifiers():
     schema = AgentOutputSchema(
         V11SingleControlOutput, strict_json_schema=True
@@ -229,6 +267,27 @@ def test_multi_planning_output_still_rejects_inconclusive_with_candidates():
                 "tasks": [],
             }
         )
+
+
+def test_critic_task_schema_still_allows_round_two():
+    output = CriticOutput.model_validate(
+        {
+            "summary": "Request one supplemental signal.",
+            "assessments": [],
+            "tasks": [
+                {
+                    "id": "task-round-two",
+                    "title": "Inspect a supplemental signal",
+                    "description": "Collect one bounded follow-up signal.",
+                    "analysis_round": 2,
+                    "tool_names": [],
+                    "information_gap": "missing signal",
+                }
+            ],
+        }
+    )
+
+    assert output.tasks[0].analysis_round == 2
 
 
 def _finding_gate_harness():

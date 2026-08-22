@@ -42,7 +42,7 @@ from backend.diagnosis.diagnostic_skills import skill_catalog_identity
 from backend.diagnosis.orchestrator import DiagnosisOrchestrator
 from backend.diagnosis.v11_runtime import (
     LeadPlanningOutput,
-    LeadTaskDraft,
+    LeadPlanningTaskDraft,
     SingleControlPlanningOutput,
     V11Runtime,
     V11RuntimeContractError,
@@ -212,7 +212,7 @@ class SingleInvestigatorAgent(V11Runtime):
                 selected_skills=selected_skills,
             ),
             tasks=[
-                LeadTaskDraft(
+                LeadPlanningTaskDraft(
                     id=task_id,
                     title=task.title,
                     description=task.description,

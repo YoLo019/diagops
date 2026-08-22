@@ -16,7 +16,7 @@ from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from agents import (
@@ -140,11 +140,17 @@ class LeadTaskDraft(BaseModel):
     information_gap: str | None = Field(default=None, max_length=256)
 
 
+class LeadPlanningTaskDraft(LeadTaskDraft):
+    """首轮 planning task；round 由 schema 固定为 1。"""
+
+    analysis_round: Literal[1] = 1
+
+
 class LeadPlanningOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     decision: LeadDecision
-    tasks: list[LeadTaskDraft] = Field(default_factory=list, max_length=3)
+    tasks: list[LeadPlanningTaskDraft] = Field(default_factory=list, max_length=3)
 
 
 class LeadDecisionDraft(BaseModel):
@@ -167,7 +173,7 @@ class SingleControlPlanningOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     decision: LeadDecisionDraft
-    tasks: list[LeadTaskDraft] = Field(default_factory=list, max_length=3)
+    tasks: list[LeadPlanningTaskDraft] = Field(default_factory=list, max_length=3)
 
 
 class InvestigatorFindingDraft(BaseModel):
