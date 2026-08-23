@@ -4136,6 +4136,87 @@ async def test_v11_needs_evidence_has_one_round_two_batch_and_one_reconciliation
 
 
 @pytest.mark.anyio
+async def test_v11_critic_downgrades_unexecutable_supplemental_work():
+    repository, record = _seed_repository()
+    runtime_run_id = "run-v11"
+    candidate = RootCauseCandidate(
+        id="candidate-budget-exhausted",
+        summary="candidate needs one more signal",
+        rank=1,
+        confidence=0.4,
+    )
+    repository.save_coordination_review(
+        CoordinationReview(
+            investigation_id=record.id,
+            runtime_run_id=runtime_run_id,
+            authority_mode="agent",
+            candidates=[candidate],
+        )
+    )
+    checks = [
+        {
+            "name": name.value,
+            "status": CausalCheckStatus.UNKNOWN.value,
+            "summary": "named gap",
+            "gap": "supplemental signal is unavailable",
+        }
+        for name in CausalCheckName
+    ]
+
+    async def turn(**kwargs):
+        assert kwargs["remaining_tool_budget"] == 0
+        return {
+            "summary": "request one supplemental signal",
+            "assessments": [
+                {
+                    "id": "assessment-budget-exhausted",
+                    "candidate_id": candidate.id,
+                    "verdict": CriticVerdict.NEEDS_EVIDENCE.value,
+                    "checks": checks,
+                    "gap": "supplemental signal is unavailable",
+                    "supplemental_task_ids": ["task-budget-exhausted"],
+                    "summary": "request one supplemental signal",
+                }
+            ],
+            "tasks": [
+                {
+                    "id": "task-budget-exhausted",
+                    "title": "Collect supplemental signal",
+                    "description": "The remaining tool budget cannot run this task.",
+                    "evidence_scope": {"entity_ids": [record.event.service]},
+                }
+            ],
+        }
+
+    runtime = V11Runtime(
+        model="fake",
+        tool_registry=build_provider_tool_registry(build_mock_provider_registry()),
+        turn=turn,
+    )
+    runtime.runtime_run_id = runtime_run_id
+    runtime._phase_tool_budget = 0
+
+    review = await runtime.critic_review(
+        repository=repository,
+        investigation_id=record.id,
+        event=record.event,
+    )
+
+    assessment = review.critic_assessments[0]
+    assert assessment.verdict == CriticVerdict.INCONCLUSIVE
+    assert assessment.gap is None
+    assert assessment.supplemental_task_ids == []
+    assert "remaining tool budget" in assessment.summary
+    assert repository.list_tasks(record.id) == []
+    await runtime.investigator_round_2(
+        repository=repository,
+        investigation_id=record.id,
+        event=record.event,
+    )
+    assert repository.get(record.id).status != InvestigationStatus.FAILED
+
+
+@pytest.mark.anyio
 async def test_v11_phase_executor_uses_runtime_phases_without_legacy_report_or_action():
     repository, record = _seed_repository()
     checks = [

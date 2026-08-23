@@ -84,6 +84,7 @@ from backend.domain.hypotheses import CauseType
 from backend.domain.multi_agent import (
     AgentExecutionLayer,
     AuthorityMode,
+    CriticVerdict,
     DiagnosticStatus,
     ExecutionActor,
     ExecutionStepKind,
@@ -1488,6 +1489,9 @@ class V11Runtime:
             self._update_summary(repository, investigation_id)
             return review
         try:
+            remaining_tool_budget = self._remaining_tool_budget_for(
+                repository, investigation_id
+            )
             turn = await self._call_model(
                 actor=ExecutionActor.CRITIC.value,
                 prompt=self._critic_prompt(
@@ -1499,9 +1503,7 @@ class V11Runtime:
                 ),
                 tools=[],
                 remaining_token_budget=self._remaining_token_budget,
-                remaining_tool_budget=self._remaining_tool_budget_for(
-                    repository, investigation_id
-                ),
+                remaining_tool_budget=remaining_tool_budget,
                 repository=repository,
                 investigation_id=investigation_id,
                 task_id=f"critic-review-{self.runtime_run_id}",
@@ -1531,6 +1533,11 @@ class V11Runtime:
                 )
                 for item in assessments
             ]
+            assessments, tasks = self._bound_supplemental_work(
+                assessments,
+                tasks,
+                remaining_tool_budget=remaining_tool_budget,
+            )
             existing_tasks = repository.list_tasks(investigation_id)
             repository.save_tasks(investigation_id, [*existing_tasks, *tasks])
             review = review.model_copy(
@@ -2622,6 +2629,58 @@ class V11Runtime:
         if len(tasks) > 3 or len({item.id for item in tasks}) != len(tasks):
             raise V11RuntimeContractError("round two task batch must be unique and bounded")
         return tasks, task_id_by_draft_id
+
+    def _bound_supplemental_work(
+        self,
+        assessments: list[CriticAssessment],
+        tasks: list[DiagnosisTask],
+        *,
+        remaining_tool_budget: int,
+    ) -> tuple[list[CriticAssessment], list[DiagnosisTask]]:
+        """在补证批次入库前按剩余额度做确定性准入。"""
+        if remaining_tool_budget < 0:
+            raise V11RuntimeContractError("remaining tool budget must be non-negative")
+        if not tasks:
+            return assessments, tasks
+
+        task_ids_by_assessment = {
+            assessment.id: tuple(assessment.supplemental_task_ids)
+            for assessment in assessments
+            if assessment.verdict == CriticVerdict.NEEDS_EVIDENCE
+        }
+        admitted_task_ids: set[str] = set()
+        admitted_count = 0
+        bounded: list[CriticAssessment] = []
+        degraded = False
+        for assessment in assessments:
+            if assessment.verdict != CriticVerdict.NEEDS_EVIDENCE:
+                bounded.append(assessment)
+                continue
+            task_ids = task_ids_by_assessment[assessment.id]
+            if admitted_count + len(task_ids) <= remaining_tool_budget:
+                admitted_task_ids.update(task_ids)
+                admitted_count += len(task_ids)
+                bounded.append(assessment)
+                continue
+            degraded = True
+            bounded.append(
+                assessment.model_copy(
+                    update={
+                        "verdict": CriticVerdict.INCONCLUSIVE,
+                        "gap": None,
+                        "supplemental_task_ids": [],
+                        "summary": (
+                            f"{assessment.summary} Supplemental evidence was not "
+                            "scheduled because the remaining tool budget cannot "
+                            "execute the requested batch."
+                        )[:512],
+                    }
+                )
+            )
+
+        if degraded:
+            self._failures.append("supplemental_tool_budget_exhausted")
+        return bounded, [task for task in tasks if task.id in admitted_task_ids]
 
     def _empty_review(self, repository, investigation_id: str) -> CoordinationReview:
         return CoordinationReview(
