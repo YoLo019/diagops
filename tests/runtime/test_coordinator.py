@@ -1,5 +1,6 @@
 import asyncio
 import json
+import threading
 from datetime import UTC, datetime
 
 import pytest
@@ -33,7 +34,11 @@ from backend.runtime.phases import (
     ToolCommit,
     checkpoint_digest,
 )
-from backend.runtime.store import InMemoryRuntimeStore, RuntimeConflict
+from backend.runtime.store import (
+    InMemoryRuntimeStore,
+    RuntimeConflict,
+    RuntimePersistenceError,
+)
 from backend.runtime.writer import RuntimeEventCommand, RuntimeWriter
 from backend.tools.registry import ToolRegistry
 
@@ -835,6 +840,97 @@ async def test_concurrent_resume_loser_never_observes_initial_budget(
     assert set(executor.inputs) == {(4, 4)}
     assert len(store.list_attempts(run.id)) == 2
     await coordinator.shutdown()
+
+
+@pytest.mark.anyio
+async def test_heartbeat_renewal_does_not_block_event_loop() -> None:
+    class BlockingStore:
+        fault_injector = None
+
+        def __init__(self) -> None:
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def renew_lease(self, *_args, **_kwargs):
+            self.started.set()
+            assert self.release.wait(2)
+            return object()
+
+    store = BlockingStore()
+    coordinator = RuntimeCoordinator(
+        store=store,
+        writer=RuntimeWriter(store),
+        phase_executor=RecordingPhaseExecutor("inv-1"),
+        heartbeat_seconds=1,
+    )
+    coordinator.heartbeat_seconds = 0.01
+    stop = asyncio.Event()
+    heartbeat = asyncio.create_task(
+        coordinator._renew_loop("run-1", "worker-a", 1, stop)
+    )
+    tick = asyncio.Event()
+
+    async def mark_tick() -> None:
+        await asyncio.sleep(0.05)
+        tick.set()
+
+    async def release_store() -> None:
+        await asyncio.sleep(0.1)
+        store.release.set()
+
+    ticker = asyncio.create_task(mark_tick())
+    releaser = asyncio.create_task(release_store())
+    try:
+        while not store.started.is_set():
+            await asyncio.sleep(0.005)
+        await asyncio.wait_for(tick.wait(), 0.3)
+    finally:
+        store.release.set()
+        stop.set()
+        await asyncio.wait_for(heartbeat, 1)
+        await ticker
+        await releaser
+
+
+@pytest.mark.anyio
+async def test_heartbeat_retries_transient_persistence_failure() -> None:
+    class FlakyStore:
+        fault_injector = None
+
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        def renew_lease(self, *_args, **_kwargs):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise RuntimePersistenceError("database is temporarily busy")
+            return object()
+
+    store = FlakyStore()
+    coordinator = RuntimeCoordinator(
+        store=store,
+        writer=RuntimeWriter(store),
+        phase_executor=RecordingPhaseExecutor("inv-1"),
+        heartbeat_seconds=1,
+    )
+    coordinator.heartbeat_seconds = 0.01
+    stop = asyncio.Event()
+    heartbeat = asyncio.create_task(
+        coordinator._renew_loop("run-1", "worker-a", 1, stop)
+    )
+    try:
+        await asyncio.wait_for(
+            _wait_for_renewal_attempts(store, expected=2),
+            1,
+        )
+    finally:
+        stop.set()
+        await asyncio.wait_for(heartbeat, 1)
+
+
+async def _wait_for_renewal_attempts(store, *, expected: int) -> None:
+    while store.attempts < expected:
+        await asyncio.sleep(0.01)
 
 
 def test_expired_lease_audit_interrupts_without_automatic_resume() -> None:

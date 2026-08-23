@@ -1,0 +1,7 @@
+interface:
+  display_name: "DiagOps Release"
+  short_description: "Guide a high-risk DiagOps change through verified release."
+  default_prompt: "Use $diagops-release to guide this high-risk DiagOps change from alignment through verified release."
+
+policy:
+  allow_implicit_invocation: false

@@ -1090,11 +1090,30 @@ class RuntimeCoordinator:
         lease_version: int,
         stop: asyncio.Event,
     ) -> None:
+        wait_seconds = self.heartbeat_seconds
+        retry_seconds = min(max(self.heartbeat_seconds / 4, 0.1), 1.0)
         while not stop.is_set():
             try:
-                await asyncio.wait_for(stop.wait(), timeout=self.heartbeat_seconds)
+                await asyncio.wait_for(stop.wait(), timeout=wait_seconds)
             except TimeoutError:
-                renewed = self.store.renew_lease(run_id, owner=owner, lease_version=lease_version)
+                try:
+                    renewed = await asyncio.to_thread(
+                        self.store.renew_lease,
+                        run_id,
+                        owner=owner,
+                        lease_version=lease_version,
+                    )
+                except RuntimePersistenceError:
+                    # 续租失败不能让后台 task 静默退出；SQLite 短暂 busy 时先快速重试，
+                    # 只有 CAS 返回 None 才确认 lease 已丢失并停止执行。
+                    logger.warning(
+                        "runtime lease renewal deferred run_id=%s "
+                        "category=runtime_lease_persistence",
+                        run_id,
+                    )
+                    wait_seconds = retry_seconds
+                    continue
+                wait_seconds = self.heartbeat_seconds
                 if renewed is None:
                     stop.set()
                     return

@@ -12,6 +12,7 @@ from uuid import uuid4
 from agents import FunctionTool
 from agents.exceptions import ModelBehaviorError
 from openai import APIConnectionError, RateLimitError
+from pydantic import BaseModel, ValidationError
 
 from backend.domain.agent_findings import AgentName
 from backend.domain.events import IncidentEvent
@@ -26,7 +27,7 @@ from backend.domain.tool_queries import (
 )
 from backend.providers.results import ProviderResult, ProviderStatus
 from backend.runtime.concurrency import RunStepGate
-from backend.safety.redaction import redact_value
+from backend.safety.redaction import redact_text, redact_value
 from backend.tools.provider_tools import QUERY_MODELS_BY_TOOL
 from backend.tools.registry import ToolInvocationResult, ToolRegistry
 
@@ -191,21 +192,7 @@ class AdaptiveToolSession:
         self._known_evidence_ids = {item.id for item in seed_evidence}
         self._stopped_agents: set[AgentIdentity] = set()
         self._allowed_targets = {event.service, *(allowed_targets or set())}
-        for item in seed_evidence:
-            dependencies = item.payload.get("dependencies", [])
-            if isinstance(dependencies, list):
-                self._allowed_targets.update(
-                    value for value in dependencies if isinstance(value, str)
-                )
-            edges = item.payload.get("edges", [])
-            if isinstance(edges, list):
-                self._allowed_targets.update(
-                    value
-                    for edge in edges
-                    if isinstance(edge, dict)
-                    for value in (edge.get("parent"), edge.get("child"))
-                    if isinstance(value, str)
-                )
+        self._extend_allowed_targets(seed_evidence)
 
     def tools_for(
         self, agent_name: AgentIdentity, round_number: int, attempt: int = 1
@@ -306,15 +293,40 @@ class AdaptiveToolSession:
             )
 
         try:
-            query = QUERY_MODELS_BY_TOOL[tool_name].model_validate(parsed)
-            self._validate_scope(query)
-        except (KeyError, TypeError, ValueError):
+            query_model = QUERY_MODELS_BY_TOOL[tool_name]
+            query = query_model.model_validate(parsed)
+        except ValidationError as exc:
             return self._reject(
                 agent_name,
                 tool_name,
                 parsed,
                 ToolCallStatus.FAILED,
-                "tool input outside investigation scope",
+                _format_query_validation_error(exc, query_model),
+                task_id=task_id,
+            )
+        except (KeyError, TypeError):
+            return self._reject(
+                agent_name,
+                tool_name,
+                parsed,
+                ToolCallStatus.FAILED,
+                "invalid tool input",
+                task_id=task_id,
+            )
+        try:
+            self._validate_scope(query)
+        except ValueError:
+            warning = "tool input outside investigation scope"
+            if isinstance(query, DependencyQuery) and query.target:
+                scoped_targets = self._scoped_target_feedback()
+                if scoped_targets:
+                    warning += f"; scoped targets: {scoped_targets}"
+            return self._reject(
+                agent_name,
+                tool_name,
+                parsed,
+                ToolCallStatus.FAILED,
+                warning,
                 task_id=task_id,
             )
 
@@ -546,6 +558,7 @@ class AdaptiveToolSession:
         output_ids = set(result.call.output_evidence_ids)
         new_output_ids = output_ids - self._known_evidence_ids
         for item in result.evidence:
+            self._extend_allowed_targets([item])
             if item.id in self._known_evidence_ids:
                 continue
             self._known_evidence_ids.add(item.id)
@@ -668,8 +681,59 @@ class AdaptiveToolSession:
             if window[1] < incident_start or window[0] > incident_end:
                 raise ValueError("query window does not intersect incident window")
         if isinstance(query, DependencyQuery):
-            if query.target and query.target not in self._allowed_targets:
+            if query.target and not self._target_is_allowed(query.target):
                 raise ValueError("dependency target outside investigation scope")
+
+    def _extend_allowed_targets(self, evidence: list[EvidenceItem]) -> None:
+        """把已验证证据暴露的实体加入当前 investigation 的 scope。"""
+        for item in evidence:
+            payload = item.payload
+            targets = {
+                value
+                for value in (item.scope.entity_ids if item.scope is not None else [])
+                if isinstance(value, str)
+            }
+            if isinstance(payload, dict):
+                for key in ("service", "entity", "entity_id", "target"):
+                    value = payload.get(key)
+                    if isinstance(value, str):
+                        targets.add(value)
+                dependencies = payload.get("dependencies", [])
+                if isinstance(dependencies, list):
+                    targets.update(
+                        value for value in dependencies if isinstance(value, str)
+                    )
+                edges = payload.get("edges", [])
+                if isinstance(edges, list):
+                    targets.update(
+                        value
+                        for edge in edges
+                        if isinstance(edge, dict)
+                        for value in (edge.get("parent"), edge.get("child"))
+                        if isinstance(value, str)
+                    )
+                if payload.get("runtime_kind") == "pod":
+                    for value in tuple(targets):
+                        parts = value.split("-")
+                        if len(parts) >= 3:
+                            # Pod 名通常为 service-replicaset-pod；只把该
+                            # provider 已声明为 Pod 的实体折叠回 service 别名。
+                            targets.add("-".join(parts[:-2]))
+            self._allowed_targets.update(targets)
+
+    def _target_is_allowed(self, target: str) -> bool:
+        if target in self._allowed_targets:
+            return True
+        # 兼容尚未携带 runtime_kind 的历史 Pod 证据，但仍要求完整的
+        # scoped entity 以 target- 开头，避免把任意服务名放宽为通配符。
+        return any(
+            known.startswith(f"{target}-") for known in self._allowed_targets
+        )
+
+    def _scoped_target_feedback(self) -> str:
+        return ", ".join(
+            redact_text(target) for target in sorted(self._allowed_targets)[:20]
+        )
 
     def _action_timeout(self) -> float:
         remaining = max(0.0, float(self._remaining_deadline_seconds()))
@@ -793,6 +857,25 @@ def tool_idempotency_key(
 
 def _agent_value(agent_name: AgentIdentity) -> str:
     return getattr(agent_name, "value", str(agent_name))
+
+
+def _format_query_validation_error(
+    error: ValidationError, query_model: type[BaseModel]
+) -> str:
+    """向模型返回可修正的字段错误，但不回显未经脱敏的输入值。"""
+    details: list[str] = []
+    for item in error.errors():
+        location = ".".join(str(part) for part in item.get("loc", ())) or "input"
+        message = redact_text(str(item.get("msg", "invalid value")))
+        details.append(f"{location}: {message}")
+    if not details:
+        return "invalid tool input"
+    fields = ", ".join(query_model.model_fields)
+    return (
+        "invalid tool input: "
+        + "; ".join(details[:6])
+        + f"; valid fields: {fields}"
+    )
 
 
 def _result_warning(results: list[ProviderResult]) -> str | None:

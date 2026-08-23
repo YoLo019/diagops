@@ -24,6 +24,7 @@ from backend.domain.multi_agent import (
     ExecutionActor,
     ExecutionStepKind,
     LeadAction,
+    MultiAgentRunStatus,
     ResultValidationCategory,
 )
 from backend.domain.tool_calls import ToolCallRecord
@@ -342,6 +343,11 @@ def _validate_supplemental_tasks(
     runtime_run_id: str,
 ) -> None:
     """把 Critic 声明与同一 assessment 的持久化 round2 task 精确对齐。"""
+    if review.run_status == MultiAgentRunStatus.FAILED:
+        # 终态失败时 review 投影会清空 candidates/assessments，但任务仍作为
+        # 失败审计保留；失败记录不是可发布诊断，不应因其清空后的引用关系
+        # 被误报成 orphan supplemental task。
+        return
     assessment_ids = {assessment.id for assessment in review.critic_assessments}
     linked: dict[str, set[str]] = {assessment_id: set() for assessment_id in assessment_ids}
     for task in tasks:

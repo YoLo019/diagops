@@ -80,6 +80,7 @@ from backend.domain.evidence import (
     EvidenceItem,
     EvidenceKind,
     EvidenceProvider,
+    EvidenceScope,
     EvidenceStatus,
 )
 from backend.domain.multi_agent import (
@@ -87,6 +88,7 @@ from backend.domain.multi_agent import (
     CausalCheckStatus,
     CriticVerdict,
     DiagnosticStatus,
+    ExecutionActor,
     ExecutionStepKind,
     FailureCategory,
     LeadAction,
@@ -228,6 +230,259 @@ def test_lead_prompt_exposes_exact_skill_identifiers():
     assert "name@version" in prompt["rule"]
 
 
+def test_investigator_prompt_keeps_tool_descriptions_without_schema_duplication():
+    registry = build_provider_tool_registry(build_mock_provider_registry())
+    runtime = V11Runtime(model=None, tool_registry=registry)
+    task = DiagnosisTask(
+        id="task-schema-contract",
+        title="Inspect bounded telemetry",
+        description="Validate the available telemetry window.",
+        task_type=DiagnosisTaskType.GENERAL_INVESTIGATION,
+        agent_name="InvestigatorAgent",
+        analysis_round=1,
+        runtime_run_id="run-schema-contract",
+        information_gap="runtime state",
+    )
+
+    prompt = json.loads(
+        runtime._investigator_prompt(
+            _event(),
+            task,
+            "investigator-1",
+            registry.agent_manifest(),
+            [],
+            [],
+            None,
+            [],
+        )
+    )
+    contracts = {item["name"]: item for item in prompt["tool_contracts"]}
+
+    assert set(contracts) == set(registry.agent_manifest())
+    assert "description" in contracts["read_runtime_state"]
+    assert "input_schema" not in contracts["read_runtime_state"]
+
+
+@pytest.mark.anyio
+async def test_invalid_structured_output_retry_receives_safe_contract_feedback(
+    monkeypatch,
+):
+    class Output(BaseModel):
+        value: str
+
+    prompts = []
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    async def turn(**kwargs):
+        prompts.append(kwargs["prompt"])
+        if len(prompts) == 1:
+            raise ModelBehaviorError("untrusted provider validation details")
+        return {"value": "ok"}
+
+    monkeypatch.setattr(v11_runtime_module.asyncio, "sleep", fake_sleep)
+    runtime = V11Runtime(model="fake", turn=turn, token_budget=10_000)
+
+    result = await runtime._call_model(
+        actor="CriticAgent",
+        prompt="review the committed candidates",
+        output_type=Output,
+        context={"request": "bounded"},
+        tools=[],
+        remaining_token_budget=10_000,
+        remaining_tool_budget=0,
+    )
+
+    assert result.output == {"value": "ok"}
+    assert prompts[0] == "review the committed candidates"
+    assert "previous structured response was rejected" in prompts[1]
+    assert "untrusted provider validation details" not in prompts[1]
+    assert sleeps == [5.0]
+
+
+def test_v11_input_estimator_is_conservative_for_cjk_and_json():
+    ascii_estimate, _ = v11_runtime_module._estimate_text_tokens("a" * 40)
+    cjk_estimate, cjk_counts = v11_runtime_module._estimate_text_tokens("故障" * 20)
+    json_estimate, json_counts = v11_runtime_module._estimate_text_tokens(
+        '{"properties":["service","window_start"]}'
+    )
+
+    assert cjk_estimate > ascii_estimate
+    assert cjk_counts["cjk_chars"] == 40
+    assert json_estimate >= json_counts["json_punctuation_chars"]
+
+
+def test_v11_input_estimate_audit_fits_model_event_payload():
+    _estimate, audit = v11_runtime_module._estimate_model_input(
+        "检查故障窗口",
+        {
+            "input": [{"role": "user", "content": "故障"}],
+            "tools": [{"name": "read_logs", "parameters": {}}],
+            "output_schema": {"type": "object", "properties": {}},
+        },
+    )
+
+    event = RuntimeEvent(
+        run_id="run-audit",
+        attempt_id="attempt-audit",
+        sequence=1,
+        event_type=RuntimeEventType.MODEL_STARTED,
+        actor_type=RuntimeActorType.AGENT,
+        safe_payload={
+            "status": "started",
+            **v11_runtime_module._input_estimate_audit(audit),
+        },
+    )
+
+    assert event.safe_payload["input_estimate_audit"]["method"] == (
+        "unicode-json-envelope-v1"
+    )
+
+
+@pytest.mark.anyio
+async def test_v11_input_estimator_calibrates_after_provider_settlement():
+    runtime = V11Runtime(model=None, token_budget=100_000)
+    prompt = "a" * 1_000
+    context = {"input": "b" * 1_000, "tools": [], "output_schema": {}}
+
+    _first_cap, first_estimate, first_reserved = await runtime._reserve_model_budget(
+        None,
+        prompt,
+        context,
+        reservation_id="calibration-request-1",
+        actor="InvestigatorAgent",
+    )
+    raw_estimate = runtime._model_reservations[
+        "calibration-request-1"
+    ].estimate_audit["raw_estimated_tokens"]
+    actual_input = max(1, int(raw_estimate) // 2)
+    await runtime._settle_model_budget(
+        first_reserved,
+        actual_input,
+        reservation_id="calibration-request-1",
+        actor="InvestigatorAgent",
+        input_tokens=actual_input,
+        actual_input_tokens=actual_input,
+        output_tokens=0,
+    )
+    assert runtime.remaining_token_budget == 100_000 - actual_input
+
+    _second_cap, second_estimate, _second_reserved = await runtime._reserve_model_budget(
+        None,
+        prompt,
+        context,
+        reservation_id="calibration-request-2",
+        actor="InvestigatorAgent",
+    )
+
+    assert second_estimate < first_estimate
+    audit = runtime._model_reservations["calibration-request-2"].estimate_audit
+    assert audit["calibration_samples"] == 1
+    assert 7_500 <= audit["calibration_factor_basis_points"] < 10_000
+
+
+def test_task_evidence_scope_filters_only_explicit_conflicts():
+    task = DiagnosisTask(
+        id="task-scoped-evidence",
+        title="Inspect service evidence",
+        description="Inspect the bounded service window.",
+        task_type=DiagnosisTaskType.GENERAL_INVESTIGATION,
+        agent_name="InvestigatorAgent",
+        analysis_round=1,
+        runtime_run_id="run-scoped-evidence",
+        evidence_scope={
+            "entity_ids": ["service-a"],
+            "start_time": "2026-01-01T00:00:00Z",
+            "end_time": "2026-01-01T01:00:00Z",
+        },
+    )
+    evidence = [
+        EvidenceItem(
+            id="ev-anchor",
+            provider=EvidenceProvider.LOG,
+            kind=EvidenceKind.LOG_PATTERN,
+            timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+            summary="initial anchor",
+            runtime_run_id=None,
+            scope=EvidenceScope(entity_ids=["service-b"]),
+        ),
+        EvidenceItem(
+            id="ev-match",
+            provider=EvidenceProvider.LOG,
+            kind=EvidenceKind.LOG_PATTERN,
+            timestamp=datetime(2026, 1, 1, 0, 30, tzinfo=UTC),
+            summary="matching evidence",
+            runtime_run_id="run-scoped-evidence",
+            scope=EvidenceScope(
+                entity_ids=["service-a"],
+                observed_at=datetime(2026, 1, 1, 0, 30, tzinfo=UTC),
+            ),
+        ),
+        EvidenceItem(
+            id="ev-conflict",
+            provider=EvidenceProvider.LOG,
+            kind=EvidenceKind.LOG_PATTERN,
+            timestamp=datetime(2026, 1, 1, 0, 30, tzinfo=UTC),
+            summary="conflicting entity",
+            runtime_run_id="run-scoped-evidence",
+            scope=EvidenceScope(
+                entity_ids=["service-b"],
+                observed_at=datetime(2026, 1, 1, 0, 30, tzinfo=UTC),
+            ),
+        ),
+        EvidenceItem(
+            id="ev-unknown",
+            provider=EvidenceProvider.LOG,
+            kind=EvidenceKind.LOG_PATTERN,
+            timestamp=datetime(2026, 1, 1, 0, 30, tzinfo=UTC),
+            summary="unknown scope",
+            runtime_run_id="run-scoped-evidence",
+            scope=None,
+        ),
+    ]
+
+    selected = v11_runtime_module._evidence_for_task(task, evidence)
+
+    assert [item.id for item in selected] == ["ev-anchor", "ev-match", "ev-unknown"]
+
+
+def test_critic_evidence_is_limited_to_candidate_and_finding_references():
+    review = CoordinationReview(
+        investigation_id="inv-critic-evidence",
+        candidates=[
+            RootCauseCandidate(
+                id="candidate-critic-evidence",
+                summary="candidate",
+                rank=1,
+                confidence=0.8,
+                supporting_evidence_ids=["ev-referenced"],
+            )
+        ],
+    )
+    evidence = [
+        EvidenceItem(
+            id="ev-referenced",
+            provider=EvidenceProvider.LOG,
+            kind=EvidenceKind.LOG_PATTERN,
+            timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+            summary="referenced evidence",
+        ),
+        EvidenceItem(
+            id="ev-unreferenced",
+            provider=EvidenceProvider.METRIC,
+            kind=EvidenceKind.METRIC_TREND,
+            timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+            summary="unreferenced query result",
+        ),
+    ]
+
+    selected = v11_runtime_module._critic_evidence(review, (), evidence)
+
+    assert [item.id for item in selected] == ["ev-referenced"]
+
+
 def test_single_control_planning_draft_tolerates_inconclusive_with_candidates():
     payload = {
         "planning": {
@@ -357,6 +612,33 @@ def test_non_gap_finding_still_rejects_failed_or_skipped_evidence():
     )
 
     with pytest.raises(V11RuntimeContractError, match="uncommitted evidence"):
+        runtime._finding_from_draft(
+            draft,
+            investigation_id="inv-1",
+            task=task,
+            instance_id="investigator-1",
+            round_number=1,
+            assessment=None,
+            evidence=evidence,
+        )
+
+
+def test_non_gap_finding_scope_mismatch_is_rejected_during_draft_admission():
+    runtime, task, evidence = _finding_gate_harness()
+    evidence[1] = evidence[1].model_copy(
+        update={"scope": EvidenceScope(entity_ids=["service-a"])}
+    )
+    draft = InvestigatorFindingDraft(
+        finding_type=AgentFindingType.SIGNAL,
+        summary="The scoped signal proves the failure.",
+        confidence=0.9,
+        evidence_ids=["ev-success"],
+        affected_entity="service-b",
+    )
+
+    with pytest.raises(
+        V11RuntimeContractError, match="scope_entity_mismatch"
+    ):
         runtime._finding_from_draft(
             draft,
             investigation_id="inv-1",
@@ -526,10 +808,11 @@ def _candidate_draft(
     *,
     supporting_finding_ids: list[str] | None = None,
     supporting_evidence_ids: list[str] | None = None,
+    rank: int = 1,
 ) -> dict:
     return {
         "summary": "candidate from investigator",
-        "rank": 1,
+        "rank": rank,
         "confidence": 0.6,
         "supporting_finding_ids": supporting_finding_ids or [],
         "supporting_evidence_ids": supporting_evidence_ids or [],
@@ -698,6 +981,49 @@ async def test_candidate_citing_skipped_evidence_is_dropped():
     assert len(audits) == 1
 
 
+def test_candidate_scope_mismatch_is_dropped_at_admission():
+    runtime_run_id = "run-candidate-scope-mismatch"
+    repository, record = _investigator_round_harness(runtime_run_id)
+    runtime = V11Runtime(model="fake", max_investigators=1)
+    runtime.runtime_run_id = runtime_run_id
+    task = repository.get_plan(record.id).tasks[0]
+    evidence = EvidenceItem(
+        id="ev-scoped-candidate",
+        provider=EvidenceProvider.LOG,
+        kind=EvidenceKind.LOG_PATTERN,
+        timestamp=datetime(2026, 8, 15, 10, tzinfo=UTC),
+        summary="scoped signal",
+        status=EvidenceStatus.SUCCESS,
+        runtime_run_id=runtime_run_id,
+        scope=EvidenceScope(entity_ids=["service-a"]),
+    )
+    audit_executions: list[AgentExecution] = []
+
+    admitted = runtime._admit_candidates(
+        (
+            RootCauseCandidate(
+                summary="candidate with a conflicting entity",
+                rank=1,
+                confidence=0.6,
+                affected_entity="service-b",
+                supporting_evidence_ids=[evidence.id],
+            ),
+        ),
+        batch_findings=[],
+        committed_evidence=[evidence],
+        repository=repository,
+        investigation_id=record.id,
+        task=task,
+        instance_id="investigator-scope",
+        audit_executions=audit_executions,
+    )
+
+    assert admitted == ()
+    assert audit_executions[0].error_message == (
+        "candidate draft rejected: scope_entity_mismatch"
+    )
+
+
 @pytest.mark.anyio
 async def test_candidate_drop_does_not_fail_sibling_candidates():
     async def turn(**_kwargs):
@@ -706,7 +1032,7 @@ async def test_candidate_drop_does_not_fail_sibling_candidates():
             "findings": [],
             "candidates": [
                 _candidate_draft(supporting_finding_ids=["finding-bogus"]),
-                _candidate_draft(),
+                _candidate_draft(rank=2),
             ],
         }
 
@@ -718,6 +1044,78 @@ async def test_candidate_drop_does_not_fail_sibling_candidates():
     assert review is not None
     assert len(review.candidates) == 1
     assert review.candidates[0].supporting_finding_ids == []
+
+
+def test_candidate_ids_are_server_generated_for_each_investigator_batch():
+    runtime_run_id = "run-candidate-server-ids"
+    repository, record = _investigator_round_harness(runtime_run_id)
+    runtime = V11Runtime(model="fake", max_investigators=2)
+    runtime.runtime_run_id = runtime_run_id
+    task = repository.get_plan(record.id).tasks[0]
+    audit_executions: list[AgentExecution] = []
+
+    first = runtime._admit_candidates(
+        (RootCauseCandidate(id="candidate-1", summary="first", rank=1, confidence=0.6),),
+        batch_findings=[],
+        committed_evidence=[],
+        repository=repository,
+        investigation_id=record.id,
+        task=task,
+        instance_id="investigator-first",
+        audit_executions=audit_executions,
+    )
+    second = runtime._admit_candidates(
+        (RootCauseCandidate(id="candidate-1", summary="second", rank=1, confidence=0.5),),
+        batch_findings=[],
+        committed_evidence=[],
+        repository=repository,
+        investigation_id=record.id,
+        task=task,
+        instance_id="investigator-second",
+        audit_executions=audit_executions,
+    )
+
+    assert first[0].id != "candidate-1"
+    assert second[0].id != "candidate-1"
+    assert first[0].id != second[0].id
+
+
+def test_candidate_projection_assigns_stable_global_ranks():
+    runtime_run_id = "run-candidate-global-ranks"
+    repository, record = _investigator_round_harness(runtime_run_id)
+    runtime = V11Runtime(model="fake", max_investigators=2)
+    runtime.runtime_run_id = runtime_run_id
+    task = repository.get_plan(record.id).tasks[0]
+    audit_executions: list[AgentExecution] = []
+
+    first = runtime._admit_candidates(
+        (RootCauseCandidate(id="candidate-1", summary="first", rank=1, confidence=0.6),),
+        batch_findings=[],
+        committed_evidence=[],
+        repository=repository,
+        investigation_id=record.id,
+        task=task,
+        instance_id="investigator-first",
+        audit_executions=audit_executions,
+    )
+    second = runtime._admit_candidates(
+        (RootCauseCandidate(id="candidate-1", summary="second", rank=1, confidence=0.5),),
+        batch_findings=[],
+        committed_evidence=[],
+        repository=repository,
+        investigation_id=record.id,
+        task=task,
+        instance_id="investigator-second",
+        audit_executions=audit_executions,
+    )
+
+    runtime._persist_candidate_projection(repository, record.id, first)
+    runtime._persist_candidate_projection(repository, record.id, second)
+
+    review = repository.get_coordination_review(record.id)
+    assert review is not None
+    assert [item.rank for item in review.candidates] == [1, 2]
+    assert [item.summary for item in review.candidates] == ["first", "second"]
 
 
 def test_strict_output_tool_uses_provider_subset_and_full_local_validation():
@@ -1106,18 +1504,20 @@ async def test_lead_planning_persists_bounded_owned_tasks_before_investigation()
         event=record.event,
         runtime_run_id="run-v11",
         remaining_tool_budget=8,
-        remaining_token_budget=1000,
+        remaining_token_budget=3000,
     )
 
     assert plan.runtime_run_id == "run-v11"
     assert plan.lead_decision is not None
     assert plan.lead_decision.action == LeadAction.INVESTIGATE
-    assert [task.id for task in plan.tasks] == ["task-timeline"]
+    assert len(plan.tasks) == 1
+    assert plan.tasks[0].id != "task-timeline"
+    assert plan.lead_decision.task_ids == [plan.tasks[0].id]
     assert repository.get_plan(record.id).model_dump(mode="json") == plan.model_dump(
         mode="json"
     )
     assert calls[0]["remaining_tool_budget"] == 8
-    assert 0 < calls[0]["remaining_token_budget"] <= 1000
+    assert 0 < calls[0]["remaining_token_budget"] <= 3000
 
 
 @pytest.mark.anyio
@@ -1160,7 +1560,7 @@ async def test_v11_run_owner_is_explicit_when_repository_has_multiple_investigat
         event=record.event,
         runtime_run_id="run-target",
         remaining_tool_budget=8,
-        remaining_token_budget=1000,
+        remaining_token_budget=3000,
     )
 
     assert repository.get_plan(record.id) is not None
@@ -1253,7 +1653,7 @@ async def test_lead_planning_rejects_conclude_and_duplicate_or_infeasible_work()
             event=record.event,
             runtime_run_id="run-v11",
             remaining_tool_budget=8,
-            remaining_token_budget=1000,
+            remaining_token_budget=3000,
         )
 
 
@@ -2884,6 +3284,32 @@ async def test_v11_zero_tool_budget_does_not_start_model():
 
 
 @pytest.mark.anyio
+async def test_v11_model_only_phase_runs_after_tool_budget_is_exhausted():
+    calls = 0
+
+    async def turn(**kwargs):
+        nonlocal calls
+        calls += 1
+        assert kwargs["remaining_tool_budget"] == 0
+        return "model-only phase completed"
+
+    runtime = V11Runtime(model="fake", turn=turn)
+
+    result = await runtime._call_model(
+        actor="LeadAgent",
+        prompt="adjudicate the committed review",
+        output_type=LeadAdjudicationOutput,
+        context={},
+        tools=[],
+        remaining_token_budget=None,
+        remaining_tool_budget=0,
+    )
+
+    assert calls == 1
+    assert result.output == "model-only phase completed"
+
+
+@pytest.mark.anyio
 async def test_v11_all_investigator_failure_is_terminal_failed_without_diagnostic():
     repository, record = _repository()
     turns = [
@@ -2926,7 +3352,7 @@ async def test_v11_all_investigator_failure_is_terminal_failed_without_diagnosti
         event=record.event,
         runtime_run_id="run-investigator-failed",
         remaining_tool_budget=8,
-        remaining_token_budget=1000,
+        remaining_token_budget=3000,
     )
 
     await runtime.investigator_round_1(
@@ -3503,13 +3929,16 @@ async def test_v11_critic_and_lead_authority_complete_without_semantic_validatio
         event=record.event,
         runtime_run_id="run-v11",
         remaining_tool_budget=8,
-        remaining_token_budget=10000,
+        remaining_token_budget=100000,
     )
     await runtime.investigator_round_1(
         repository=repository,
         investigation_id=record.id,
         event=record.event,
     )
+    candidate_id = repository.get_coordination_review(record.id).candidates[0].id
+    turns[0]["assessments"][0]["candidate_id"] = candidate_id
+    turns[1]["decision"]["candidate_ids"] = [candidate_id]
     review = await runtime.critic_review(
         repository=repository,
         investigation_id=record.id,
@@ -3523,7 +3952,7 @@ async def test_v11_critic_and_lead_authority_complete_without_semantic_validatio
         event=record.event,
     )
     assert review.lead_decision is not None
-    assert review.lead_decision.candidate_ids == ["candidate-1"]
+    assert review.lead_decision.candidate_ids == [candidate_id]
     await runtime.result_validation(
         repository=repository,
         investigation_id=record.id,
@@ -3661,13 +4090,17 @@ async def test_v11_needs_evidence_has_one_round_two_batch_and_one_reconciliation
         event=record.event,
         runtime_run_id="run-v11",
         remaining_tool_budget=8,
-        remaining_token_budget=10000,
+        remaining_token_budget=100000,
     )
     await runtime.investigator_round_1(
         repository=repository,
         investigation_id=record.id,
         event=record.event,
     )
+    candidate_id = repository.get_coordination_review(record.id).candidates[0].id
+    turns[0]["assessments"][0]["candidate_id"] = candidate_id
+    turns[2]["assessments"][0]["candidate_id"] = candidate_id
+    turns[3]["decision"]["candidate_ids"] = [candidate_id]
     first = await runtime.critic_review(
         repository=repository,
         investigation_id=record.id,
@@ -3816,12 +4249,104 @@ async def test_v11_phase_executor_uses_runtime_phases_without_legacy_report_or_a
             )
         )
         assert output.business_mutation.investigation_id == record.id
+        if phase == RuntimePhase.INVESTIGATOR_ROUND_1:
+            candidate_id = repository.get_coordination_review(record.id).candidates[0].id
+            turns[0]["assessments"][0]["candidate_id"] = candidate_id
+            turns[1]["decision"]["candidate_ids"] = [candidate_id]
 
     persisted = repository.get_coordination_review(record.id)
     assert persisted is not None
     assert persisted.lead_decision is not None
     assert repository.get(record.id).report is None
     assert repository.get(record.id).actions == []
+
+
+def test_durable_session_rebuild_preserves_supplemental_tasks():
+    class PlanPayloadOnlyRepository(InMemoryInvestigationRepository):
+        def get_plan(self, investigation_id):
+            plan = super().get_plan(investigation_id)
+            if plan is None:
+                return None
+            return plan.model_copy(
+                update={
+                    "tasks": [
+                        task for task in plan.tasks if task.analysis_round == 1
+                    ]
+                }
+            )
+
+    _, record = _seed_repository()
+    repository = PlanPayloadOnlyRepository()
+    repository.save(record)
+    runtime_run_id = "run-durable-round-two"
+    first_task = DiagnosisTask(
+        id="task-round-one",
+        title="Inspect signal",
+        description="Inspect the initial signal.",
+        task_type=DiagnosisTaskType.GENERAL_INVESTIGATION,
+        agent_name="investigator",
+        analysis_round=1,
+        evidence_scope={"entity_ids": ["checkout-service"]},
+        runtime_run_id=runtime_run_id,
+    )
+    supplemental_task = DiagnosisTask(
+        id="task-round-two",
+        title="Collect supplemental signal",
+        description="Collect the requested supplemental signal.",
+        task_type=DiagnosisTaskType.GENERAL_INVESTIGATION,
+        agent_name="investigator",
+        analysis_round=2,
+        information_gap="need a trace boundary",
+        runtime_run_id=runtime_run_id,
+        critic_assessment_id="assessment-round-one",
+    )
+    repository.save_plan(
+        DiagnosisPlan(
+            id="plan-durable-round-two",
+            investigation_id=record.id,
+            tasks=[first_task],
+            runtime_run_id=runtime_run_id,
+            lead_decision=LeadDecision(
+                action=LeadAction.INVESTIGATE,
+                summary="collect initial signal",
+                task_ids=[first_task.id],
+            ),
+        )
+    )
+    repository.save_tasks(record.id, [first_task, supplemental_task])
+
+    orchestrator = SimpleNamespace(
+        repository=repository,
+        providers=build_mock_provider_registry(),
+        analyzer=None,
+        report_generator=None,
+        coordinator=None,
+        action_planner=None,
+        task_planner=None,
+        agents_runtime=None,
+        v11_runtime=None,
+        default_strategy="adaptive",
+        max_tool_calls_per_specialist=3,
+        max_total_tool_calls=8,
+    )
+    executor = DiagnosisPhaseExecutor(orchestrator)
+    sandbox = executor._build_durable_session(
+        PhaseInput(
+            run_id=runtime_run_id,
+            attempt_id="attempt-durable-round-two",
+            phase=RuntimePhase.INVESTIGATOR_ROUND_2,
+            resume_state=RuntimeResumeState(
+                remaining_tool_budget=8,
+                remaining_token_budget=10000,
+            ),
+            investigation_id=record.id,
+            strategy="adaptive",
+        )
+    )
+
+    assert [
+        task.id for task in sandbox._orchestrator.repository.list_tasks(record.id)
+    ] == [first_task.id, supplemental_task.id]
 
 
 def test_v11_official_provider_contract_and_client_ignore_ambient_endpoint(monkeypatch):
@@ -4395,7 +4920,80 @@ async def test_v11_concurrent_model_reservations_cannot_oversell_token_ceiling()
             input_tokens=input_estimate,
             reservation_status="completed",
         )
-    assert runtime.remaining_token_budget == 90
+    assert runtime.remaining_token_budget == 100 - sum(
+        item[1] for item in results
+    )
+
+
+@pytest.mark.anyio
+async def test_v11_default_model_reservations_share_concurrent_budget():
+    runtime = V11Runtime(
+        model="fake",
+        token_budget=100_000,
+        max_investigators=3,
+    )
+
+    async def reserve(index: int):
+        return await runtime._reserve_model_budget(
+            None,
+            f"prompt-{index}",
+            {"index": index},
+            reservation_id=f"logical-default-{index}:request-1",
+            logical_call_id=f"logical-default-{index}",
+            execution_id=f"execution-default-{index}",
+            actor=ExecutionActor.INVESTIGATOR.value,
+        )
+
+    results = await asyncio.gather(*(reserve(index) for index in range(3)))
+
+    assert sum(item[2] for item in results) == 100_000
+    assert all(reserved > input_estimate for _, input_estimate, reserved in results)
+    assert runtime.remaining_token_budget == 0
+    for index, (_, input_estimate, reserved_total) in enumerate(results):
+        await runtime._settle_model_budget(
+            reserved_total,
+            input_estimate,
+            reservation_id=f"logical-default-{index}:request-1",
+            logical_call_id=f"logical-default-{index}",
+            execution_id=f"execution-default-{index}",
+            input_tokens=input_estimate,
+            reservation_status="completed",
+        )
+    assert runtime.remaining_token_budget == 100_000 - sum(
+        item[1] for item in results
+    )
+
+
+@pytest.mark.anyio
+async def test_v11_serial_default_model_reservation_keeps_the_full_budget():
+    runtime = V11Runtime(
+        model="fake",
+        token_budget=100_000,
+        max_investigators=3,
+    )
+
+    _, input_estimate, reserved_total = await runtime._reserve_model_budget(
+        None,
+        "critic prompt",
+        {"review": "bounded"},
+        reservation_id="logical-critic:request-1",
+        logical_call_id="logical-critic",
+        execution_id="execution-critic",
+        actor=ExecutionActor.CRITIC.value,
+    )
+
+    assert reserved_total == 100_000
+    assert reserved_total > input_estimate
+    await runtime._settle_model_budget(
+        reserved_total,
+        input_estimate,
+        reservation_id="logical-critic:request-1",
+        logical_call_id="logical-critic",
+        execution_id="execution-critic",
+        input_tokens=input_estimate,
+        reservation_status="completed",
+    )
+    assert runtime.remaining_token_budget == 100_000 - input_estimate
 
 
 def test_domain_violating_draft_raises_contract_error_not_validation_error():

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Grilling"
+  short_description: "Resolve a DiagOps release decision tree with the user."
+  default_prompt: "Use $grilling to resolve the open decisions for this DiagOps release."

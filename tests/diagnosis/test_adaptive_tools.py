@@ -121,6 +121,32 @@ async def test_scoped_window_intersection_is_enforced_without_attribute_error():
 
 
 @pytest.mark.anyio
+async def test_invalid_scoped_window_reports_the_schema_fields_to_the_model():
+    provider = QueryProvider("read_runtime_state", EvidenceProvider.RUNTIME_STATE, None)
+    session = _manifest_session([provider])
+
+    response = json.loads(
+        await session.invoke(
+            "investigator-1",
+            "read_runtime_state",
+            json.dumps(
+                {
+                    "start_time": "2026-07-15T07:50:00+00:00",
+                    "end_time": "2026-07-15T08:10:00+00:00",
+                }
+            ),
+            1,
+        )
+    )
+
+    assert response["status"] == "failed"
+    assert response["warning"].startswith("invalid tool input:")
+    assert "window_start" in response["warning"]
+    assert "window_end" in response["warning"]
+    assert provider.calls == 0
+
+
+@pytest.mark.anyio
 async def test_scoped_window_fingerprint_normalizes_timezone_spelling():
     provider = QueryProvider(
         "query_related_alerts", EvidenceProvider.RELATED_ALERT, None
@@ -282,6 +308,35 @@ async def test_session_allows_targets_from_seed_dependency_edges():
             AgentName.DEPLOYMENT,
             "query_dependencies",
             json.dumps(_query_payload(target="payment-service")),
+            1,
+        )
+    )
+
+    assert response["status"] == "success"
+    assert provider.calls == 1
+
+
+@pytest.mark.anyio
+async def test_session_allows_service_target_from_scoped_pod_evidence():
+    provider = QueryProvider(
+        "query_dependencies", EvidenceProvider.DEPENDENCY, "ev-follow-up-pod"
+    )
+    seed = _evidence(
+        "ev-runtime-pod",
+        EvidenceProvider.RUNTIME_STATE,
+        EvidenceKind.RUNTIME_STATE,
+        payload={
+            "entity_id": "queue-master-5f47847cd-4wbwd",
+            "runtime_kind": "pod",
+        },
+    )
+    session = _session([provider], seed=[seed])
+
+    response = json.loads(
+        await session.invoke(
+            AgentName.DEPLOYMENT,
+            "query_dependencies",
+            json.dumps(_query_payload(target="queue-master")),
             1,
         )
     )

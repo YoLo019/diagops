@@ -41,6 +41,7 @@ from backend.domain.multi_agent import (
     ExecutionActor,
     ExecutionStepKind,
     LeadAction,
+    MultiAgentRunStatus,
 )
 
 
@@ -249,6 +250,37 @@ def test_v11_validator_rejects_orphan_supplemental_task_ids():
             evidence=[evidence],
             tasks=[persisted_task],
         )
+
+
+def test_v11_validator_preserves_failed_run_task_audit_without_orphan_error():
+    evidence = _validation_evidence()
+    persisted_task = DiagnosisTask(
+        id="failed-round-two-task",
+        title="collect the requested signal",
+        description="collect the requested signal",
+        task_type=DiagnosisTaskType.GENERAL_INVESTIGATION,
+        agent_name=ExecutionActor.INVESTIGATOR.value,
+        analysis_round=2,
+        evidence_scope={"entity_ids": ["checkout-service"]},
+        runtime_run_id="run-v11",
+        critic_assessment_id="cleared-assessment",
+    )
+    review = CoordinationReview(
+        investigation_id="inv-1",
+        runtime_run_id="run-v11",
+        authority_mode=AuthorityMode.AGENT,
+        run_status=MultiAgentRunStatus.FAILED,
+    )
+
+    validate_v11_result(
+        investigation_id="inv-1",
+        runtime_run_id="run-v11",
+        findings=[],
+        candidates=[],
+        review=review,
+        evidence=[evidence],
+        tasks=[persisted_task],
+    )
 
 
 def _validation_metric_evidence(

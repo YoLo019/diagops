@@ -1,0 +1,4 @@
+interface:
+  display_name: "Domain Modeling"
+  short_description: "Sharpen DiagOps terminology and durable design decisions."
+  default_prompt: "Use $domain-modeling to clarify this DiagOps term or durable design decision."

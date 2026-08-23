@@ -195,7 +195,10 @@ class DiagnosisPhaseExecutor:
         review = source.get_coordination_review(record.id)
         if plan is not None:
             repository.save_plan(plan)
-        elif tasks:
+        # Supplemental tasks are persisted as an independent projection.  Do
+        # not rely on get_plan() to merge them into the historical plan payload
+        # when rebuilding a durable phase session.
+        if tasks:
             repository.save_tasks(record.id, tasks)
         if context_facts:
             repository.save_context_facts(record.id, context_facts)

@@ -56,16 +56,45 @@ _PROVIDER_TOOLS: dict[str, EvidenceProvider] = {
 _INTERNAL_TOOLS = frozenset({"query_prometheus"})
 
 _DESCRIPTIONS: dict[str, str] = {
-    "read_logs": "Read log evidence.",
-    "query_metrics": "Read metric evidence.",
-    "read_deployments": "Read deployment evidence.",
-    "read_service_catalog": "Read service catalog evidence.",
-    "query_prometheus": "Query Prometheus metric evidence.",
-    "query_dependencies": "Read dependency evidence.",
-    "query_traces": "Read bounded trace span evidence.",
-    "read_runtime_state": "Read runtime state evidence.",
-    "query_related_alerts": "Read related alert evidence.",
-    "lookup_memory": "Lookup verified prior incident memory.",
+    "read_logs": (
+        "Read log evidence. Requires start_time, end_time, and reason; the window "
+        "must be timezone-aware and no longer than two hours."
+    ),
+    "query_metrics": (
+        "Read metric evidence. Requires start_time, end_time, and reason; the window "
+        "must be timezone-aware and no longer than two hours."
+    ),
+    "read_deployments": (
+        "Read deployment evidence. Requires start_time, end_time, and reason; the "
+        "window must be timezone-aware and no longer than two hours."
+    ),
+    "read_service_catalog": (
+        "Read service catalog evidence. Requires start_time, end_time, and reason; "
+        "the window must be timezone-aware and no longer than two hours."
+    ),
+    "query_prometheus": (
+        "Query Prometheus metric evidence. Requires start_time, end_time, and reason; "
+        "the window must be timezone-aware and no longer than two hours."
+    ),
+    "query_dependencies": (
+        "Read dependency evidence. Requires start_time, end_time, and reason; the "
+        "window must be timezone-aware and no longer than two hours. direction is "
+        "either upstream or downstream; depth is fixed at 1."
+    ),
+    "query_traces": (
+        "Read bounded trace span evidence. Use window_start and window_end together "
+        "when a time window is needed; do not use start_time or end_time."
+    ),
+    "read_runtime_state": (
+        "Read runtime state evidence. Use window_start and window_end together when "
+        "a time window is needed; do not use start_time or end_time. states accepts "
+        "at most 8 values."
+    ),
+    "query_related_alerts": (
+        "Read related alert evidence. Use window_start and window_end together when "
+        "a time window is needed; do not use start_time or end_time."
+    ),
+    "lookup_memory": "Lookup verified prior incident memory; no time-window fields are used.",
 }
 
 QUERY_MODELS_BY_TOOL = {

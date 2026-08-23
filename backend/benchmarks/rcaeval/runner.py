@@ -221,14 +221,15 @@ class SingleInvestigatorAgent(V11Runtime):
                 )
             ],
         )
-        repository.save_plan(
-            self._build_plan(
-                provisional,
-                investigation_id=investigation_id,
-                runtime_run_id=self.runtime_run_id or "",
-                manifest=manifest,
-            )
+        provisional_plan = self._build_plan(
+            provisional,
+            investigation_id=investigation_id,
+            runtime_run_id=self.runtime_run_id or "",
+            manifest=manifest,
         )
+        repository.save_plan(provisional_plan)
+        task = provisional_plan.tasks[0]
+        task_id = task.id
         session = AdaptiveToolSession(
             event=event,
             seed_evidence=base_evidence,
@@ -307,6 +308,9 @@ class SingleInvestigatorAgent(V11Runtime):
                 manifest=manifest,
             )
             repository.save_plan(plan)
+            if plan.tasks:
+                task = plan.tasks[0]
+                task_id = task.id
             committed_evidence = repository.get(investigation_id).evidence
             # 模型输出是不可信数据：单个 draft 违约只拒绝该 draft 并留持久化
             # 审计（spec §7.4 校验器可拒绝输出），不让同批合法 finding 陪葬

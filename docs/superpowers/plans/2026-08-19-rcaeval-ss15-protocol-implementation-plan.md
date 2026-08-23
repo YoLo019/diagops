@@ -1,6 +1,7 @@
 # RCAEval SS15 Protocol Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans (inline execution was explicitly requested by the user). Steps use checkbox (`- [ ]`) syntax for tracking.
+Status: `implemented`; the formal SS15/TT90 run remains blocked by the
+capability admission recorded in `../current.md`.
 
 **Goal:** Replace the project-local Sock Shop sealed-validation protocol with a deterministic 15-case `SS15` partition while preserving the upstream `RE2-SS` 90-case source contract and leaving `OB30`/`TT90` unchanged.
 
@@ -63,13 +64,6 @@ uv run pytest tests/benchmarks/test_rcaeval_prepare.py -q
 Expected: collection or assertion failures because `RcaEvalPartition.SS15` and
 the new partition count do not exist yet. Do not change the test back to make it
 pass.
-
-- [ ] **Step 3: Commit the RED selector test contract**
-
-```powershell
-git add tests/benchmarks/test_rcaeval_prepare.py
-git commit -m "test: define SS15 selector behavior"
-```
 
 ### Task 2: Implement the SS15 partition and selector
 
@@ -163,14 +157,6 @@ the exact `ob30` and `ss15` source ID lists. Update the golden-vector test to lo
 v2, keep `tt90` out of the vector, and remove v1 so no test can silently use the old
 30-case SS selection.
 
-- [ ] **Step 5: Commit the model, selector, and golden vector**
-
-```powershell
-git add backend/benchmarks/rcaeval/models.py backend/benchmarks/rcaeval/prepare.py tests/benchmarks/test_rcaeval_prepare.py tests/benchmarks/fixtures/rcaeval-selector-golden-v2.json
-git rm tests/benchmarks/fixtures/rcaeval-selector-golden-v1.json
-git commit -m "feat: add deterministic SS15 partition"
-```
-
 ### Task 3: Add RED tests for formal SS15 cardinality and CLI identity
 
 **Files:**
@@ -249,13 +235,6 @@ uv run pytest tests/benchmarks/test_rcaeval_runner.py tests/benchmarks/test_rcae
 Expected: all renamed tests pass, including the 15-case formal bundle and the
 rejection of the deleted `ss30` value.
 
-- [ ] **Step 5: Commit the formal contract change**
-
-```powershell
-git add backend/benchmarks/rcaeval/__main__.py backend/benchmarks/rcaeval/runner.py backend/benchmarks/rcaeval/evaluator.py tests/benchmarks/test_rcaeval_runner.py tests/benchmarks/test_rcaeval_evaluator.py tests/benchmarks/test_rcaeval_isolation.py tests/benchmarks/test_rcaeval_custodian_ledger.py
-git commit -m "feat: enforce SS15 formal cardinality"
-```
-
 ### Task 5: Reconcile remaining code/tests and documentation
 
 **Files:**
@@ -319,15 +298,11 @@ $script = Get-Content -Raw -LiteralPath 'C:\Users\林佳威\Desktop\task14-ss30-
 Write-Output 'SS15_SCRIPT_PARSE_OK'
 ```
 
-- [ ] **Step 3: Commit repository documentation, then leave the external script change recorded in the handoff**
+- [ ] **Step 3: Verify repository documentation and record the external script in the handoff**
 
-```powershell
-git add docs/superpowers/current.md docs/superpowers/plans/2026-08-02-diagops-v11-adaptive-multi-agent-rca-implementation-plan.md
-git commit -m "docs: record SS15 protocol supersession"
-```
-
-The desktop file is outside the repository and is verified by its parse result and
-the final `git status` check; no credential material is committed.
+Run `git diff --check` and inspect `git status --short`. The desktop file is
+outside the repository and is verified by its parse result; no credential
+material is committed.
 
 ### Task 7: Generate and verify the new SS15 custodian packages
 

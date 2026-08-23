@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from statistics import median
@@ -137,6 +138,17 @@ def _services(*investigation_ids: str):
     return repository, InMemoryRuntimeStore(repository, lease_seconds=5)
 
 
+@contextmanager
+def _temporary_sqlite_engine(prefix: str):
+    with tempfile.TemporaryDirectory(prefix=prefix) as temp_dir:
+        engine = create_db_engine(f"sqlite:///{Path(temp_dir) / 'runtime.db'}")
+        try:
+            initialize_database(engine)
+            yield engine
+        finally:
+            engine.dispose()
+
+
 def _run(store, investigation_id: str, run_id: str, *, adaptive: bool = False):
     return store.create_run(
         RuntimeRun(
@@ -259,9 +271,7 @@ async def _boundary_scenario(point: str) -> dict[str, object]:
 
 
 async def _persistence_mid_transaction() -> dict[str, object]:
-    with tempfile.TemporaryDirectory(prefix="diagops-acceptance-transaction-") as temp_dir:
-        engine = create_db_engine(f"sqlite:///{Path(temp_dir) / 'runtime.db'}")
-        initialize_database(engine)
+    with _temporary_sqlite_engine("diagops-acceptance-transaction-") as engine:
         repository = SQLiteInvestigationRepository(engine)
         repository.save(
             InvestigationRecord(
@@ -319,7 +329,6 @@ async def _persistence_mid_transaction() -> dict[str, object]:
         assert persisted.status == RuntimeRunStatus.RUNNING
         assert persisted.current_phase is None
         assert store.list_attempts(run.id)[0].status == RuntimeAttemptStatus.RUNNING
-        engine.dispose()
         return {
             "run_status": "running",
             "attempt_status": "running",
@@ -1162,9 +1171,7 @@ async def _otel_unavailable() -> dict[str, object]:
 
 
 async def _replay_external_call() -> dict[str, object]:
-    with tempfile.TemporaryDirectory(prefix="diagops-acceptance-replay-") as temp_dir:
-        engine = create_db_engine(f"sqlite:///{Path(temp_dir) / 'runtime.db'}")
-        initialize_database(engine)
+    with _temporary_sqlite_engine("diagops-acceptance-replay-") as engine:
         repository = SQLiteInvestigationRepository(engine)
         store = SQLiteRuntimeStore(engine, repository)
 
@@ -1183,12 +1190,14 @@ async def _replay_external_call() -> dict[str, object]:
                 writer=RuntimeWriter(store),
                 phase_executor=_CompleteExecutor(),
             )
-            completed = await coordinator.execute(
-                run.id, owner=f"acceptance-replay-{index}"
-            )
-            assert completed.status == RuntimeRunStatus.COMPLETED
-            await coordinator.shutdown()
-            return completed
+            try:
+                completed = await coordinator.execute(
+                    run.id, owner=f"acceptance-replay-{index}"
+                )
+                assert completed.status == RuntimeRunStatus.COMPLETED
+                return completed
+            finally:
+                await coordinator.shutdown()
 
         source = await create_source(0)
         dependencies = ReplayDependencies(store=store)
@@ -1266,7 +1275,6 @@ async def _replay_external_call() -> dict[str, object]:
             store.get_frozen_business_projection(source.id),
             ensure_ascii=False,
         )
-        engine.dispose()
         return {
             "external_attempt_detected": True,
             "clean_external_call_count": 0,

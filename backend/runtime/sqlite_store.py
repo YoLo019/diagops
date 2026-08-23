@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from threading import RLock
 
 from pydantic import ValidationError
 from sqlalchemy import func, insert, or_, select, update
@@ -71,8 +70,6 @@ class SQLiteRuntimeStore:
         self._failpoint = failpoint
         self._event_publisher = event_publisher
         self.fault_injector = fault_injector or NoFaultInjector()
-        # V9 是单进程执行器；该锁补足绕过 RuntimeWriter 的同进程直接 Store 调用。
-        self._write_lock = RLock()
 
     def create_run(self, run: RuntimeRun) -> RuntimeRun:
         values = run.model_dump(mode="json")
@@ -1322,8 +1319,7 @@ class SQLiteRuntimeStore:
             raise RuntimePersistenceError("failed to reserve V11 model turn") from exc
 
     def commit_phase(self, commit) -> RuntimeCheckpoint:
-        with self._write_lock:
-            return self._commit_phase(commit)
+        return self._commit_phase(commit)
 
     def _commit_phase(self, commit) -> RuntimeCheckpoint:
         from backend.runtime.phases import (
@@ -1567,6 +1563,22 @@ class SQLiteRuntimeStore:
                     raise RuntimeLeaseLost("runtime lease lost before phase advancement")
         except (RuntimeNotFound, RuntimeLeaseLost, RuntimeIntegrityError, RuntimeConflict):
             raise
+        except IntegrityError as exc:
+            # 两个执行者可同时提交同一逻辑 checkpoint；唯一键冲突后重新读取，
+            # 相同内容视为幂等成功，内容不同才是实际的 checkpoint ID 冲突。
+            try:
+                existing = self.get_checkpoint(commit.checkpoint_id)
+            except RuntimeNotFound:
+                raise RuntimePersistenceError("sqlite phase commit rolled back") from exc
+            if (
+                existing.run_id == commit.run_id
+                and existing.attempt_id == commit.attempt_id
+                and existing.completed_phase == commit.phase
+                and existing.state_digest == digest
+                and existing.projection_digest == projection_digest
+            ):
+                return existing
+            raise RuntimeConflict("checkpoint id was reused for another phase result") from exc
         except Exception as exc:
             raise RuntimePersistenceError("sqlite phase commit rolled back") from exc
 

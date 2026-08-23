@@ -45,6 +45,17 @@ def test_agent_specs_are_all_read_only_with_schemas():
         assert spec.input_schema["additionalProperties"] is False
 
 
+def test_scoped_tool_descriptions_name_the_v11_window_fields():
+    registry = build_provider_tool_registry(ProviderRegistry([]))
+
+    for name in ("query_traces", "query_related_alerts", "read_runtime_state"):
+        description = registry.get(name).description
+        assert "window_start" in description
+        assert "window_end" in description
+        assert "start_time" in description
+        assert "end_time" in description
+
+
 def test_exposure_defaults_to_agent_for_compatibility():
     assert ToolSpec(name="t", description="d").exposure == ToolExposure.AGENT
 

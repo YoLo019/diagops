@@ -57,6 +57,7 @@ from backend.diagnosis.openai_compatible_model import (
 from backend.diagnosis.openai_model import OFFICIAL_OPENAI_BASE_URL
 from backend.diagnosis.result_validation import (
     V11ResultValidationError,
+    _validate_scope_consistency,
     validate_v11_result,
 )
 from backend.domain.agent_findings import (
@@ -214,7 +215,9 @@ class CriticOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     summary: str = Field(default="", max_length=512)
-    assessments: list[CriticAssessment] = Field(default_factory=list, max_length=3)
+    # 三个并行 Investigator 各自最多提交三个候选；Critic 必须覆盖合并后的
+    # 全部候选，不能让 schema 上限把合法候选截掉。
+    assessments: list[CriticAssessment] = Field(default_factory=list, max_length=9)
     tasks: list[LeadTaskDraft] = Field(default_factory=list, max_length=3)
 
 
@@ -261,6 +264,7 @@ class _ModelReservation:
     output_cap: int | None
     input_estimate: int
     reserved_total: int
+    estimate_audit: dict[str, Any]
     status: str = "reserved"
 
 
@@ -353,6 +357,108 @@ class _ModelUsageAccumulator:
         return input_tokens, output_tokens
 
 
+_INPUT_ESTIMATE_METHOD = "unicode-json-envelope-v1"
+_JSON_PUNCTUATION = frozenset('{}[],:"\\')
+_INPUT_ESTIMATE_CALIBRATION_SAFETY_NUMERATOR = 5
+_INPUT_ESTIMATE_CALIBRATION_SAFETY_DENOMINATOR = 4
+_INPUT_ESTIMATE_CALIBRATION_FLOOR_BASIS_POINTS = 7500
+_INPUT_ESTIMATE_BASIS_POINTS = 10000
+
+
+def _is_cjk_character(character: str) -> bool:
+    """识别需要按接近逐字计量的 CJK/日韩文字。"""
+    codepoint = ord(character)
+    return (
+        0x2E80 <= codepoint <= 0x2FFF
+        or 0x3040 <= codepoint <= 0x30FF
+        or 0x3400 <= codepoint <= 0x4DBF
+        or 0x4E00 <= codepoint <= 0x9FFF
+        or 0xAC00 <= codepoint <= 0xD7AF
+        or 0xF900 <= codepoint <= 0xFAFF
+    )
+
+
+def _estimate_text_tokens(text: str) -> tuple[int, dict[str, int]]:
+    """计算 provider-neutral 的保守输入 token 包络。
+
+    这里不是某个模型的 tokenizer：兼容 endpoint 可能使用未知 tokenizer，
+    只能先按普通 ASCII、JSON 标点和 CJK 分开计量。实际 provider usage 会在
+    settle 时继续作为权威值审计；这个包络的职责是避免明显低估后才发现超支。
+    """
+    ascii_plain = 0
+    cjk = 0
+    non_ascii = 0
+    json_punctuation = 0
+    for character in text:
+        if _is_cjk_character(character):
+            cjk += 1
+        elif ord(character) > 0x7F:
+            non_ascii += 1
+        elif character in _JSON_PUNCTUATION:
+            json_punctuation += 1
+        else:
+            ascii_plain += 1
+
+    # ASCII 文本按 4 字符/token；JSON 标点按逐个 token；CJK 按 1.5
+    # token/字向上取整；其他非 ASCII 字符按 2 token 保守处理。
+    estimated = (
+        (ascii_plain + 3) // 4
+        + (cjk * 3 + 1) // 2
+        + non_ascii * 2
+        + json_punctuation
+    )
+    return max(1, estimated), {
+        "chars": len(text),
+        "ascii_plain_chars": ascii_plain,
+        "cjk_chars": cjk,
+        "non_ascii_chars": non_ascii,
+        "json_punctuation_chars": json_punctuation,
+    }
+
+
+def _serialized_value(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError):
+        # 只用于无敏感内容的长度审计和预算包络；模型请求本身仍由 SDK
+        # 负责序列化，不能用这个 fallback 伪造请求内容。
+        return repr(value)
+
+
+def _estimate_model_input(
+    prompt: str, context: dict[str, Any]
+) -> tuple[int, dict[str, int | str]]:
+    """估算当前请求并返回不含原文的组成统计。"""
+    context_json = _serialized_value(context)
+    total_text = f"{prompt}{context_json}"
+    estimated, counts = _estimate_text_tokens(total_text)
+    audit: dict[str, int | str] = {
+        "method": _INPUT_ESTIMATE_METHOD,
+        "estimated_tokens": estimated,
+        "instruction_chars": len(prompt),
+        "context_chars": len(context_json),
+        "total_chars": len(total_text),
+        **counts,
+    }
+    for component in ("input", "tools", "output_schema"):
+        if component not in context:
+            continue
+        component_text = _serialized_value(context[component])
+        component_estimate, component_counts = _estimate_text_tokens(component_text)
+        audit[f"{component}_chars"] = len(component_text)
+        audit[f"{component}_estimated_tokens"] = component_estimate
+        audit[f"{component}_cjk_chars"] = component_counts["cjk_chars"]
+        audit[f"{component}_json_punctuation_chars"] = component_counts[
+            "json_punctuation_chars"
+        ]
+    return estimated, audit
+
+
+def _input_estimate_audit(audit: dict[str, Any]) -> dict[str, Any]:
+    """以单个受限字段记录估算组成，避免撑爆 RuntimeEvent 顶层字段数。"""
+    return {"input_estimate_audit": dict(audit)}
+
+
 class _V11BudgetedModel(Model):
     """把 durable token reservation 下沉到 Agents SDK 的每个 request。"""
 
@@ -438,16 +544,21 @@ class _V11BudgetedModel(Model):
             input_tokens, output_tokens = _usage_values(
                 getattr(response, "usage", None)
             )
+            # provider 已返回 usage 时以实际 input 结算，估算只作缺失 usage 的回退；
+            # 否则保守估算的多余部分会被错误地永久消耗掉 run 预算。
+            settlement_input_tokens = (
+                input_tokens if input_tokens > 0 else input_estimate
+            )
             await self._runtime._settle_model_budget(
                 reserved_total,
-                max(input_estimate, input_tokens) + output_tokens,
+                settlement_input_tokens + output_tokens,
                 reservation_id=reservation_id,
                 logical_call_id=self._logical_call_id,
                 execution_id=self._execution_id,
                 attempt=self._attempt_number,
                 actor=self._actor,
                 request_index=request_index,
-                input_tokens=max(input_estimate, input_tokens),
+                input_tokens=settlement_input_tokens,
                 actual_input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 reservation_status="completed",
@@ -565,12 +676,66 @@ def _draft_rejection_code(exc: V11RuntimeContractError) -> str:
     return "finding draft rejected: uncommitted_evidence"
 
 
+def _investigator_failure_audit(exc: BaseException) -> tuple[str, FailureCategory]:
+    """把 Investigator 的边界失败收口为可审计的固定码。"""
+    code_by_message = {
+        "model token budget exhausted": (
+            "model_token_budget_exhausted",
+            FailureCategory.QUOTA,
+        ),
+        "model response exceeded token budget": (
+            "model_token_budget_exceeded",
+            FailureCategory.QUOTA,
+        ),
+        "model tool budget exhausted": (
+            "model_tool_budget_exhausted",
+            FailureCategory.QUOTA,
+        ),
+        "V11 model turn budget exhausted": (
+            "model_turn_budget_exhausted",
+            FailureCategory.QUOTA,
+        ),
+        "invalid V11 model output": (
+            "invalid_v11_model_output",
+            FailureCategory.INVALID_OUTPUT,
+        ),
+    }
+    return code_by_message.get(str(exc), ("investigator failed", FailureCategory.UNKNOWN))
+
+
 def _model_retryable_exception(exc: BaseException) -> BaseException:
     """模型调用超时可重试（网关慢/长生成是运营噪声）；工具路径的裸
     TimeoutError 契约不受影响——转换只发生在模型调用的 re-raise 处。"""
     if isinstance(exc, TimeoutError):
         return ClassifiedRetryableError(FailureCategory.TIMEOUT)
     return exc
+
+
+def _structured_output_retry_feedback(output_type: type[BaseModel]) -> str:
+    """为下一次模型尝试提供固定、可安全持久化的 schema 纠正提示。"""
+    common = (
+        "The previous structured response was rejected. Return a new response "
+        "that satisfies the declared JSON schema exactly: output one JSON object, "
+        "use the declared enum values, respect every list bound, and add no extra "
+        "fields. Do not return markdown or explain the correction."
+    )
+    if output_type is CriticOutput:
+        return (
+            f"{common} For every listed candidate, emit exactly one assessment "
+            "with exactly these seven checks: temporal, topology, mechanism, "
+            "blast_radius, symptom_vs_cause, counterevidence, alternatives. "
+            "Each pass/fail check must cite evidence_ids; each unknown check must "
+            "name a gap. A needs_evidence assessment must include a gap and at "
+            "least one supplemental task."
+        )
+    if output_type is InvestigatorOutput:
+        return (
+            f"{common} Cite only committed usable evidence IDs available to this "
+            "investigator. Leave candidate supporting_finding_ids and "
+            "contradicting_finding_ids empty, and do not invent finding or evidence "
+            "IDs. A non-gap finding must cite at least one usable evidence ID."
+        )
+    return common
 
 
 TurnCallable = Callable[..., Awaitable[Any]]
@@ -638,6 +803,9 @@ class V11Runtime:
             tuple[str, int], list[_ModelRequestEvent]
         ] = {}
         self._model_usage_accumulators: dict[str, _ModelUsageAccumulator] = {}
+        # 同一 run 内按 agent 角色累计 provider usage；首次请求仍使用保守包络，
+        # 后续请求用实测比例校准，避免未知 tokenizer 长期吞掉 output cap。
+        self._input_estimate_calibration: dict[str, list[int]] = {}
         self._commit_lock = asyncio.Lock()
         self._execution_contract: dict[str, Any] | None = None
         self._remaining_deadline_seconds: Callable[[], float] = lambda: float("inf")
@@ -976,9 +1144,12 @@ class V11Runtime:
         remaining_token_budget: int | None,
     ) -> DiagnosisPlan:
         """调用 Lead 生成并立即持久化 bounded Investigator plan。"""
-        if remaining_tool_budget < 0 or (
-            remaining_token_budget is not None and remaining_token_budget < 0
-        ):
+        if remaining_tool_budget <= 0:
+            # Planning 本身不调用工具，但必须至少为 Investigator 留出一个
+            # tool budget；后续 Critic/Lead adjudication 是纯模型阶段，不受
+            # Investigator 工具额度耗尽影响。
+            raise V11RuntimeContractError("remaining tool budget must be positive")
+        if remaining_token_budget is not None and remaining_token_budget < 0:
             raise V11RuntimeContractError("remaining budget must be non-negative")
         self.runtime_run_id = runtime_run_id
         self._remaining_token_budget = remaining_token_budget
@@ -1068,9 +1239,14 @@ class V11Runtime:
         allowed_skills = {f"{skill.name}@{skill.version}" for skill in self.skills}
         if not set(output.decision.selected_skills) <= allowed_skills:
             raise V11RuntimeContractError("planning selected an unknown skill")
+        task_id_by_draft_id = {
+            task.id: self._new_task_id() for task in output.tasks
+        }
         tasks = [
             DiagnosisTask(
-                id=task.id,
+                # 模型 task id 只用于本次 structured output 的引用；持久化主键
+                # 必须由服务端生成，否则不同调查的常见 task-1/task-2 会冲突。
+                id=task_id_by_draft_id[task.id],
                 title=task.title,
                 description=task.description,
                 task_type=DiagnosisTaskType.GENERAL_INVESTIGATION,
@@ -1092,7 +1268,10 @@ class V11Runtime:
             for task in output.tasks
         ]
         decision = output.decision.model_copy(
-            update={"task_ids": task_ids, "candidate_ids": []}
+            update={
+                "task_ids": [task_id_by_draft_id[task_id] for task_id in task_ids],
+                "candidate_ids": [],
+            }
         )
         return DiagnosisPlan(
             investigation_id=investigation_id,
@@ -1100,6 +1279,16 @@ class V11Runtime:
             tasks=tasks,
             lead_decision=decision,
         )
+
+    @staticmethod
+    def _new_task_id() -> str:
+        """为持久化任务生成不受模型控制的全局唯一主键。"""
+        return f"task-{uuid4().hex}"
+
+    @staticmethod
+    def _new_candidate_id() -> str:
+        """为持久化候选生成不受模型控制的全局唯一主键。"""
+        return f"candidate-{uuid4().hex}"
 
     def _agent_manifest(self) -> tuple[str, ...]:
         if self.tool_registry is None:
@@ -1249,7 +1438,7 @@ class V11Runtime:
                         event=event,
                         task=task,
                         round_number=1,
-                        seed_evidence=base_evidence,
+                        seed_evidence=_evidence_for_task(task, base_evidence),
                         own_findings=(),
                     )
             except asyncio.CancelledError:
@@ -1326,11 +1515,22 @@ class V11Runtime:
                 runtime_run_id=self.runtime_run_id or "",
                 review_round=1,
             )
-            tasks = self._supplemental_tasks(
+            tasks, supplemental_task_id_map = self._supplemental_tasks(
                 output,
                 assessments,
                 runtime_run_id=self.runtime_run_id or "",
             )
+            assessments = [
+                item.model_copy(
+                    update={
+                        "supplemental_task_ids": [
+                            supplemental_task_id_map[task_id]
+                            for task_id in item.supplemental_task_ids
+                        ]
+                    }
+                )
+                for item in assessments
+            ]
             existing_tasks = repository.list_tasks(investigation_id)
             repository.save_tasks(investigation_id, [*existing_tasks, *tasks])
             review = review.model_copy(
@@ -1433,7 +1633,7 @@ class V11Runtime:
                         event=event,
                         task=task,
                         round_number=2,
-                        seed_evidence=evidence,
+                        seed_evidence=_evidence_for_task(task, evidence),
                         own_findings=tuple(
                             item
                             for item in repository.list_agent_findings(investigation_id)
@@ -2061,12 +2261,14 @@ class V11Runtime:
             raise
         except Exception as exc:
             self._failures.append(type(exc).__name__)
+            failure_message, failure_category = _investigator_failure_audit(exc)
             execution = self._failed_execution(
                 task_id=task.id,
                 actor=instance_id,
                 step_kind=ExecutionStepKind.INVESTIGATOR_ANALYSIS,
-                message="investigator failed",
+                message=failure_message,
                 analysis_round=round_number,
+                failure_category=failure_category,
             )
             return _InvestigatorResult((), (), execution)
         finally:
@@ -2100,6 +2302,7 @@ class V11Runtime:
             if item.status in {EvidenceStatus.SUCCESS, EvidenceStatus.PARTIAL}
             and item.runtime_run_id == self.runtime_run_id
         }
+        evidence_by_id = {item.id: item for item in committed_evidence}
         admitted: list[RootCauseCandidate] = []
         for candidate in drafts:
             finding_refs = {
@@ -2114,8 +2317,23 @@ class V11Runtime:
                 code = "candidate draft rejected: candidate_finding_reference"
             elif not evidence_refs <= usable_evidence:
                 code = "candidate draft rejected: candidate_evidence_reference"
+            elif candidate.affected_entity is not None:
+                try:
+                    _validate_scope_consistency(
+                        candidate.affected_entity,
+                        candidate.supporting_evidence_ids,
+                        evidence_by_id,
+                    )
+                except V11ResultValidationError as exc:
+                    code = f"candidate draft rejected: {exc.code}"
+                else:
+                    code = ""
             else:
-                admitted.append(candidate)
+                code = ""
+            if not code:
+                # 模型候选 ID 只用于它自己的响应，不能成为跨 Investigator
+                # 的持久化主键；不同调查员常会同时返回 candidate-1。
+                admitted.append(candidate.model_copy(update={"id": self._new_candidate_id()}))
                 continue
             self._failures.append("investigator_candidate_draft_rejected")
             audit_executions.append(
@@ -2165,11 +2383,19 @@ class V11Runtime:
             by_id[candidate.id] = candidate
         if not by_id:
             return
+        # Investigator 的 rank 只在各自响应批次内有意义；并行合并后必须建立
+        # 一个稳定的 review 全局序列，否则三个批次都返回 rank=1 会让终态
+        # 校验得到重复 rank。这里仅分配持久化投影的展示序号，不选择、改写
+        # 或补造任何根因内容；候选顺序由确定的 task/gather 顺序保持。
+        normalized_candidates = [
+            candidate.model_copy(update={"rank": rank})
+            for rank, candidate in enumerate(by_id.values(), start=1)
+        ]
         review = (
             current
             if current is not None
             else self._empty_review(repository, investigation_id)
-        ).model_copy(update={"candidates": list(by_id.values())})
+        ).model_copy(update={"candidates": normalized_candidates})
         repository.save_coordination_review(review)
 
     async def _commit_session(
@@ -2250,6 +2476,19 @@ class V11Runtime:
             raise V11RuntimeContractError("Investigator referenced uncommitted evidence")
         if draft.finding_type != AgentFindingType.GAP and not draft.evidence_ids:
             raise V11RuntimeContractError("non-gap finding requires evidence")
+        if draft.finding_type != AgentFindingType.GAP:
+            try:
+                _validate_scope_consistency(
+                    draft.affected_entity,
+                    draft.evidence_ids,
+                    {item.id: item for item in evidence},
+                )
+            except V11ResultValidationError as exc:
+                # 终态 validator 与 draft 准入必须共享同一 scope 合同；提前
+                # 拒绝不一致 draft，避免把可局部丢弃的模型违约升级成整 run 失败。
+                raise V11RuntimeContractError(
+                    f"finding draft violates finding contract: {exc.code}"
+                ) from exc
         try:
             return AgentFinding(
                 investigation_id=investigation_id,
@@ -2322,12 +2561,12 @@ class V11Runtime:
         assessments: list[CriticAssessment],
         *,
         runtime_run_id: str,
-    ) -> list[DiagnosisTask]:
+    ) -> tuple[list[DiagnosisTask], dict[str, str]]:
         needs = [item for item in assessments if item.verdict.value == "needs_evidence"]
         if not needs:
             if output.tasks:
                 raise V11RuntimeContractError("only needs_evidence may create round two tasks")
-            return []
+            return [], {}
         if len(output.tasks) > 3:
             raise V11RuntimeContractError("round two task batch is out of bounds")
         task_by_id = {item.id: item for item in output.tasks}
@@ -2342,6 +2581,9 @@ class V11Runtime:
             raise V11RuntimeContractError(
                 "round two task IDs must match Critic supplemental IDs"
             )
+        task_id_by_draft_id = {
+            task_id: self._new_task_id() for task_id in declared_ids
+        }
         tasks: list[DiagnosisTask] = []
         for assessment in needs:
             ids = list(assessment.supplemental_task_ids)
@@ -2355,7 +2597,9 @@ class V11Runtime:
                     )
                 tasks.append(
                     DiagnosisTask(
-                        id=draft.id,
+                        # Supplemental task ids are also model drafts and must not
+                        # become global SQLite primary keys.
+                        id=task_id_by_draft_id[draft.id],
                         title=draft.title,
                         description=draft.description,
                         task_type=DiagnosisTaskType.GENERAL_INVESTIGATION,
@@ -2377,7 +2621,7 @@ class V11Runtime:
                 )
         if len(tasks) > 3 or len({item.id for item in tasks}) != len(tasks):
             raise V11RuntimeContractError("round two task batch must be unique and bounded")
-        return tasks
+        return tasks, task_id_by_draft_id
 
     def _empty_review(self, repository, investigation_id: str) -> CoordinationReview:
         return CoordinationReview(
@@ -2724,6 +2968,13 @@ class V11Runtime:
             "agent_instance_id": instance_id,
             "round": task.analysis_round,
             "tool_manifest": manifest,
+            "tool_contracts": [
+                {
+                    "name": name,
+                    "description": self.tool_registry.get(name).description,
+                }
+                for name in manifest
+            ],
             "skills": [_skill_projection(skill) for skill in self.skills],
             "selected_skills": selected_skills,
             "own_committed_evidence": [
@@ -2751,19 +3002,15 @@ class V11Runtime:
         *,
         round_number: int,
     ) -> str:
+        findings = repository.list_agent_findings(investigation_id)
+        evidence = _critic_evidence(review, findings, repository.get(investigation_id).evidence)
         payload = {
             "role": "critic",
             "incident": _event_projection(event),
             "round": round_number,
             "candidates": [item.model_dump(mode="json") for item in review.candidates],
-            "findings": [
-                item.model_dump(mode="json")
-                for item in repository.list_agent_findings(investigation_id)
-            ],
-            "evidence": [
-                _evidence_projection(item)
-                for item in repository.get(investigation_id).evidence
-            ],
+            "findings": [item.model_dump(mode="json") for item in findings],
+            "evidence": [_evidence_projection(item) for item in evidence],
             "prior_assessments": [
                 item.model_dump(mode="json") for item in review.critic_assessments
             ],
@@ -2779,15 +3026,13 @@ class V11Runtime:
         *,
         round_number: int,
     ) -> dict[str, Any]:
-        evidence_ids = [
-            item.id
-            for item in repository.get(investigation_id).evidence
-        ]
+        findings = repository.list_agent_findings(investigation_id)
+        evidence = _critic_evidence(review, findings, repository.get(investigation_id).evidence)
         return {
             "round": round_number,
             "candidate_ids": [item.id for item in review.candidates],
             "assessment_ids": [item.id for item in review.critic_assessments],
-            "evidence_ids": evidence_ids,
+            "evidence_ids": [item.id for item in evidence],
             "tools": [],
         }
 
@@ -2963,6 +3208,65 @@ class V11Runtime:
             else {}
         )
 
+    def _calibrated_input_estimate(
+        self,
+        actor: str,
+        raw_estimate: int,
+        audit: dict[str, int | str],
+    ) -> tuple[int, dict[str, Any]]:
+        """按同角色已结算 usage 校准估算，并保留固定安全边际。"""
+        estimated_total, actual_total, sample_count = self._input_estimate_calibration.get(
+            actor, [0, 0, 0]
+        )
+        factor_basis_points = _INPUT_ESTIMATE_BASIS_POINTS
+        if estimated_total > 0 and actual_total > 0:
+            observed_basis_points = (
+                actual_total * _INPUT_ESTIMATE_BASIS_POINTS // estimated_total
+            )
+            factor_basis_points = min(
+                _INPUT_ESTIMATE_BASIS_POINTS,
+                max(
+                    _INPUT_ESTIMATE_CALIBRATION_FLOOR_BASIS_POINTS,
+                    (
+                        observed_basis_points
+                        * _INPUT_ESTIMATE_CALIBRATION_SAFETY_NUMERATOR
+                        + _INPUT_ESTIMATE_CALIBRATION_SAFETY_DENOMINATOR
+                        - 1
+                    )
+                    // _INPUT_ESTIMATE_CALIBRATION_SAFETY_DENOMINATOR,
+                ),
+            )
+        calibrated = max(
+            1,
+            (
+                raw_estimate * factor_basis_points
+                + _INPUT_ESTIMATE_BASIS_POINTS
+                - 1
+            )
+            // _INPUT_ESTIMATE_BASIS_POINTS,
+        )
+        calibrated_audit: dict[str, Any] = {
+            **audit,
+            "raw_estimated_tokens": raw_estimate,
+            "estimated_tokens": calibrated,
+            "calibration_factor_basis_points": factor_basis_points,
+            "calibration_samples": sample_count,
+        }
+        return calibrated, calibrated_audit
+
+    def _record_input_estimate_calibration(
+        self, actor: str, raw_estimate: int, actual_input_tokens: int | None
+    ) -> None:
+        """只用 provider 返回的正数 input usage 更新角色校准。"""
+        if raw_estimate <= 0 or not isinstance(actual_input_tokens, int):
+            return
+        if actual_input_tokens <= 0:
+            return
+        bucket = self._input_estimate_calibration.setdefault(actor, [0, 0, 0])
+        bucket[0] += raw_estimate
+        bucket[1] += actual_input_tokens
+        bucket[2] += 1
+
     async def _defer_later_model_retries(
         self,
         logical_call_id: str,
@@ -3001,6 +3305,7 @@ class V11Runtime:
                         "reserved_tokens": released_tokens,
                         "input_estimate": reservation.input_estimate,
                         "attempt": attempt,
+                        **_input_estimate_audit(reservation.estimate_audit),
                         **self._model_turn_audit_payload(),
                         **self._request_index_payload(later_index),
                     },
@@ -3031,14 +3336,11 @@ class V11Runtime:
             else self._remaining_token_budget
         )
         assert requested is not None
-        input_estimate = max(
-            1,
-            (
-                len(prompt)
-                + len(json.dumps(context, ensure_ascii=False, sort_keys=True))
-                + 3
-            )
-            // 4,
+        raw_input_estimate, raw_estimate_audit = _estimate_model_input(prompt, context)
+        input_estimate, estimate_audit = self._calibrated_input_estimate(
+            actor,
+            raw_input_estimate,
+            raw_estimate_audit,
         )
         async with self._token_budget_lock:
             existing = (
@@ -3060,6 +3362,7 @@ class V11Runtime:
                             "reserved_tokens": existing.reserved_total,
                             "input_estimate": existing.input_estimate,
                             "attempt": attempt,
+                            **_input_estimate_audit(existing.estimate_audit),
                             **self._model_turn_audit_payload(),
                             **self._request_index_payload(request_index),
                         },
@@ -3092,6 +3395,22 @@ class V11Runtime:
                 current = self._remaining_token_budget
                 if requested_budget is None:
                     requested = current
+            if requested_budget is None:
+                # Agents SDK 未设置 max_tokens 时，只对并发 Investigator 按
+                # 尚未占用的调查槽位均分；串行的 Lead/Critic 必须保留全部
+                # 当前预算，否则实际输入稍大于估算值就会被错误拒绝。
+                remaining_slots = max(
+                    1,
+                    self.max_investigators - len(self._model_reservations)
+                    if actor == ExecutionActor.INVESTIGATOR.value
+                    else 1,
+                )
+                requested = max(
+                    input_estimate + 1,
+                    (current + remaining_slots - 1) // remaining_slots
+                    if current is not None
+                    else requested,
+                )
             assert requested is not None
             available = min(
                 requested,
@@ -3110,6 +3429,7 @@ class V11Runtime:
                     output_cap=output_cap,
                     input_estimate=input_estimate,
                     reserved_total=available,
+                    estimate_audit=estimate_audit,
                 )
                 try:
                     await self._emit_model(
@@ -3123,6 +3443,7 @@ class V11Runtime:
                             "reserved_tokens": available,
                             "input_estimate": input_estimate,
                             "attempt": attempt,
+                            **_input_estimate_audit(estimate_audit),
                             **self._model_turn_audit_payload(),
                             **self._request_index_payload(request_index),
                         },
@@ -3165,6 +3486,18 @@ class V11Runtime:
                     return
                 if reserved_total != reservation.reserved_total:
                     raise V11RuntimeContractError("model reservation total mismatch")
+                raw_estimate = reservation.estimate_audit.get(
+                    "raw_estimated_tokens", reservation.input_estimate
+                )
+                if (
+                    reservation_status == "completed"
+                    and isinstance(raw_estimate, int)
+                ):
+                    self._record_input_estimate_calibration(
+                        actor,
+                        raw_estimate,
+                        actual_input_tokens,
+                    )
                 if actual_total > reserved_total:
                     reported_input = (
                         actual_input_tokens
@@ -3190,6 +3523,7 @@ class V11Runtime:
                                 "actual_input_tokens": reported_input,
                                 "budget_overrun_tokens": actual_total - reserved_total,
                                 "attempt": attempt,
+                                **_input_estimate_audit(reservation.estimate_audit),
                                 **self._model_turn_audit_payload(),
                                 **self._request_index_payload(request_index),
                             },
@@ -3221,6 +3555,7 @@ class V11Runtime:
                             "reserved_tokens": reservation.reserved_total,
                             "input_estimate": reservation.input_estimate,
                             "attempt": attempt,
+                            **_input_estimate_audit(reservation.estimate_audit),
                             **self._model_turn_audit_payload(),
                             **self._request_index_payload(request_index),
                         },
@@ -3243,6 +3578,7 @@ class V11Runtime:
                         "input_estimate": reservation.input_estimate,
                         "attempt": attempt,
                         **self._actual_input_payload(actual_input_tokens),
+                        **_input_estimate_audit(reservation.estimate_audit),
                         **self._model_turn_audit_payload(),
                         **self._request_index_payload(request_index),
                     },
@@ -3300,7 +3636,7 @@ class V11Runtime:
         self._validate_bound_execution_contract()
         if remaining_token_budget is not None and remaining_token_budget <= 0:
             raise V11RuntimeContractError("model token budget exhausted")
-        if remaining_tool_budget is not None and remaining_tool_budget <= 0:
+        if tools and remaining_tool_budget is not None and remaining_tool_budget <= 0:
             raise V11RuntimeContractError("model tool budget exhausted")
         if self._model_turn_budget_enabled:
             if self._remaining_model_turns is None:
@@ -3323,6 +3659,7 @@ class V11Runtime:
         current_execution_id: str | None = None
         current_started_at: datetime | None = None
         usage_accumulator = _ModelUsageAccumulator({}, set())
+        active_prompt = prompt
 
         async def persist_attempt(
             *,
@@ -3378,7 +3715,11 @@ class V11Runtime:
         self._model_usage_accumulators[model_event_id] = usage_accumulator
         try:
             async def invoke_model(attempt: int) -> Any:
-                nonlocal current_execution_id, current_started_at, previous_execution_id
+                nonlocal active_prompt, current_execution_id, current_started_at
+                nonlocal previous_execution_id
+                attempt_reservation_id = self._model_request_reservation_id(
+                    model_event_id, 0
+                ) or reservation_id
                 current_execution_id = f"exec-{uuid4().hex}"
                 current_started_at = datetime.now(UTC)
                 await persist_attempt(
@@ -3393,9 +3734,9 @@ class V11Runtime:
                     if self.turn is not None:
                         reservation = await self._reserve_model_budget(
                             remaining_token_budget,
-                            prompt,
+                            active_prompt,
                             context,
-                            reservation_id=reservation_id,
+                            reservation_id=attempt_reservation_id,
                             logical_call_id=model_event_id,
                             execution_id=current_execution_id,
                             attempt=attempt,
@@ -3406,7 +3747,7 @@ class V11Runtime:
                             _maybe_await(
                                 self.turn(
                                     actor=actor,
-                                    prompt=prompt,
+                                    prompt=active_prompt,
                                     output_type=output_type,
                                     tools=tools,
                                     context=context,
@@ -3434,7 +3775,7 @@ class V11Runtime:
                         )
                         agent_kwargs: dict[str, Any] = {
                             "name": actor,
-                            "instructions": prompt,
+                            "instructions": active_prompt,
                             "model": sdk_model,
                             "tools": tools,
                             "output_type": output_type,
@@ -3509,15 +3850,21 @@ class V11Runtime:
                             self._input_tokens += fallback[0]
                             self._output_tokens += fallback[1]
                     if self.turn is not None:
+                        # 同上：turn 测试适配器也必须以实际 usage 结算。
+                        settlement_input_tokens = (
+                            measured.input_tokens
+                            if measured.input_tokens > 0
+                            else input_estimate
+                        )
                         await self._settle_model_budget(
                             reserved_total,
-                            measured.input_tokens + measured.output_tokens,
-                            reservation_id=reservation_id,
+                            settlement_input_tokens + measured.output_tokens,
+                            reservation_id=attempt_reservation_id,
                             logical_call_id=model_event_id,
                             execution_id=current_execution_id,
                             attempt=attempt,
                             actor=actor,
-                            input_tokens=measured.input_tokens,
+                            input_tokens=settlement_input_tokens,
                             actual_input_tokens=measured.input_tokens,
                             output_tokens=measured.output_tokens,
                             reservation_status="completed",
@@ -3538,7 +3885,7 @@ class V11Runtime:
                         await self._settle_model_budget(
                             reserved_total,
                             input_estimate,
-                            reservation_id=reservation_id,
+                            reservation_id=attempt_reservation_id,
                             logical_call_id=model_event_id,
                             execution_id=current_execution_id,
                             attempt=attempt,
@@ -3564,7 +3911,7 @@ class V11Runtime:
                         await self._settle_model_budget(
                             reserved_total,
                             input_estimate if retry_status == "released" else 0,
-                            reservation_id=reservation_id,
+                            reservation_id=attempt_reservation_id,
                             logical_call_id=model_event_id,
                             execution_id=current_execution_id,
                             attempt=attempt,
@@ -3580,6 +3927,11 @@ class V11Runtime:
                             FailureCategory.TIMEOUT
                             if isinstance(exc, TimeoutError)
                             else FailureCategory.UNKNOWN
+                        )
+                    if category == FailureCategory.INVALID_OUTPUT:
+                        active_prompt = (
+                            f"{prompt}\n\n"
+                            f"{_structured_output_retry_feedback(output_type)}"
                         )
                     await persist_attempt(
                         status=AgentExecutionStatus.FAILED,
@@ -3598,7 +3950,11 @@ class V11Runtime:
                 self._model_timeout()
                 if remaining_token_budget is not None and remaining_token_budget <= 0:
                     raise V11RuntimeContractError("model token budget exhausted")
-                if remaining_tool_budget is not None and remaining_tool_budget <= 0:
+                if (
+                    tools
+                    and remaining_tool_budget is not None
+                    and remaining_tool_budget <= 0
+                ):
                     raise V11RuntimeContractError("model tool budget exhausted")
                 if self.tool_registry is not None:
                     self._agent_manifest()
@@ -3781,6 +4137,93 @@ def _evidence_projection(item: EvidenceItem) -> dict[str, Any]:
         "timestamp": item.timestamp.astimezone(UTC).isoformat(),
         "summary": item.summary,
     }
+
+
+def _evidence_for_task(
+    task: DiagnosisTask, evidence: Iterable[EvidenceItem]
+) -> list[EvidenceItem]:
+    """按已持久化 task scope 过滤证据，同时对不确定项保守放行。
+
+    scope 来自模型草稿，但筛选本身完全由代码执行。没有明确 scope、没有
+    EvidenceScope、没有 runtime owner 的初始锚点，以及无法判定冲突的证据都
+    保留，避免一次不完整的 scope 草稿静默丢失关键证据；只有证据自身明确
+    与 task 的实体或时间范围冲突时才排除。
+    """
+    items = list(evidence)
+    if not task.evidence_scope:
+        return items
+    try:
+        scope = EvidenceScopeDraft.model_validate(task.evidence_scope)
+    except (TypeError, ValidationError):
+        return items
+
+    selected: list[EvidenceItem] = []
+    requested_entities = set(scope.entity_ids)
+    for item in items:
+        # 初始 evidence 是诊断锚点；无 scope 的证据也无法证明与 task 冲突。
+        if item.runtime_run_id is None or item.scope is None:
+            selected.append(item)
+            continue
+        item_entities = set(item.scope.entity_ids)
+        if requested_entities and item_entities and not (
+            requested_entities & item_entities
+        ):
+            continue
+        observed_at = item.scope.observed_at or item.timestamp
+        if scope.start_time is not None and observed_at < scope.start_time:
+            continue
+        if scope.end_time is not None and observed_at > scope.end_time:
+            continue
+        selected.append(item)
+
+    # 空结果不代表没有证据，只代表 scope 无法安全命中；回退全量，保持
+    # “宁可多发不能漏发”的证据充分性约束。
+    return selected or items
+
+
+def _critic_evidence(
+    review: CoordinationReview,
+    findings: Iterable[AgentFinding],
+    evidence: Iterable[EvidenceItem],
+) -> list[EvidenceItem]:
+    """只把当前候选链实际引用的证据摘要交给 Critic。
+
+    Evidence 的完整记录仍保存在 repository。Critic 只需要判断候选与
+    finding 链的因果充分性；把同一 run 中所有 Investigator 的全部查询
+    结果再次注入会让工具结果把每一轮的 prompt 放大数倍，并且不增加可
+    归因的证据引用。筛选只读取已持久化引用，不由模型决定，因此不会
+    改写候选、finding 或证据内容。
+    """
+    evidence_items = list(evidence)
+    referenced_ids = {
+        evidence_id
+        for candidate in review.candidates
+        for evidence_id in (
+            *candidate.supporting_evidence_ids,
+            *candidate.contradicting_evidence_ids,
+        )
+    }
+    referenced_ids.update(
+        evidence_id
+        for finding in findings
+        for evidence_id in (
+            *finding.evidence_ids,
+            *finding.contradicting_evidence_ids,
+        )
+    )
+    referenced_ids.update(
+        evidence_id
+        for assessment in review.critic_assessments
+        for evidence_id in (
+            *assessment.supporting_evidence_ids,
+            *assessment.contradicting_evidence_ids,
+            *(evidence_id for check in assessment.checks for evidence_id in check.evidence_ids),
+        )
+    )
+    if not referenced_ids:
+        return evidence_items
+    selected = [item for item in evidence_items if item.id in referenced_ids]
+    return selected or evidence_items
 
 
 def _skill_projection(skill: DiagnosticSkill) -> dict[str, Any]:

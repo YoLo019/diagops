@@ -1,6 +1,6 @@
 # DiagOps V11 Adaptive Multi-Agent RCA Design
 
-Status: `review_required`
+Status: `approved`
 
 Date: 2026-08-02
 

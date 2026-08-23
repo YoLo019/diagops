@@ -86,6 +86,28 @@ def test_runtime_event_redacts_bare_provider_credential_in_message() -> None:
     assert "sk-proj" not in event.safe_payload["message"]
 
 
+def test_runtime_model_event_accepts_bounded_input_estimate_audit() -> None:
+    event = RuntimeEvent(
+        run_id="run-1",
+        attempt_id="attempt-1",
+        sequence=1,
+        event_type=RuntimeEventType.MODEL_STARTED,
+        actor_type=RuntimeActorType.AGENT,
+        safe_payload={
+            "status": "started",
+            "input_estimate_audit": {
+                "method": "unicode-json-envelope-v1",
+                "estimated_tokens": 120,
+                "instruction_chars": 240,
+                "context_chars": 180,
+                "total_chars": 420,
+            },
+        },
+    )
+
+    assert event.safe_payload["input_estimate_audit"]["estimated_tokens"] == 120
+
+
 @pytest.mark.parametrize(
     "payload",
     [

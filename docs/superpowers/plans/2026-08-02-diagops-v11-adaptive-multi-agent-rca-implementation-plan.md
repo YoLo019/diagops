@@ -1,6 +1,6 @@
 # DiagOps V11 Adaptive Multi-Agent RCA Implementation Plan
 
-Status: `review_required`
+Status: `approved`
 
 Date: 2026-08-02
 
@@ -39,7 +39,7 @@ Authoritative specification:
 - Do not create a commit, branch, tag, push, or PR without explicit user
   authorization. A clean immutable source identity is a hard prerequisite for
   the final TT90 execution; stop before that gate if authorization is missing.
-- Preserve the existing user-owned `AGENT.md` modification and unrelated dirty
+- Preserve the existing user-owned `AGENTS.md` modification and unrelated dirty
   worktree content.
 
 ## 2. Milestones

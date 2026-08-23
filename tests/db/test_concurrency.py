@@ -21,6 +21,15 @@ from backend.domain.human_transitions import HumanStateConflict
 from backend.services.incident_cases import load_incident_case
 
 
+def test_sqlite_engine_configures_busy_timeout(tmp_path) -> None:
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'busy-timeout.db'}")
+    try:
+        with engine.connect() as connection:
+            assert connection.exec_driver_sql("PRAGMA busy_timeout").scalar_one() == 10_000
+    finally:
+        engine.dispose()
+
+
 @pytest.mark.parametrize(
     ("initial", "targets"),
     [
