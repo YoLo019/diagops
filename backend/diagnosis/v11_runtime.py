@@ -113,6 +113,24 @@ from backend.tools.registry import ToolRegistry, agent_manifest_hash
 logger = logging.getLogger(__name__)
 
 
+# 这些错误只表示当前诊断证据不足以满足 COMPLETE/PARTIAL 的发布合同。
+# 它们可以通过撤销发布权安全降级为 INCONCLUSIVE；引用、所有权、schema
+# 和执行覆盖错误不能这样处理，否则会把结构性违约伪装成合法诊断。
+_LIVE_INCONCLUSIVE_RESULT_VALIDATION_CODES = frozenset(
+    {
+        "partial_usable_evidence_required",
+        "partial_candidate_failed_check",
+        "partial_candidate_evidence",
+        "partial_candidate_provider_types",
+        "final_conclusion_required",
+        "final_critic_required",
+        "final_lead_required",
+        "final_critic_execution_required",
+        "final_lead_execution_required",
+    }
+)
+
+
 class V11RuntimeContractError(ValueError):
     """表示 Agent 输出违反 V11 的机械合同。"""
 
@@ -2360,97 +2378,107 @@ class V11Runtime:
             )
         except V11ResultValidationError as first_error:
             self._failures.append(first_error.code)
-            # Validator 本身不修改任何 Agent 字段，correction 也只能改变 Lead decision。
-            try:
-                if (
-                    self._remaining_token_budget is not None
-                    and self._remaining_token_budget <= 0
-                ):
-                    # 预算耗尽时 correction 必败（预算门 fail-closed）；跳过
-                    # 这次必败调用，直接落入下方既有 terminal 路径。
-                    self._failures.append("correction_budget_exhausted")
-                    raise V11RuntimeContractError("correction budget exhausted")
-                turn = await self._call_model(
-                    actor=ExecutionActor.LEAD.value,
-                    prompt="Return a mechanically valid inconclusive V11 Lead decision.",
-                    output_type=LeadAdjudicationOutput,
-                    context={"correction_attempt": 1, "reason": first_error.code},
-                    tools=[],
-                    remaining_token_budget=self._remaining_token_budget,
-                    remaining_tool_budget=self._remaining_tool_budget_for(
-                        repository, investigation_id
-                    ),
-                    repository=repository,
-                    investigation_id=investigation_id,
-                    task_id=f"lead-result-validation-{self.runtime_run_id}",
-                    step_kind=ExecutionStepKind.LEAD_ADJUDICATION,
-                    analysis_round=2 if self._completed_rounds == 2 else 1,
-                )
-                corrected = self._parse_output(
-                    turn.output, LeadAdjudicationOutput
-                ).decision
-                self._validate_lead_decision(corrected, review)
-                corrected_status = self._diagnostic_status(corrected)
-                correction_projection = {
-                    "lead_decision": corrected,
-                    "diagnostic_status": corrected_status,
-                    "stop_reason": corrected.stop_reason,
-                    "run_status": (
-                        MultiAgentRunStatus.PARTIAL
-                        if corrected_status == DiagnosticStatus.PARTIAL
-                        else MultiAgentRunStatus.COMPLETED
-                    ),
-                }
-                if corrected.action == LeadAction.INCONCLUSIVE:
-                    # inconclusive 只取消发布权；已准入候选继续作为审计投影保留。
-                    correction_projection.update({"root_causes": []})
-                review = review.model_copy(update=correction_projection)
-                repository.save_coordination_review(review)
-                validate_v11_result(
-                    investigation_id=investigation_id,
-                    runtime_run_id=self.runtime_run_id or "",
-                    findings=repository.list_agent_findings(investigation_id),
-                    candidates=review.candidates,
-                    review=review,
-                    executions=repository.list_executions(investigation_id),
-                    evidence=repository.get(investigation_id).evidence,
-                    tasks=repository.list_tasks(investigation_id),
-                    tool_calls=repository.list_tool_calls(investigation_id),
-                    tool_registry=self.tool_registry,
-                    agent_manifest=self._agent_manifest(),
-                    status=review.diagnostic_status,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as second_error:
-                self._failures.append(type(second_error).__name__)
-                self._record_execution(
+            # live Agents SDK 路径不能再用一次无上下文的模型调用修正机械校验
+            # 失败：该调用既不能修改已持久化候选，又会让同一输入出现非确定性
+            # 的二次失败。仅对“证据不足/终态发布条件不足”做服务端降级；其余
+            # 结构性错误直接 fail-closed，并保留明确的失败类别。
+            if self.turn is None and first_error.code not in (
+                _LIVE_INCONCLUSIVE_RESULT_VALIDATION_CODES
+            ):
+                review = self._terminalize_result_validation_failure(
                     repository,
                     investigation_id,
-                    self._failed_execution(
-                        task_id=f"result-validation-{self.runtime_run_id}",
-                        actor="ValidatorAgent",
-                        step_kind=ExecutionStepKind.RESULT_VALIDATION,
-                        message="result validation correction failed",
+                    review,
+                    message="result validation rejected",
+                    failure_category=self._result_validation_failure_category(
+                        first_error.code
                     ),
                 )
-                self._mark_terminal_failure(
-                    repository,
-                    investigation_id,
-                    "result validation failed",
-                )
-                review = review.model_copy(
-                    update={
-                        "candidates": [],
-                        "critic_assessments": [],
-                        "lead_decision": None,
-                        "diagnostic_status": None,
-                        "run_status": MultiAgentRunStatus.FAILED,
-                        "stop_reason": "result_validation_failed",
-                        "summary": "Result validation failed.",
+            else:
+                # Validator 本身不修改任何 Agent 字段，非 live adapter 的 bounded
+                # correction 仍只允许改变 Lead decision；live 路径使用服务端的
+                # 固定 inconclusive decision。
+                try:
+                    if self.turn is None:
+                        corrected = self._validation_inconclusive_decision(
+                            first_error.code
+                        )
+                    else:
+                        if (
+                            self._remaining_token_budget is not None
+                            and self._remaining_token_budget <= 0
+                        ):
+                            # 预算耗尽时 correction 必败（预算门 fail-closed）；跳过
+                            # 这次必败调用，直接落入下方既有 terminal 路径。
+                            self._failures.append("correction_budget_exhausted")
+                            raise V11RuntimeContractError("correction budget exhausted")
+                        turn = await self._call_model(
+                            actor=ExecutionActor.LEAD.value,
+                            prompt="Return a mechanically valid inconclusive V11 Lead decision.",
+                            output_type=LeadAdjudicationOutput,
+                            context={"correction_attempt": 1, "reason": first_error.code},
+                            tools=[],
+                            remaining_token_budget=self._remaining_token_budget,
+                            remaining_tool_budget=self._remaining_tool_budget_for(
+                                repository, investigation_id
+                            ),
+                            repository=repository,
+                            investigation_id=investigation_id,
+                            task_id=f"lead-result-validation-{self.runtime_run_id}",
+                            step_kind=ExecutionStepKind.LEAD_ADJUDICATION,
+                            analysis_round=2 if self._completed_rounds == 2 else 1,
+                        )
+                        corrected = self._parse_output(
+                            turn.output, LeadAdjudicationOutput
+                        ).decision
+                    self._validate_lead_decision(corrected, review)
+                    corrected_status = self._diagnostic_status(corrected)
+                    correction_projection = {
+                        "lead_decision": corrected,
+                        "diagnostic_status": corrected_status,
+                        "stop_reason": corrected.stop_reason,
+                        "run_status": (
+                            MultiAgentRunStatus.PARTIAL
+                            if corrected_status == DiagnosticStatus.PARTIAL
+                            else MultiAgentRunStatus.COMPLETED
+                        ),
                     }
-                )
-                repository.save_coordination_review(review)
+                    if corrected.action == LeadAction.INCONCLUSIVE:
+                        # inconclusive 只取消发布权；已准入候选继续作为审计投影保留。
+                        correction_projection.update({"root_causes": []})
+                    review = review.model_copy(update=correction_projection)
+                    repository.save_coordination_review(review)
+                    if self.turn is None:
+                        self._record_validation_degradation(
+                            repository,
+                            investigation_id,
+                            review,
+                            reason=corrected.stop_reason or "result_validation_rejected",
+                        )
+                    validate_v11_result(
+                        investigation_id=investigation_id,
+                        runtime_run_id=self.runtime_run_id or "",
+                        findings=repository.list_agent_findings(investigation_id),
+                        candidates=review.candidates,
+                        review=review,
+                        executions=repository.list_executions(investigation_id),
+                        evidence=repository.get(investigation_id).evidence,
+                        tasks=repository.list_tasks(investigation_id),
+                        tool_calls=repository.list_tool_calls(investigation_id),
+                        tool_registry=self.tool_registry,
+                        agent_manifest=self._agent_manifest(),
+                        status=review.diagnostic_status,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as second_error:
+                    self._failures.append(type(second_error).__name__)
+                    review = self._terminalize_result_validation_failure(
+                        repository,
+                        investigation_id,
+                        review,
+                        message="result validation correction failed",
+                    )
         self._update_summary(repository, investigation_id)
         return review
 
@@ -3316,6 +3344,103 @@ class V11Runtime:
             completed_at=now,
             deadline_at=self._deadline_at,
         )
+
+    @staticmethod
+    def _result_validation_failure_category(code: str) -> FailureCategory:
+        if "reference" in code or "owner" in code or "projection" in code:
+            return FailureCategory.INVALID_REFERENCE
+        return FailureCategory.INVALID_OUTPUT
+
+    @staticmethod
+    def _validation_inconclusive_decision(code: str) -> LeadDecision:
+        safe_code = "".join(
+            char if char.isascii() and (char.isalnum() or char == "_") else "_"
+            for char in code
+        )[:96]
+        return LeadDecision(
+            action=LeadAction.INCONCLUSIVE,
+            summary="Result validation rejected candidate publication.",
+            stop_reason=f"result_validation_{safe_code or 'rejected'}",
+        )
+
+    def _record_validation_degradation(
+        self, repository, investigation_id: str, review: CoordinationReview, *, reason: str
+    ) -> None:
+        """记录服务端撤销发布权，不冒充额外模型诊断。"""
+        now = datetime.now(UTC)
+        audit = json.dumps(
+            {
+                "schema_version": "candidate-lifecycle-authority-v1",
+                "persisted_candidate_count": len(review.candidates),
+                "authoritative_candidate_ids": [],
+                "unpublished": [
+                    {"candidate_ref": candidate.id, "reason": reason}
+                    for candidate in review.candidates
+                ],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        self._record_execution(
+            repository,
+            investigation_id,
+            AgentExecution(
+                id=f"exec-{uuid4().hex}",
+                task_id=f"result-validation-{self.runtime_run_id}",
+                agent_name="ValidatorAgent",
+                runtime_run_id=self.runtime_run_id,
+                status=AgentExecutionStatus.COMPLETED,
+                execution_layer=AgentExecutionLayer.CUSTOM,
+                step_kind=ExecutionStepKind.RESULT_VALIDATION,
+                runtime_attempt_id=f"server-{uuid4().hex}",
+                failure_category=FailureCategory.NONE,
+                model_provider=self.model_provider,
+                model_name=self.model_name,
+                summary=audit,
+                started_at=now,
+                completed_at=now,
+            ),
+        )
+
+    def _terminalize_result_validation_failure(
+        self,
+        repository,
+        investigation_id: str,
+        review: CoordinationReview,
+        *,
+        message: str,
+        failure_category: FailureCategory = FailureCategory.UNKNOWN,
+    ) -> CoordinationReview:
+        self._record_execution(
+            repository,
+            investigation_id,
+            self._failed_execution(
+                task_id=f"result-validation-{self.runtime_run_id}",
+                actor="ValidatorAgent",
+                step_kind=ExecutionStepKind.RESULT_VALIDATION,
+                message=message,
+                failure_category=failure_category,
+            ),
+        )
+        self._mark_terminal_failure(
+            repository,
+            investigation_id,
+            "result validation failed",
+        )
+        failed_review = review.model_copy(
+            update={
+                "candidates": [],
+                "critic_assessments": [],
+                "lead_decision": None,
+                "diagnostic_status": None,
+                "run_status": MultiAgentRunStatus.FAILED,
+                "stop_reason": "result_validation_failed",
+                "summary": "Result validation failed.",
+            }
+        )
+        repository.save_coordination_review(failed_review)
+        return failed_review
 
     def _ensure_failed_execution(
         self,

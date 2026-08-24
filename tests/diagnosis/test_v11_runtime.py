@@ -56,6 +56,7 @@ from backend.diagnosis.v11_runtime import (
     LeadAdjudicationOutput,
     LeadPlanningCompactOutput,
     LeadPlanningOutput,
+    V11ResultValidationError,
     V11Runtime,
     V11RuntimeContractError,
     V11SingleControlOutput,
@@ -4043,6 +4044,90 @@ async def test_v11_insufficient_partial_downgrades_to_inconclusive_via_lead_corr
     assert run.status == MultiAgentRunStatus.COMPLETED
     assert run.diagnostic_status == DiagnosticStatus.INCONCLUSIVE
     validate_v11_final_status(review, run)
+
+
+@pytest.mark.anyio
+async def test_v11_live_validation_degradation_is_server_owned_and_audited(monkeypatch):
+    """live SDK 的证据不足降级不应再发起非确定性的二次模型调用。"""
+    repository, record = _repository()
+    runtime_run_id = "run-live-validation-degradation"
+    candidate = RootCauseCandidate(
+        id="candidate-live-validation-degradation",
+        summary="candidate retained for audit",
+        rank=1,
+        confidence=0.5,
+    )
+    assessment = CriticAssessment(
+        id="assessment-live-validation-degradation",
+        candidate_id=candidate.id,
+        verdict=CriticVerdict.ACCEPT,
+        checks=[
+            CausalCheck(
+                name=name,
+                status=CausalCheckStatus.UNKNOWN,
+                summary="not sufficient for publication",
+                gap="insufficient evidence",
+            )
+            for name in CausalCheckName
+        ],
+        summary="candidate retained for audit",
+        runtime_run_id=runtime_run_id,
+    )
+    repository.save_coordination_review(
+        CoordinationReview(
+            investigation_id=record.id,
+            runtime_run_id=runtime_run_id,
+            authority_mode="agent",
+            candidates=[candidate],
+            critic_assessments=[assessment],
+            lead_decision=LeadDecision(
+                action=LeadAction.CONCLUDE,
+                summary="candidate was initially selected",
+                candidate_ids=[candidate.id],
+            ),
+            diagnostic_status=DiagnosticStatus.COMPLETE,
+        )
+    )
+
+    calls = 0
+
+    def fake_validate(**_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise V11ResultValidationError("partial_candidate_evidence")
+
+    monkeypatch.setattr(v11_runtime_module, "validate_v11_result", fake_validate)
+    runtime = V11Runtime(
+        model="fake",
+        model_provider=ModelProvider.OPENAI,
+        model_name="fake",
+        tool_registry=build_provider_tool_registry(build_mock_provider_registry()),
+    )
+    runtime.runtime_run_id = runtime_run_id
+
+    review = await runtime.result_validation(
+        repository=repository,
+        investigation_id=record.id,
+        event=record.event,
+    )
+
+    assert calls == 2
+    assert review.diagnostic_status == DiagnosticStatus.INCONCLUSIVE
+    assert review.run_status == MultiAgentRunStatus.COMPLETED
+    assert [item.id for item in review.candidates] == [candidate.id]
+    assert review.lead_decision is not None
+    assert review.lead_decision.action == LeadAction.INCONCLUSIVE
+    assert review.stop_reason == "result_validation_partial_candidate_evidence"
+    assert repository.get(record.id).status != InvestigationStatus.FAILED
+    audit = [
+        item
+        for item in repository.list_executions(record.id)
+        if item.step_kind == ExecutionStepKind.RESULT_VALIDATION
+        and item.status == AgentExecutionStatus.COMPLETED
+    ]
+    assert len(audit) == 1
+    assert "result_validation_partial_candidate_evidence" in (audit[0].summary or "")
 
 
 @pytest.mark.anyio
