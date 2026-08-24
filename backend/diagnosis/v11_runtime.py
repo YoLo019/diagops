@@ -267,11 +267,13 @@ class CriticCompactAssessmentDraft(BaseModel):
     contradicting_evidence_ids: list[
         Annotated[str, Field(min_length=1, max_length=128)]
     ] = Field(default_factory=list, max_length=8)
+    gap: str | None = Field(default=None, max_length=128)
+    supplemental_task_ids: list[str] = Field(default_factory=list, max_length=3)
     summary: str = Field(min_length=1, max_length=128)
 
 
 class CriticCompactOutput(BaseModel):
-    """已有完整证据时使用的有界 Critic 输出，不请求第二轮查询。"""
+    """已有完整证据时使用的有界 Critic 输出。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -847,9 +849,10 @@ def _structured_output_retry_feedback(output_type: type[BaseModel]) -> str:
         return (
             f"{common} For every listed candidate, emit exactly one concise "
             "assessment using its candidate_ref exactly as provided; use only "
-            "accept, reject, or inconclusive (never needs_evidence), emit seven "
-            "named causal checks, and cite only committed evidence IDs. Do not "
-            "return server assessment IDs, candidate_id, tasks, or extra fields."
+            "accept, reject, or inconclusive, emit seven named causal checks, "
+            "and cite only committed evidence IDs. Do not request needs_evidence "
+            "or tasks in this bounded review. Do not return server assessment "
+            "IDs, candidate_id, or extra fields."
         )
     if output_type is CriticOutput:
         return (
@@ -2978,14 +2981,19 @@ class V11Runtime:
                         tool_names=list(self._agent_manifest()),
                         execution_layer=AgentExecutionLayer.OPENAI_AGENTS_SDK,
                         analysis_round=2,
-                        strategy=draft.strategy,
+                        strategy=getattr(draft, "strategy", None),
                         evidence_scope=(
                             draft.evidence_scope.model_dump(mode="json")
-                            if draft.evidence_scope is not None
+                            if getattr(draft, "evidence_scope", None) is not None
                             else None
                         ),
-                        expected_discriminator=draft.expected_discriminator,
-                        information_gap=draft.information_gap or assessment.gap,
+                        expected_discriminator=getattr(
+                            draft, "expected_discriminator", None
+                        ),
+                        information_gap=(
+                            getattr(draft, "information_gap", None)
+                            or assessment.gap
+                        ),
                         runtime_run_id=runtime_run_id,
                         critic_assessment_id=assessment.id,
                     )
@@ -3498,7 +3506,9 @@ class V11Runtime:
                 "inconclusive; emit seven named causal checks and only committed "
                 "evidence IDs. Do not request needs_evidence or tasks in this "
                 "bounded review; use inconclusive when evidence is insufficient. "
-                "Never return server assessment IDs or candidate_id."
+                "Keep each check summary to a few words and cite at most one "
+                "evidence ID per check. Never return server assessment IDs or "
+                "candidate_id."
                 if compact_output
                 else "Use candidate_ref exactly as provided. Return verdict, seven "
                 "named causal checks, and only committed evidence IDs; never "
