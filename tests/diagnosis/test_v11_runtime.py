@@ -277,13 +277,23 @@ def test_single_control_schema_contains_only_diagnostic_candidate_fields():
 
 def test_lead_prompt_exposes_exact_skill_identifiers():
     prompt = json.loads(
-        V11Runtime(model=None)._lead_prompt(_event(), ("read_logs",), 8)
+        V11Runtime(model=None, turn=object())._lead_prompt(
+            _event(), ("read_logs",), 8
+        )
     )
 
     assert [item["identifier"] for item in prompt["skills"]] == [
         f"{skill.name}@{skill.version}" for skill in DIAGNOSTIC_SKILLS
     ]
     assert "name@version" in prompt["rule"]
+
+
+def test_live_lead_prompt_omits_redundant_static_catalogs():
+    prompt = json.loads(V11Runtime(model=None)._lead_prompt(_event(), ("read_logs",), 8))
+
+    assert set(prompt) == {"incident", "rule"}
+    assert "tool_manifest" not in prompt
+    assert "skills" not in prompt
 
 
 def test_investigator_prompt_keeps_tool_descriptions_without_schema_duplication():
@@ -357,9 +367,16 @@ def test_live_investigator_prompt_compacts_complete_evidence_context():
         )
     )
 
-    assert prompt["tool_contracts"] == []
-    assert prompt["skills"] == []
-    assert "findings as an empty list" in prompt["rule"]
+    assert "tool_contracts" not in prompt
+    assert "skills" not in prompt
+    assert "Return zero or one candidate" in prompt["rule"]
+    assert set(prompt["evidence"][0]) == {
+        "id",
+        "kind",
+        "observed_at",
+        "summary",
+        "scope_entity_ids",
+    }
     assert "id" not in prompt["task"]
     assert "runtime_run_id" not in prompt["task"]
 

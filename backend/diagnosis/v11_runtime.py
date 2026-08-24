@@ -3613,6 +3613,25 @@ class V11Runtime:
         selected_skills: list[str],
     ) -> str:
         has_committed_evidence = bool(evidence) and self.turn is None
+        if has_committed_evidence:
+            payload = {
+                "role": "general investigator",
+                "incident": _live_incident_prompt_projection(event),
+                "task": _live_task_prompt_projection(task),
+                "evidence": [_live_evidence_prompt_projection(item) for item in evidence],
+                "rule": (
+                    "Use only the committed evidence below. Return zero or one candidate. "
+                    "Never invent evidence IDs or emit server fields such as id, rank, "
+                    "runtime_run_id, review fields, or finding refs. A candidate needs "
+                    "non-empty affected_entity, failure_mechanism, and at least one "
+                    "supporting_evidence_ids value from the evidence; affected_entity "
+                    "must match every cited scope_entity_ids value. Cite every directly "
+                    "relevant evidence ID. If only a symptom is supported, state the "
+                    "symptom and say the causal mechanism is unresolved; do not infer "
+                    "a cause. Return no candidate when no observation is supported."
+                ),
+            }
+            return json.dumps(redact_value(payload), ensure_ascii=False, sort_keys=True)
         payload = {
             "role": "general investigator",
             "incident": _event_projection(event),
@@ -3690,6 +3709,38 @@ class V11Runtime:
         findings = repository.list_agent_findings(investigation_id)
         evidence = _critic_evidence(review, findings, repository.get(investigation_id).evidence)
         compact_output = self.turn is None and len(review.candidates) <= self.max_investigators
+        if compact_output:
+            payload = {
+                "role": "critic",
+                "incident": _live_incident_prompt_projection(
+                    event, include_description=False
+                ),
+                "candidates": [
+                    {
+                        "candidate_ref": item.id,
+                        "affected_entity": item.affected_entity,
+                        "failure_mechanism": item.failure_mechanism,
+                        "supporting_evidence_ids": item.supporting_evidence_ids,
+                        "contradicting_evidence_ids": item.contradicting_evidence_ids,
+                    }
+                    for item in review.candidates
+                ],
+                "evidence": [
+                    _live_evidence_prompt_projection(item) for item in evidence
+                ],
+                "rule": (
+                    "Assess every candidate exactly once using its candidate_ref. Return "
+                    "only accept, reject, or inconclusive and exactly seven named checks: "
+                    "temporal, topology, mechanism, blast_radius, symptom_vs_cause, "
+                    "counterevidence, alternatives. A pass or fail check needs one "
+                    "committed evidence ID and no gap; unknown needs a short gap. A "
+                    "symptom candidate may be accepted when its observation is directly "
+                    "supported even if the deeper cause is unresolved. Emit only the "
+                    "declared candidate_ref, verdict, and check name/status/evidence_ids/gap; "
+                    "do not emit IDs, summaries, tasks, or extra fields."
+                ),
+            }
+            return json.dumps(redact_value(payload), ensure_ascii=False, sort_keys=True)
         payload = {
             "role": "critic",
             "incident": _event_projection(event),
@@ -3793,6 +3844,18 @@ class V11Runtime:
         manifest: tuple[str, ...],
         remaining_tool_budget: int,
     ) -> str:
+        if self.turn is None:
+            payload = {
+                "incident": _live_incident_prompt_projection(event),
+                "rule": (
+                    "Plan one to three bounded Investigator tasks and do not conclude. "
+                    "The server supplies the read-only tools, task IDs, analysis round, "
+                    "and persistent fields. Keep each task concise and return only the "
+                    "declared task draft fields. Focus tasks on distinct information "
+                    "gaps that can be checked with the committed evidence."
+                ),
+            }
+            return json.dumps(redact_value(payload), ensure_ascii=False, sort_keys=True)
         payload = {
             "incident": _event_projection(event),
             "tool_manifest": manifest,
@@ -4889,6 +4952,44 @@ def _event_projection(event: IncidentEvent) -> dict[str, Any]:
         "time_window_minutes": event.time_window_minutes,
         "signals": event.signals,
     }
+
+
+def _live_incident_prompt_projection(
+    event: IncidentEvent, *, include_description: bool = True
+) -> dict[str, Any]:
+    """live prompt 只保留当前角色真正需要的事件上下文。"""
+    payload = {
+        "service": event.service,
+        "environment": event.environment,
+        "severity": event.severity.value,
+        "title": event.title,
+    }
+    if include_description:
+        payload["description"] = event.description
+    return payload
+
+
+def _live_evidence_prompt_projection(item: EvidenceItem) -> dict[str, Any]:
+    """live prompt 省略已由服务端过滤的 provider/status，保留可归因字段。"""
+    return {
+        "id": item.id,
+        "kind": item.kind.value,
+        "observed_at": item.timestamp.astimezone(UTC).isoformat(),
+        "summary": item.summary,
+        "scope_entity_ids": sorted(item.scope.entity_ids) if item.scope else [],
+    }
+
+
+def _live_task_prompt_projection(task: DiagnosisTask) -> dict[str, Any]:
+    """live Investigator 只接收任务目标，工具和范围由服务端已完成约束。"""
+    payload = {
+        "title": task.title,
+        "description": task.description,
+        "information_gap": task.information_gap,
+    }
+    if task.expected_discriminator:
+        payload["expected_discriminator"] = task.expected_discriminator
+    return payload
 
 
 def _evidence_projection(item: EvidenceItem) -> dict[str, Any]:
