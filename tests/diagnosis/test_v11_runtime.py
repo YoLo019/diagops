@@ -56,6 +56,7 @@ from backend.diagnosis.v11_runtime import (
     V11Runtime,
     V11RuntimeContractError,
     V11SingleControlOutput,
+    _select_evidence_digest,
     _V11BudgetedModel,
 )
 from backend.domain.agent_findings import (
@@ -310,6 +311,50 @@ def test_investigator_prompt_keeps_tool_descriptions_without_schema_duplication(
     assert "description" in contracts["read_runtime_state"]
     assert "input_schema" not in contracts["read_runtime_state"]
     assert "unresolved cause" in prompt["rule"]
+
+
+def test_v11_evidence_digest_is_bounded_and_excludes_unusable_items():
+    evidence = []
+    for index in range(6):
+        for provider, kind in (
+            (EvidenceProvider.LOG, EvidenceKind.LOG_PATTERN),
+            (EvidenceProvider.METRIC, EvidenceKind.METRIC_TREND),
+            (EvidenceProvider.RUNTIME_STATE, EvidenceKind.RUNTIME_STATE),
+        ):
+            evidence.append(
+                EvidenceItem(
+                    id=f"ev-{provider.value}-{index}",
+                    provider=provider,
+                    kind=kind,
+                    timestamp=datetime(2026, 1, 1, index, tzinfo=UTC),
+                    summary=f"{provider.value} signal {index}",
+                    payload={"change_score": float(index)},
+                )
+            )
+    evidence.append(
+        EvidenceItem(
+            id="ev-skipped",
+            provider=EvidenceProvider.RELATED_ALERT,
+            kind=EvidenceKind.PROVIDER_ERROR,
+            timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+            summary="provider skipped",
+            status=EvidenceStatus.SKIPPED,
+        )
+    )
+
+    selected = _select_evidence_digest(evidence)
+
+    assert len(selected) == 12
+    assert len({item.id for item in selected}) == len(selected)
+    assert all(
+        item.status in {EvidenceStatus.SUCCESS, EvidenceStatus.PARTIAL}
+        for item in selected
+    )
+    assert {item.kind for item in selected} == {
+        EvidenceKind.LOG_PATTERN,
+        EvidenceKind.METRIC_TREND,
+        EvidenceKind.RUNTIME_STATE,
+    }
 
 
 @pytest.mark.anyio

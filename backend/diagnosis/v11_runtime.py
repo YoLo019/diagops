@@ -2295,12 +2295,13 @@ class V11Runtime:
         )
         self._active_sessions.add(session)
         try:
+            evidence_digest = _select_evidence_digest(seed_evidence)
             prompt = self._investigator_prompt(
                 event,
                 task,
                 instance_id,
                 manifest,
-                seed_evidence,
+                evidence_digest,
                 own_findings,
                 assessment,
                 selected_skills,
@@ -2316,14 +2317,20 @@ class V11Runtime:
                     "round": round_number,
                     "tool_manifest": manifest,
                     "selected_skills": selected_skills,
-                    "own_committed_evidence_ids": [item.id for item in seed_evidence],
+                    "own_committed_evidence_ids": [
+                        item.id for item in evidence_digest
+                    ],
                     "own_committed_finding_ids": [item.id for item in own_findings],
                     "assessment_id": assessment.id if assessment is not None else None,
                     "remaining_tool_budget": self._remaining_tool_budget_for(
                         repository, investigation_id
                     ),
                 },
-                tools=session.tools_for(instance_id, round_number),
+                tools=(
+                    session.tools_for(instance_id, round_number)
+                    if not evidence_digest
+                    else []
+                ),
                 remaining_token_budget=self._remaining_token_budget,
                 remaining_tool_budget=self._remaining_tool_budget_for(
                     repository, investigation_id
@@ -4509,6 +4516,43 @@ def _evidence_projection(item: EvidenceItem) -> dict[str, Any]:
         "timestamp": item.timestamp.astimezone(UTC).isoformat(),
         "summary": item.summary,
     }
+
+
+def _select_evidence_digest(
+    evidence: Iterable[EvidenceItem],
+    *,
+    max_per_kind: int = 4,
+    max_total: int = 16,
+) -> list[EvidenceItem]:
+    """为模型提供有界的可引用 evidence 摘要，不改变服务端完整投影。"""
+    usable = [
+        item
+        for item in evidence
+        if item.status in {EvidenceStatus.SUCCESS, EvidenceStatus.PARTIAL}
+    ]
+    groups: dict[str, list[EvidenceItem]] = {}
+    for item in usable:
+        groups.setdefault(item.kind.value, []).append(item)
+    for items in groups.values():
+        items.sort(
+            key=lambda item: (
+                float(item.payload.get("change_score", 0.0))
+                if isinstance(item.payload.get("change_score"), (int, float))
+                else 0.0,
+                item.timestamp,
+                item.id,
+            ),
+            reverse=True,
+        )
+    selected: list[EvidenceItem] = []
+    for offset in range(max_per_kind):
+        for kind in sorted(groups):
+            items = groups[kind]
+            if offset < len(items):
+                selected.append(items[offset])
+                if len(selected) >= max_total:
+                    return selected
+    return selected
 
 
 def _evidence_for_task(

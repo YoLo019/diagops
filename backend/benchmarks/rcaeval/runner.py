@@ -50,6 +50,7 @@ from backend.diagnosis.v11_runtime import (
     _candidate_lifecycle_trace,
     _evidence_projection,
     _InvestigatorResult,
+    _select_evidence_digest,
 )
 from backend.domain.agent_findings import AgentFinding, CoordinationReview
 from backend.domain.agent_plan import (
@@ -129,35 +130,10 @@ class EmptyRunOwnedMemory(VerifiedMemoryLookup):
 
 def _single_control_evidence_digest(evidence: list[Any]) -> list[dict[str, Any]]:
     """按证据类型轮转提供小型、可引用的模型上下文摘要。"""
-    usable = [
-        item
-        for item in evidence
-        if item.status in {EvidenceStatus.SUCCESS, EvidenceStatus.PARTIAL}
+    return [
+        redact_value(_evidence_projection(item))
+        for item in _select_evidence_digest(evidence)
     ]
-    groups: dict[str, list[Any]] = {}
-    for item in usable:
-        groups.setdefault(item.kind.value, []).append(item)
-    for items in groups.values():
-        items.sort(
-            key=lambda item: (
-                float(item.payload.get("change_score", 0.0))
-                if isinstance(item.payload.get("change_score"), (int, float))
-                else 0.0,
-                item.timestamp,
-            ),
-            reverse=True,
-        )
-    selected: list[Any] = []
-    for offset in range(4):
-        for kind in sorted(groups):
-            items = groups[kind]
-            if offset < len(items):
-                selected.append(items[offset])
-                if len(selected) >= 16:
-                    return [
-                        redact_value(_evidence_projection(item)) for item in selected
-                    ]
-    return [redact_value(_evidence_projection(item)) for item in selected]
 
 
 class SingleInvestigatorAgent(V11Runtime):
