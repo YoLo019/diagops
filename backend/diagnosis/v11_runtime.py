@@ -249,6 +249,14 @@ class CriticOutput(BaseModel):
     tasks: list[LeadTaskDraft] = Field(default_factory=list, max_length=3)
 
 
+class CriticCompactCausalCheck(CausalCheck):
+    """live Critic 的短 check，保持七项因果检查语义不变。"""
+
+    summary: str = Field(min_length=1, max_length=32)
+    evidence_ids: list[str] = Field(default_factory=list, max_length=1)
+    gap: str | None = Field(default=None, max_length=64)
+
+
 class CriticCompactAssessmentDraft(BaseModel):
     """已有完整证据时的无 supplemental task Critic 草稿。"""
 
@@ -260,16 +268,16 @@ class CriticCompactAssessmentDraft(BaseModel):
         CriticVerdict.REJECT,
         CriticVerdict.INCONCLUSIVE,
     ]
-    checks: list[CausalCheck] = Field(min_length=7, max_length=7)
+    checks: list[CriticCompactCausalCheck] = Field(min_length=7, max_length=7)
     supporting_evidence_ids: list[
         Annotated[str, Field(min_length=1, max_length=128)]
-    ] = Field(default_factory=list, max_length=8)
+    ] = Field(default_factory=list, max_length=2)
     contradicting_evidence_ids: list[
         Annotated[str, Field(min_length=1, max_length=128)]
-    ] = Field(default_factory=list, max_length=8)
-    gap: str | None = Field(default=None, max_length=128)
+    ] = Field(default_factory=list, max_length=2)
+    gap: str | None = Field(default=None, max_length=64)
     supplemental_task_ids: list[str] = Field(default_factory=list, max_length=3)
-    summary: str = Field(min_length=1, max_length=128)
+    summary: str = Field(min_length=1, max_length=64)
 
 
 class CriticCompactOutput(BaseModel):
@@ -277,7 +285,7 @@ class CriticCompactOutput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    summary: str = Field(default="", max_length=256)
+    summary: str = Field(default="", max_length=128)
     assessments: list[CriticCompactAssessmentDraft] = Field(
         default_factory=list, max_length=3
     )
@@ -850,9 +858,10 @@ def _structured_output_retry_feedback(output_type: type[BaseModel]) -> str:
             f"{common} For every listed candidate, emit exactly one concise "
             "assessment using its candidate_ref exactly as provided; use only "
             "accept, reject, or inconclusive, emit seven named causal checks, "
-            "and cite only committed evidence IDs. Do not request needs_evidence "
-            "or tasks in this bounded review. Do not return server assessment "
-            "IDs, candidate_id, or extra fields."
+            "and cite at most one committed evidence ID per check. Keep check "
+            "summaries to one to three words. Do not request needs_evidence or "
+            "tasks in this bounded review. Do not return server assessment IDs, "
+            "candidate_id, or extra fields."
         )
     if output_type is CriticOutput:
         return (
@@ -3506,9 +3515,9 @@ class V11Runtime:
                 "inconclusive; emit seven named causal checks and only committed "
                 "evidence IDs. Do not request needs_evidence or tasks in this "
                 "bounded review; use inconclusive when evidence is insufficient. "
-                "Keep each check summary to a few words and cite at most one "
-                "evidence ID per check. Never return server assessment IDs or "
-                "candidate_id."
+                "Keep each check summary to one to three words and cite at most "
+                "one evidence ID per check; keep the assessment summary under "
+                "eight words. Never return server assessment IDs or candidate_id."
                 if compact_output
                 else "Use candidate_ref exactly as provided. Return verdict, seven "
                 "named causal checks, and only committed evidence IDs; never "
