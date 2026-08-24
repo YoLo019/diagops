@@ -55,19 +55,7 @@ REQUIRED_CONTRACTS = (
 )
 STRUCTURED_OUTPUT_TRANSPORTS = ("native_json_schema", "strict_output_tool")
 _NATIVE_PROBE_RESULT = {
-    "planning": {
-        "decision": {
-            "action": "inconclusive",
-            "summary": "Capability probe completed.",
-            "task_ids": [],
-            "candidate_ids": [],
-            "evidence_ids": [],
-            "selected_skills": [],
-            "stop_reason": "Capability probe only.",
-        },
-        "tasks": [],
-    },
-    "investigator": {"summary": "", "findings": [], "candidates": []},
+    "candidates": [],
 }
 
 

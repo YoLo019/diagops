@@ -214,16 +214,9 @@ def test_lead_planning_schema_constrains_selected_skill_identifiers():
 
 
 def test_planning_task_schema_requires_first_analysis_round():
-    for output_type, task_path in (
-        (LeadPlanningOutput, ("$defs", "LeadPlanningTaskDraft")),
-        (V11SingleControlOutput, ("$defs", "LeadPlanningTaskDraft")),
-    ):
-        schema = AgentOutputSchema(
-            output_type, strict_json_schema=True
-        ).json_schema()
-        task_schema = schema[task_path[0]][task_path[1]]
-
-        assert task_schema["properties"]["analysis_round"]["const"] == 1
+    schema = AgentOutputSchema(LeadPlanningOutput, strict_json_schema=True).json_schema()
+    task_schema = schema["$defs"]["LeadPlanningTaskDraft"]
+    assert task_schema["properties"]["analysis_round"]["const"] == 1
 
     with pytest.raises(ValidationError):
         LeadPlanningOutput.model_validate(
@@ -251,17 +244,25 @@ def test_planning_task_schema_requires_first_analysis_round():
         )
 
 
-def test_single_control_schema_constrains_selected_skill_identifiers():
+def test_single_control_schema_contains_only_diagnostic_candidate_fields():
     schema = AgentOutputSchema(
         V11SingleControlOutput, strict_json_schema=True
     ).json_schema()
-    selected_skills = schema["$defs"]["LeadDecisionDraft"]["properties"][
-        "selected_skills"
-    ]["items"]
-
-    assert selected_skills["pattern"] == (
-        r"^[A-Za-z0-9_.-]{1,64}@[A-Za-z0-9_.-]{1,32}$"
-    )
+    assert set(schema["properties"]) == {"candidates"}
+    candidate = schema["$defs"]["InvestigatorCandidateDraft"]
+    assert set(candidate["properties"]) == {
+        "affected_entity",
+        "failure_mechanism",
+        "supporting_evidence_ids",
+        "contradicting_evidence_ids",
+    }
+    assert not {
+        "id",
+        "rank",
+        "runtime_run_id",
+        "review_round",
+        "authoritative",
+    } & set(candidate["properties"])
 
 
 def test_lead_prompt_exposes_exact_skill_identifiers():
@@ -563,27 +564,14 @@ def test_critic_evidence_is_limited_to_candidate_and_finding_references():
     assert [item.id for item in selected] == ["ev-referenced"]
 
 
-def test_single_control_planning_draft_tolerates_inconclusive_with_candidates():
-    payload = {
-        "planning": {
-            "decision": {
-                "action": "inconclusive",
-                "summary": "Investigated but evidence is insufficient.",
-                "task_ids": [],
-                "candidate_ids": ["candidate-1"],
-                "evidence_ids": ["ev-1"],
-                "selected_skills": [],
-                "stop_reason": None,
-            },
-            "tasks": [],
-        },
-        "investigator": {"summary": "", "findings": [], "candidates": []},
-    }
-
-    output = V11SingleControlOutput.model_validate(payload)
-
-    assert output.planning.decision.action == LeadAction.INCONCLUSIVE
-    assert output.planning.decision.candidate_ids == ["candidate-1"]
+def test_single_control_rejects_server_owned_planning_fields():
+    with pytest.raises(ValidationError):
+        V11SingleControlOutput.model_validate(
+            {
+                "planning": {"action": "inconclusive"},
+                "candidates": [],
+            }
+        )
 
 
 def test_multi_planning_output_still_rejects_inconclusive_with_candidates():
@@ -892,21 +880,14 @@ def _candidate_draft(
 ) -> dict:
     del supporting_finding_ids, rank
     return {
-        "cause_type": None,
         "affected_entity": "checkout-service",
         "failure_mechanism": "bounded failure mechanism",
-        "summary": "candidate from investigator",
-        "confidence": 0.6,
         "supporting_evidence_ids": (
             supporting_evidence_ids
             if supporting_evidence_ids is not None
             else ["ev-candidate"]
         ),
         "contradicting_evidence_ids": [],
-        "rationale": "bounded evidence-backed diagnosis",
-        "uncertainty": "",
-        "onset_window_start": None,
-        "onset_window_end": None,
     }
 
 
@@ -4097,21 +4078,14 @@ async def test_v11_critic_and_lead_authority_complete_without_semantic_validatio
                     "evidence_ids": ["ev-metric"],
                 }
             ],
-                "candidates": [
-                    {
-                        "cause_type": None,
-                        "affected_entity": "checkout-service",
-                        "failure_mechanism": "bounded failure mechanism",
-                        "summary": "bounded candidate",
-                        "confidence": 0.8,
-                        "supporting_evidence_ids": ["ev-metric"],
-                        "contradicting_evidence_ids": [],
-                        "rationale": "committed evidence",
-                        "uncertainty": "",
-                        "onset_window_start": None,
-                        "onset_window_end": None,
-                    }
-                ],
+                    "candidates": [
+                        {
+                            "affected_entity": "checkout-service",
+                            "failure_mechanism": "bounded failure mechanism",
+                            "supporting_evidence_ids": ["ev-metric"],
+                            "contradicting_evidence_ids": [],
+                        }
+                    ],
         },
         {
                 "summary": "all seven checks are complete",
@@ -4233,21 +4207,14 @@ async def test_v11_needs_evidence_has_one_round_two_batch_and_one_reconciliation
                     "blocking": True,
                 }
             ],
-                "candidates": [
-                    {
-                        "cause_type": None,
-                        "affected_entity": "checkout-service",
-                        "failure_mechanism": "bounded failure mechanism",
-                        "summary": "candidate awaiting evidence",
-                        "confidence": 0.5,
-                        "supporting_evidence_ids": ["ev-metric"],
-                        "contradicting_evidence_ids": [],
-                        "rationale": "committed evidence",
-                        "uncertainty": "",
-                        "onset_window_start": None,
-                        "onset_window_end": None,
-                    }
-                ],
+                    "candidates": [
+                        {
+                            "affected_entity": "checkout-service",
+                            "failure_mechanism": "bounded failure mechanism",
+                            "supporting_evidence_ids": ["ev-metric"],
+                            "contradicting_evidence_ids": [],
+                        }
+                    ],
         },
         {
                 "assessments": [
@@ -4492,21 +4459,14 @@ async def test_v11_phase_executor_uses_runtime_phases_without_legacy_report_or_a
                     "evidence_ids": ["ev-metric"],
                 }
             ],
-                "candidates": [
-                    {
-                        "cause_type": None,
-                        "affected_entity": "checkout-service",
-                        "failure_mechanism": "bounded failure mechanism",
-                        "summary": "bounded candidate",
-                        "confidence": 0.8,
-                        "supporting_evidence_ids": ["ev-metric"],
-                        "contradicting_evidence_ids": [],
-                        "rationale": "committed evidence",
-                        "uncertainty": "",
-                        "onset_window_start": None,
-                        "onset_window_end": None,
-                    }
-                ],
+                    "candidates": [
+                        {
+                            "affected_entity": "checkout-service",
+                            "failure_mechanism": "bounded failure mechanism",
+                            "supporting_evidence_ids": ["ev-metric"],
+                            "contradicting_evidence_ids": [],
+                        }
+                    ],
         },
         {
                 "assessments": [

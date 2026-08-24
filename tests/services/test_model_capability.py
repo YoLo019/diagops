@@ -29,19 +29,7 @@ _ENDPOINT_ID = endpoint_id(_CANONICAL_URL)
 _TESTED_AT = datetime(2026, 8, 7, 12, 0, tzinfo=UTC)
 
 _PRODUCTION_RESULT = {
-    "planning": {
-        "decision": {
-            "action": "inconclusive",
-            "summary": "Capability probe completed.",
-            "task_ids": [],
-            "candidate_ids": [],
-            "evidence_ids": [],
-            "selected_skills": [],
-            "stop_reason": "Capability probe only.",
-        },
-        "tasks": [],
-    },
-    "investigator": {"summary": "", "findings": [], "candidates": []},
+    "candidates": [],
 }
 
 
@@ -347,7 +335,7 @@ def test_capability_manifest_hash_tracks_the_shared_production_schema(monkeypatc
         schema = AgentOutputSchema(
             V11SingleControlOutput, strict_json_schema=True
         ).json_schema()
-        schema["$defs"]["InvestigatorOutput"]["properties"]["summary"]["maxLength"] = 1
+        schema["properties"]["candidates"]["maxItems"] = 1
         return schema
 
     monkeypatch.setattr(module, "_native_production_schema", mutated_schema)

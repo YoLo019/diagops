@@ -175,31 +175,7 @@ def _write_runtime_package(root: Path) -> RuntimeCaseEntry:
 def _single_turn(**kwargs):
     output_type = kwargs["output_type"].__name__
     if output_type == "V11SingleControlOutput":
-        return {
-            "planning": {
-                "decision": {
-                    "action": "investigate",
-                    "summary": "Inspect bounded offline evidence.",
-                    "task_ids": ["single-control-task"],
-                    "candidate_ids": [],
-                    "selected_skills": ["first_failure_timeline@1.0.0"],
-                },
-                "tasks": [
-                    {
-                        "id": "single-control-task",
-                        "title": "Inspect evidence",
-                        "description": "Use the frozen read-only tools.",
-                        "tool_names": ["read_logs"],
-                        "information_gap": "affected service and mechanism",
-                    }
-                ],
-            },
-            "investigator": {
-                "summary": "No supported candidate.",
-                "findings": [],
-                "candidates": [],
-            },
-        }
+        return {"candidates": []}
     raise AssertionError(f"unexpected single output type: {output_type}")
 
 
@@ -233,51 +209,15 @@ def _invalid_multi_turn(**kwargs):
 def _inconclusive_single_turn(**kwargs):
     output_type = kwargs["output_type"].__name__
     if output_type == "V11SingleControlOutput":
-        return {
-            "planning": {
-                "decision": {
-                    "action": "inconclusive",
-                    "summary": "Investigated but evidence is insufficient.",
-                    "task_ids": [],
-                    "candidate_ids": ["candidate-1"],
-                    "selected_skills": ["first_failure_timeline@1.0.0"],
-                },
-                "tasks": [],
-            },
-            "investigator": {
-                "summary": "No supported candidate.",
-                "findings": [],
-                "candidates": [],
-            },
-        }
+        return {"candidates": []}
     raise AssertionError(f"unexpected single output type: {output_type}")
-
-
-_SINGLE_PLANNING = {
-    "decision": {
-        "action": "investigate",
-        "summary": "Inspect bounded offline evidence.",
-        "task_ids": ["single-control-task"],
-        "candidate_ids": [],
-        "selected_skills": ["first_failure_timeline@1.0.0"],
-    },
-    "tasks": [
-        {
-            "id": "single-control-task",
-            "title": "Inspect evidence",
-            "description": "Use the frozen read-only tools.",
-            "tool_names": ["read_logs"],
-            "information_gap": "affected service and mechanism",
-        }
-    ],
-}
 
 
 def _single_turn_with_investigator(investigator):
     def _turn(**kwargs):
         output_type = kwargs["output_type"].__name__
         if output_type == "V11SingleControlOutput":
-            return {"planning": _SINGLE_PLANNING, "investigator": investigator}
+            return {"candidates": investigator.get("candidates", [])}
         raise AssertionError(f"unexpected single output type: {output_type}")
 
     return _turn
@@ -317,43 +257,20 @@ def _run_single_case(tmp_path: Path, turn):
     return prediction, repository, runtime_store
 
 
-def test_single_control_rejects_violating_draft_and_keeps_legal_ones(tmp_path: Path):
+def test_single_control_empty_candidates_are_inconclusive(tmp_path: Path):
     turn = _single_turn_with_investigator(
         {
-            "summary": "One violating draft, one legal gap.",
-            "findings": [
-                {
-                    "finding_type": "signal",
-                    "summary": "signal citing uncommitted evidence",
-                    "confidence": 0.6,
-                    "evidence_ids": ["ev-uncommitted"],
-                },
-                {
-                    "finding_type": "gap",
-                    "summary": "deployment evidence is unavailable",
-                    "confidence": 0.2,
-                    "gaps": ["deployment history unavailable"],
-                },
-            ],
             "candidates": [],
         }
     )
     prediction, repository, runtime_store = _run_single_case(tmp_path, turn)
 
-    # 单个违约 draft 只被拒绝+审计，合法 finding 保留，run 不陪葬（spec §7.4）。
     assert prediction.completed is True
+    assert prediction.candidates == []
+    assert prediction.diagnostic_status == DiagnosticStatus.INCONCLUSIVE
     persisted = runtime_store.get_run(prediction.runtime_run_id)
     assert persisted.status == RuntimeRunStatus.COMPLETED
-    findings = repository.list_agent_findings(persisted.investigation_id)
-    assert [item.finding_type.value for item in findings] == ["gap"]
-    audits = [
-        item
-        for item in repository.list_executions(persisted.investigation_id)
-        if item.status == AgentExecutionStatus.FAILED
-    ]
-    assert len(audits) == 1
-    assert audits[0].failure_category == FailureCategory.INVALID_REFERENCE
-    assert audits[0].error_message == "finding draft rejected: uncommitted_evidence"
+    assert repository.get_coordination_review(persisted.investigation_id).candidates == []
 
 
 def test_single_control_drops_candidate_citing_unknown_references(tmp_path: Path):
@@ -363,17 +280,10 @@ def test_single_control_drops_candidate_citing_unknown_references(tmp_path: Path
             "findings": [],
                 "candidates": [
                     {
-                        "cause_type": None,
                         "affected_entity": "carts",
                         "failure_mechanism": "thread pool exhaustion",
-                        "summary": "candidate with bogus refs",
-                        "confidence": 0.5,
                         "supporting_evidence_ids": ["ev-bogus"],
                         "contradicting_evidence_ids": [],
-                        "rationale": "bounded evidence-backed diagnosis",
-                        "uncertainty": "",
-                        "onset_window_start": None,
-                        "onset_window_end": None,
                     }
                 ],
         }
@@ -433,38 +343,34 @@ def test_single_control_rejects_incomplete_candidate_output(tmp_path: Path):
     assert audits
 
 
-def test_single_control_batch_rejection_stays_terminal(tmp_path: Path):
+def test_single_control_candidate_rejection_is_audited_without_terminal_failure(
+    tmp_path: Path,
+):
     turn = _single_turn_with_investigator(
         {
-            "summary": "Every draft violates the contract.",
-            "findings": [
+            "candidates": [
                 {
-                    "finding_type": "signal",
-                    "summary": "signal citing uncommitted evidence",
-                    "confidence": 0.6,
-                    "evidence_ids": ["ev-uncommitted"],
-                },
+                    "affected_entity": "carts",
+                    "failure_mechanism": "unsupported mechanism",
+                    "supporting_evidence_ids": ["ev-uncommitted"],
+                }
             ],
-            "candidates": [],
         }
     )
     prediction, repository, runtime_store = _run_single_case(tmp_path, turn)
 
-    # 整批违约全灭且无候选：维持 investigator 失败语义（terminal failed）。
-    assert prediction.completed is False
+    assert prediction.completed is True
+    assert prediction.diagnostic_status == DiagnosticStatus.INCONCLUSIVE
     persisted = runtime_store.get_run(prediction.runtime_run_id)
-    assert persisted.status == RuntimeRunStatus.FAILED
-    # failed PhaseCommit 合法化后：暂存的失败审计原子落库、run 归类
-    # output_validation，而不是 ValueError 逃逸成 unknown。
-    assert persisted.failure_category == RuntimeFailureCategory.OUTPUT_VALIDATION
+    assert persisted.status == RuntimeRunStatus.COMPLETED
     audits = [
         item
         for item in repository.list_executions(persisted.investigation_id)
         if item.status == AgentExecutionStatus.FAILED
     ]
     messages = [item.error_message for item in audits]
-    assert "finding draft rejected: uncommitted_evidence" in messages
-    assert "investigator findings rejected" in messages
+    assert "candidate draft rejected: candidate_evidence_reference" in messages
+    assert all(item.failure_category == FailureCategory.INVALID_REFERENCE for item in audits)
 
 
 def _multi_turn(**kwargs):
@@ -557,7 +463,8 @@ def test_single_control_runs_through_persisted_sqlite_v11_runtime(tmp_path: Path
     plan = repository.get_plan(persisted.investigation_id)
     assert plan is not None
     assert plan.lead_decision is not None
-    assert plan.lead_decision.selected_skills == ["first_failure_timeline@1.0.0"]
+    assert plan.lead_decision.selected_skills
+    assert plan.lead_decision.selected_skills[0] == "first_failure_timeline@1.0.0"
     assert runtime_store.get_benchmark_replay_locator(persisted.id) == {
         "schema_version": 1,
         "benchmark": "rcaeval-re2-v11",
@@ -569,7 +476,7 @@ def test_single_control_runs_through_persisted_sqlite_v11_runtime(tmp_path: Path
     }
 
 
-def test_single_control_normalizes_inconclusive_decision_with_candidate_refs(tmp_path: Path):
+def test_single_control_uses_server_owned_provisional_plan(tmp_path: Path):
     runtime_package = tmp_path / "runtime"
     case = _write_runtime_package(runtime_package)
     engine = create_db_engine(f"sqlite:///{tmp_path / 'runtime.db'}")
@@ -608,11 +515,11 @@ def test_single_control_normalizes_inconclusive_decision_with_candidate_refs(tmp
     plan = repository.get_plan(persisted.investigation_id)
     assert plan is not None
     assert plan.lead_decision is not None
-    assert plan.lead_decision.action == LeadAction.INCONCLUSIVE
-    assert plan.lead_decision.task_ids == []
+    assert plan.lead_decision.action == LeadAction.INVESTIGATE
+    assert plan.lead_decision.task_ids
     assert plan.lead_decision.candidate_ids == []
-    assert plan.lead_decision.stop_reason == "single_control_inconclusive"
-    assert plan.tasks == []
+    assert plan.tasks
+    assert plan.tasks[0].id in plan.lead_decision.task_ids
 
 
 def test_run_summary_keeps_total_tool_limit_after_phase_budget_is_exhausted(
@@ -917,44 +824,31 @@ def test_frozen_run_identity_fails_closed_without_dependency_lock(tmp_path: Path
     assert identity.dependency_lock_hash != identity.source_manifest_hash
 
 
-def test_single_control_rejects_domain_violating_draft(tmp_path: Path):
+def test_single_control_rejects_server_owned_candidate_fields(tmp_path: Path):
     turn = _single_turn_with_investigator(
         {
-            "summary": "One domain-violating draft, one legal gap.",
-            "findings": [
+            "candidates": [
                 {
-                    "finding_type": "gap",
-                    "summary": "blocking gap without gaps list",
-                    "confidence": 0.5,
-                    "blocking": True,
-                },
-                {
-                    "finding_type": "gap",
-                    "summary": "deployment evidence is unavailable",
-                    "confidence": 0.2,
-                    "gaps": ["deployment history unavailable"],
-                },
+                    "affected_entity": "carts",
+                    "failure_mechanism": "latency increase",
+                    "supporting_evidence_ids": ["ev-1"],
+                    "id": "candidate-model-owned",
+                }
             ],
-            "candidates": [],
         }
     )
     prediction, repository, runtime_store = _run_single_case(tmp_path, turn)
 
-    # 领域规则违约（blocking 要求 gap+非空 gaps）同样走 per-draft 拒绝+审计，
-    # 合法 finding 保留，run 不陪葬。
-    assert prediction.completed is True
+    assert prediction.completed is False
+    assert prediction.failure_category == RuntimeFailureCategory.OUTPUT_VALIDATION
     persisted = runtime_store.get_run(prediction.runtime_run_id)
-    assert persisted.status == RuntimeRunStatus.COMPLETED
-    findings = repository.list_agent_findings(persisted.investigation_id)
-    assert [item.finding_type.value for item in findings] == ["gap"]
+    assert persisted.status == RuntimeRunStatus.FAILED
     audits = [
         item
         for item in repository.list_executions(persisted.investigation_id)
         if item.status == AgentExecutionStatus.FAILED
     ]
-    assert len(audits) == 1
-    assert audits[0].failure_category == FailureCategory.INVALID_REFERENCE
-    assert audits[0].error_message == "finding draft rejected: invalid_finding_contract"
+    assert audits
 
 
 def _stub_prediction(completed: bool, category: str | None, run_suffix: str):

@@ -44,12 +44,10 @@ from backend.diagnosis.orchestrator import DiagnosisOrchestrator
 from backend.diagnosis.v11_runtime import (
     LeadPlanningOutput,
     LeadPlanningTaskDraft,
-    SingleControlPlanningOutput,
     V11Runtime,
     V11RuntimeContractError,
     V11SingleControlOutput,
     _candidate_lifecycle_trace,
-    _draft_rejection_code,
     _InvestigatorResult,
 )
 from backend.domain.agent_findings import AgentFinding, CoordinationReview
@@ -68,7 +66,6 @@ from backend.domain.multi_agent import (
     ExecutionActor,
     ExecutionContractVersion,
     ExecutionStepKind,
-    FailureCategory,
     InvestigationStrategy,
     LeadAction,
     ModelProvider,
@@ -107,39 +104,6 @@ EMPTY_MEMORY_IDENTITY = {"schema_version": "empty-run-owned-memory-v1", "entries
 logger = logging.getLogger(__name__)
 
 
-def _single_control_planning(
-    planning: SingleControlPlanningOutput, *, task_id: str
-) -> LeadPlanningOutput:
-    """Single control 的 decision 不参与裁决（result_validation 强制 inconclusive
-    收口），这里把草稿归一化为领域合法形态；任务语义门禁仍由 _build_plan 执行。"""
-    decision = planning.decision
-    if decision.action == LeadAction.INCONCLUSIVE:
-        return LeadPlanningOutput(
-            decision=LeadDecision(
-                action=LeadAction.INCONCLUSIVE,
-                summary=decision.summary,
-                stop_reason=decision.stop_reason or "single_control_inconclusive",
-                evidence_ids=decision.evidence_ids,
-                selected_skills=decision.selected_skills,
-            ),
-            tasks=[],
-        )
-    if len(planning.tasks) != 1:
-        raise V11RuntimeContractError(
-            "single control planning must contain its one owned task"
-        )
-    return LeadPlanningOutput(
-        decision=LeadDecision(
-            action=decision.action,
-            summary=decision.summary,
-            task_ids=[task_id],
-            candidate_ids=decision.candidate_ids,
-            evidence_ids=decision.evidence_ids,
-            selected_skills=decision.selected_skills,
-            stop_reason=decision.stop_reason,
-        ),
-        tasks=[planning.tasks[0].model_copy(update={"id": task_id})],
-    )
 RETRY_POLICY = {
     "max_retries": 1,
     "retryable_categories": ["transport", "rate_limit"],
@@ -255,25 +219,12 @@ class SingleInvestigatorAgent(V11Runtime):
         )
         self._active_sessions.add(session)
         try:
-            prompt = json.dumps(
-                {
-                    "role": "single investigator control",
-                    "incident": event.model_dump(mode="json"),
-                    "task": task.model_dump(mode="json"),
-                    "tool_manifest": manifest,
-                    "skills": selected_skills,
-                    "committed_evidence": [item.id for item in base_evidence],
-                    "rule": (
-                        "Return planning and investigator fields from this one context. "
-                        f"The only task id is {task_id!r}; do not use sibling agents. "
-                        "Do not emit candidate IDs, ranks, runtime IDs, review "
-                        "fields, finding references, or invented evidence IDs; "
-                        "cite only committed usable evidence IDs in candidate "
-                        "evidence fields."
-                    ),
-                },
-                ensure_ascii=False,
-                sort_keys=True,
+            prompt = (
+                "Return only diagnostic candidates. Use read-only evidence tools "
+                "when needed. Every candidate needs affected_entity, "
+                "failure_mechanism, and committed usable supporting evidence IDs. "
+                "Do not emit server-owned IDs, ranks, runtime fields, review "
+                "fields, or invented references."
             )
             turn = await self._call_model(
                 actor=ExecutionActor.INVESTIGATOR.value,
@@ -281,13 +232,8 @@ class SingleInvestigatorAgent(V11Runtime):
                 output_type=V11SingleControlOutput,
                 context={
                     "incident": event.model_dump(mode="json"),
-                    "task": task.model_dump(mode="json"),
+                    "committed_evidence_ids": [item.id for item in base_evidence],
                     "tool_manifest": manifest,
-                    "selected_skills": selected_skills,
-                    "remaining_tool_budget": self._remaining_tool_budget_for(
-                        repository, investigation_id
-                    ),
-                    "single_context": True,
                 },
                 tools=session.tools_for(instance_id, 1),
                 remaining_token_budget=self._remaining_token_budget,
@@ -302,51 +248,13 @@ class SingleInvestigatorAgent(V11Runtime):
             )
             await self._commit_session(repository, investigation_id, session)
             output = self._parse_output(turn.output, V11SingleControlOutput)
-            candidate_drafts = tuple(output.investigator.candidates)
-            planning = _single_control_planning(output.planning, task_id=task_id)
-            plan = self._build_plan(
-                planning,
-                investigation_id=investigation_id,
-                runtime_run_id=self.runtime_run_id or "",
-                manifest=manifest,
-            )
-            repository.save_plan(plan)
-            if plan.tasks:
-                task = plan.tasks[0]
-                task_id = task.id
+            candidate_drafts = tuple(output.candidates)
             committed_evidence = repository.get(investigation_id).evidence
             # 模型输出是不可信数据：单个 draft 违约只拒绝该 draft 并留持久化
             # 审计（spec §7.4 校验器可拒绝输出），不让同批合法 finding 陪葬
             # （与 Multi 路径 _run_investigator 同一语义）。
             findings: list[AgentFinding] = []
             audit_executions: list[AgentExecution] = []
-            rejected = 0
-            for draft in output.investigator.findings:
-                try:
-                    findings.append(
-                        self._finding_from_draft(
-                            draft,
-                            investigation_id=investigation_id,
-                            task=task,
-                            instance_id=instance_id,
-                            round_number=1,
-                            assessment=None,
-                            evidence=committed_evidence,
-                        )
-                    )
-                except V11RuntimeContractError as exc:
-                    rejected += 1
-                    self._failures.append("investigator_finding_draft_rejected")
-                    audit_executions.append(
-                        self._failed_execution(
-                            task_id=task.id,
-                            actor=instance_id,
-                            step_kind=ExecutionStepKind.INVESTIGATOR_ANALYSIS,
-                            message=_draft_rejection_code(exc),
-                            analysis_round=1,
-                            failure_category=FailureCategory.INVALID_REFERENCE,
-                        )
-                    )
             candidates = self._admit_candidates(
                 candidate_drafts,
                 batch_findings=findings,
@@ -357,30 +265,6 @@ class SingleInvestigatorAgent(V11Runtime):
                 instance_id=instance_id,
                 audit_executions=audit_executions,
             )
-            if rejected and not findings and not candidates:
-                # 整批违约全灭：维持 investigator 失败语义（terminal failed），
-                # 失败审计随 failed PhaseCommit 原子落库。
-                self._failures.append("investigator_batch_rejected")
-                self._persist_investigator_result(
-                    repository,
-                    investigation_id,
-                    _InvestigatorResult(
-                        (),
-                        (),
-                        self._failed_execution(
-                            task_id=task.id,
-                            actor=instance_id,
-                            step_kind=ExecutionStepKind.INVESTIGATOR_ANALYSIS,
-                            message="investigator findings rejected",
-                            analysis_round=1,
-                        ),
-                        tuple(audit_executions),
-                    ),
-                )
-                self._mark_terminal_failure(
-                    repository, investigation_id, "investigator findings rejected"
-                )
-                return ()
             execution = next(
                 (
                     item

@@ -629,6 +629,23 @@ def test_tools_for_rejects_non_read_only_spec():
         session.tools_for(AgentName.LOG, 1)
 
 
+def test_tools_for_exposes_compact_schema_but_keeps_query_contract():
+    from backend.diagnosis.adaptive_tools import _compact_json_schema
+
+    registry = build_provider_tool_registry(ProviderRegistry([]))
+    original = registry.get("query_traces").input_schema
+    compact = _compact_json_schema(original)
+
+    assert len(json.dumps(compact, sort_keys=True)) < len(
+        json.dumps(original, sort_keys=True)
+    )
+    assert compact["additionalProperties"] is False
+    assert compact.get("required", []) == original.get("required", [])
+    assert set(compact["properties"]) == set(original["properties"])
+    assert "$defs" not in json.dumps(compact)
+    assert "$ref" not in json.dumps(compact)
+
+
 class QueryProvider:
     def __init__(
         self,

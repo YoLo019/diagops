@@ -78,7 +78,6 @@ from backend.domain.agent_plan import (
     DiagnosisTask,
     DiagnosisTaskType,
     LeadDecision,
-    SelectedSkill,
 )
 from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem, EvidenceStatus
@@ -157,29 +156,6 @@ class LeadPlanningOutput(BaseModel):
     tasks: list[LeadPlanningTaskDraft] = Field(default_factory=list, max_length=3)
 
 
-class LeadDecisionDraft(BaseModel):
-    """Single control 的 decision 草稿：仅字段级约束，语义由确定性边界裁决。"""
-
-    model_config = ConfigDict(extra="forbid")
-
-    action: LeadAction
-    summary: str = Field(min_length=1, max_length=512)
-    task_ids: list[str] = Field(default_factory=list, max_length=3)
-    candidate_ids: list[str] = Field(default_factory=list, max_length=32)
-    evidence_ids: list[str] = Field(default_factory=list, max_length=32)
-    selected_skills: list[SelectedSkill] = Field(default_factory=list, max_length=4)
-    stop_reason: str | None = Field(default=None, max_length=256)
-
-
-class SingleControlPlanningOutput(BaseModel):
-    """Single control 的 planning 契约；decision 草稿不参与最终裁决。"""
-
-    model_config = ConfigDict(extra="forbid")
-
-    decision: LeadDecisionDraft
-    tasks: list[LeadPlanningTaskDraft] = Field(default_factory=list, max_length=3)
-
-
 class InvestigatorFindingDraft(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -198,34 +174,18 @@ class InvestigatorFindingDraft(BaseModel):
 
 
 class InvestigatorCandidateDraft(BaseModel):
-    """模型可见的候选草稿；持久化主键和排序字段由服务端生成。"""
+    """模型可见的最小候选草稿；其余持久化字段由服务端生成。"""
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    cause_type: CauseType | None = None
-
     affected_entity: str = Field(min_length=1, max_length=128)
-    failure_mechanism: str = Field(
-        min_length=1,
-        max_length=256,
-        description=(
-            "Observed failure mechanism or symptom. If the causal mechanism is "
-            "unresolved, state the supported service-level symptom and that "
-            "the cause remains unresolved."
-        ),
+    failure_mechanism: str = Field(min_length=1, max_length=256)
+    supporting_evidence_ids: list[Annotated[str, Field(min_length=1, max_length=128)]] = Field(
+        min_length=1, max_length=32
     )
-    summary: str = Field(default="", max_length=512)
-    confidence: float = Field(default=0.5, ge=0, le=1, allow_inf_nan=False)
-    supporting_evidence_ids: list[
-        Annotated[str, Field(min_length=1, max_length=128)]
-    ] = Field(min_length=1, max_length=32)
     contradicting_evidence_ids: list[
         Annotated[str, Field(min_length=1, max_length=128)]
     ] = Field(default_factory=list, max_length=32)
-    rationale: str = Field(default="", max_length=512)
-    uncertainty: str = Field(default="", max_length=512)
-    onset_window_start: datetime | None = None
-    onset_window_end: datetime | None = None
 
 
 class InvestigatorOutput(BaseModel):
@@ -239,12 +199,13 @@ class InvestigatorOutput(BaseModel):
 
 
 class V11SingleControlOutput(BaseModel):
-    """Single control 的 planning 与 investigation 共用一个模型上下文。"""
+    """Single control 的最小诊断输出；planning/task 由服务端预注册。"""
 
     model_config = ConfigDict(extra="forbid")
 
-    planning: SingleControlPlanningOutput
-    investigator: InvestigatorOutput
+    candidates: list[InvestigatorCandidateDraft] = Field(
+        default_factory=list, max_length=3
+    )
 
 
 class CriticAssessmentDraft(BaseModel):
@@ -848,6 +809,14 @@ def _structured_output_retry_feedback(output_type: type[BaseModel]) -> str:
             "Each pass/fail check must cite evidence_ids; each unknown check must "
             "name a gap. A needs_evidence assessment must include a gap and at "
             "least one supplemental task."
+        )
+    if output_type is V11SingleControlOutput:
+        return (
+            f"{common} Return only candidates with affected_entity, "
+            "failure_mechanism, supporting_evidence_ids, and optional "
+            "contradicting_evidence_ids. Cite only committed usable evidence IDs; "
+            "do not emit server-owned IDs, ranks, runtime fields, review fields, "
+            "or finding references."
         )
     if output_type is InvestigatorOutput:
         return (
@@ -2578,20 +2547,22 @@ class V11Runtime:
         """把模型诊断字段转换为服务端拥有的候选实体。"""
         if isinstance(draft, RootCauseCandidate):
             return draft
-        summary = draft.summary or f"{draft.affected_entity}: {draft.failure_mechanism}"
+        summary = getattr(draft, "summary", "") or (
+            f"{draft.affected_entity}: {draft.failure_mechanism}"
+        )
         return RootCauseCandidate(
-            cause_type=draft.cause_type,
+            cause_type=getattr(draft, "cause_type", None),
             affected_entity=draft.affected_entity,
             failure_mechanism=draft.failure_mechanism,
             summary=summary,
             rank=1,
-            confidence=draft.confidence,
+            confidence=getattr(draft, "confidence", 0.5),
             supporting_evidence_ids=list(draft.supporting_evidence_ids),
             contradicting_evidence_ids=list(draft.contradicting_evidence_ids),
-            rationale=draft.rationale,
-            uncertainty=draft.uncertainty,
-            onset_window_start=draft.onset_window_start,
-            onset_window_end=draft.onset_window_end,
+            rationale=getattr(draft, "rationale", ""),
+            uncertainty=getattr(draft, "uncertainty", ""),
+            onset_window_start=getattr(draft, "onset_window_start", None),
+            onset_window_end=getattr(draft, "onset_window_end", None),
         )
 
     def _persist_investigator_result(

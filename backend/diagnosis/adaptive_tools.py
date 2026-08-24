@@ -31,6 +31,53 @@ from backend.safety.redaction import redact_text, redact_value
 from backend.tools.provider_tools import QUERY_MODELS_BY_TOOL
 from backend.tools.registry import ToolInvocationResult, ToolRegistry
 
+_COMPACT_SCHEMA_KEYS = (
+    "type",
+    "enum",
+    "const",
+    "required",
+    "additionalProperties",
+    "format",
+)
+
+
+def _compact_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """压缩模型可见 schema，保留类型/必填/枚举语义。
+
+    工具调用进入服务端后仍由完整的 Pydantic query model 校验；这里仅移除
+    title、description、长度和正则等重复元数据，避免低预算请求在发送前被
+    工具 schema 消耗。read-only、工具名单和服务端校验不因此改变。
+    """
+    definitions = schema.get("$defs", {})
+
+    def visit(node: Any, stack: tuple[str, ...] = ()) -> Any:
+        if not isinstance(node, dict):
+            return node
+        reference = node.get("$ref")
+        if isinstance(reference, str):
+            name = reference.rsplit("/", 1)[-1]
+            if name in stack:
+                return {"type": "object"}
+            return visit(definitions.get(name, {}), (*stack, name))
+
+        compact = {
+            key: node[key] for key in _COMPACT_SCHEMA_KEYS if key in node
+        }
+        if "properties" in node:
+            compact["properties"] = {
+                key: visit(value, stack)
+                for key, value in node["properties"].items()
+            }
+        if "items" in node:
+            compact["items"] = visit(node["items"], stack)
+        for key in ("anyOf", "oneOf", "allOf"):
+            if key in node:
+                compact[key] = [visit(value, stack) for value in node[key]]
+        return compact
+
+    return visit(schema)
+
+
 TOOLS_BY_AGENT = {
     AgentName.LOG: frozenset({"read_logs"}),
     AgentName.METRIC: frozenset({"query_metrics", "query_prometheus"}),
@@ -227,7 +274,7 @@ class AdaptiveToolSession:
                 FunctionTool(
                     name=spec.name,
                     description=spec.description,
-                    params_json_schema=dict(spec.input_schema),
+                    params_json_schema=_compact_json_schema(spec.input_schema),
                     on_invoke_tool=invoke,
                     strict_json_schema=True,
                     timeout_seconds=self.tool_timeout_seconds + 1,
