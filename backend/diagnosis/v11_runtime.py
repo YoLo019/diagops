@@ -201,7 +201,15 @@ class InvestigatorCandidateDraft(RootCauseCandidate):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     affected_entity: str = Field(min_length=1, max_length=128)
-    failure_mechanism: str = Field(min_length=1, max_length=256)
+    failure_mechanism: str = Field(
+        min_length=1,
+        max_length=256,
+        description=(
+            "Observed failure mechanism or symptom. If the causal mechanism is "
+            "unresolved, state the supported service-level symptom and that "
+            "the cause remains unresolved."
+        ),
+    )
     supporting_evidence_ids: list[
         Annotated[str, Field(min_length=1, max_length=128)]
     ] = Field(min_length=1, max_length=32)
@@ -751,7 +759,12 @@ def _structured_output_retry_feedback(output_type: type[BaseModel]) -> str:
             "IDs. Every candidate must include a non-empty affected_entity, a "
             "non-empty failure_mechanism, and at least one supporting usable "
             "evidence ID. A non-gap finding must cite at least one usable evidence "
-            "ID. If no candidate meets these requirements, return no candidates."
+            "ID. If no candidate meets these requirements, return no candidates. "
+            "When the evidence supports a service-level failure symptom but not "
+            "a confirmed causal root cause, emit a bounded candidate with an "
+            "explicitly unresolved observed mechanism and keep the uncertainty "
+            "in the finding. Do not emit a candidate without an affected service "
+            "and usable evidence."
         )
     return common
 
@@ -3073,7 +3086,10 @@ class V11Runtime:
             "empty; cite only committed usable evidence IDs in candidate "
             "evidence fields. Every candidate must include a non-empty "
             "affected_entity, a non-empty failure_mechanism, and at least one "
-            "supporting usable evidence ID; otherwise emit no candidate.",
+            "supporting usable evidence ID. If the causal mechanism is unresolved "
+            "but a service-level failure symptom is supported, state that "
+            "observed symptom and the unresolved cause in failure_mechanism; "
+            "otherwise emit no candidate.",
         }
         return json.dumps(redact_value(payload), ensure_ascii=False, sort_keys=True)
 

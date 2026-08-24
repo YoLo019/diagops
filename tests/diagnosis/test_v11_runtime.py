@@ -290,6 +290,7 @@ def test_investigator_prompt_keeps_tool_descriptions_without_schema_duplication(
     assert set(contracts) == set(registry.agent_manifest())
     assert "description" in contracts["read_runtime_state"]
     assert "input_schema" not in contracts["read_runtime_state"]
+    assert "unresolved cause" in prompt["rule"]
 
 
 @pytest.mark.anyio
