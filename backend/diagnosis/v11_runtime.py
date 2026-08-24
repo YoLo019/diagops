@@ -16,7 +16,7 @@ from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import uuid4
 
 from agents import (
@@ -195,12 +195,26 @@ class InvestigatorFindingDraft(BaseModel):
     contradicting_evidence_ids: list[str] = Field(default_factory=list, max_length=32)
 
 
+class InvestigatorCandidateDraft(RootCauseCandidate):
+    """Investigator 可提交的候选契约；领域模型的可选字段仅为历史兼容。"""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    affected_entity: str = Field(min_length=1, max_length=128)
+    failure_mechanism: str = Field(min_length=1, max_length=256)
+    supporting_evidence_ids: list[
+        Annotated[str, Field(min_length=1, max_length=128)]
+    ] = Field(min_length=1, max_length=32)
+
+
 class InvestigatorOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     summary: str = Field(default="", max_length=512)
     findings: list[InvestigatorFindingDraft] = Field(default_factory=list, max_length=8)
-    candidates: list[RootCauseCandidate] = Field(default_factory=list, max_length=3)
+    candidates: list[InvestigatorCandidateDraft] = Field(
+        default_factory=list, max_length=3
+    )
 
 
 class V11SingleControlOutput(BaseModel):
@@ -734,7 +748,10 @@ def _structured_output_retry_feedback(output_type: type[BaseModel]) -> str:
             f"{common} Cite only committed usable evidence IDs available to this "
             "investigator. Leave candidate supporting_finding_ids and "
             "contradicting_finding_ids empty, and do not invent finding or evidence "
-            "IDs. A non-gap finding must cite at least one usable evidence ID."
+            "IDs. Every candidate must include a non-empty affected_entity, a "
+            "non-empty failure_mechanism, and at least one supporting usable "
+            "evidence ID. A non-gap finding must cite at least one usable evidence "
+            "ID. If no candidate meets these requirements, return no candidates."
         )
     return common
 
@@ -2324,6 +2341,12 @@ class V11Runtime:
                 code = "candidate draft rejected: candidate_finding_reference"
             elif not evidence_refs <= usable_evidence:
                 code = "candidate draft rejected: candidate_evidence_reference"
+            elif (
+                not candidate.affected_entity
+                or not candidate.failure_mechanism
+                or not candidate.supporting_evidence_ids
+            ):
+                code = "candidate draft rejected: candidate_incomplete"
             elif candidate.affected_entity is not None:
                 try:
                     _validate_scope_consistency(
@@ -3048,7 +3071,9 @@ class V11Runtime:
             "rule": "Do not use sibling drafts or invent evidence IDs. Leave "
             "candidate supporting_finding_ids and contradicting_finding_ids "
             "empty; cite only committed usable evidence IDs in candidate "
-            "evidence fields.",
+            "evidence fields. Every candidate must include a non-empty "
+            "affected_entity, a non-empty failure_mechanism, and at least one "
+            "supporting usable evidence ID; otherwise emit no candidate.",
         }
         return json.dumps(redact_value(payload), ensure_ascii=False, sort_keys=True)
 

@@ -155,6 +155,35 @@ def test_v11_model_output_types_are_valid_strict_json_schemas(output_type):
     _assert_explicit_schema_semantics(schema)
 
 
+def test_investigator_candidate_schema_requires_publishable_fields():
+    schema = AgentOutputSchema(
+        InvestigatorOutput, strict_json_schema=True
+    ).json_schema()
+    candidate_schema = schema["$defs"]["InvestigatorCandidateDraft"]
+
+    assert {
+        "affected_entity",
+        "failure_mechanism",
+        "supporting_evidence_ids",
+    } <= set(candidate_schema["required"])
+    assert candidate_schema["properties"]["supporting_evidence_ids"]["minItems"] == 1
+
+    with pytest.raises(ValidationError):
+        InvestigatorOutput.model_validate(
+            {
+                "summary": "incomplete candidate",
+                "findings": [],
+                "candidates": [
+                    {
+                        "summary": "missing publishable fields",
+                        "rank": 1,
+                        "confidence": 0.5,
+                    }
+                ],
+            }
+        )
+
+
 def test_lead_planning_schema_constrains_selected_skill_identifiers():
     schema = AgentOutputSchema(
         LeadPlanningOutput, strict_json_schema=True
@@ -814,15 +843,32 @@ def _candidate_draft(
         "summary": "candidate from investigator",
         "rank": rank,
         "confidence": 0.6,
+        "affected_entity": "checkout-service",
+        "failure_mechanism": "bounded failure mechanism",
         "supporting_finding_ids": supporting_finding_ids or [],
-        "supporting_evidence_ids": supporting_evidence_ids or [],
+        "supporting_evidence_ids": (
+            supporting_evidence_ids
+            if supporting_evidence_ids is not None
+            else ["ev-candidate"]
+        ),
     }
 
 
 async def _run_candidate_round(runtime_run_id: str, turn, seed=None):
     repository, record = _investigator_round_harness(runtime_run_id)
-    if seed is not None:
-        repository.save(record.model_copy(update={"evidence": seed}))
+    if seed is None:
+        seed = [
+            EvidenceItem(
+                id="ev-candidate",
+                provider=EvidenceProvider.LOG,
+                kind=EvidenceKind.LOG_PATTERN,
+                timestamp=record.event.started_at,
+                summary="candidate evidence",
+                status=EvidenceStatus.SUCCESS,
+                runtime_run_id=runtime_run_id,
+            )
+        ]
+    repository.save(record.model_copy(update={"evidence": seed}))
     runtime = V11Runtime(
         model="fake",
         model_provider=ModelProvider.OPENAI,
@@ -919,7 +965,10 @@ async def test_candidate_referencing_persisted_finding_is_kept():
             "summary": "done",
             "findings": [],
             "candidates": [
-                _candidate_draft(supporting_finding_ids=[persisted.id])
+                _candidate_draft(
+                    supporting_finding_ids=[persisted.id],
+                    supporting_evidence_ids=[seeded_evidence.id],
+                )
             ],
         }
 
@@ -1006,6 +1055,7 @@ def test_candidate_scope_mismatch_is_dropped_at_admission():
                 rank=1,
                 confidence=0.6,
                 affected_entity="service-b",
+                failure_mechanism="bounded failure mechanism",
                 supporting_evidence_ids=[evidence.id],
             ),
         ),
@@ -1021,6 +1071,37 @@ def test_candidate_scope_mismatch_is_dropped_at_admission():
     assert admitted == ()
     assert audit_executions[0].error_message == (
         "candidate draft rejected: scope_entity_mismatch"
+    )
+
+
+def test_candidate_incomplete_is_dropped_at_shared_admission():
+    runtime_run_id = "run-candidate-incomplete"
+    repository, record = _investigator_round_harness(runtime_run_id)
+    runtime = V11Runtime(model="fake", max_investigators=1)
+    runtime.runtime_run_id = runtime_run_id
+    task = repository.get_plan(record.id).tasks[0]
+    audit_executions: list[AgentExecution] = []
+
+    admitted = runtime._admit_candidates(
+        (
+            RootCauseCandidate(
+                summary="candidate without publishable fields",
+                rank=1,
+                confidence=0.5,
+            ),
+        ),
+        batch_findings=[],
+        committed_evidence=[],
+        repository=repository,
+        investigation_id=record.id,
+        task=task,
+        instance_id="investigator-incomplete",
+        audit_executions=audit_executions,
+    )
+
+    assert admitted == ()
+    assert audit_executions[0].error_message == (
+        "candidate draft rejected: candidate_incomplete"
     )
 
 
@@ -1052,12 +1133,31 @@ def test_candidate_ids_are_server_generated_for_each_investigator_batch():
     runtime = V11Runtime(model="fake", max_investigators=2)
     runtime.runtime_run_id = runtime_run_id
     task = repository.get_plan(record.id).tasks[0]
+    evidence = EvidenceItem(
+        id="ev-server-id",
+        provider=EvidenceProvider.LOG,
+        kind=EvidenceKind.LOG_PATTERN,
+        timestamp=record.event.started_at,
+        summary="candidate evidence",
+        status=EvidenceStatus.SUCCESS,
+        runtime_run_id=runtime_run_id,
+    )
     audit_executions: list[AgentExecution] = []
 
     first = runtime._admit_candidates(
-        (RootCauseCandidate(id="candidate-1", summary="first", rank=1, confidence=0.6),),
+        (
+            RootCauseCandidate(
+                id="candidate-1",
+                summary="first",
+                rank=1,
+                confidence=0.6,
+                affected_entity=record.event.service,
+                failure_mechanism="bounded failure mechanism",
+                supporting_evidence_ids=[evidence.id],
+            ),
+        ),
         batch_findings=[],
-        committed_evidence=[],
+        committed_evidence=[evidence],
         repository=repository,
         investigation_id=record.id,
         task=task,
@@ -1065,9 +1165,19 @@ def test_candidate_ids_are_server_generated_for_each_investigator_batch():
         audit_executions=audit_executions,
     )
     second = runtime._admit_candidates(
-        (RootCauseCandidate(id="candidate-1", summary="second", rank=1, confidence=0.5),),
+        (
+            RootCauseCandidate(
+                id="candidate-1",
+                summary="second",
+                rank=1,
+                confidence=0.5,
+                affected_entity=record.event.service,
+                failure_mechanism="bounded failure mechanism",
+                supporting_evidence_ids=[evidence.id],
+            ),
+        ),
         batch_findings=[],
-        committed_evidence=[],
+        committed_evidence=[evidence],
         repository=repository,
         investigation_id=record.id,
         task=task,
@@ -1086,12 +1196,31 @@ def test_candidate_projection_assigns_stable_global_ranks():
     runtime = V11Runtime(model="fake", max_investigators=2)
     runtime.runtime_run_id = runtime_run_id
     task = repository.get_plan(record.id).tasks[0]
+    evidence = EvidenceItem(
+        id="ev-global-rank",
+        provider=EvidenceProvider.LOG,
+        kind=EvidenceKind.LOG_PATTERN,
+        timestamp=record.event.started_at,
+        summary="candidate evidence",
+        status=EvidenceStatus.SUCCESS,
+        runtime_run_id=runtime_run_id,
+    )
     audit_executions: list[AgentExecution] = []
 
     first = runtime._admit_candidates(
-        (RootCauseCandidate(id="candidate-1", summary="first", rank=1, confidence=0.6),),
+        (
+            RootCauseCandidate(
+                id="candidate-1",
+                summary="first",
+                rank=1,
+                confidence=0.6,
+                affected_entity=record.event.service,
+                failure_mechanism="bounded failure mechanism",
+                supporting_evidence_ids=[evidence.id],
+            ),
+        ),
         batch_findings=[],
-        committed_evidence=[],
+        committed_evidence=[evidence],
         repository=repository,
         investigation_id=record.id,
         task=task,
@@ -1099,9 +1228,19 @@ def test_candidate_projection_assigns_stable_global_ranks():
         audit_executions=audit_executions,
     )
     second = runtime._admit_candidates(
-        (RootCauseCandidate(id="candidate-1", summary="second", rank=1, confidence=0.5),),
+        (
+            RootCauseCandidate(
+                id="candidate-1",
+                summary="second",
+                rank=1,
+                confidence=0.5,
+                affected_entity=record.event.service,
+                failure_mechanism="bounded failure mechanism",
+                supporting_evidence_ids=[evidence.id],
+            ),
+        ),
         batch_findings=[],
-        committed_evidence=[],
+        committed_evidence=[evidence],
         repository=repository,
         investigation_id=record.id,
         task=task,
@@ -3882,6 +4021,8 @@ async def test_v11_critic_and_lead_authority_complete_without_semantic_validatio
                     "summary": "bounded candidate",
                     "rank": 1,
                     "confidence": 0.8,
+                    "affected_entity": "checkout-service",
+                    "failure_mechanism": "bounded failure mechanism",
                     "supporting_evidence_ids": ["ev-metric"],
                 }
             ],
@@ -4005,6 +4146,8 @@ async def test_v11_needs_evidence_has_one_round_two_batch_and_one_reconciliation
                     "summary": "candidate awaiting evidence",
                     "rank": 1,
                     "confidence": 0.5,
+                    "affected_entity": "checkout-service",
+                    "failure_mechanism": "bounded failure mechanism",
                     "supporting_evidence_ids": ["ev-metric"],
                 }
             ],
@@ -4259,6 +4402,8 @@ async def test_v11_phase_executor_uses_runtime_phases_without_legacy_report_or_a
                     "summary": "bounded candidate",
                     "rank": 1,
                     "confidence": 0.8,
+                    "affected_entity": "checkout-service",
+                    "failure_mechanism": "bounded failure mechanism",
                     "supporting_evidence_ids": ["ev-metric"],
                 }
             ],

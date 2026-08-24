@@ -397,7 +397,7 @@ def test_single_control_drops_candidate_citing_unknown_references(tmp_path: Path
     )
 
 
-def test_single_control_drops_incomplete_candidate(tmp_path: Path):
+def test_single_control_rejects_incomplete_candidate_output(tmp_path: Path):
     turn = _single_turn_with_investigator(
         {
             "summary": "Candidate lacks entity, mechanism, and evidence.",
@@ -413,22 +413,20 @@ def test_single_control_drops_incomplete_candidate(tmp_path: Path):
     )
     prediction, repository, runtime_store = _run_single_case(tmp_path, turn)
 
-    # Single 终态校验要求 candidate 完整且引用 usable 证据；不完整候选在
-    # 准入层丢弃并审计，run 收敛 inconclusive（spec §7.4 拒绝输出单元）。
-    assert prediction.completed is True
+    # Candidate draft 的结构化输出契约拒绝不完整对象；不让它进入 review 或
+    # predictions.json。共享准入层仍覆盖历史/内部构造的 domain 对象。
+    assert prediction.completed is False
+    assert prediction.failure_category == RuntimeFailureCategory.OUTPUT_VALIDATION
     persisted = runtime_store.get_run(prediction.runtime_run_id)
-    assert persisted.status == RuntimeRunStatus.COMPLETED
+    assert persisted.status == RuntimeRunStatus.FAILED
     review = repository.get_coordination_review(persisted.investigation_id)
-    assert review is not None
-    assert review.candidates == []
-    assert review.diagnostic_status == DiagnosticStatus.INCONCLUSIVE
+    assert review is None or review.candidates == []
     audits = [
         item
         for item in repository.list_executions(persisted.investigation_id)
         if item.status == AgentExecutionStatus.FAILED
     ]
-    assert len(audits) == 1
-    assert audits[0].error_message == "candidate draft rejected: candidate_incomplete"
+    assert audits
 
 
 def test_single_control_batch_rejection_stays_terminal(tmp_path: Path):
