@@ -2075,25 +2075,31 @@ class V11Runtime:
             review = self._empty_review(repository, investigation_id)
         decision: LeadDecision | None = None
         try:
-            turn = await self._call_model(
-                actor=ExecutionActor.LEAD.value,
-                prompt=self._lead_adjudication_prompt(repository, review, event),
-                output_type=LeadAdjudicationOutput,
-                context=self._lead_adjudication_context(repository, review),
-                tools=[],
-                remaining_token_budget=self._remaining_token_budget,
-                remaining_tool_budget=self._remaining_tool_budget_for(
-                    repository, investigation_id
-                ),
-                repository=repository,
-                investigation_id=investigation_id,
-                task_id=f"lead-adjudication-{self.runtime_run_id}",
-                step_kind=ExecutionStepKind.LEAD_ADJUDICATION,
-                analysis_round=2 if self._completed_rounds == 2 else 1,
-            )
-            decision = self._parse_output(
-                turn.output, LeadAdjudicationOutput
-            ).decision
+            if self.turn is None:
+                # Critic 已经返回服务端 candidate_ref；live authority 只做
+                # 机械的 verdict→candidate ID 投影，不再让第二个模型重复
+                # 生成同一组 authority refs 并消耗冻结预算。
+                decision = self._critic_authority_decision(review)
+            else:
+                turn = await self._call_model(
+                    actor=ExecutionActor.LEAD.value,
+                    prompt=self._lead_adjudication_prompt(repository, review, event),
+                    output_type=LeadAdjudicationOutput,
+                    context=self._lead_adjudication_context(repository, review),
+                    tools=[],
+                    remaining_token_budget=self._remaining_token_budget,
+                    remaining_tool_budget=self._remaining_tool_budget_for(
+                        repository, investigation_id
+                    ),
+                    repository=repository,
+                    investigation_id=investigation_id,
+                    task_id=f"lead-adjudication-{self.runtime_run_id}",
+                    step_kind=ExecutionStepKind.LEAD_ADJUDICATION,
+                    analysis_round=2 if self._completed_rounds == 2 else 1,
+                )
+                decision = self._parse_output(
+                    turn.output, LeadAdjudicationOutput
+                ).decision
             self._validate_lead_decision(decision, review)
         except asyncio.CancelledError:
             raise
@@ -2213,6 +2219,31 @@ class V11Runtime:
             sort_keys=True,
             separators=(",", ":"),
         )
+        if self.turn is None:
+            # 该 execution 明确标记为 CUSTOM：它记录的是服务端 authority
+            # 投影，不冒充一次额外的模型调用；Critic verdict 才是诊断判断来源。
+            now = datetime.now(UTC)
+            self._record_execution(
+                repository,
+                investigation_id,
+                AgentExecution(
+                    id=f"exec-{uuid4().hex}",
+                    task_id=f"lead-adjudication-{self.runtime_run_id}",
+                    agent_name=ExecutionActor.LEAD.value,
+                    runtime_run_id=self.runtime_run_id,
+                    status=AgentExecutionStatus.COMPLETED,
+                    execution_layer=AgentExecutionLayer.CUSTOM,
+                    analysis_round=2 if self._completed_rounds == 2 else 1,
+                    step_kind=ExecutionStepKind.LEAD_ADJUDICATION,
+                    runtime_attempt_id=f"server-{uuid4().hex}",
+                    failure_category=FailureCategory.NONE,
+                    model_provider=self.model_provider,
+                    model_name=self.model_name,
+                    summary=lead_audit,
+                    started_at=now,
+                    completed_at=now,
+                ),
+            )
         lead_executions = [
             item
             for item in repository.list_executions(investigation_id)
@@ -2244,6 +2275,53 @@ class V11Runtime:
         repository.save_coordination_review(review)
         self._update_summary(repository, investigation_id)
         return review
+
+    @staticmethod
+    def _critic_authority_decision(review: CoordinationReview) -> LeadDecision:
+        """将已校验 Critic verdict 投影为唯一的 live authority decision。"""
+        candidate_ids = {candidate.id for candidate in review.candidates}
+        accepted = [
+            assessment.candidate_id
+            for assessment in review.critic_assessments
+            if assessment.verdict == CriticVerdict.ACCEPT
+            and assessment.candidate_id in candidate_ids
+        ]
+        if not accepted:
+            return LeadDecision(
+                action=LeadAction.INCONCLUSIVE,
+                summary="No candidate was accepted by Critic.",
+                stop_reason="critic_no_accepted_candidate",
+            )
+        accepted_set = set(accepted)
+        evidence_ids = {
+            evidence_id
+            for candidate in review.candidates
+            if candidate.id in accepted_set
+            for evidence_id in (
+                *candidate.supporting_evidence_ids,
+                *candidate.contradicting_evidence_ids,
+            )
+        }
+        evidence_ids.update(
+            evidence_id
+            for assessment in review.critic_assessments
+            if assessment.candidate_id in accepted_set
+            for evidence_id in (
+                *assessment.supporting_evidence_ids,
+                *assessment.contradicting_evidence_ids,
+                *(
+                    evidence_id
+                    for check in assessment.checks
+                    for evidence_id in check.evidence_ids
+                ),
+            )
+        )
+        return LeadDecision(
+            action=LeadAction.CONCLUDE,
+            summary="Critic accepted evidence-backed candidates.",
+            candidate_ids=accepted,
+            evidence_ids=sorted(evidence_ids),
+        )
 
     async def result_validation(
         self, *, repository, investigation_id: str, event: IncidentEvent
