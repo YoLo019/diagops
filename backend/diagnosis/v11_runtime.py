@@ -252,9 +252,11 @@ class CriticOutput(BaseModel):
 class CriticCompactCausalCheck(CausalCheck):
     """live Critic 的短 check，保持七项因果检查语义不变。"""
 
+    model_config = ConfigDict(extra="forbid")
+
     summary: str = Field(min_length=1, max_length=32)
     evidence_ids: list[str] = Field(default_factory=list, max_length=1)
-    gap: str | None = Field(default=None, max_length=64)
+    gap: str | None = Field(default=None, max_length=32)
 
 
 class CriticCompactAssessmentDraft(BaseModel):
@@ -275,9 +277,7 @@ class CriticCompactAssessmentDraft(BaseModel):
     contradicting_evidence_ids: list[
         Annotated[str, Field(min_length=1, max_length=128)]
     ] = Field(default_factory=list, max_length=2)
-    gap: str | None = Field(default=None, max_length=64)
-    supplemental_task_ids: list[str] = Field(default_factory=list, max_length=3)
-    summary: str = Field(min_length=1, max_length=64)
+    summary: str = Field(min_length=1, max_length=32)
 
 
 class CriticCompactOutput(BaseModel):
@@ -765,6 +765,30 @@ def _safe_lifecycle_digest(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _structured_validation_signature(exc: BaseException) -> str:
+    """提取结构校验的安全位置码，不把模型值或原始响应写入审计。"""
+    if not isinstance(exc, ValidationError):
+        return type(exc).__name__.lower()[:64]
+    signatures: list[str] = []
+    for error in exc.errors(include_url=False, include_context=False):
+        loc_parts: list[str] = []
+        for part in error.get("loc", ()):
+            if isinstance(part, int):
+                loc_parts.append(str(part))
+            elif (
+                isinstance(part, str)
+                and len(part) <= 64
+                and all(char.isalnum() or char in "_-" for char in part)
+            ):
+                loc_parts.append(part)
+            else:
+                loc_parts.append("field")
+        location = ".".join(loc_parts) or "root"
+        error_type = str(error.get("type", "validation_error"))[:64]
+        signatures.append(f"{location}:{error_type}")
+    return ";".join(signatures[:8])[:256] or "validation_error"
+
+
 def _candidate_lifecycle_trace(
     *,
     raw_output: Any,
@@ -798,6 +822,12 @@ def _candidate_lifecycle_trace(
 
 def _investigator_failure_audit(exc: BaseException) -> tuple[str, FailureCategory]:
     """把 Investigator 的边界失败收口为可审计的固定码。"""
+    audit_code = getattr(exc, "audit_code", None)
+    if isinstance(audit_code, str) and audit_code:
+        return (
+            f"investigator output invalid: {audit_code[:256]}",
+            FailureCategory.INVALID_OUTPUT,
+        )
     code_by_message = {
         "model token budget exhausted": (
             "model_token_budget_exhausted",
@@ -829,6 +859,12 @@ def _investigator_failure_audit(exc: BaseException) -> tuple[str, FailureCategor
 
 def _critic_failure_audit(exc: BaseException) -> tuple[str, FailureCategory]:
     """把 Critic 边界失败映射为不含模型文本的固定审计码。"""
+    audit_code = getattr(exc, "audit_code", None)
+    if isinstance(audit_code, str) and audit_code:
+        return (
+            f"critic output invalid: {audit_code[:256]}",
+            FailureCategory.INVALID_OUTPUT,
+        )
     message = str(exc)
     if "candidate reference" in message:
         return "critic candidate reference rejected", FailureCategory.INVALID_REFERENCE
@@ -858,10 +894,12 @@ def _structured_output_retry_feedback(output_type: type[BaseModel]) -> str:
             f"{common} For every listed candidate, emit exactly one concise "
             "assessment using its candidate_ref exactly as provided; use only "
             "accept, reject, or inconclusive, emit seven named causal checks, "
-            "and cite at most one committed evidence ID per check. Keep check "
-            "summaries to one to three words. Do not request needs_evidence or "
-            "tasks in this bounded review. Do not return server assessment IDs, "
-            "candidate_id, or extra fields."
+            "and cite at most one committed evidence ID per check. A pass or "
+            "fail check must cite evidence and must not include gap; an unknown "
+            "check must include a short gap. Keep check summaries to one to "
+            "three words. Do not include top-level gap or supplemental task "
+            "fields in this bounded review. Do not return server assessment "
+            "IDs, candidate_id, or extra fields."
         )
     if output_type is CriticOutput:
         return (
@@ -3515,9 +3553,12 @@ class V11Runtime:
                 "inconclusive; emit seven named causal checks and only committed "
                 "evidence IDs. Do not request needs_evidence or tasks in this "
                 "bounded review; use inconclusive when evidence is insufficient. "
-                "Keep each check summary to one to three words and cite at most "
-                "one evidence ID per check; keep the assessment summary under "
-                "eight words. Never return server assessment IDs or candidate_id."
+                "For every check, pass or fail requires one committed evidence ID "
+                "and no gap; unknown requires a short gap. Keep each check "
+                "summary to one to three words and cite at most one evidence ID "
+                "per check; keep the assessment summary under eight words. Do "
+                "not emit top-level gap or supplemental_task_ids. Never return "
+                "server assessment IDs or candidate_id."
                 if compact_output
                 else "Use candidate_ref exactly as provided. Return verdict, seven "
                 "named causal checks, and only committed evidence IDs; never "
@@ -4367,7 +4408,8 @@ class V11Runtime:
                         # 截断/漂移必须进入 bounded retry，而不是在 phase 外静默
                         # 变成 completed 后再由调用方丢失。
                         raise ClassifiedRetryableError(
-                            FailureCategory.INVALID_OUTPUT
+                            FailureCategory.INVALID_OUTPUT,
+                            audit_code=_structured_validation_signature(exc),
                         ) from exc
                     self._model_timeout()
                     if not usage_accumulator.has_attempt_usage(attempt):
@@ -4468,7 +4510,14 @@ class V11Runtime:
                         attempt=attempt,
                         started_at=current_started_at,
                         failure_category=category,
-                        error_message="model attempt failed",
+                        error_message=(
+                            f"model attempt failed: {exc.audit_code[:256]}"
+                            if isinstance(
+                                getattr(exc, "audit_code", None), str
+                            )
+                            and exc.audit_code
+                            else "model attempt failed"
+                        ),
                         input_tokens=input_estimate,
                     )
                     previous_execution_id = current_execution_id
@@ -4600,7 +4649,10 @@ class V11Runtime:
         try:
             return output_type.model_validate(value)
         except (TypeError, ValueError) as exc:
-            raise V11RuntimeContractError("invalid V11 model output") from exc
+            raise V11RuntimeContractError(
+                "invalid V11 model output "
+                f"[{_structured_validation_signature(exc)}]"
+            ) from exc
 
     def _cleanup_session(self, session: AdaptiveToolSession) -> None:
         session._stopped_agents.update(session.task_ids)

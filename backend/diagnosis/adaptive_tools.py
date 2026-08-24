@@ -119,8 +119,10 @@ AgentIdentity = AgentName | str
 class ClassifiedRetryableError(RuntimeError):
     """Provider 已把异常分类为可重试 transport/rate-limit。"""
 
-    def __init__(self, category: FailureCategory) -> None:
+    def __init__(self, category: FailureCategory, *, audit_code: str | None = None) -> None:
         self.category = category
+        # 只允许调用方传入固定、非模型内容的结构摘要，便于持久化失败审计。
+        self.audit_code = audit_code
         super().__init__(category.value)
 
 
