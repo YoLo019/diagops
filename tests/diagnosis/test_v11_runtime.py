@@ -49,6 +49,7 @@ from backend.diagnosis.openai_compatible_model import (
 from backend.diagnosis.openai_model import OFFICIAL_OPENAI_BASE_URL
 from backend.diagnosis.v11_runtime import (
     CriticOutput,
+    InvestigatorCandidateOutput,
     InvestigatorFindingDraft,
     InvestigatorOutput,
     LeadAdjudicationOutput,
@@ -148,6 +149,7 @@ def _assert_explicit_schema_semantics(schema: dict, path: tuple[str, ...] = ()) 
     "output_type",
     [
         LeadPlanningOutput,
+        InvestigatorCandidateOutput,
         InvestigatorOutput,
         CriticOutput,
         LeadAdjudicationOutput,
@@ -312,6 +314,50 @@ def test_investigator_prompt_keeps_tool_descriptions_without_schema_duplication(
     assert "description" in contracts["read_runtime_state"]
     assert "input_schema" not in contracts["read_runtime_state"]
     assert "unresolved cause" in prompt["rule"]
+
+
+def test_live_investigator_prompt_compacts_complete_evidence_context():
+    registry = build_provider_tool_registry(build_mock_provider_registry())
+    runtime = V11Runtime(model=None, tool_registry=registry)
+    task = DiagnosisTask(
+        id="task-compact-context",
+        title="Use committed evidence",
+        description="Diagnose the bounded signal.",
+        task_type=DiagnosisTaskType.GENERAL_INVESTIGATION,
+        agent_name="InvestigatorAgent",
+        analysis_round=1,
+        runtime_run_id="run-compact-context",
+        information_gap="affected service",
+    )
+    evidence = [
+        EvidenceItem(
+            id="ev-compact",
+            provider=EvidenceProvider.LOG,
+            kind=EvidenceKind.LOG_PATTERN,
+            timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+            summary="bounded signal",
+            scope=EvidenceScope(entity_ids=["service-a"]),
+        )
+    ]
+
+    prompt = json.loads(
+        runtime._investigator_prompt(
+            _event(),
+            task,
+            "investigator-compact",
+            registry.agent_manifest(),
+            evidence,
+            [],
+            None,
+            [],
+        )
+    )
+
+    assert prompt["tool_contracts"] == []
+    assert prompt["skills"] == []
+    assert "findings as an empty list" in prompt["rule"]
+    assert "id" not in prompt["task"]
+    assert "runtime_run_id" not in prompt["task"]
 
 
 def test_v11_evidence_digest_is_bounded_and_excludes_unusable_items():

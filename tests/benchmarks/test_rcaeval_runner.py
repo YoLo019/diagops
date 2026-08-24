@@ -401,7 +401,9 @@ def _multi_turn(**kwargs):
                 "stop_reason": "insufficient_evidence",
             }
         }
-    assert output_type == "InvestigatorOutput"
+    assert output_type in {"InvestigatorOutput", "InvestigatorCandidateOutput"}
+    if output_type == "InvestigatorCandidateOutput":
+        return {"candidates": []}
     return {"summary": "No supported candidate.", "findings": [], "candidates": []}
 
 

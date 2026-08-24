@@ -198,6 +198,16 @@ class InvestigatorOutput(BaseModel):
     )
 
 
+class InvestigatorCandidateOutput(BaseModel):
+    """已有完整证据时使用的紧凑候选输出契约。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidates: list[InvestigatorCandidateDraft] = Field(
+        default_factory=list, max_length=3
+    )
+
+
 class V11SingleControlOutput(BaseModel):
     """Single control 的最小诊断输出；planning/task 由服务端预注册。"""
 
@@ -812,11 +822,13 @@ def _structured_output_retry_feedback(output_type: type[BaseModel]) -> str:
             "name a gap. A needs_evidence assessment must include a gap and at "
             "least one supplemental task."
         )
-    if output_type is V11SingleControlOutput:
+    if output_type in {V11SingleControlOutput, InvestigatorCandidateOutput}:
         return (
             f"{common} Return only candidates with affected_entity, "
             "failure_mechanism, supporting_evidence_ids, and optional "
             "contradicting_evidence_ids. Cite only committed usable evidence IDs; "
+            "when cited evidence has scope_entity_ids, affected_entity must "
+            "match an entity in every cited evidence scope; "
             "do not emit server-owned IDs, ranks, runtime fields, review fields, "
             "or finding references."
         )
@@ -2295,7 +2307,17 @@ class V11Runtime:
         )
         self._active_sessions.add(session)
         try:
-            evidence_digest = _select_evidence_digest(seed_evidence)
+            evidence_digest = _select_evidence_digest(
+                seed_evidence,
+                max_per_kind=2,
+                max_total=6,
+            )
+            # live SDK 请求在已有证据时使用紧凑 Draft schema；注入 turn 仍保留
+            # 完整 Investigator schema，以便 deterministic 测试覆盖 finding 合同。
+            compact_output = bool(evidence_digest) and self.turn is None
+            output_type = (
+                InvestigatorCandidateOutput if compact_output else InvestigatorOutput
+            )
             prompt = self._investigator_prompt(
                 event,
                 task,
@@ -2309,14 +2331,14 @@ class V11Runtime:
             turn = await self._call_model(
                 actor=ExecutionActor.INVESTIGATOR.value,
                 prompt=prompt,
-                output_type=InvestigatorOutput,
+                output_type=output_type,
                 context={
                     "incident": _event_projection(event),
-                    "task": task.model_dump(mode="json"),
+                    "task": _investigator_task_projection(task),
                     "agent_instance_id": instance_id,
                     "round": round_number,
-                    "tool_manifest": manifest,
-                    "selected_skills": selected_skills,
+                    "tool_manifest": list(manifest) if not evidence_digest else [],
+                    "selected_skills": selected_skills if not evidence_digest else [],
                     "own_committed_evidence_ids": [
                         item.id for item in evidence_digest
                     ],
@@ -2331,7 +2353,9 @@ class V11Runtime:
                     if not evidence_digest
                     else []
                 ),
-                remaining_token_budget=self._remaining_token_budget,
+                # 并发 Investigator 必须让 reservation 根据剩余槽位均分；传入
+                # 整笔剩余预算会让第一个请求独占余量，后续请求被误判 quota。
+                remaining_token_budget=None,
                 remaining_tool_budget=self._remaining_tool_budget_for(
                     repository, investigation_id
                 ),
@@ -2343,7 +2367,7 @@ class V11Runtime:
             )
             # 任何 finding 引用前，先收口 tool/evidence 的 durable 投影。
             await self._commit_session(repository, investigation_id, session)
-            output = self._parse_output(turn.output, InvestigatorOutput)
+            output = self._parse_output(turn.output, output_type)
             committed_evidence = repository.get(investigation_id).evidence
             candidate_drafts = tuple(output.candidates)
             # 模型输出是不可信数据：单个 draft 违约只拒绝该 draft 并留持久化
@@ -2351,7 +2375,11 @@ class V11Runtime:
             findings: list[AgentFinding] = []
             audit_executions: list[AgentExecution] = []
             rejected = 0
-            for draft in output.findings:
+            for draft in (
+                output.findings
+                if isinstance(output, InvestigatorOutput)
+                else ()
+            ):
                 try:
                     findings.append(
                         self._finding_from_draft(
@@ -3292,22 +3320,29 @@ class V11Runtime:
         assessment: CriticAssessment | None,
         selected_skills: list[str],
     ) -> str:
+        has_committed_evidence = bool(evidence) and self.turn is None
         payload = {
             "role": "general investigator",
             "incident": _event_projection(event),
-            "task": task.model_dump(mode="json"),
+            "task": _investigator_task_projection(task),
             "agent_instance_id": instance_id,
             "round": task.analysis_round,
-            "tool_manifest": manifest,
+            "tool_manifest": list(manifest) if not has_committed_evidence else [],
             "tool_contracts": [
                 {
                     "name": name,
                     "description": self.tool_registry.get(name).description,
                 }
                 for name in manifest
-            ],
-            "skills": [_skill_projection(skill) for skill in self.skills],
-            "selected_skills": selected_skills,
+            ]
+            if not has_committed_evidence
+            else [],
+            "skills": (
+                [_skill_projection(skill) for skill in self.skills]
+                if not has_committed_evidence
+                else []
+            ),
+            "selected_skills": selected_skills if not has_committed_evidence else [],
             "own_committed_evidence": [
                 _evidence_projection(item) for item in evidence
             ],
@@ -3317,17 +3352,31 @@ class V11Runtime:
             "critic_assessment": (
                 assessment.model_dump(mode="json") if assessment is not None else None
             ),
-            "rule": "Do not use sibling drafts or invent evidence IDs. Do not "
-            "emit candidate IDs, ranks, runtime IDs, review fields, or finding "
-            "references; cite only committed usable evidence IDs in candidate "
-            "evidence fields. When cited evidence has scope_entity_ids, "
-            "affected_entity must exactly match an entity in every cited "
-            "evidence scope. Every candidate must include a non-empty "
-            "affected_entity, a non-empty failure_mechanism, and at least one "
-            "supporting usable evidence ID. If the causal mechanism is unresolved "
-            "but a service-level failure symptom is supported, state that "
-            "observed symptom and the unresolved cause in failure_mechanism; "
-            "otherwise emit no candidate.",
+            "rule": (
+                "Use only the bounded committed evidence shown below. Return "
+                "findings as an empty list and only the minimum candidate drafts "
+                "needed. Do not use sibling drafts or invent evidence IDs. Do "
+                "not emit candidate IDs, ranks, runtime IDs, review fields, or "
+                "finding references; cite only committed usable evidence IDs in "
+                "candidate evidence fields. When cited evidence has "
+                "scope_entity_ids, affected_entity must exactly match an entity "
+                "in every cited evidence scope. Every candidate must include a "
+                "non-empty affected_entity, a non-empty failure_mechanism, and "
+                "at least one supporting usable evidence ID. If no candidate is "
+                "supported, return an empty candidates list."
+                if has_committed_evidence
+                else "Do not use sibling drafts or invent evidence IDs. Do not "
+                "emit candidate IDs, ranks, runtime IDs, review fields, or "
+                "finding references; cite only committed usable evidence IDs in "
+                "candidate evidence fields. When cited evidence has "
+                "scope_entity_ids, affected_entity must exactly match an entity "
+                "in every cited evidence scope. Every candidate must include a "
+                "non-empty affected_entity, a non-empty failure_mechanism, and "
+                "at least one supporting usable evidence ID. If the causal "
+                "mechanism is unresolved but a service-level failure symptom is "
+                "supported, state that observed symptom and the unresolved cause "
+                "in failure_mechanism; otherwise emit no candidate."
+            ),
         }
         return json.dumps(redact_value(payload), ensure_ascii=False, sort_keys=True)
 
@@ -4518,6 +4567,18 @@ def _evidence_projection(item: EvidenceItem) -> dict[str, Any]:
         "timestamp": item.timestamp.astimezone(UTC).isoformat(),
         "summary": item.summary,
         "scope_entity_ids": sorted(item.scope.entity_ids) if item.scope else [],
+    }
+
+
+def _investigator_task_projection(task: DiagnosisTask) -> dict[str, Any]:
+    """仅向 Investigator 暴露诊断任务语义，不暴露运行时主键。"""
+    return {
+        "title": task.title,
+        "description": task.description,
+        "analysis_round": task.analysis_round,
+        "tool_names": list(task.tool_names),
+        "evidence_scope": task.evidence_scope,
+        "information_gap": task.information_gap,
     }
 
 
