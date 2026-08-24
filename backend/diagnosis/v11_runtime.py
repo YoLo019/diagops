@@ -375,11 +375,11 @@ class _ModelUsageAccumulator:
         return input_tokens, output_tokens
 
 
-_INPUT_ESTIMATE_METHOD = "unicode-json-envelope-v1"
+_INPUT_ESTIMATE_METHOD = "unicode-json-envelope-v2"
 _JSON_PUNCTUATION = frozenset('{}[],:"\\')
 _INPUT_ESTIMATE_CALIBRATION_SAFETY_NUMERATOR = 5
 _INPUT_ESTIMATE_CALIBRATION_SAFETY_DENOMINATOR = 4
-_INPUT_ESTIMATE_CALIBRATION_FLOOR_BASIS_POINTS = 7500
+_INPUT_ESTIMATE_CALIBRATION_FLOOR_BASIS_POINTS = 5000
 _INPUT_ESTIMATE_BASIS_POINTS = 10000
 
 
@@ -417,13 +417,15 @@ def _estimate_text_tokens(text: str) -> tuple[int, dict[str, int]]:
         else:
             ascii_plain += 1
 
-    # ASCII 文本按 4 字符/token；JSON 标点按逐个 token；CJK 按 1.5
-    # token/字向上取整；其他非 ASCII 字符按 2 token 保守处理。
+    # ASCII 文本按 4 字符/token；JSON 标点按约 2 字符/token；CJK 按 1.5
+    # token/字向上取整；其他非 ASCII 字符按 2 token 保守处理。兼容端点
+    # 的实际 usage 会在结算时覆盖估算，低预算下避免 JSON schema 标点的
+    # 逐字符包络吞掉结构化结果所需的最小输出空间。
     estimated = (
         (ascii_plain + 3) // 4
         + (cjk * 3 + 1) // 2
         + non_ascii * 2
-        + json_punctuation
+        + (json_punctuation + 1) // 2
     )
     return max(1, estimated), {
         "chars": len(text),
@@ -897,6 +899,7 @@ class V11Runtime:
         self._model_turn_budget_enabled = False
         self._model_reservations: dict[str, _ModelReservation] = {}
         self._settled_model_reservations: set[str] = set()
+        self._model_request_output_caps: dict[tuple[str, int], int] = {}
         self._model_request_history: dict[
             tuple[str, int], list[_ModelRequestEvent]
         ] = {}
@@ -3763,9 +3766,21 @@ class V11Runtime:
                 requested,
                 current if current is not None else requested,
             )
+            if logical_call_id is not None and request_index is not None:
+                previous_caps = [
+                    cap
+                    for (call_id, index), cap in self._model_request_output_caps.items()
+                    if call_id == logical_call_id and index < request_index
+                ]
+                if previous_caps:
+                    available = min(available, input_estimate + min(previous_caps) - 1)
             output_cap = available - input_estimate
             if output_cap <= 0:
                 raise V11RuntimeContractError("model token budget exhausted")
+            if logical_call_id is not None and request_index is not None:
+                self._model_request_output_caps[(logical_call_id, request_index)] = (
+                    output_cap
+                )
             await self._reserve_run_model_turn()
             if current is not None:
                 self._remaining_token_budget = current - available

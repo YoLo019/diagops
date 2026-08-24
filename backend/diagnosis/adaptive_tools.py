@@ -39,6 +39,9 @@ _COMPACT_SCHEMA_KEYS = (
     "additionalProperties",
     "format",
 )
+_SERVER_QUERY_FIELDS = frozenset(
+    {"start_time", "end_time", "window_start", "window_end", "reason", "limit"}
+)
 
 
 def _compact_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
@@ -76,6 +79,31 @@ def _compact_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
         return compact
 
     return visit(schema)
+
+
+def _model_query_schema(tool_name: str, schema: dict[str, Any]) -> dict[str, Any]:
+    """移除由服务端上下文确定的查询字段和默认值。"""
+    compact = _compact_json_schema(schema)
+    query_model = QUERY_MODELS_BY_TOOL.get(tool_name)
+    if query_model is None or compact.get("type") != "object":
+        return compact
+    properties = compact.get("properties")
+    if not isinstance(properties, dict):
+        return compact
+    for field_name in _SERVER_QUERY_FIELDS:
+        properties.pop(field_name, None)
+    required = [
+        field_name
+        for field_name in compact.get("required", [])
+        if field_name in properties
+        and field_name in query_model.model_fields
+        and query_model.model_fields[field_name].is_required()
+    ]
+    if required:
+        compact["required"] = required
+    else:
+        compact.pop("required", None)
+    return compact
 
 
 TOOLS_BY_AGENT = {
@@ -274,7 +302,9 @@ class AdaptiveToolSession:
                 FunctionTool(
                     name=spec.name,
                     description=spec.description,
-                    params_json_schema=_compact_json_schema(spec.input_schema),
+                    params_json_schema=_model_query_schema(
+                        spec.name, spec.input_schema
+                    ),
                     on_invoke_tool=invoke,
                     strict_json_schema=True,
                     timeout_seconds=self.tool_timeout_seconds + 1,
@@ -341,7 +371,9 @@ class AdaptiveToolSession:
 
         try:
             query_model = QUERY_MODELS_BY_TOOL[tool_name]
-            query = query_model.model_validate(parsed)
+            query = query_model.model_validate(
+                _server_query_defaults(self.event, query_model, parsed)
+            )
         except ValidationError as exc:
             return self._reject(
                 agent_name,
@@ -855,6 +887,34 @@ def _query_window(
             return None
         return query.window_start, query.window_end
     return None
+
+
+def _server_query_defaults(
+    event: IncidentEvent,
+    query_model: type[BaseModel],
+    parsed: dict[str, Any],
+) -> dict[str, Any]:
+    """为模型省略的公共查询字段注入当前 incident 的安全默认值。"""
+    if not issubclass(query_model, (QueryWindow, ScopedTelemetryQuery)):
+        return parsed
+    span = timedelta(minutes=event.time_window_minutes)
+    defaults = {"limit": 20}
+    if issubclass(query_model, QueryWindow):
+        defaults.update(
+            {
+                "start_time": event.started_at - span,
+                "end_time": event.started_at + span,
+                "reason": "bounded read-only incident query",
+            }
+        )
+    else:
+        defaults.update(
+            {
+                "window_start": event.started_at - span,
+                "window_end": event.started_at + span,
+            }
+        )
+    return {**defaults, **parsed}
 
 
 def _query_fingerprint(

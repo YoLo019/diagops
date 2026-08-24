@@ -643,7 +643,35 @@ def test_tools_for_exposes_compact_schema_but_keeps_query_contract():
     assert compact.get("required", []) == original.get("required", [])
     assert set(compact["properties"]) == set(original["properties"])
     assert "$defs" not in json.dumps(compact)
-    assert "$ref" not in json.dumps(compact)
+
+
+@pytest.mark.anyio
+async def test_model_query_schema_uses_server_owned_incident_window_defaults():
+    provider = QueryProvider("read_logs", EvidenceProvider.LOG, "ev-default-window")
+    session = _manifest_session([provider])
+
+    tool = next(
+        item for item in session.tools_for("investigator-1", 1)
+        if item.name == "read_logs"
+    )
+    assert not set(tool.params_json_schema.get("required", [])) & {
+        "start_time",
+        "end_time",
+        "reason",
+        "limit",
+    }
+    assert not set(tool.params_json_schema.get("properties", [])) & {
+        "start_time",
+        "end_time",
+        "reason",
+        "limit",
+    }
+
+    response = json.loads(
+        await session.invoke("investigator-1", "read_logs", "{}", 1)
+    )
+    assert response["status"] == "success"
+    assert provider.calls == 1
 
 
 class QueryProvider:

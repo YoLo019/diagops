@@ -418,7 +418,7 @@ def test_v11_input_estimate_audit_fits_model_event_payload():
     )
 
     assert event.safe_payload["input_estimate_audit"]["method"] == (
-        "unicode-json-envelope-v1"
+        "unicode-json-envelope-v2"
     )
 
 
@@ -461,7 +461,7 @@ async def test_v11_input_estimator_calibrates_after_provider_settlement():
     assert second_estimate < first_estimate
     audit = runtime._model_reservations["calibration-request-2"].estimate_audit
     assert audit["calibration_samples"] == 1
-    assert 7_500 <= audit["calibration_factor_basis_points"] < 10_000
+    assert 5_000 <= audit["calibration_factor_basis_points"] < 10_000
 
 
 def test_task_evidence_scope_filters_only_explicit_conflicts():

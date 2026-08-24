@@ -223,6 +223,8 @@ class SingleInvestigatorAgent(V11Runtime):
                 "Return only diagnostic candidates. Use read-only evidence tools "
                 "when needed. Every candidate needs affected_entity, "
                 "failure_mechanism, and committed usable supporting evidence IDs. "
+                "Prefer one focused query; after usable evidence is available, "
+                "return the candidates without another query. "
                 "Do not emit server-owned IDs, ranks, runtime fields, review "
                 "fields, or invented references."
             )
