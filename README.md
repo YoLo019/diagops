@@ -15,6 +15,10 @@ The local platform includes:
 - Vite React investigation console for list/detail, evidence, hypotheses,
   action status, verification results, reports, and frozen OpenRCA results.
 
+For a from-scratch Chinese walkthrough of the architecture, Agent design,
+tool-calling, durable Runtime, safety, evaluation, and interview preparation,
+see the [DiagOps interview study guide](docs/interview-guide/README.md).
+
 ## Local Development
 
 Install Python dependencies:
