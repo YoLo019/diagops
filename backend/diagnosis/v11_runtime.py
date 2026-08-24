@@ -3320,7 +3320,9 @@ class V11Runtime:
             "rule": "Do not use sibling drafts or invent evidence IDs. Do not "
             "emit candidate IDs, ranks, runtime IDs, review fields, or finding "
             "references; cite only committed usable evidence IDs in candidate "
-            "evidence fields. Every candidate must include a non-empty "
+            "evidence fields. When cited evidence has scope_entity_ids, "
+            "affected_entity must exactly match an entity in every cited "
+            "evidence scope. Every candidate must include a non-empty "
             "affected_entity, a non-empty failure_mechanism, and at least one "
             "supporting usable evidence ID. If the causal mechanism is unresolved "
             "but a service-level failure symptom is supported, state that "
@@ -4515,6 +4517,7 @@ def _evidence_projection(item: EvidenceItem) -> dict[str, Any]:
         "status": item.status.value,
         "timestamp": item.timestamp.astimezone(UTC).isoformat(),
         "summary": item.summary,
+        "scope_entity_ids": sorted(item.scope.entity_ids) if item.scope else [],
     }
 
 

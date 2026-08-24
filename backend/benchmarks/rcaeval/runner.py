@@ -242,7 +242,9 @@ class SingleInvestigatorAgent(V11Runtime):
                 "Prefer one focused query; after usable evidence is available, "
                 "return the candidates without another query. "
                 "Do not emit server-owned IDs, ranks, runtime fields, review "
-                "fields, or invented references."
+                "fields, or invented references. When cited evidence has "
+                "scope_entity_ids, affected_entity must exactly match an entity "
+                "in every cited evidence scope."
             )
             turn = await self._call_model(
                 actor=ExecutionActor.INVESTIGATOR.value,

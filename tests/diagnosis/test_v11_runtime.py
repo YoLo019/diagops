@@ -56,6 +56,7 @@ from backend.diagnosis.v11_runtime import (
     V11Runtime,
     V11RuntimeContractError,
     V11SingleControlOutput,
+    _evidence_projection,
     _select_evidence_digest,
     _V11BudgetedModel,
 )
@@ -355,6 +356,22 @@ def test_v11_evidence_digest_is_bounded_and_excludes_unusable_items():
         EvidenceKind.METRIC_TREND,
         EvidenceKind.RUNTIME_STATE,
     }
+
+
+def test_evidence_projection_exposes_server_owned_scope_entities():
+    item = EvidenceItem(
+        id="ev-scoped",
+        provider=EvidenceProvider.LOG,
+        kind=EvidenceKind.LOG_PATTERN,
+        timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+        summary="bounded signal",
+        scope=EvidenceScope(entity_ids=["service-b", "service-a"]),
+    )
+
+    assert _evidence_projection(item)["scope_entity_ids"] == [
+        "service-a",
+        "service-b",
+    ]
 
 
 @pytest.mark.anyio
