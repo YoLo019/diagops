@@ -105,7 +105,7 @@ class DiagnosisPhaseExecutor:
             RuntimePhase, Callable[[_DiagnosisState], Awaitable[PhaseOutput]]
         ] = {
             RuntimePhase.INTAKE: self._v11_intake,
-            RuntimePhase.EVIDENCE_COLLECTION: self._v11_pass,
+            RuntimePhase.EVIDENCE_COLLECTION: self._v11_evidence_collection,
             RuntimePhase.LEAD_PLANNING: self._v11_runtime_phase,
             RuntimePhase.INVESTIGATOR_ROUND_1: self._v11_runtime_phase,
             RuntimePhase.CRITIC_REVIEW: self._v11_runtime_phase,
@@ -393,6 +393,10 @@ class DiagnosisPhaseExecutor:
     async def _v11_pass(self, state: _DiagnosisState) -> PhaseOutput:
         return self._output(state)
 
+    async def _v11_evidence_collection(self, state: _DiagnosisState) -> PhaseOutput:
+        """V11 先持久化只读证据，再让 Agent 生成诊断候选。"""
+        return await self.evidence_collection(state, record_legacy_execution=False)
+
     async def _v11_report_generation(self, state: _DiagnosisState) -> PhaseOutput:
         """把 V11 review 投影为报告和 candidate-owned 只读建议。"""
         record, safe_event = self._required(state)
@@ -530,7 +534,9 @@ class DiagnosisPhaseExecutor:
         state.record = record
         return self._output(state, status="completed")
 
-    async def evidence_collection(self, state: _DiagnosisState) -> PhaseOutput:
+    async def evidence_collection(
+        self, state: _DiagnosisState, *, record_legacy_execution: bool = True
+    ) -> PhaseOutput:
         record, safe_event = self._required(state)
         context = await self._orchestrator.coordinator.collect_async(
             state.event,
@@ -539,19 +545,43 @@ class DiagnosisPhaseExecutor:
             parallel_limit=self._parallel_limit,
         )
         state.hit_fault("provider_before_commit")
-        validated = validate_investigation_evidence(context.provider_results)
+        runtime_run_id = state.runtime_run_id
+
+        def bind_evidence_owner(items):
+            if runtime_run_id is None:
+                return list(items)
+            return [
+                item.model_copy(update={"runtime_run_id": runtime_run_id})
+                for item in items
+            ]
+
+        provider_results = [
+            result.model_copy(
+                update={"evidence_items": bind_evidence_owner(result.evidence_items)}
+            )
+            for result in context.provider_results
+        ]
+        specialist_results = [
+            result.model_copy(
+                update={"evidence_items": bind_evidence_owner(result.evidence_items)}
+            )
+            for result in context.specialist_results
+        ]
+        evidence = bind_evidence_owner(context.evidence)
+        validated = validate_investigation_evidence(provider_results)
         state.supporting_evidence = validated.supporting_evidence
-        record.provider_results = context.provider_results
-        record.specialist_results = context.specialist_results
-        record.evidence = context.evidence
+        record.provider_results = provider_results
+        record.specialist_results = specialist_results
+        record.evidence = evidence
         record.updated_at = datetime.now(UTC)
         state.record = self._orchestrator.repository.save(record)
-        await asyncio.to_thread(
-            self._orchestrator._record_v4_execution,
-            record.id,
-            safe_event,
-            context.provider_results,
-        )
+        if record_legacy_execution:
+            await asyncio.to_thread(
+                self._orchestrator._record_v4_execution,
+                record.id,
+                safe_event,
+                context.provider_results,
+            )
         return self._output(state, evidence_count=len(record.evidence))
 
     async def deterministic_rca(self, state: _DiagnosisState) -> PhaseOutput:

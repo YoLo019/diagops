@@ -48,6 +48,7 @@ from backend.diagnosis.v11_runtime import (
     V11RuntimeContractError,
     V11SingleControlOutput,
     _candidate_lifecycle_trace,
+    _evidence_projection,
     _InvestigatorResult,
 )
 from backend.domain.agent_findings import AgentFinding, CoordinationReview
@@ -91,6 +92,9 @@ from backend.runtime.sqlite_store import SQLiteRuntimeStore
 from backend.runtime.telemetry import RuntimeTelemetry
 from backend.runtime.writer import RuntimeWriter
 from backend.safety.redaction import (
+    redact_value,
+)
+from backend.safety.redaction import (
     safe_exception_diagnostic as _safe_exception_diagnostic,
 )
 from backend.services.source_identity import reject_reparse_path, resolve_source_identity
@@ -123,6 +127,39 @@ class EmptyRunOwnedMemory(VerifiedMemoryLookup):
         return []
 
 
+def _single_control_evidence_digest(evidence: list[Any]) -> list[dict[str, Any]]:
+    """按证据类型轮转提供小型、可引用的模型上下文摘要。"""
+    usable = [
+        item
+        for item in evidence
+        if item.status in {EvidenceStatus.SUCCESS, EvidenceStatus.PARTIAL}
+    ]
+    groups: dict[str, list[Any]] = {}
+    for item in usable:
+        groups.setdefault(item.kind.value, []).append(item)
+    for items in groups.values():
+        items.sort(
+            key=lambda item: (
+                float(item.payload.get("change_score", 0.0))
+                if isinstance(item.payload.get("change_score"), (int, float))
+                else 0.0,
+                item.timestamp,
+            ),
+            reverse=True,
+        )
+    selected: list[Any] = []
+    for offset in range(4):
+        for kind in sorted(groups):
+            items = groups[kind]
+            if offset < len(items):
+                selected.append(items[offset])
+                if len(selected) >= 16:
+                    return [
+                        redact_value(_evidence_projection(item)) for item in selected
+                    ]
+    return [redact_value(_evidence_projection(item)) for item in selected]
+
+
 class SingleInvestigatorAgent(V11Runtime):
     """冻结单上下文对照；planning 与 investigation 共用一次模型调用。"""
 
@@ -150,6 +187,8 @@ class SingleInvestigatorAgent(V11Runtime):
     async def investigator_round_1(self, *, repository, investigation_id: str, event):
         manifest = self._agent_manifest()
         base_evidence = list(repository.get(investigation_id).evidence)
+        evidence_digest = _single_control_evidence_digest(base_evidence)
+        evidence_ids = [item["id"] for item in evidence_digest]
         task_id = f"single-control-task-{self.runtime_run_id}"
         task = DiagnosisTask(
             id=task_id,
@@ -221,7 +260,8 @@ class SingleInvestigatorAgent(V11Runtime):
         try:
             prompt = (
                 "Return only diagnostic candidates. Use read-only evidence tools "
-                "when needed. Every candidate needs affected_entity, "
+                "when needed. Use the committed evidence digest first. Every "
+                "candidate needs affected_entity, "
                 "failure_mechanism, and committed usable supporting evidence IDs. "
                 "Prefer one focused query; after usable evidence is available, "
                 "return the candidates without another query. "
@@ -234,10 +274,11 @@ class SingleInvestigatorAgent(V11Runtime):
                 output_type=V11SingleControlOutput,
                 context={
                     "incident": event.model_dump(mode="json"),
-                    "committed_evidence_ids": [item.id for item in base_evidence],
+                    "committed_evidence_ids": evidence_ids,
+                    "committed_evidence": evidence_digest,
                     "tool_manifest": manifest,
                 },
-                tools=session.tools_for(instance_id, 1),
+                tools=(session.tools_for(instance_id, 1) if not evidence_digest else []),
                 remaining_token_budget=self._remaining_token_budget,
                 remaining_tool_budget=self._remaining_tool_budget_for(
                     repository, investigation_id

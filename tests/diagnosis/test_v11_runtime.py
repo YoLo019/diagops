@@ -37,6 +37,7 @@ from backend.db.repositories import InMemoryInvestigationRepository
 from backend.diagnosis import openai_compatible_model as compatible_model_module
 from backend.diagnosis import v11_runtime as v11_runtime_module
 from backend.diagnosis.adaptive_tools import ClassifiedRetryableError
+from backend.diagnosis.context import DiagnosisContext
 from backend.diagnosis.diagnostic_skills import (
     DIAGNOSTIC_SKILLS,
     SKILL_CATALOG_VERSION,
@@ -107,6 +108,7 @@ from backend.domain.runtime import (
 from backend.domain.tool_calls import ToolSpec
 from backend.domain.v11_contracts import validate_v11_final_status
 from backend.providers.registry import build_mock_provider_registry
+from backend.providers.results import ProviderResult, ProviderStatus
 from backend.runtime.phase_executor import DiagnosisPhaseExecutor
 from backend.runtime.phases import V11_PHASE_ORDER, PhaseInput
 from backend.services.container import AppContainer
@@ -4490,6 +4492,31 @@ async def test_v11_phase_executor_uses_runtime_phases_without_legacy_report_or_a
     async def turn(**_kwargs):
         return turns.pop(0)
 
+    async def collect_async(event, **_kwargs):
+        evidence = EvidenceItem(
+            id="ev-metric",
+            provider=EvidenceProvider.METRIC,
+            kind=EvidenceKind.METRIC_TREND,
+            timestamp=event.started_at,
+            summary="committed evidence",
+            runtime_run_id="run-v11",
+        )
+        result = ProviderResult(
+            provider=EvidenceProvider.METRIC,
+            evidence_items=[evidence],
+        )
+        skipped_result = ProviderResult(
+            provider=EvidenceProvider.RELATED_ALERT,
+            status=ProviderStatus.SKIPPED,
+            error_message="related alert provider unavailable",
+        )
+        provider_error = skipped_result.to_error_evidence()
+        return DiagnosisContext(
+            event=event,
+            evidence=[evidence, provider_error],
+            provider_results=[result, skipped_result],
+        )
+
     runtime = V11Runtime(
         model="fake",
         tool_registry=build_provider_tool_registry(
@@ -4505,6 +4532,7 @@ async def test_v11_phase_executor_uses_runtime_phases_without_legacy_report_or_a
         repository=repository,
         v11_runtime=runtime,
         agents_runtime=None,
+        coordinator=SimpleNamespace(collect_async=collect_async),
         max_total_tool_calls=8,
     )
     executor = DiagnosisPhaseExecutor(orchestrator)
@@ -4542,6 +4570,12 @@ async def test_v11_phase_executor_uses_runtime_phases_without_legacy_report_or_a
     persisted = repository.get_coordination_review(record.id)
     assert persisted is not None
     assert persisted.lead_decision is not None
+    committed_record = repository.get(record.id)
+    assert {item.id for item in committed_record.evidence} >= {"ev-metric"}
+    assert sum(
+        item.kind is EvidenceKind.PROVIDER_ERROR for item in committed_record.evidence
+    ) == 1
+    assert all(item.runtime_run_id == "run-v11" for item in committed_record.evidence)
     assert repository.get(record.id).report is None
     assert repository.get(record.id).actions == []
 
