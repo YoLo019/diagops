@@ -4,6 +4,7 @@ from backend.benchmarks.rcaeval.providers import (
     RcaEvalRuntimeStateProvider,
     incident_event_for_case,
 )
+from backend.diagnosis.evidence_validation import validate_investigation_evidence
 from backend.domain.evidence import RuntimeStateValue
 from backend.domain.tool_queries import RuntimeStateQuery
 
@@ -31,3 +32,28 @@ def test_placement_only_runtime_file_does_not_claim_health_or_readiness(tmp_path
     assert payload["state"] == RuntimeStateValue.UNKNOWN.value
     assert payload["ready"] is None
     assert "scheduled on" in payload["reason"]
+
+
+def test_runtime_state_duplicate_rows_have_distinct_evidence_ids(tmp_path):
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    (case_dir / "telemetry-00.csv").write_text(
+        "POD,NODE_NAME\ncheckout-0,node-a\ncheckout-0,node-a\n",
+        encoding="utf-8",
+    )
+    provider = RcaEvalRuntimeStateProvider(
+        case_dir,
+        case_id="re2-aaaaaaaaaaaaaaaa",
+        runtime_manifest_hash="a" * 64,
+        evidence_namespace="run-1",
+    )
+
+    result = provider.collect(
+        incident_event_for_case(case_dir, "re2-aaaaaaaaaaaaaaaa"),
+        RuntimeStateQuery(limit=10),
+    )
+
+    ids = [item.id for item in result.evidence_items]
+    assert len(ids) == 2
+    assert len(ids) == len(set(ids))
+    assert len(validate_investigation_evidence([result]).supporting_evidence) == 2

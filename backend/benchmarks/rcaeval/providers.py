@@ -107,9 +107,17 @@ class _RcaEvalProvider:
         summary: str,
         payload: dict,
         entity_ids: list[str] | None = None,
+        identity: str | None = None,
     ) -> EvidenceItem:
         canonical = json.dumps(
-            [self.case_id, provider.value, kind.value, summary, payload],
+            [
+                self.case_id,
+                provider.value,
+                kind.value,
+                summary,
+                payload,
+                identity,
+            ],
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -428,7 +436,7 @@ class RcaEvalRuntimeStateProvider(_RcaEvalProvider):
         evidence: list[EvidenceItem] = []
         for path in self.telemetry.pod_files:
             with path.open(encoding="utf-8", errors="replace", newline="") as handle:
-                for row in csv.DictReader(handle):
+                for row_index, row in enumerate(csv.DictReader(handle)):
                     pod = (row.get("POD") or "").strip()[:128]
                     node = (row.get("NODE_NAME") or "").strip()[:128]
                     if not pod or (query and query.entity_ids and pod not in query.entity_ids):
@@ -457,6 +465,7 @@ class RcaEvalRuntimeStateProvider(_RcaEvalProvider):
                             summary=f"pod {pod} scheduled on {node or 'unknown'}",
                             payload=payload.model_dump(mode="json"),
                             entity_ids=[pod],
+                            identity=f"{path.name}:{row_index}",
                         )
                     )
                     if len(evidence) >= limit:
