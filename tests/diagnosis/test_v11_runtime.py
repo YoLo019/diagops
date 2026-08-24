@@ -54,6 +54,7 @@ from backend.diagnosis.v11_runtime import (
     InvestigatorFindingDraft,
     InvestigatorOutput,
     LeadAdjudicationOutput,
+    LeadPlanningCompactOutput,
     LeadPlanningOutput,
     V11Runtime,
     V11RuntimeContractError,
@@ -149,6 +150,7 @@ def _assert_explicit_schema_semantics(schema: dict, path: tuple[str, ...] = ()) 
 @pytest.mark.parametrize(
     "output_type",
     [
+        LeadPlanningCompactOutput,
         LeadPlanningOutput,
         CriticCompactOutput,
         InvestigatorCandidateOutput,

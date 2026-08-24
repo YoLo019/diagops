@@ -158,6 +158,29 @@ class LeadPlanningOutput(BaseModel):
     tasks: list[LeadPlanningTaskDraft] = Field(default_factory=list, max_length=3)
 
 
+class LeadPlanningCompactTaskDraft(BaseModel):
+    """live Lead 的最小 planning draft；运行时字段由服务端补齐。"""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    id: str = Field(min_length=1, max_length=64)
+    title: str = Field(min_length=1, max_length=96)
+    description: str = Field(min_length=1, max_length=256)
+    information_gap: str = Field(min_length=1, max_length=160)
+    expected_discriminator: str | None = Field(default=None, max_length=160)
+
+
+class LeadPlanningCompactOutput(BaseModel):
+    """live Lead 的最小 planning 输出；不暴露 server-owned task 字段。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    decision: LeadDecision
+    tasks: list[LeadPlanningCompactTaskDraft] = Field(
+        default_factory=list, max_length=3
+    )
+
+
 class InvestigatorFindingDraft(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -893,6 +916,14 @@ def _structured_output_retry_feedback(output_type: type[BaseModel]) -> str:
         "use the declared enum values, respect every list bound, and add no extra "
         "fields. Do not return markdown or explain the correction."
     )
+    if output_type is LeadPlanningCompactOutput:
+        return (
+            f"{common} Return one to three concise planning tasks. Each task may "
+            "contain only id, title, description, information_gap, and optional "
+            "expected_discriminator. Do not return tool names, round numbers, "
+            "runtime IDs, review fields, or server-owned fields. Do not conclude "
+            "during planning."
+        )
     if output_type is CriticCompactOutput:
         return (
             f"{common} For every listed candidate, emit exactly one concise "
@@ -1379,7 +1410,11 @@ class V11Runtime:
         turn = await self._call_model(
             actor=ExecutionActor.LEAD.value,
             prompt=prompt,
-            output_type=LeadPlanningOutput,
+            output_type=(
+                LeadPlanningCompactOutput
+                if self.turn is None
+                else LeadPlanningOutput
+            ),
             context=context,
             tools=[],
             remaining_token_budget=remaining_token_budget,
@@ -1390,7 +1425,28 @@ class V11Runtime:
             step_kind=ExecutionStepKind.LEAD_PLANNING,
             analysis_round=1,
         )
-        parsed = self._parse_output(turn.output, LeadPlanningOutput)
+        parsed_output = self._parse_output(
+            turn.output,
+            LeadPlanningCompactOutput if self.turn is None else LeadPlanningOutput,
+        )
+        parsed = (
+            LeadPlanningOutput(
+                decision=parsed_output.decision,
+                tasks=[
+                    LeadPlanningTaskDraft(
+                        id=task.id,
+                        title=task.title,
+                        description=task.description,
+                        analysis_round=1,
+                        expected_discriminator=task.expected_discriminator,
+                        information_gap=task.information_gap,
+                    )
+                    for task in parsed_output.tasks
+                ],
+            )
+            if isinstance(parsed_output, LeadPlanningCompactOutput)
+            else parsed_output
+        )
         plan = self._build_plan(
             parsed,
             investigation_id=investigation_id,
@@ -3667,6 +3723,14 @@ class V11Runtime:
             "remaining_token_budget": self._remaining_token_budget,
             "rule": (
                 "Persist one to three bounded general Investigator tasks; "
+                "do not conclude during planning. In live mode keep each task "
+                "concise and return only id, title, description, "
+                "information_gap, and optional expected_discriminator; the "
+                "server supplies tool names, analysis round, and persistent IDs. "
+                "selected_skills must contain only exact skill identifiers from "
+                "the skills list in name@version form, or be empty."
+                if self.turn is None
+                else "Persist one to three bounded general Investigator tasks; "
                 "do not conclude during planning. selected_skills must contain "
                 "only exact skill identifiers from the skills list in name@version "
                 "form, or be empty."
