@@ -3847,12 +3847,14 @@ class V11Runtime:
         if self.turn is None:
             payload = {
                 "incident": _live_incident_prompt_projection(event),
+                "skills": [f"{skill.name}@{skill.version}" for skill in self.skills],
                 "rule": (
                     "Plan one to three bounded Investigator tasks and do not conclude. "
                     "The server supplies the read-only tools, task IDs, analysis round, "
                     "and persistent fields. Keep each task concise and return only the "
-                    "declared task draft fields. Focus tasks on distinct information "
-                    "gaps that can be checked with the committed evidence."
+                    "declared task draft fields. Use only the listed skill identifiers "
+                    "or select none. Focus tasks on distinct information gaps that can "
+                    "be checked with the committed evidence."
                 ),
             }
             return json.dumps(redact_value(payload), ensure_ascii=False, sort_keys=True)

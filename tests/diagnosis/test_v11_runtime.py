@@ -291,9 +291,11 @@ def test_lead_prompt_exposes_exact_skill_identifiers():
 def test_live_lead_prompt_omits_redundant_static_catalogs():
     prompt = json.loads(V11Runtime(model=None)._lead_prompt(_event(), ("read_logs",), 8))
 
-    assert set(prompt) == {"incident", "rule"}
+    assert set(prompt) == {"incident", "skills", "rule"}
+    assert set(prompt["skills"]) == {
+        f"{skill.name}@{skill.version}" for skill in DIAGNOSTIC_SKILLS
+    }
     assert "tool_manifest" not in prompt
-    assert "skills" not in prompt
 
 
 def test_investigator_prompt_keeps_tool_descriptions_without_schema_duplication():
