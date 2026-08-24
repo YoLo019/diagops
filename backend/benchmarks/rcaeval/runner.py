@@ -69,6 +69,7 @@ from backend.domain.multi_agent import (
     ExecutionActor,
     ExecutionContractVersion,
     ExecutionStepKind,
+    FailureCategory,
     InvestigationStrategy,
     LeadAction,
     ModelProvider,
@@ -116,6 +117,68 @@ RETRY_POLICY = {
     "provider_max_retries": 0,
     "sdk_max_retries": 0,
 }
+
+
+# 案例级重试必须与 execution-level provider retry 的公开契约一致；否则
+# 内层留下 transport/rate_limit 失败时，外层可能仍把同一案例当成成功发布。
+CASE_RETRYABLE_FAILURE_CATEGORIES = frozenset(
+    {
+        RuntimeFailureCategory.TIMEOUT.value,
+        RuntimeFailureCategory.OUTPUT_VALIDATION.value,
+        "transport",
+        "rate_limit",
+    }
+)
+
+
+def _is_candidate_rejection(execution: AgentExecution) -> bool:
+    """识别准入层拒绝审计，不把它误判成整个案例的运行失败。"""
+    message = execution.error_message or ""
+    return message.startswith(
+        (
+            "candidate draft rejected:",
+            "finding draft rejected:",
+            "critic candidate reference rejected",
+            "critic evidence reference rejected",
+        )
+    )
+
+
+def _unresolved_case_failure_category(
+    executions: list[AgentExecution],
+) -> str | None:
+    """返回未被成功 retry 覆盖的 execution 失败类别。"""
+    resolved_failure_ids = _resolved_execution_ids(executions)
+    categories: set[str] = set()
+    category_map = {
+        FailureCategory.INVALID_OUTPUT.value: RuntimeFailureCategory.OUTPUT_VALIDATION.value,
+        FailureCategory.TIMEOUT.value: RuntimeFailureCategory.TIMEOUT.value,
+        FailureCategory.CANCELLED.value: FailureCategory.CANCELLED.value,
+        FailureCategory.NONE.value: "failed",
+    }
+    for execution in executions:
+        if execution.status not in {
+            AgentExecutionStatus.FAILED,
+            AgentExecutionStatus.CANCELLED,
+        }:
+            continue
+        if execution.id in resolved_failure_ids or _is_candidate_rejection(execution):
+            continue
+        category = execution.failure_category.value
+        categories.add(category_map.get(category, category))
+    if not categories:
+        return None
+    # 先返回可重试类别，保证 transport 与其它审计失败同时存在时，案例级
+    # bounded retry 仍能吸收明确的运营噪声；非重试类别则 fail-closed。
+    for category in (
+        "transport",
+        "rate_limit",
+        RuntimeFailureCategory.TIMEOUT.value,
+        RuntimeFailureCategory.OUTPUT_VALIDATION.value,
+    ):
+        if category in categories:
+            return category
+    return sorted(categories)[0]
 
 
 class EmptyRunOwnedMemory(VerifiedMemoryLookup):
@@ -588,13 +651,6 @@ class RcaEvalCaseRunner:
             persisted.status == RuntimeRunStatus.COMPLETED
             and record.status == InvestigationStatus.COMPLETED
         )
-        if completed:
-            ensure_v11_projection_owner(self.repository, self.runtime_store, record)
-        candidates = _published_candidates(
-            review,
-            single=not budget.configuration.is_multi,
-            completed=completed,
-        )
         evidence = {
             item.id: item
             for item in record.evidence
@@ -602,6 +658,26 @@ class RcaEvalCaseRunner:
         }
         calls = self.repository.list_tool_calls(record.id)
         executions = self.repository.list_executions(record.id)
+        lifecycle_failure_category = _unresolved_case_failure_category(executions)
+        if lifecycle_failure_category is not None:
+            # Runtime/Investigation 的 completed 只表示 phase 已收口；案例发布
+            # 还必须通过 execution-level failure fence。候选仍保留在侧库，
+            # 但本次 prediction 不得发布，交给有界 case retry 决定是否继续。
+            completed = False
+            failure_category = lifecycle_failure_category
+        if completed:
+            ensure_v11_projection_owner(self.repository, self.runtime_store, record)
+        candidates = _published_candidates(
+            review,
+            single=not budget.configuration.is_multi,
+            completed=completed,
+        )
+        candidate_lifecycle = _candidate_lifecycle_audit(
+            review,
+            executions,
+            candidates,
+            single=not budget.configuration.is_multi,
+        )
         read_only_violations = 0
         for call in calls:
             try:
@@ -641,12 +717,7 @@ class RcaEvalCaseRunner:
                 )
                 for candidate in candidates
             ],
-            candidate_lifecycle=_candidate_lifecycle_audit(
-                review,
-                executions,
-                candidates,
-                single=not budget.configuration.is_multi,
-            ),
+            candidate_lifecycle=candidate_lifecycle,
             runtime_run_id=run.id,
             execution_contract_hash=execution_contract_digest(contract),
             available_evidence_ids=sorted(evidence),
@@ -672,18 +743,6 @@ class RcaEvalCaseRunner:
             },
         )
         return prediction
-
-
-# 案例级有界重试的资格集：只覆盖运营噪声（超时，与模型输出违约类——含网关
-# 抖动、长生成、investigation 内被吞的预算耗尽）。CONTRACT_INTEGRITY/UNKNOWN
-# 等代码缺陷信号不重试——重试必然再败且会掩盖 bug，保持 fail-closed
-# （每次 attempt 均持久化可审计）。
-CASE_RETRYABLE_FAILURE_CATEGORIES = frozenset(
-    {
-        RuntimeFailureCategory.TIMEOUT.value,
-        RuntimeFailureCategory.OUTPUT_VALIDATION.value,
-    }
-)
 
 
 def run_case_with_bounded_retry(

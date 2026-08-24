@@ -21,6 +21,7 @@ from backend.benchmarks.rcaeval.runner import (
     SingleInvestigatorAgent,
     _candidate_lifecycle_audit,
     _safe_exception_diagnostic,
+    _unresolved_case_failure_category,
     validate_configuration_set,
 )
 from backend.db.session import create_db_engine, initialize_database
@@ -89,6 +90,43 @@ def test_candidate_lifecycle_audit_ignores_resolved_retry_failures():
     )
 
     assert audit.failure_categories == [FailureCategory.INVALID_OUTPUT.value]
+
+
+def test_unresolved_case_failure_category_uses_only_live_execution_failures():
+    failed_transport = AgentExecution(
+        id="exec-transport-attempt-1",
+        task_id="investigator-task-audit",
+        agent_name="InvestigatorAgent",
+        runtime_run_id="run-audit",
+        status=AgentExecutionStatus.FAILED,
+        execution_layer=AgentExecutionLayer.OPENAI_AGENTS_SDK,
+        step_kind=ExecutionStepKind.INVESTIGATOR_ANALYSIS,
+        analysis_round=1,
+        attempt=1,
+        failure_category=FailureCategory.TRANSPORT,
+        error_message="model attempt failed",
+    )
+
+    assert _unresolved_case_failure_category([failed_transport]) == "transport"
+
+    recovered = failed_transport.model_copy(
+        update={
+            "id": "exec-transport-attempt-2",
+            "status": AgentExecutionStatus.COMPLETED,
+            "attempt": 2,
+            "failure_category": FailureCategory.NONE,
+        }
+    )
+    assert _unresolved_case_failure_category([failed_transport, recovered]) is None
+
+    rejected_candidate = failed_transport.model_copy(
+        update={
+            "id": "exec-candidate-rejection",
+            "failure_category": FailureCategory.INVALID_REFERENCE,
+            "error_message": "candidate draft rejected: candidate_evidence_reference",
+        }
+    )
+    assert _unresolved_case_failure_category([rejected_candidate]) is None
 
 
 def test_safe_exception_diagnostic_redacts_message_and_reports_relative_location():
@@ -947,6 +985,24 @@ def test_case_retry_retries_operational_failure_once():
 
     assert prediction.completed is True
     assert prediction.runtime_run_id == "run-a2"
+    assert prediction.attempts == 2
+    assert runner.calls == 2
+
+
+@pytest.mark.parametrize("category", ["transport", "rate_limit"])
+def test_case_retry_retries_provider_failure_once(category):
+    from backend.benchmarks.rcaeval.runner import run_case_with_bounded_retry
+
+    runner = _StubRunner(
+        [
+            _stub_prediction(False, category, "a1"),
+            _stub_prediction(True, None, "a2"),
+        ]
+    )
+
+    prediction = run_case_with_bounded_retry(runner, object(), object())
+
+    assert prediction.completed is True
     assert prediction.attempts == 2
     assert runner.calls == 2
 
