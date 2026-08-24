@@ -78,6 +78,7 @@ from backend.domain.agent_plan import (
     DiagnosisTask,
     DiagnosisTaskType,
     LeadDecision,
+    SelectedSkill,
 )
 from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem, EvidenceStatus
@@ -181,11 +182,20 @@ class LeadPlanningCompactTaskDraft(BaseModel):
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    id: str = Field(min_length=1, max_length=64)
     title: str = Field(min_length=1, max_length=96)
     description: str = Field(min_length=1, max_length=256)
     information_gap: str = Field(min_length=1, max_length=160)
     expected_discriminator: str | None = Field(default=None, max_length=160)
+
+
+class LeadPlanningDecisionDraft(BaseModel):
+    """live Lead 的 planning 草稿；实体引用和终态字段由服务端生成。"""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    action: Literal[LeadAction.INVESTIGATE, LeadAction.TEST]
+    summary: str = Field(min_length=1, max_length=256)
+    selected_skills: list[SelectedSkill] = Field(default_factory=list, max_length=4)
 
 
 class LeadPlanningCompactOutput(BaseModel):
@@ -193,7 +203,7 @@ class LeadPlanningCompactOutput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    decision: LeadDecision
+    decision: LeadPlanningDecisionDraft
     tasks: list[LeadPlanningCompactTaskDraft] = Field(
         default_factory=list, max_length=3
     )
@@ -865,6 +875,43 @@ def _candidate_lifecycle_trace(
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _resolved_execution_ids(executions: Iterable[AgentExecution]) -> set[str]:
+    """返回被同一逻辑动作的成功 retry 覆盖的失败 execution ID。"""
+    items = list(executions)
+    completed_attempts: dict[
+        tuple[str | None, str, str, ExecutionStepKind | None, int | None], int
+    ] = {}
+    for item in items:
+        if item.status != AgentExecutionStatus.COMPLETED:
+            continue
+        key = (
+            item.runtime_run_id,
+            item.agent_name,
+            item.task_id,
+            item.step_kind,
+            item.analysis_round,
+        )
+        completed_attempts[key] = max(
+            completed_attempts.get(key, 0), item.attempt
+        )
+    return {
+        item.id
+        for item in items
+        if item.status in {AgentExecutionStatus.FAILED, AgentExecutionStatus.CANCELLED}
+        and completed_attempts.get(
+            (
+                item.runtime_run_id,
+                item.agent_name,
+                item.task_id,
+                item.step_kind,
+                item.analysis_round,
+            ),
+            0,
+        )
+        >= item.attempt
+    }
+
+
 def _investigator_failure_audit(exc: BaseException) -> tuple[str, FailureCategory]:
     """把 Investigator 的边界失败收口为可审计的固定码。"""
     audit_code = getattr(exc, "audit_code", None)
@@ -937,10 +984,11 @@ def _structured_output_retry_feedback(output_type: type[BaseModel]) -> str:
     if output_type is LeadPlanningCompactOutput:
         return (
             f"{common} Return one to three concise planning tasks. Each task may "
-            "contain only id, title, description, information_gap, and optional "
-            "expected_discriminator. Do not return tool names, round numbers, "
-            "runtime IDs, review fields, or server-owned fields. Do not conclude "
-            "during planning."
+            "contain only title, description, information_gap, and optional "
+            "expected_discriminator. The decision may contain only action, "
+            "summary, and selected_skills. Do not return task IDs, candidate IDs, "
+            "tool names, round numbers, runtime IDs, review fields, or other "
+            "server-owned fields. Do not conclude during planning."
         )
     if output_type is CriticCompactOutput:
         return (
@@ -1449,17 +1497,25 @@ class V11Runtime:
         )
         parsed = (
             LeadPlanningOutput(
-                decision=parsed_output.decision,
+                decision=LeadDecision(
+                    action=parsed_output.decision.action,
+                    summary=parsed_output.decision.summary,
+                    task_ids=[
+                        f"draft-task-{index}"
+                        for index, _task in enumerate(parsed_output.tasks, start=1)
+                    ],
+                    selected_skills=list(parsed_output.decision.selected_skills),
+                ),
                 tasks=[
                     LeadPlanningTaskDraft(
-                        id=task.id,
+                        id=f"draft-task-{index}",
                         title=task.title,
                         description=task.description,
                         analysis_round=1,
                         expected_discriminator=task.expected_discriminator,
                         information_gap=task.information_gap,
                     )
-                    for task in parsed_output.tasks
+                    for index, task in enumerate(parsed_output.tasks, start=1)
                 ],
             )
             if isinstance(parsed_output, LeadPlanningCompactOutput)
@@ -3594,13 +3650,17 @@ class V11Runtime:
     def _restore_failure_memory(self, repository, investigation_id: str) -> None:
         """跨进程 resume 后从持久化 failed/cancelled execution 回填失败记忆。
 
-        持久化执行是失败记忆的唯一事实来源；内存 _failures 只是其运行期缓存。
+        持久化执行是失败记忆的唯一事实来源；同一逻辑动作的成功 retry 会收敛
+        旧 attempt，内存 _failures 只是其运行期缓存。
         """
-        for item in repository.list_executions(investigation_id):
+        executions = repository.list_executions(investigation_id)
+        resolved_ids = _resolved_execution_ids(executions)
+        for item in executions:
             if (
                 item.runtime_run_id == self.runtime_run_id
                 and item.status
                 in {AgentExecutionStatus.FAILED, AgentExecutionStatus.CANCELLED}
+                and item.id not in resolved_ids
                 and item.id not in self._failures
             ):
                 self._failures.append(item.id)
@@ -3992,7 +4052,7 @@ class V11Runtime:
             "rule": (
                 "Persist one to three bounded general Investigator tasks; "
                 "do not conclude during planning. In live mode keep each task "
-                "concise and return only id, title, description, "
+                "concise and return only title, description, "
                 "information_gap, and optional expected_discriminator; the "
                 "server supplies tool names, analysis round, and persistent IDs. "
                 "selected_skills must contain only exact skill identifiers from "

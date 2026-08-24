@@ -61,6 +61,7 @@ from backend.diagnosis.v11_runtime import (
     V11RuntimeContractError,
     V11SingleControlOutput,
     _evidence_projection,
+    _resolved_execution_ids,
     _select_evidence_digest,
     _V11BudgetedModel,
 )
@@ -164,6 +165,68 @@ def _assert_explicit_schema_semantics(schema: dict, path: tuple[str, ...] = ()) 
 def test_v11_model_output_types_are_valid_strict_json_schemas(output_type):
     schema = AgentOutputSchema(output_type, strict_json_schema=True).json_schema()
     _assert_explicit_schema_semantics(schema)
+
+
+def test_live_lead_planning_schema_contains_no_server_owned_entity_fields():
+    schema = AgentOutputSchema(
+        LeadPlanningCompactOutput, strict_json_schema=True
+    ).json_schema()
+    decision = schema["$defs"]["LeadPlanningDecisionDraft"]
+    task = schema["$defs"]["LeadPlanningCompactTaskDraft"]
+
+    assert set(decision["properties"]) == {
+        "action",
+        "summary",
+        "selected_skills",
+    }
+    assert set(task["properties"]) == {
+        "title",
+        "description",
+        "information_gap",
+        "expected_discriminator",
+    }
+    assert not {
+        "candidate_ids",
+        "evidence_ids",
+        "runtime_run_id",
+        "review_round",
+        "authoritative",
+    } & set(json.dumps(schema))
+
+
+def test_resolved_model_retry_is_not_a_persisted_failure():
+    failed = AgentExecution(
+        id="exec-lead-retry-1",
+        task_id="lead-planning-run-retry",
+        agent_name="LeadAgent",
+        runtime_run_id="run-retry",
+        status=AgentExecutionStatus.FAILED,
+        execution_layer=AgentExecutionLayer.OPENAI_AGENTS_SDK,
+        step_kind=ExecutionStepKind.LEAD_PLANNING,
+        analysis_round=1,
+        attempt=1,
+        failure_category=FailureCategory.INVALID_OUTPUT,
+    )
+    completed = failed.model_copy(
+        update={
+            "id": "exec-lead-retry-3",
+            "status": AgentExecutionStatus.COMPLETED,
+            "attempt": 3,
+            "failure_category": FailureCategory.NONE,
+        }
+    )
+    unresolved = failed.model_copy(
+        update={
+            "id": "exec-critic-unresolved",
+            "task_id": "critic-review-run-retry",
+            "agent_name": "CriticAgent",
+            "step_kind": ExecutionStepKind.CRITIC_REVIEW,
+        }
+    )
+
+    assert _resolved_execution_ids([failed, completed, unresolved]) == {
+        failed.id
+    }
 
 
 def test_investigator_candidate_schema_requires_publishable_fields():

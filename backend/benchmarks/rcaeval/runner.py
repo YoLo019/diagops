@@ -50,6 +50,7 @@ from backend.diagnosis.v11_runtime import (
     _candidate_lifecycle_trace,
     _evidence_projection,
     _InvestigatorResult,
+    _resolved_execution_ids,
     _select_evidence_digest,
 )
 from backend.domain.agent_findings import AgentFinding, CoordinationReview
@@ -1056,7 +1057,14 @@ def _candidate_lifecycle_audit(
     admitted_hashes: list[str] = []
     failure_categories: set[str] = set()
     drop_reasons: set[str] = set()
+    resolved_failure_ids = _resolved_execution_ids(executions)
     for execution in executions:
+        if (
+            execution.status
+            in {AgentExecutionStatus.FAILED, AgentExecutionStatus.CANCELLED}
+            and execution.id in resolved_failure_ids
+        ):
+            continue
         if execution.failure_category.value != "none":
             failure_categories.add(execution.failure_category.value)
         summary = execution.summary

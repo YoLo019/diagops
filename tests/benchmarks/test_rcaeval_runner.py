@@ -19,20 +19,76 @@ from backend.benchmarks.rcaeval.providers import incident_event_for_case
 from backend.benchmarks.rcaeval.runner import (
     RcaEvalCaseRunner,
     SingleInvestigatorAgent,
+    _candidate_lifecycle_audit,
     _safe_exception_diagnostic,
     validate_configuration_set,
 )
 from backend.db.session import create_db_engine, initialize_database
 from backend.db.sqlite_repository import SQLiteInvestigationRepository
 from backend.diagnosis.v11_runtime import V11SingleControlOutput
-from backend.domain.agent_plan import AgentExecutionStatus
-from backend.domain.multi_agent import DiagnosticStatus, FailureCategory, LeadAction
+from backend.domain.agent_findings import CoordinationReview, RootCauseCandidate
+from backend.domain.agent_plan import AgentExecution, AgentExecutionStatus
+from backend.domain.multi_agent import (
+    AgentExecutionLayer,
+    DiagnosticStatus,
+    ExecutionStepKind,
+    FailureCategory,
+    LeadAction,
+)
 from backend.domain.runtime import (
     RuntimeEventType,
     RuntimeFailureCategory,
     RuntimeRunStatus,
 )
 from backend.runtime.sqlite_store import SQLiteRuntimeStore
+
+
+def test_candidate_lifecycle_audit_ignores_resolved_retry_failures():
+    candidate = RootCauseCandidate(
+        id="candidate-audit",
+        affected_entity="checkout-service",
+        failure_mechanism="bounded observed symptom",
+        summary="bounded observed symptom",
+        rank=1,
+        confidence=0.5,
+        supporting_evidence_ids=["evidence-1"],
+    )
+    failed = AgentExecution(
+        id="exec-lead-attempt-1",
+        task_id="lead-planning-run-audit",
+        agent_name="LeadAgent",
+        runtime_run_id="run-audit",
+        status=AgentExecutionStatus.FAILED,
+        execution_layer=AgentExecutionLayer.OPENAI_AGENTS_SDK,
+        step_kind=ExecutionStepKind.LEAD_PLANNING,
+        analysis_round=1,
+        attempt=1,
+        failure_category=FailureCategory.INVALID_OUTPUT,
+    )
+    resolved = failed.model_copy(
+        update={
+            "id": "exec-lead-attempt-2",
+            "status": AgentExecutionStatus.COMPLETED,
+            "attempt": 2,
+            "failure_category": FailureCategory.NONE,
+        }
+    )
+    unresolved = failed.model_copy(
+        update={
+            "id": "exec-critic-attempt-1",
+            "task_id": "critic-review-run-audit",
+            "agent_name": "CriticAgent",
+            "step_kind": ExecutionStepKind.CRITIC_REVIEW,
+        }
+    )
+    audit = _candidate_lifecycle_audit(
+        CoordinationReview(investigation_id="inv-audit", candidates=[candidate]),
+        [failed, resolved, unresolved],
+        [candidate],
+        single=True,
+    )
+
+    assert audit.failure_categories == [FailureCategory.INVALID_OUTPUT.value]
 
 
 def test_safe_exception_diagnostic_redacts_message_and_reports_relative_location():
