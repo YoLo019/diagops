@@ -2412,8 +2412,11 @@ class V11Runtime:
         try:
             evidence_digest = _select_evidence_digest(
                 seed_evidence,
-                max_per_kind=1,
-                max_total=3,
+                # 每类保留两个有界锚点，避免只看到单个高分信号就把
+                # 同一服务的反证/影响指标误判为证据缺口；完整证据仍只
+                # 保存在服务端，且候选只能引用本次摘要中的 ID。
+                max_per_kind=2,
+                max_total=6,
             )
             # live SDK 请求在已有证据时使用紧凑 Draft schema；注入 turn 仍保留
             # 完整 Investigator schema，以便 deterministic 测试覆盖 finding 合同。
