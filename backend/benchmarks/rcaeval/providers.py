@@ -181,6 +181,7 @@ class RcaEvalLogProvider(_RcaEvalProvider):
                                 "message": message[:500],
                             },
                             entity_ids=[service[:128]],
+                            identity=f"{path.name}:{row_index}",
                         )
                     )
         return _result(self.provider, evidence)
@@ -196,7 +197,7 @@ class RcaEvalMetricProvider(_RcaEvalProvider):
         requested = [item.casefold() for item in (query.metric_names if query else [])]
         instance = query.instance.casefold() if query and query.instance else None
         limit = query.limit if query else 20
-        changes: list[tuple[float, str, str, float, float, datetime]] = []
+        changes: list[tuple[float, str, str, float, float, datetime, str]] = []
         for path in self.telemetry.metric_files:
             header = self.telemetry._headers[path]
             selected = [
@@ -241,6 +242,7 @@ class RcaEvalMetricProvider(_RcaEvalProvider):
                         baseline,
                         observation,
                         points[middle][0],
+                        f"{path.name}:{name}",
                     )
                 )
         evidence = [
@@ -260,8 +262,9 @@ class RcaEvalMetricProvider(_RcaEvalProvider):
                     "change_score": score,
                 },
                 entity_ids=[entity],
+                identity=identity,
             )
-            for score, metric, entity, baseline, observation, timestamp in sorted(
+            for score, metric, entity, baseline, observation, timestamp, identity in sorted(
                 changes, reverse=True
             )[:limit]
         ]
@@ -275,7 +278,7 @@ class RcaEvalTraceProvider(_RcaEvalProvider):
     def collect(self, event: IncidentEvent, query: TraceQuery | None = None) -> ProviderResult:
         limit = query.limit if query else 50
         evidence: list[EvidenceItem] = []
-        for row in self._rows():
+        for source_identity, row in self._rows():
             service = (row.get("serviceName") or "unknown").strip()
             operation = (row.get("operationName") or row.get("methodName") or "unknown").strip()
             duration = _trace_duration_ms(row)
@@ -320,6 +323,7 @@ class RcaEvalTraceProvider(_RcaEvalProvider):
                     ),
                     payload=span.model_dump(mode="json"),
                     entity_ids=[service[:128]],
+                    identity=source_identity,
                 )
             )
             if len(evidence) >= limit:
@@ -332,7 +336,7 @@ class RcaEvalTraceProvider(_RcaEvalProvider):
                 for index, row in enumerate(csv.DictReader(handle)):
                     if index >= _MAX_SCAN_ROWS:
                         return
-                    yield row
+                    yield f"{path.name}:{index}", row
 
 
 class RcaEvalDependencyProvider(RcaEvalTraceProvider):
@@ -344,7 +348,7 @@ class RcaEvalDependencyProvider(RcaEvalTraceProvider):
     ) -> ProviderResult:
         limit = query.limit if query else 20
         spans: dict[tuple[str, str], tuple[str, str | None, datetime, float, bool]] = {}
-        for row in self._rows():
+        for _source_identity, row in self._rows():
             trace_id = (row.get("traceID") or "").casefold()
             span_id = (row.get("spanID") or "").casefold()
             service = (row.get("serviceName") or "unknown")[:128]
@@ -405,7 +409,7 @@ class RcaEvalServiceCatalogProvider(RcaEvalTraceProvider):
         self, event: IncidentEvent, query: ServiceCatalogQuery | None = None
     ) -> ProviderResult:
         services: set[str] = set()
-        for row in self._rows():
+        for _source_identity, row in self._rows():
             service = (row.get("serviceName") or "").strip()
             if service and (not query or not query.name or query.name == service):
                 services.add(service[:128])
