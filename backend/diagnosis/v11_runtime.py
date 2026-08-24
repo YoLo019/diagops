@@ -2416,7 +2416,7 @@ class V11Runtime:
                 # 同一服务的反证/影响指标误判为证据缺口；完整证据仍只
                 # 保存在服务端，且候选只能引用本次摘要中的 ID。
                 max_per_kind=2,
-                max_total=6,
+                max_total=4,
             )
             # live SDK 请求在已有证据时使用紧凑 Draft schema；注入 turn 仍保留
             # 完整 Investigator schema，以便 deterministic 测试覆盖 finding 合同。
@@ -4763,9 +4763,21 @@ def _select_evidence_digest(
             ),
             reverse=True,
         )
+    def kind_priority(kind: str) -> tuple[float, str]:
+        top_score = max(
+            (
+                float(item.payload.get("change_score", 0.0))
+                if isinstance(item.payload.get("change_score"), (int, float))
+                else 0.0
+            )
+            for item in groups[kind]
+        )
+        return (-top_score, kind)
+
     selected: list[EvidenceItem] = []
+    ordered_kinds = sorted(groups, key=kind_priority)
     for offset in range(max_per_kind):
-        for kind in sorted(groups):
+        for kind in ordered_kinds:
             items = groups[kind]
             if offset < len(items):
                 selected.append(items[offset])
