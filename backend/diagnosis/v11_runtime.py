@@ -204,7 +204,7 @@ class InvestigatorCandidateOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     candidates: list[InvestigatorCandidateDraft] = Field(
-        default_factory=list, max_length=3
+        default_factory=list, max_length=1
     )
 
 
@@ -247,6 +247,38 @@ class CriticOutput(BaseModel):
         default_factory=list, max_length=9
     )
     tasks: list[LeadTaskDraft] = Field(default_factory=list, max_length=3)
+
+
+class CriticCompactAssessmentDraft(BaseModel):
+    """已有完整证据时的无 supplemental task Critic 草稿。"""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    candidate_ref: str = Field(min_length=1, max_length=128)
+    verdict: Literal[
+        CriticVerdict.ACCEPT,
+        CriticVerdict.REJECT,
+        CriticVerdict.INCONCLUSIVE,
+    ]
+    checks: list[CausalCheck] = Field(min_length=7, max_length=7)
+    supporting_evidence_ids: list[
+        Annotated[str, Field(min_length=1, max_length=128)]
+    ] = Field(default_factory=list, max_length=8)
+    contradicting_evidence_ids: list[
+        Annotated[str, Field(min_length=1, max_length=128)]
+    ] = Field(default_factory=list, max_length=8)
+    summary: str = Field(min_length=1, max_length=128)
+
+
+class CriticCompactOutput(BaseModel):
+    """已有完整证据时使用的有界 Critic 输出，不请求第二轮查询。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str = Field(default="", max_length=256)
+    assessments: list[CriticCompactAssessmentDraft] = Field(
+        default_factory=list, max_length=3
+    )
 
 
 class LeadAdjudicationOutput(BaseModel):
@@ -811,6 +843,14 @@ def _structured_output_retry_feedback(output_type: type[BaseModel]) -> str:
         "use the declared enum values, respect every list bound, and add no extra "
         "fields. Do not return markdown or explain the correction."
     )
+    if output_type is CriticCompactOutput:
+        return (
+            f"{common} For every listed candidate, emit exactly one concise "
+            "assessment using its candidate_ref exactly as provided; use only "
+            "accept, reject, or inconclusive (never needs_evidence), emit seven "
+            "named causal checks, and cite only committed evidence IDs. Do not "
+            "return server assessment IDs, candidate_id, tasks, or extra fields."
+        )
     if output_type is CriticOutput:
         return (
             f"{common} For every listed candidate, emit exactly one assessment "
@@ -1268,16 +1308,24 @@ class V11Runtime:
         self._remaining_token_budget = remaining_token_budget
         manifest = self._agent_manifest()
         prompt = self._lead_prompt(event, manifest, remaining_tool_budget)
-        turn = await self._call_model(
-            actor=ExecutionActor.LEAD.value,
-            prompt=prompt,
-            output_type=LeadPlanningOutput,
-            context={
+        context = (
+            {
+                "remaining_tool_budget": remaining_tool_budget,
+                "remaining_token_budget": remaining_token_budget,
+            }
+            if self.turn is None
+            else {
                 "incident": _event_projection(event),
                 "tool_manifest": manifest,
                 "remaining_tool_budget": remaining_tool_budget,
                 "remaining_token_budget": remaining_token_budget,
-            },
+            }
+        )
+        turn = await self._call_model(
+            actor=ExecutionActor.LEAD.value,
+            prompt=prompt,
+            output_type=LeadPlanningOutput,
+            context=context,
             tools=[],
             remaining_token_budget=remaining_token_budget,
             remaining_tool_budget=remaining_tool_budget,
@@ -1604,12 +1652,17 @@ class V11Runtime:
             remaining_tool_budget = self._remaining_tool_budget_for(
                 repository, investigation_id
             )
+            output_type = (
+                CriticCompactOutput
+                if self.turn is None and len(review.candidates) <= self.max_investigators
+                else CriticOutput
+            )
             turn = await self._call_model(
                 actor=ExecutionActor.CRITIC.value,
                 prompt=self._critic_prompt(
                     repository, investigation_id, event, review, round_number=1
                 ),
-                output_type=CriticOutput,
+                output_type=output_type,
                 context=self._critic_context(
                     repository, investigation_id, review, round_number=1
                 ),
@@ -1622,7 +1675,7 @@ class V11Runtime:
                 step_kind=ExecutionStepKind.CRITIC_REVIEW,
                 analysis_round=1,
             )
-            output = self._parse_output(turn.output, CriticOutput)
+            output = self._parse_output(turn.output, output_type)
             assessments = self._normalize_assessments(
                 output.assessments,
                 candidate_ids={item.id for item in review.candidates},
@@ -2309,8 +2362,8 @@ class V11Runtime:
         try:
             evidence_digest = _select_evidence_digest(
                 seed_evidence,
-                max_per_kind=2,
-                max_total=6,
+                max_per_kind=1,
+                max_total=3,
             )
             # live SDK 请求在已有证据时使用紧凑 Draft schema；注入 turn 仍保留
             # 完整 Investigator schema，以便 deterministic 测试覆盖 finding 合同。
@@ -2328,11 +2381,18 @@ class V11Runtime:
                 assessment,
                 selected_skills,
             )
-            turn = await self._call_model(
-                actor=ExecutionActor.INVESTIGATOR.value,
-                prompt=prompt,
-                output_type=output_type,
-                context={
+            model_context = (
+                {
+                    "round": round_number,
+                    "own_committed_evidence_ids": [
+                        item.id for item in evidence_digest
+                    ],
+                    "remaining_tool_budget": self._remaining_tool_budget_for(
+                        repository, investigation_id
+                    ),
+                }
+                if compact_output
+                else {
                     "incident": _event_projection(event),
                     "task": _investigator_task_projection(task),
                     "agent_instance_id": instance_id,
@@ -2342,12 +2402,20 @@ class V11Runtime:
                     "own_committed_evidence_ids": [
                         item.id for item in evidence_digest
                     ],
-                    "own_committed_finding_ids": [item.id for item in own_findings],
+                    "own_committed_finding_ids": [
+                        item.id for item in own_findings
+                    ],
                     "assessment_id": assessment.id if assessment is not None else None,
                     "remaining_tool_budget": self._remaining_tool_budget_for(
                         repository, investigation_id
                     ),
-                },
+                }
+            )
+            turn = await self._call_model(
+                actor=ExecutionActor.INVESTIGATOR.value,
+                prompt=prompt,
+                output_type=output_type,
+                context=model_context,
                 tools=(
                     session.tools_for(instance_id, round_number)
                     if not evidence_digest
@@ -2788,7 +2856,9 @@ class V11Runtime:
 
     def _normalize_assessments(
         self,
-        assessments: Iterable[CriticAssessmentDraft | CriticAssessment],
+        assessments: Iterable[
+            CriticAssessmentDraft | CriticCompactAssessmentDraft | CriticAssessment
+        ],
         *,
         candidate_ids: set[str],
         runtime_run_id: str,
@@ -2836,8 +2906,10 @@ class V11Runtime:
                     checks=list(draft.checks),
                     supporting_evidence_ids=list(draft.supporting_evidence_ids),
                     contradicting_evidence_ids=list(draft.contradicting_evidence_ids),
-                    gap=draft.gap,
-                    supplemental_task_ids=list(draft.supplemental_task_ids),
+                    gap=getattr(draft, "gap", None),
+                    supplemental_task_ids=list(
+                        getattr(draft, "supplemental_task_ids", [])
+                    ),
                     summary=draft.summary,
                     runtime_run_id=runtime_run_id,
                     review_round=review_round,
@@ -2855,19 +2927,20 @@ class V11Runtime:
 
     def _supplemental_tasks(
         self,
-        output: CriticOutput,
+        output: CriticOutput | CriticCompactOutput,
         assessments: list[CriticAssessment],
         *,
         runtime_run_id: str,
     ) -> tuple[list[DiagnosisTask], dict[str, str]]:
         needs = [item for item in assessments if item.verdict.value == "needs_evidence"]
+        output_tasks = list(getattr(output, "tasks", []))
         if not needs:
-            if output.tasks:
+            if output_tasks:
                 raise V11RuntimeContractError("only needs_evidence may create round two tasks")
             return [], {}
-        if len(output.tasks) > 3:
+        if len(output_tasks) > 3:
             raise V11RuntimeContractError("round two task batch is out of bounds")
-        task_by_id = {item.id: item for item in output.tasks}
+        task_by_id = {item.id: item for item in output_tasks}
         declared_ids = [
             task_id
             for assessment in needs
@@ -3354,8 +3427,8 @@ class V11Runtime:
             ),
             "rule": (
                 "Use only the bounded committed evidence shown below. Return "
-                "findings as an empty list and only the minimum candidate drafts "
-                "needed. Do not use sibling drafts or invent evidence IDs. Do "
+                "findings as an empty list and at most one minimum candidate "
+                "draft. Do not use sibling drafts or invent evidence IDs. Do "
                 "not emit candidate IDs, ranks, runtime IDs, review fields, or "
                 "finding references; cite only committed usable evidence IDs in "
                 "candidate evidence fields. When cited evidence has "
@@ -3391,6 +3464,7 @@ class V11Runtime:
     ) -> str:
         findings = repository.list_agent_findings(investigation_id)
         evidence = _critic_evidence(review, findings, repository.get(investigation_id).evidence)
+        compact_output = self.turn is None and len(review.candidates) <= self.max_investigators
         payload = {
             "role": "critic",
             "incident": _event_projection(event),
@@ -3419,7 +3493,14 @@ class V11Runtime:
                 for item in review.critic_assessments
             ],
             "rule": (
-                "Use candidate_ref exactly as provided. Return verdict, seven "
+                "Use candidate_ref exactly as provided. Return exactly one concise "
+                "assessment per candidate with verdict accept, reject, or "
+                "inconclusive; emit seven named causal checks and only committed "
+                "evidence IDs. Do not request needs_evidence or tasks in this "
+                "bounded review; use inconclusive when evidence is insufficient. "
+                "Never return server assessment IDs or candidate_id."
+                if compact_output
+                else "Use candidate_ref exactly as provided. Return verdict, seven "
                 "named causal checks, and only committed evidence IDs; never "
                 "return server assessment IDs or candidate_id. Unknown requires "
                 "a named gap."

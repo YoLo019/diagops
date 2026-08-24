@@ -48,6 +48,7 @@ from backend.diagnosis.openai_compatible_model import (
 )
 from backend.diagnosis.openai_model import OFFICIAL_OPENAI_BASE_URL
 from backend.diagnosis.v11_runtime import (
+    CriticCompactOutput,
     CriticOutput,
     InvestigatorCandidateOutput,
     InvestigatorFindingDraft,
@@ -149,6 +150,7 @@ def _assert_explicit_schema_semantics(schema: dict, path: tuple[str, ...] = ()) 
     "output_type",
     [
         LeadPlanningOutput,
+        CriticCompactOutput,
         InvestigatorCandidateOutput,
         InvestigatorOutput,
         CriticOutput,
