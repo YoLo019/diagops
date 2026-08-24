@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import inspect
 import json
 import logging
@@ -64,6 +65,7 @@ from backend.domain.agent_findings import (
     AgentFinding,
     AgentFindingSeverity,
     AgentFindingType,
+    CausalCheck,
     CoordinationReview,
     CriticAssessment,
     FindingActor,
@@ -195,10 +197,12 @@ class InvestigatorFindingDraft(BaseModel):
     contradicting_evidence_ids: list[str] = Field(default_factory=list, max_length=32)
 
 
-class InvestigatorCandidateDraft(RootCauseCandidate):
-    """Investigator 可提交的候选契约；领域模型的可选字段仅为历史兼容。"""
+class InvestigatorCandidateDraft(BaseModel):
+    """模型可见的候选草稿；持久化主键和排序字段由服务端生成。"""
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    cause_type: CauseType | None = None
 
     affected_entity: str = Field(min_length=1, max_length=128)
     failure_mechanism: str = Field(
@@ -210,9 +214,18 @@ class InvestigatorCandidateDraft(RootCauseCandidate):
             "the cause remains unresolved."
         ),
     )
+    summary: str = Field(default="", max_length=512)
+    confidence: float = Field(default=0.5, ge=0, le=1, allow_inf_nan=False)
     supporting_evidence_ids: list[
         Annotated[str, Field(min_length=1, max_length=128)]
     ] = Field(min_length=1, max_length=32)
+    contradicting_evidence_ids: list[
+        Annotated[str, Field(min_length=1, max_length=128)]
+    ] = Field(default_factory=list, max_length=32)
+    rationale: str = Field(default="", max_length=512)
+    uncertainty: str = Field(default="", max_length=512)
+    onset_window_start: datetime | None = None
+    onset_window_end: datetime | None = None
 
 
 class InvestigatorOutput(BaseModel):
@@ -234,13 +247,34 @@ class V11SingleControlOutput(BaseModel):
     investigator: InvestigatorOutput
 
 
+class CriticAssessmentDraft(BaseModel):
+    """Critic 草稿；candidate_ref 是服务端提供的候选引用，不是实体主键字段。"""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    candidate_ref: str = Field(min_length=1, max_length=128)
+    verdict: CriticVerdict
+    checks: list[CausalCheck] = Field(min_length=7, max_length=7)
+    supporting_evidence_ids: list[
+        Annotated[str, Field(min_length=1, max_length=128)]
+    ] = Field(default_factory=list, max_length=32)
+    contradicting_evidence_ids: list[
+        Annotated[str, Field(min_length=1, max_length=128)]
+    ] = Field(default_factory=list, max_length=32)
+    gap: str | None = Field(default=None, max_length=256)
+    supplemental_task_ids: list[str] = Field(default_factory=list, max_length=3)
+    summary: str = Field(min_length=1, max_length=512)
+
+
 class CriticOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     summary: str = Field(default="", max_length=512)
     # 三个并行 Investigator 各自最多提交三个候选；Critic 必须覆盖合并后的
     # 全部候选，不能让 schema 上限把合法候选截掉。
-    assessments: list[CriticAssessment] = Field(default_factory=list, max_length=9)
+    assessments: list[CriticAssessmentDraft] = Field(
+        default_factory=list, max_length=9
+    )
     tasks: list[LeadTaskDraft] = Field(default_factory=list, max_length=3)
 
 
@@ -699,6 +733,54 @@ def _draft_rejection_code(exc: V11RuntimeContractError) -> str:
     return "finding draft rejected: uncommitted_evidence"
 
 
+def _safe_lifecycle_digest(value: Any) -> str:
+    """仅返回摘要哈希，禁止把模型原始结果写入审计。"""
+    if isinstance(value, BaseModel):
+        value = value.model_dump(mode="json")
+    try:
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    except (TypeError, ValueError):
+        encoded = repr(type(value)).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _candidate_lifecycle_trace(
+    *,
+    raw_output: Any,
+    parsed_drafts: Iterable[BaseModel],
+    admitted_candidates: Iterable[RootCauseCandidate],
+    failure_categories: Iterable[str] = (),
+) -> str:
+    """构造安全的候选生命周期审计摘要。"""
+    drafts = [item.model_dump(mode="json") for item in parsed_drafts]
+    admitted = [item.model_dump(mode="json") for item in admitted_candidates]
+    payload = {
+        "schema_version": "candidate-lifecycle-v1",
+        "raw_structured_output": {
+            "count": 1,
+            "sha256": _safe_lifecycle_digest(raw_output),
+        },
+        "parsed_drafts": {
+            "count": len(drafts),
+            "sha256": _safe_lifecycle_digest(drafts),
+        },
+        "admitted_candidates": {
+            "count": len(admitted),
+            "sha256": _safe_lifecycle_digest(admitted),
+        },
+        "failure_categories": sorted(
+            {str(item)[:128] for item in failure_categories if item}
+        ),
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
 def _investigator_failure_audit(exc: BaseException) -> tuple[str, FailureCategory]:
     """把 Investigator 的边界失败收口为可审计的固定码。"""
     code_by_message = {
@@ -722,8 +804,22 @@ def _investigator_failure_audit(exc: BaseException) -> tuple[str, FailureCategor
             "invalid_v11_model_output",
             FailureCategory.INVALID_OUTPUT,
         ),
+        "invalid_output": (
+            "invalid_v11_model_output",
+            FailureCategory.INVALID_OUTPUT,
+        ),
     }
     return code_by_message.get(str(exc), ("investigator failed", FailureCategory.UNKNOWN))
+
+
+def _critic_failure_audit(exc: BaseException) -> tuple[str, FailureCategory]:
+    """把 Critic 边界失败映射为不含模型文本的固定审计码。"""
+    message = str(exc)
+    if "candidate reference" in message:
+        return "critic candidate reference rejected", FailureCategory.INVALID_REFERENCE
+    if "evidence reference" in message:
+        return "critic evidence reference rejected", FailureCategory.INVALID_REFERENCE
+    return "critic output invalid", FailureCategory.INVALID_OUTPUT
 
 
 def _model_retryable_exception(exc: BaseException) -> BaseException:
@@ -745,6 +841,8 @@ def _structured_output_retry_feedback(output_type: type[BaseModel]) -> str:
     if output_type is CriticOutput:
         return (
             f"{common} For every listed candidate, emit exactly one assessment "
+            "using its candidate_ref exactly as provided; do not emit id or "
+            "candidate_id fields. "
             "with exactly these seven checks: temporal, topology, mechanism, "
             "blast_radius, symptom_vs_cause, counterevidence, alternatives. "
             "Each pass/fail check must cite evidence_ids; each unknown check must "
@@ -754,9 +852,9 @@ def _structured_output_retry_feedback(output_type: type[BaseModel]) -> str:
     if output_type is InvestigatorOutput:
         return (
             f"{common} Cite only committed usable evidence IDs available to this "
-            "investigator. Leave candidate supporting_finding_ids and "
-            "contradicting_finding_ids empty, and do not invent finding or evidence "
-            "IDs. Every candidate must include a non-empty affected_entity, a "
+            "investigator. Do not emit candidate IDs, ranks, runtime IDs, review "
+            "fields, or finding references. Every candidate must include a "
+            "non-empty affected_entity, a "
             "non-empty failure_mechanism, and at least one supporting usable "
             "evidence ID. A non-gap finding must cite at least one usable evidence "
             "ID. If no candidate meets these requirements, return no candidates. "
@@ -1546,6 +1644,12 @@ class V11Runtime:
                 candidate_ids={item.id for item in review.candidates},
                 runtime_run_id=self.runtime_run_id or "",
                 review_round=1,
+                usable_evidence_ids={
+                    item.id
+                    for item in repository.get(investigation_id).evidence
+                    if item.status in {EvidenceStatus.SUCCESS, EvidenceStatus.PARTIAL}
+                    and item.runtime_run_id == self.runtime_run_id
+                },
             )
             tasks, supplemental_task_id_map = self._supplemental_tasks(
                 output,
@@ -1580,22 +1684,23 @@ class V11Runtime:
             raise
         except Exception as exc:
             self._failures.append(type(exc).__name__)
+            failure_message, failure_category = _critic_failure_audit(exc)
             self._ensure_failed_execution(
                 repository,
                 investigation_id,
                 task_id=f"critic-review-{self.runtime_run_id}",
                 actor=ExecutionActor.CRITIC.value,
                 step_kind=ExecutionStepKind.CRITIC_REVIEW,
-                message="critic review failed",
+                message=failure_message,
+                failure_category=failure_category,
             )
             review = review.model_copy(
                 update={
-                    "candidates": [],
                     "critic_assessments": [],
                     "lead_decision": None,
                     "diagnostic_status": None,
                     "run_status": MultiAgentRunStatus.FAILED,
-                    "stop_reason": "critic_review_failed",
+                    "stop_reason": failure_message.replace(" ", "_"),
                     "summary": "Critic review failed.",
                 }
             )
@@ -1603,7 +1708,8 @@ class V11Runtime:
             self._mark_terminal_failure(
                 repository,
                 investigation_id,
-                "critic review failed",
+                failure_message,
+                preserve_candidates=True,
             )
             return review
         repository.save_coordination_review(review)
@@ -1751,6 +1857,13 @@ class V11Runtime:
                 candidate_ids={item.id for item in review.candidates},
                 runtime_run_id=self.runtime_run_id or "",
                 review_round=2,
+                usable_evidence_ids={
+                    item.id
+                    for item in repository.get(investigation_id).evidence
+                    if item.status in {EvidenceStatus.SUCCESS, EvidenceStatus.PARTIAL}
+                    and item.runtime_run_id == self.runtime_run_id
+                },
+                existing_assessments=review.critic_assessments,
             )
             expected = {item.id for item in review.critic_assessments}
             if {item.id for item in assessments} != expected:
@@ -1771,23 +1884,23 @@ class V11Runtime:
             raise
         except Exception as exc:
             self._failures.append(type(exc).__name__)
+            failure_message, failure_category = _critic_failure_audit(exc)
             self._ensure_failed_execution(
                 repository,
                 investigation_id,
                 task_id=f"critic-reconciliation-{self.runtime_run_id}",
                 actor=ExecutionActor.CRITIC.value,
                 step_kind=ExecutionStepKind.CRITIC_REVIEW,
-                message="critic reconciliation failed",
+                message=failure_message,
                 analysis_round=2,
+                failure_category=failure_category,
             )
             review = review.model_copy(
                 update={
-                    "candidates": [],
-                    "critic_assessments": [],
                     "lead_decision": None,
                     "diagnostic_status": None,
                     "run_status": MultiAgentRunStatus.FAILED,
-                    "stop_reason": "critic_reconciliation_failed",
+                    "stop_reason": failure_message.replace(" ", "_"),
                     "summary": "Critic reconciliation failed.",
                 }
             )
@@ -1795,7 +1908,8 @@ class V11Runtime:
             self._mark_terminal_failure(
                 repository,
                 investigation_id,
-                "critic reconciliation failed",
+                failure_message,
+                preserve_candidates=True,
             )
             return review
         repository.save_coordination_review(review)
@@ -1913,11 +2027,68 @@ class V11Runtime:
             ),
             "summary": decision.summary,
         }
-        if decision.action == LeadAction.INCONCLUSIVE:
-            # Lead 的语义归一化必须清掉候选及其 assessment 投影；validator 只能机械校验。
-            projection.update(
-                {"candidates": [], "critic_assessments": [], "root_causes": []}
+        accepted_ids = {
+            item.candidate_id
+            for item in review.critic_assessments
+            if item.verdict == CriticVerdict.ACCEPT
+        }
+        unpublished = []
+        for candidate in review.candidates:
+            if candidate.id in decision.candidate_ids:
+                continue
+            assessment = next(
+                (
+                    item
+                    for item in review.critic_assessments
+                    if item.candidate_id == candidate.id
+                ),
+                None,
             )
+            if assessment is None:
+                reason = "critic_assessment_missing"
+            elif assessment.verdict != CriticVerdict.ACCEPT:
+                reason = f"critic_not_accepted:{assessment.verdict.value}"
+            elif candidate.id in accepted_ids:
+                reason = "lead_did_not_authorize"
+            else:
+                reason = "candidate_not_authoritative"
+            unpublished.append({"candidate_ref": candidate.id, "reason": reason})
+        lead_audit = json.dumps(
+            {
+                "schema_version": "candidate-lifecycle-authority-v1",
+                "persisted_candidate_count": len(review.candidates),
+                "authoritative_candidate_ids": list(decision.candidate_ids),
+                "unpublished": unpublished,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        lead_executions = [
+            item
+            for item in repository.list_executions(investigation_id)
+            if item.agent_name == ExecutionActor.LEAD.value
+            and item.step_kind == ExecutionStepKind.LEAD_ADJUDICATION
+            and item.runtime_run_id == self.runtime_run_id
+        ]
+        if lead_executions:
+            latest = max(
+                lead_executions,
+                key=lambda item: (
+                    item.attempt,
+                    item.started_at or datetime.min.replace(tzinfo=UTC),
+                    item.id,
+                ),
+            )
+            self._record_execution(
+                repository,
+                investigation_id,
+                latest.model_copy(update={"summary": lead_audit}),
+            )
+        if decision.action == LeadAction.INCONCLUSIVE:
+            # inconclusive 只取消发布权；候选和 critic 评审保留为审计投影，
+            # predictions 仍由 authoritative_candidate_ids 严格过滤。
+            projection.update({"root_causes": []})
         review = review.model_copy(
             update=projection
         )
@@ -2004,11 +2175,8 @@ class V11Runtime:
                     ),
                 }
                 if corrected.action == LeadAction.INCONCLUSIVE:
-                    # 与 lead_adjudication 相同的语义归一化：Lead 决定 inconclusive
-                    # 后不得保留候选投影；代码不替代 Lead 造候选。
-                    correction_projection.update(
-                        {"candidates": [], "critic_assessments": [], "root_causes": []}
-                    )
+                    # inconclusive 只取消发布权；已准入候选继续作为审计投影保留。
+                    correction_projection.update({"root_causes": []})
                 review = review.model_copy(update=correction_projection)
                 repository.save_coordination_review(review)
                 validate_v11_result(
@@ -2198,6 +2366,7 @@ class V11Runtime:
             await self._commit_session(repository, investigation_id, session)
             output = self._parse_output(turn.output, InvestigatorOutput)
             committed_evidence = repository.get(investigation_id).evidence
+            candidate_drafts = tuple(output.candidates)
             # 模型输出是不可信数据：单个 draft 违约只拒绝该 draft 并留持久化
             # 审计（spec §7.4 校验器可拒绝输出），不让同批合法 finding 陪葬。
             findings: list[AgentFinding] = []
@@ -2231,7 +2400,7 @@ class V11Runtime:
                     )
             candidates = (
                 self._admit_candidates(
-                    tuple(output.candidates),
+                    candidate_drafts,
                     batch_findings=findings,
                     committed_evidence=committed_evidence,
                     repository=repository,
@@ -2287,7 +2456,15 @@ class V11Runtime:
                     "evidence_ids": sorted(
                         session.evidence_ids_for(instance_id, round_number)
                     ),
-                    "summary": output.summary or "Investigator completed.",
+                    "summary": _candidate_lifecycle_trace(
+                        raw_output=turn.output,
+                        parsed_drafts=candidate_drafts,
+                        admitted_candidates=candidates,
+                        failure_categories=(
+                            audit.error_message or audit.failure_category.value
+                            for audit in audit_executions
+                        ),
+                    ),
                 }
             )
             return _InvestigatorResult(
@@ -2313,7 +2490,7 @@ class V11Runtime:
 
     def _admit_candidates(
         self,
-        drafts: tuple[RootCauseCandidate, ...],
+        drafts: tuple[InvestigatorCandidateDraft | RootCauseCandidate, ...],
         *,
         batch_findings: list[AgentFinding],
         committed_evidence: list[EvidenceItem],
@@ -2341,7 +2518,10 @@ class V11Runtime:
         }
         evidence_by_id = {item.id: item for item in committed_evidence}
         admitted: list[RootCauseCandidate] = []
-        for candidate in drafts:
+        for draft in drafts:
+            # 只有这里把模型 Draft 转成领域实体；模型永远不能填写持久化
+            # id/rank，旧的领域对象仅保留给内部测试和已持久化重放路径使用。
+            candidate = self._candidate_from_draft(draft)
             finding_refs = {
                 *candidate.supporting_finding_ids,
                 *candidate.contradicting_finding_ids,
@@ -2390,6 +2570,29 @@ class V11Runtime:
                 )
             )
         return tuple(admitted)
+
+    @classmethod
+    def _candidate_from_draft(
+        cls, draft: InvestigatorCandidateDraft | RootCauseCandidate
+    ) -> RootCauseCandidate:
+        """把模型诊断字段转换为服务端拥有的候选实体。"""
+        if isinstance(draft, RootCauseCandidate):
+            return draft
+        summary = draft.summary or f"{draft.affected_entity}: {draft.failure_mechanism}"
+        return RootCauseCandidate(
+            cause_type=draft.cause_type,
+            affected_entity=draft.affected_entity,
+            failure_mechanism=draft.failure_mechanism,
+            summary=summary,
+            rank=1,
+            confidence=draft.confidence,
+            supporting_evidence_ids=list(draft.supporting_evidence_ids),
+            contradicting_evidence_ids=list(draft.contradicting_evidence_ids),
+            rationale=draft.rationale,
+            uncertainty=draft.uncertainty,
+            onset_window_start=draft.onset_window_start,
+            onset_window_end=draft.onset_window_end,
+        )
 
     def _persist_investigator_result(
         self, repository, investigation_id: str, result: _InvestigatorResult
@@ -2576,18 +2779,61 @@ class V11Runtime:
 
     def _normalize_assessments(
         self,
-        assessments: Iterable[CriticAssessment],
+        assessments: Iterable[CriticAssessmentDraft | CriticAssessment],
         *,
         candidate_ids: set[str],
         runtime_run_id: str,
         review_round: int,
+        usable_evidence_ids: set[str] | None = None,
+        existing_assessments: Iterable[CriticAssessment] = (),
     ) -> list[CriticAssessment]:
-        values = [
-            item.model_copy(
-                update={"runtime_run_id": runtime_run_id, "review_round": review_round}
+        existing_by_candidate = {
+            item.candidate_id: item for item in existing_assessments
+        }
+        values: list[CriticAssessment] = []
+        for draft in assessments:
+            if isinstance(draft, CriticAssessment):
+                candidate_ref = draft.candidate_id
+                values.append(
+                    draft.model_copy(
+                        update={
+                            "runtime_run_id": runtime_run_id,
+                            "review_round": review_round,
+                        }
+                    )
+                )
+                continue
+            candidate_ref = draft.candidate_ref
+            if candidate_ref not in candidate_ids:
+                raise V11RuntimeContractError(
+                    "critic assessment candidate reference is unknown"
+                )
+            references = {
+                *draft.supporting_evidence_ids,
+                *draft.contradicting_evidence_ids,
+                *(evidence_id for check in draft.checks for evidence_id in check.evidence_ids),
+            }
+            if usable_evidence_ids is not None and not references <= usable_evidence_ids:
+                raise V11RuntimeContractError(
+                    "critic assessment evidence reference is invalid"
+                )
+            values.append(
+                CriticAssessment(
+                    id=existing_by_candidate[candidate_ref].id
+                    if candidate_ref in existing_by_candidate
+                    else f"assessment-{uuid4().hex}",
+                    candidate_id=candidate_ref,
+                    verdict=draft.verdict,
+                    checks=list(draft.checks),
+                    supporting_evidence_ids=list(draft.supporting_evidence_ids),
+                    contradicting_evidence_ids=list(draft.contradicting_evidence_ids),
+                    gap=draft.gap,
+                    supplemental_task_ids=list(draft.supplemental_task_ids),
+                    summary=draft.summary,
+                    runtime_run_id=runtime_run_id,
+                    review_round=review_round,
+                )
             )
-            for item in assessments
-        ]
         if {item.candidate_id for item in values} != candidate_ids:
             raise V11RuntimeContractError("Critic must assess every candidate exactly once")
         if len(values) != len(candidate_ids):
@@ -2780,6 +3026,7 @@ class V11Runtime:
         step_kind: ExecutionStepKind,
         message: str,
         analysis_round: int = 1,
+        failure_category: FailureCategory = FailureCategory.INVALID_OUTPUT,
     ) -> None:
         """保留一次 actor action 的失败审计，避免模型 audit 后重复造记录。"""
         matches = [
@@ -2809,7 +3056,7 @@ class V11Runtime:
                 existing.model_copy(
                     update={
                         "status": AgentExecutionStatus.FAILED,
-                        "failure_category": FailureCategory.INVALID_OUTPUT,
+                        "failure_category": failure_category,
                         "error_message": message,
                         "completed_at": now,
                         "deadline_at": existing.deadline_at or self._deadline_at,
@@ -2838,6 +3085,7 @@ class V11Runtime:
                 step_kind=step_kind,
                 message=message,
                 analysis_round=analysis_round,
+                failure_category=failure_category,
             ),
         )
 
@@ -2883,6 +3131,8 @@ class V11Runtime:
         repository,
         investigation_id: str,
         reason: str,
+        *,
+        preserve_candidates: bool = False,
     ) -> None:
         """统一收敛必需 actor 失败，避免用 inconclusive 掩盖运行失败。"""
         self._terminal_failure = True
@@ -2895,18 +3145,23 @@ class V11Runtime:
         )
         review = repository.get_coordination_review(investigation_id)
         if review is not None:
-            repository.save_coordination_review(
-                review.model_copy(
-                    update={
-                        "candidates": [],
-                        "critic_assessments": [],
-                        "lead_decision": None,
-                        "diagnostic_status": None,
-                        "run_status": MultiAgentRunStatus.FAILED,
-                        "stop_reason": "v11_required_actor_failed",
-                        "summary": "V11 required actor failed.",
-                    }
+            projection = {
+                "lead_decision": None,
+                "diagnostic_status": None,
+                "run_status": MultiAgentRunStatus.FAILED,
+                "stop_reason": (
+                    reason.replace(" ", "_")
+                    if preserve_candidates
+                    else "v11_required_actor_failed"
+                ),
+                "summary": "V11 required actor failed.",
+            }
+            if not preserve_candidates:
+                projection.update(
+                    {"candidates": [], "critic_assessments": [], "root_causes": []}
                 )
+            repository.save_coordination_review(
+                review.model_copy(update=projection)
             )
         self._update_summary(repository, investigation_id)
 
@@ -3081,9 +3336,9 @@ class V11Runtime:
             "critic_assessment": (
                 assessment.model_dump(mode="json") if assessment is not None else None
             ),
-            "rule": "Do not use sibling drafts or invent evidence IDs. Leave "
-            "candidate supporting_finding_ids and contradicting_finding_ids "
-            "empty; cite only committed usable evidence IDs in candidate "
+            "rule": "Do not use sibling drafts or invent evidence IDs. Do not "
+            "emit candidate IDs, ranks, runtime IDs, review fields, or finding "
+            "references; cite only committed usable evidence IDs in candidate "
             "evidence fields. Every candidate must include a non-empty "
             "affected_entity, a non-empty failure_mechanism, and at least one "
             "supporting usable evidence ID. If the causal mechanism is unresolved "
@@ -3108,13 +3363,35 @@ class V11Runtime:
             "role": "critic",
             "incident": _event_projection(event),
             "round": round_number,
-            "candidates": [item.model_dump(mode="json") for item in review.candidates],
+            "candidates": [
+                {
+                    "candidate_ref": item.id,
+                    "cause_type": item.cause_type,
+                    "affected_entity": item.affected_entity,
+                    "failure_mechanism": item.failure_mechanism,
+                    "summary": item.summary,
+                    "supporting_evidence_ids": item.supporting_evidence_ids,
+                    "contradicting_evidence_ids": item.contradicting_evidence_ids,
+                    "uncertainty": item.uncertainty,
+                }
+                for item in review.candidates
+            ],
             "findings": [item.model_dump(mode="json") for item in findings],
             "evidence": [_evidence_projection(item) for item in evidence],
             "prior_assessments": [
-                item.model_dump(mode="json") for item in review.critic_assessments
+                {
+                    "candidate_ref": item.candidate_id,
+                    "verdict": item.verdict,
+                    "summary": item.summary,
+                }
+                for item in review.critic_assessments
             ],
-            "rule": "Exactly seven named causal checks; unknown requires a named gap.",
+            "rule": (
+                "Use candidate_ref exactly as provided. Return verdict, seven "
+                "named causal checks, and only committed evidence IDs; never "
+                "return server assessment IDs or candidate_id. Unknown requires "
+                "a named gap."
+            ),
         }
         return json.dumps(redact_value(payload), ensure_ascii=False, sort_keys=True)
 
@@ -3130,8 +3407,7 @@ class V11Runtime:
         evidence = _critic_evidence(review, findings, repository.get(investigation_id).evidence)
         return {
             "round": round_number,
-            "candidate_ids": [item.id for item in review.candidates],
-            "assessment_ids": [item.id for item in review.critic_assessments],
+            "candidate_refs": [item.id for item in review.candidates],
             "evidence_ids": [item.id for item in evidence],
             "tools": [],
         }
@@ -3939,6 +4215,16 @@ class V11Runtime:
                             if isinstance(model_provider, _V11ModelProvider):
                                 await model_provider.aclose()
                     measured = _coerce_turn(raw_result)
+                    try:
+                        if output_type is not BaseModel:
+                            output_type.model_validate(measured.output)
+                    except (TypeError, ValueError) as exc:
+                        # turn 测试适配器与 Agents SDK 共用同一结构化输出门；
+                        # 截断/漂移必须进入 bounded retry，而不是在 phase 外静默
+                        # 变成 completed 后再由调用方丢失。
+                        raise ClassifiedRetryableError(
+                            FailureCategory.INVALID_OUTPUT
+                        ) from exc
                     self._model_timeout()
                     if not usage_accumulator.has_attempt_usage(attempt):
                         fallback = usage_accumulator.record_fallback(

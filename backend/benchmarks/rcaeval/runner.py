@@ -20,6 +20,7 @@ from backend.benchmarks.rcaeval.ledger import (
 )
 from backend.benchmarks.rcaeval.models import (
     EXPECTED_CONFIGURATION_TOPOLOGY,
+    CandidateLifecycleAudit,
     CandidatePrediction,
     CasePrediction,
     EndpointCapabilityIdentity,
@@ -47,6 +48,7 @@ from backend.diagnosis.v11_runtime import (
     V11Runtime,
     V11RuntimeContractError,
     V11SingleControlOutput,
+    _candidate_lifecycle_trace,
     _draft_rejection_code,
     _InvestigatorResult,
 )
@@ -99,7 +101,7 @@ from backend.services.v11_projection import ensure_v11_projection_owner
 from backend.tools.provider_tools import VerifiedMemoryLookup, build_provider_tool_registry
 from backend.tools.registry import agent_manifest_hash
 
-PROMPT_VERSION = "v11-rcaeval-v3"
+PROMPT_VERSION = "v11-rcaeval-v4"
 EMPTY_MEMORY_IDENTITY = {"schema_version": "empty-run-owned-memory-v1", "entries": []}
 
 logger = logging.getLogger(__name__)
@@ -264,8 +266,8 @@ class SingleInvestigatorAgent(V11Runtime):
                     "rule": (
                         "Return planning and investigator fields from this one context. "
                         f"The only task id is {task_id!r}; do not use sibling agents. "
-                        "Do not invent evidence IDs. Leave candidate "
-                        "supporting_finding_ids and contradicting_finding_ids empty; "
+                        "Do not emit candidate IDs, ranks, runtime IDs, review "
+                        "fields, finding references, or invented evidence IDs; "
                         "cite only committed usable evidence IDs in candidate "
                         "evidence fields."
                     ),
@@ -300,6 +302,7 @@ class SingleInvestigatorAgent(V11Runtime):
             )
             await self._commit_session(repository, investigation_id, session)
             output = self._parse_output(turn.output, V11SingleControlOutput)
+            candidate_drafts = tuple(output.investigator.candidates)
             planning = _single_control_planning(output.planning, task_id=task_id)
             plan = self._build_plan(
                 planning,
@@ -345,7 +348,7 @@ class SingleInvestigatorAgent(V11Runtime):
                         )
                     )
             candidates = self._admit_candidates(
-                tuple(output.investigator.candidates),
+                candidate_drafts,
                 batch_findings=findings,
                 committed_evidence=committed_evidence,
                 repository=repository,
@@ -354,30 +357,6 @@ class SingleInvestigatorAgent(V11Runtime):
                 instance_id=instance_id,
                 audit_executions=audit_executions,
             )
-            # Single 终态校验（见下方 result_validation）要求 candidate 完整：
-            # entity/mechanism/supporting evidence 任一缺失在终态只能杀 run，
-            # 提前在准入层丢弃+审计，让诊断收敛 inconclusive（spec §7.4）。
-            complete_candidates = []
-            for candidate in candidates:
-                if (
-                    not candidate.affected_entity
-                    or not candidate.failure_mechanism
-                    or not candidate.supporting_evidence_ids
-                ):
-                    self._failures.append("investigator_candidate_draft_rejected")
-                    audit_executions.append(
-                        self._failed_execution(
-                            task_id=task.id,
-                            actor=instance_id,
-                            step_kind=ExecutionStepKind.INVESTIGATOR_ANALYSIS,
-                            message="candidate draft rejected: candidate_incomplete",
-                            analysis_round=1,
-                            failure_category=FailureCategory.INVALID_REFERENCE,
-                        )
-                    )
-                    continue
-                complete_candidates.append(candidate)
-            candidates = tuple(complete_candidates)
             if rejected and not findings and not candidates:
                 # 整批违约全灭：维持 investigator 失败语义（terminal failed），
                 # 失败审计随 failed PhaseCommit 原子落库。
@@ -426,7 +405,15 @@ class SingleInvestigatorAgent(V11Runtime):
                     "agent_name": instance_id,
                     "tool_call_ids": [call.id for call in session.tool_calls],
                     "evidence_ids": sorted(session.evidence_ids_for(instance_id, 1)),
-                    "summary": output.investigator.summary or "Single control completed.",
+                    "summary": _candidate_lifecycle_trace(
+                        raw_output=turn.output,
+                        parsed_drafts=candidate_drafts,
+                        admitted_candidates=candidates,
+                        failure_categories=(
+                            audit.error_message or audit.failure_category.value
+                            for audit in audit_executions
+                        ),
+                    ),
                 }
             )
             result = _InvestigatorResult(
@@ -708,6 +695,7 @@ class RcaEvalCaseRunner:
             if item.status in {EvidenceStatus.SUCCESS, EvidenceStatus.PARTIAL}
         }
         calls = self.repository.list_tool_calls(record.id)
+        executions = self.repository.list_executions(record.id)
         read_only_violations = 0
         for call in calls:
             try:
@@ -736,6 +724,7 @@ class RcaEvalCaseRunner:
             case_id=case.case_id,
             configuration=budget.configuration,
             completed=completed,
+            diagnostic_status=(review.diagnostic_status if review is not None else None),
             candidates=[
                 CandidatePrediction(
                     affected_service=candidate.affected_entity or "unknown",
@@ -746,6 +735,12 @@ class RcaEvalCaseRunner:
                 )
                 for candidate in candidates
             ],
+            candidate_lifecycle=_candidate_lifecycle_audit(
+                review,
+                executions,
+                candidates,
+                single=not budget.configuration.is_multi,
+            ),
             runtime_run_id=run.id,
             execution_contract_hash=execution_contract_digest(contract),
             available_evidence_ids=sorted(evidence),
@@ -1139,6 +1134,99 @@ def _published_candidates(
     return sorted(
         (candidate for candidate in review.candidates if candidate.id in allowed),
         key=lambda item: item.rank,
+    )
+
+
+def _candidate_lifecycle_audit(
+    review: CoordinationReview | None,
+    executions: list[AgentExecution],
+    published_candidates,
+    *,
+    single: bool,
+) -> CandidateLifecycleAudit:
+    """从 durable 安全摘要重建候选四层链路，不读取原始模型 payload。"""
+    raw_count = parsed_count = admitted_count = 0
+    raw_hashes: list[str] = []
+    parsed_hashes: list[str] = []
+    admitted_hashes: list[str] = []
+    failure_categories: set[str] = set()
+    drop_reasons: set[str] = set()
+    for execution in executions:
+        if execution.failure_category.value != "none":
+            failure_categories.add(execution.failure_category.value)
+        summary = execution.summary
+        if not summary:
+            continue
+        try:
+            payload = json.loads(summary)
+        except (TypeError, ValueError):
+            payload = None
+        if isinstance(payload, dict) and payload.get("schema_version") == "candidate-lifecycle-v1":
+            raw = payload.get("raw_structured_output", {})
+            parsed = payload.get("parsed_drafts", {})
+            admitted = payload.get("admitted_candidates", {})
+            raw_count += max(0, int(raw.get("count", 0)))
+            parsed_count += max(0, int(parsed.get("count", 0)))
+            admitted_count += max(0, int(admitted.get("count", 0)))
+            for value, target in (
+                (raw.get("sha256"), raw_hashes),
+                (parsed.get("sha256"), parsed_hashes),
+                (admitted.get("sha256"), admitted_hashes),
+            ):
+                if isinstance(value, str) and value not in target:
+                    target.append(value)
+            for value in payload.get("failure_categories", []):
+                if isinstance(value, str):
+                    drop_reasons.add(value[:128])
+        elif (
+            isinstance(payload, dict)
+            and payload.get("schema_version") == "candidate-lifecycle-authority-v1"
+        ):
+            for item in payload.get("unpublished", []):
+                if isinstance(item, dict) and isinstance(item.get("reason"), str):
+                    drop_reasons.add(item["reason"][:128])
+        elif execution.error_message:
+            message = execution.error_message
+            if message.startswith(
+                (
+                    "candidate draft rejected:",
+                    "finding draft rejected:",
+                    "critic candidate reference rejected",
+                    "critic evidence reference rejected",
+                    "critic output invalid",
+                )
+            ):
+                drop_reasons.add(message[:128])
+
+    persisted = list(review.candidates) if review is not None else []
+    authoritative = review.authoritative_candidate_ids if review is not None else []
+    published = list(published_candidates)
+    if single and published and not authoritative:
+        drop_reasons.add("single_control_no_critic")
+    if persisted and not authoritative and not single and not drop_reasons:
+        drop_reasons.add("candidate_not_authoritative")
+    return CandidateLifecycleAudit(
+        raw_structured_output_count=raw_count,
+        raw_structured_output_hashes=raw_hashes,
+        parsed_draft_count=parsed_count,
+        parsed_draft_hashes=parsed_hashes,
+        admitted_candidate_count=admitted_count,
+        admitted_candidate_hashes=admitted_hashes,
+        persisted_candidate_count=len(persisted),
+        persisted_candidate_hash=(
+            canonical_json_sha256([item.model_dump(mode="json") for item in persisted])
+            if persisted
+            else None
+        ),
+        authoritative_candidate_ids=list(authoritative),
+        published_candidate_count=len(published),
+        published_candidate_hash=(
+            canonical_json_sha256([item.model_dump(mode="json") for item in published])
+            if published
+            else None
+        ),
+        failure_categories=sorted(failure_categories),
+        drop_reasons=sorted(drop_reasons),
     )
 
 

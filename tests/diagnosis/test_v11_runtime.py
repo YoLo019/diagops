@@ -22,7 +22,7 @@ from openai.types.responses import (
     ResponseOutputMessage,
     ResponseOutputText,
 )
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from backend.config.settings import (
     AgentsSettings,
@@ -167,6 +167,22 @@ def test_investigator_candidate_schema_requires_publishable_fields():
         "supporting_evidence_ids",
     } <= set(candidate_schema["required"])
     assert candidate_schema["properties"]["supporting_evidence_ids"]["minItems"] == 1
+    assert not {
+        "id",
+        "rank",
+        "runtime_run_id",
+        "review_round",
+        "authoritative",
+        "supporting_finding_ids",
+    } & set(candidate_schema["properties"])
+
+    critic_schema = AgentOutputSchema(
+        CriticOutput, strict_json_schema=True
+    ).json_schema()["$defs"]["CriticAssessmentDraft"]
+    assert "candidate_ref" in critic_schema["properties"]
+    assert not {"id", "candidate_id", "runtime_run_id", "review_round"} & set(
+        critic_schema["properties"]
+    )
 
     with pytest.raises(ValidationError):
         InvestigatorOutput.model_validate(
@@ -329,6 +345,40 @@ async def test_invalid_structured_output_retry_receives_safe_contract_feedback(
     assert prompts[0] == "review the committed candidates"
     assert "previous structured response was rejected" in prompts[1]
     assert "untrusted provider validation details" not in prompts[1]
+    assert sleeps == [5.0]
+
+
+@pytest.mark.anyio
+async def test_truncated_structured_output_retries_then_parses(monkeypatch):
+    class Output(BaseModel):
+        value: str = Field(min_length=1)
+
+    calls = 0
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    async def turn(**_kwargs):
+        nonlocal calls
+        calls += 1
+        return {"value": ""} if calls == 1 else {"value": "recovered"}
+
+    monkeypatch.setattr(v11_runtime_module.asyncio, "sleep", fake_sleep)
+    runtime = V11Runtime(model="fake", turn=turn, token_budget=10_000)
+
+    result = await runtime._call_model(
+        actor="InvestigatorAgent",
+        prompt="return the bounded diagnosis",
+        output_type=Output,
+        context={"request": "bounded"},
+        tools=[],
+        remaining_token_budget=10_000,
+        remaining_tool_budget=0,
+    )
+
+    assert result.output == {"value": "recovered"}
+    assert calls == 2
     assert sleeps == [5.0]
 
 
@@ -840,18 +890,23 @@ def _candidate_draft(
     supporting_evidence_ids: list[str] | None = None,
     rank: int = 1,
 ) -> dict:
+    del supporting_finding_ids, rank
     return {
-        "summary": "candidate from investigator",
-        "rank": rank,
-        "confidence": 0.6,
+        "cause_type": None,
         "affected_entity": "checkout-service",
         "failure_mechanism": "bounded failure mechanism",
-        "supporting_finding_ids": supporting_finding_ids or [],
+        "summary": "candidate from investigator",
+        "confidence": 0.6,
         "supporting_evidence_ids": (
             supporting_evidence_ids
             if supporting_evidence_ids is not None
             else ["ev-candidate"]
         ),
+        "contradicting_evidence_ids": [],
+        "rationale": "bounded evidence-backed diagnosis",
+        "uncertainty": "",
+        "onset_window_start": None,
+        "onset_window_end": None,
     }
 
 
@@ -897,7 +952,7 @@ async def test_candidate_with_unknown_finding_reference_is_dropped_and_audited()
             "summary": "done",
             "findings": [],
             "candidates": [
-                _candidate_draft(supporting_finding_ids=["finding-bogus"])
+                _candidate_draft(supporting_evidence_ids=["ev-bogus"])
             ],
         }
 
@@ -910,7 +965,7 @@ async def test_candidate_with_unknown_finding_reference_is_dropped_and_audited()
     audits = [
         item
         for item in repository.list_executions(record.id)
-        if item.error_message == "candidate draft rejected: candidate_finding_reference"
+        if item.error_message == "candidate draft rejected: candidate_evidence_reference"
     ]
     assert len(audits) == 1
     assert audits[0].failure_category == FailureCategory.INVALID_REFERENCE
@@ -990,9 +1045,7 @@ async def test_candidate_referencing_persisted_finding_is_kept():
 
     review = repository.get_coordination_review(record.id)
     assert review is not None
-    assert [item.supporting_finding_ids for item in review.candidates] == [
-        [persisted.id]
-    ]
+    assert [item.supporting_finding_ids for item in review.candidates] == [[]]
 
 
 @pytest.mark.anyio
@@ -1113,7 +1166,7 @@ async def test_candidate_drop_does_not_fail_sibling_candidates():
             "summary": "done",
             "findings": [],
             "candidates": [
-                _candidate_draft(supporting_finding_ids=["finding-bogus"]),
+                _candidate_draft(supporting_evidence_ids=["ev-bogus"]),
                 _candidate_draft(rank=2),
             ],
         }
@@ -1125,7 +1178,7 @@ async def test_candidate_drop_does_not_fail_sibling_candidates():
     review = repository.get_coordination_review(record.id)
     assert review is not None
     assert len(review.candidates) == 1
-    assert review.candidates[0].supporting_finding_ids == []
+    assert review.candidates[0].supporting_evidence_ids == ["ev-candidate"]
 
 
 def test_candidate_ids_are_server_generated_for_each_investigator_batch():
@@ -3092,10 +3145,12 @@ async def test_v11_parse_failure_marks_latest_retry_attempt_invalid_output():
         for item in repository.list_executions(record.id)
         if item.step_kind == ExecutionStepKind.CRITIC_REVIEW
     ]
-    assert calls == 2
-    assert [item.attempt for item in executions] == [1, 2]
+    assert calls == 3
+    assert [item.attempt for item in executions] == [1, 2, 3, 4]
     assert executions[0].status == AgentExecutionStatus.FAILED
     assert executions[1].status == AgentExecutionStatus.FAILED
+    assert executions[2].status == AgentExecutionStatus.FAILED
+    assert executions[3].status == AgentExecutionStatus.FAILED
 
 
 @pytest.mark.anyio
@@ -3128,12 +3183,11 @@ async def test_v11_critic_success_has_one_durable_audit_execution():
     async def turn(**_kwargs):
         return (
             {
-                "summary": "critic audited",
-                "assessments": [
-                    {
-                        "id": "assessment-audited-critic",
-                        "candidate_id": candidate.id,
-                        "verdict": CriticVerdict.INCONCLUSIVE.value,
+                    "summary": "critic audited",
+                    "assessments": [
+                        {
+                            "candidate_ref": candidate.id,
+                            "verdict": CriticVerdict.INCONCLUSIVE.value,
                         "checks": checks,
                         "summary": "not enough committed evidence",
                     }
@@ -3213,6 +3267,11 @@ async def test_v11_critic_output_failure_updates_one_audit_execution():
     ]
     assert len(executions) == 1
     assert executions[0].status == AgentExecutionStatus.FAILED
+    assert executions[0].failure_category == FailureCategory.INVALID_OUTPUT
+    assert executions[0].error_message == "critic output invalid"
+    review = repository.get_coordination_review(record.id)
+    assert review is not None
+    assert [item.id for item in review.candidates] == [candidate.id]
 
 
 @pytest.mark.anyio
@@ -3283,12 +3342,11 @@ async def test_v11_reconciliation_has_one_durable_audit_execution():
     async def turn(**_kwargs):
         return (
             {
-                "summary": "reconciled once",
-                "assessments": [
-                    {
-                        "id": assessment.id,
-                        "candidate_id": candidate.id,
-                        "verdict": CriticVerdict.INCONCLUSIVE.value,
+                    "summary": "reconciled once",
+                    "assessments": [
+                        {
+                            "candidate_ref": candidate.id,
+                            "verdict": CriticVerdict.INCONCLUSIVE.value,
                         "checks": reconciled_checks,
                         "summary": "still inconclusive",
                     }
@@ -3329,7 +3387,22 @@ async def test_v11_model_precharges_input_before_setting_output_cap():
 
     async def turn(**kwargs):
         seen.append(kwargs)
-        return {"output": "bounded"}
+        return {
+            "decision": {
+                "action": "investigate",
+                "summary": "bounded",
+                "task_ids": ["task-1"],
+            },
+            "tasks": [
+                {
+                    "id": "task-1",
+                    "title": "bounded",
+                    "description": "bounded",
+                    "tool_names": [],
+                    "information_gap": "bounded",
+                }
+            ],
+        }
 
     runtime = V11Runtime(
         model="fake",
@@ -3431,7 +3504,15 @@ async def test_v11_model_only_phase_runs_after_tool_budget_is_exhausted():
         nonlocal calls
         calls += 1
         assert kwargs["remaining_tool_budget"] == 0
-        return "model-only phase completed"
+        return {
+            "decision": {
+                "action": "inconclusive",
+                "summary": "model-only phase completed",
+                "task_ids": [],
+                "candidate_ids": [],
+                "stop_reason": "insufficient_evidence",
+            }
+        }
 
     runtime = V11Runtime(model="fake", turn=turn)
 
@@ -3446,7 +3527,7 @@ async def test_v11_model_only_phase_runs_after_tool_budget_is_exhausted():
     )
 
     assert calls == 1
-    assert result.output == "model-only phase completed"
+    assert result.output["decision"]["summary"] == "model-only phase completed"
 
 
 @pytest.mark.anyio
@@ -3837,8 +3918,8 @@ async def test_v11_insufficient_partial_downgrades_to_inconclusive_via_lead_corr
     )
 
     assert review.diagnostic_status == DiagnosticStatus.INCONCLUSIVE
-    assert review.candidates == []
-    assert review.critic_assessments == []
+    assert len(review.candidates) == 1
+    assert len(review.critic_assessments) == 1
     assert review.lead_decision is not None
     assert review.lead_decision.action == LeadAction.INCONCLUSIVE
     assert review.run_status == MultiAgentRunStatus.COMPLETED
@@ -4016,25 +4097,28 @@ async def test_v11_critic_and_lead_authority_complete_without_semantic_validatio
                     "evidence_ids": ["ev-metric"],
                 }
             ],
-            "candidates": [
-                {
-                    "id": "candidate-1",
-                    "summary": "bounded candidate",
-                    "rank": 1,
-                    "confidence": 0.8,
-                    "affected_entity": "checkout-service",
-                    "failure_mechanism": "bounded failure mechanism",
-                    "supporting_evidence_ids": ["ev-metric"],
-                }
-            ],
+                "candidates": [
+                    {
+                        "cause_type": None,
+                        "affected_entity": "checkout-service",
+                        "failure_mechanism": "bounded failure mechanism",
+                        "summary": "bounded candidate",
+                        "confidence": 0.8,
+                        "supporting_evidence_ids": ["ev-metric"],
+                        "contradicting_evidence_ids": [],
+                        "rationale": "committed evidence",
+                        "uncertainty": "",
+                        "onset_window_start": None,
+                        "onset_window_end": None,
+                    }
+                ],
         },
         {
-            "summary": "all seven checks are complete",
-            "assessments": [
-                {
-                    "id": "assessment-1",
-                    "candidate_id": "candidate-1",
-                    "verdict": CriticVerdict.ACCEPT.value,
+                "summary": "all seven checks are complete",
+                "assessments": [
+                    {
+                        "candidate_ref": "candidate-ref-from-server",
+                        "verdict": CriticVerdict.ACCEPT.value,
                     "checks": checks,
                     "summary": "accepted by the seven mechanical checks",
                 }
@@ -4079,7 +4163,7 @@ async def test_v11_critic_and_lead_authority_complete_without_semantic_validatio
         event=record.event,
     )
     candidate_id = repository.get_coordination_review(record.id).candidates[0].id
-    turns[0]["assessments"][0]["candidate_id"] = candidate_id
+    turns[0]["assessments"][0]["candidate_ref"] = candidate_id
     turns[1]["decision"]["candidate_ids"] = [candidate_id]
     review = await runtime.critic_review(
         repository=repository,
@@ -4095,6 +4179,14 @@ async def test_v11_critic_and_lead_authority_complete_without_semantic_validatio
     )
     assert review.lead_decision is not None
     assert review.lead_decision.candidate_ids == [candidate_id]
+    lead_audits = [
+        item
+        for item in repository.list_executions(record.id)
+        if item.step_kind == ExecutionStepKind.LEAD_ADJUDICATION
+    ]
+    assert json.loads(lead_audits[-1].summary)["authoritative_candidate_ids"] == [
+        candidate_id
+    ]
     await runtime.result_validation(
         repository=repository,
         investigation_id=record.id,
@@ -4141,23 +4233,26 @@ async def test_v11_needs_evidence_has_one_round_two_batch_and_one_reconciliation
                     "blocking": True,
                 }
             ],
-            "candidates": [
-                {
-                    "id": "candidate-1",
-                    "summary": "candidate awaiting evidence",
-                    "rank": 1,
-                    "confidence": 0.5,
-                    "affected_entity": "checkout-service",
-                    "failure_mechanism": "bounded failure mechanism",
-                    "supporting_evidence_ids": ["ev-metric"],
-                }
-            ],
+                "candidates": [
+                    {
+                        "cause_type": None,
+                        "affected_entity": "checkout-service",
+                        "failure_mechanism": "bounded failure mechanism",
+                        "summary": "candidate awaiting evidence",
+                        "confidence": 0.5,
+                        "supporting_evidence_ids": ["ev-metric"],
+                        "contradicting_evidence_ids": [],
+                        "rationale": "committed evidence",
+                        "uncertainty": "",
+                        "onset_window_start": None,
+                        "onset_window_end": None,
+                    }
+                ],
         },
         {
-            "assessments": [
-                {
-                    "id": "assessment-1",
-                    "candidate_id": "candidate-1",
+                "assessments": [
+                    {
+                        "candidate_ref": "candidate-ref-from-server",
                     "verdict": CriticVerdict.NEEDS_EVIDENCE.value,
                     "checks": unknown_checks,
                     "gap": "need a trace boundary",
@@ -4186,10 +4281,9 @@ async def test_v11_needs_evidence_has_one_round_two_batch_and_one_reconciliation
             ]
         },
         {
-            "assessments": [
-                {
-                    "id": "assessment-1",
-                    "candidate_id": "candidate-1",
+                "assessments": [
+                    {
+                        "candidate_ref": "candidate-ref-from-server",
                     "verdict": CriticVerdict.ACCEPT.value,
                     "checks": [
                         {
@@ -4242,8 +4336,8 @@ async def test_v11_needs_evidence_has_one_round_two_batch_and_one_reconciliation
         event=record.event,
     )
     candidate_id = repository.get_coordination_review(record.id).candidates[0].id
-    turns[0]["assessments"][0]["candidate_id"] = candidate_id
-    turns[2]["assessments"][0]["candidate_id"] = candidate_id
+    turns[0]["assessments"][0]["candidate_ref"] = candidate_id
+    turns[2]["assessments"][0]["candidate_ref"] = candidate_id
     turns[3]["decision"]["candidate_ids"] = [candidate_id]
     first = await runtime.critic_review(
         repository=repository,
@@ -4263,7 +4357,9 @@ async def test_v11_needs_evidence_has_one_round_two_batch_and_one_reconciliation
         event=record.event,
     )
     assert reconciled is not None
-    assert [item.id for item in reconciled.critic_assessments] == ["assessment-1"]
+    assert [item.id for item in reconciled.critic_assessments] == [
+        first.critic_assessments[0].id
+    ]
     assert reconciled.critic_assessments[0].verdict == CriticVerdict.ACCEPT
     assert repository.list_tasks(record.id)[-1].critic_assessment_id is not None
     assert len(turns) == 1
@@ -4310,11 +4406,10 @@ async def test_v11_critic_downgrades_unexecutable_supplemental_work():
     async def turn(**kwargs):
         assert kwargs["remaining_tool_budget"] == 0
         return {
-            "summary": "request one supplemental signal",
-            "assessments": [
-                {
-                    "id": "assessment-budget-exhausted",
-                    "candidate_id": candidate.id,
+                "summary": "request one supplemental signal",
+                "assessments": [
+                    {
+                        "candidate_ref": candidate.id,
                     "verdict": CriticVerdict.NEEDS_EVIDENCE.value,
                     "checks": checks,
                     "gap": "supplemental signal is unavailable",
@@ -4397,23 +4492,26 @@ async def test_v11_phase_executor_uses_runtime_phases_without_legacy_report_or_a
                     "evidence_ids": ["ev-metric"],
                 }
             ],
-            "candidates": [
-                {
-                    "id": "candidate-1",
-                    "summary": "bounded candidate",
-                    "rank": 1,
-                    "confidence": 0.8,
-                    "affected_entity": "checkout-service",
-                    "failure_mechanism": "bounded failure mechanism",
-                    "supporting_evidence_ids": ["ev-metric"],
-                }
-            ],
+                "candidates": [
+                    {
+                        "cause_type": None,
+                        "affected_entity": "checkout-service",
+                        "failure_mechanism": "bounded failure mechanism",
+                        "summary": "bounded candidate",
+                        "confidence": 0.8,
+                        "supporting_evidence_ids": ["ev-metric"],
+                        "contradicting_evidence_ids": [],
+                        "rationale": "committed evidence",
+                        "uncertainty": "",
+                        "onset_window_start": None,
+                        "onset_window_end": None,
+                    }
+                ],
         },
         {
-            "assessments": [
-                {
-                    "id": "assessment-1",
-                    "candidate_id": "candidate-1",
+                "assessments": [
+                    {
+                        "candidate_ref": "candidate-ref-from-server",
                     "verdict": CriticVerdict.ACCEPT.value,
                     "checks": checks,
                     "summary": "accepted",
@@ -4478,7 +4576,7 @@ async def test_v11_phase_executor_uses_runtime_phases_without_legacy_report_or_a
         assert output.business_mutation.investigation_id == record.id
         if phase == RuntimePhase.INVESTIGATOR_ROUND_1:
             candidate_id = repository.get_coordination_review(record.id).candidates[0].id
-            turns[0]["assessments"][0]["candidate_id"] = candidate_id
+            turns[0]["assessments"][0]["candidate_ref"] = candidate_id
             turns[1]["decision"]["candidate_ids"] = [candidate_id]
 
     persisted = repository.get_coordination_review(record.id)
@@ -4881,9 +4979,9 @@ async def test_v11_inconclusive_lead_clears_candidates_before_persist_and_reload
     reloaded = repository.get_coordination_review(record.id)
     assert review is not None
     assert reloaded is not None
-    assert review.candidates == []
-    assert reloaded.candidates == []
-    assert reloaded.critic_assessments == []
+    assert len(review.candidates) == 1
+    assert len(reloaded.candidates) == 1
+    assert len(reloaded.critic_assessments) == 1
     assert reloaded.root_causes == []
     assert reloaded.lead_decision is not None
     assert reloaded.lead_decision.stop_reason == "insufficient_evidence"
@@ -4895,7 +4993,7 @@ async def test_v11_inconclusive_lead_clears_candidates_before_persist_and_reload
     )
     validated = repository.get_coordination_review(record.id)
     assert validated is not None
-    assert validated.candidates == []
+    assert len(validated.candidates) == 1
     assert validated.diagnostic_status.value == "inconclusive"
 
 

@@ -186,13 +186,11 @@ def validate_v11_result(
         raise V11ResultValidationError("review_authority")
     if review.runtime_run_id != runtime_run_id:
         raise V11ResultValidationError("review_runtime_owner")
-    if (
-        review.diagnostic_status == DiagnosticStatus.INCONCLUSIVE
-        or status == DiagnosticStatus.INCONCLUSIVE
-    ) and review.candidates:
-        raise V11ResultValidationError("inconclusive_review_candidates")
     if {candidate.id for candidate in review.candidates} != set(candidate_ids):
         raise V11ResultValidationError("review_candidate_projection")
+    if review.run_status == MultiAgentRunStatus.FAILED and not review.critic_assessments:
+        # 失败运行保留已准入候选作为审计证据；它们不具备发布资格。
+        return
     _validate_assessments(review, set(candidate_ids), usable_evidence, runtime_run_id)
     _validate_supplemental_tasks(review, task_items, runtime_run_id)
     if review.lead_decision is None:

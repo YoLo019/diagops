@@ -16,6 +16,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from backend.domain.multi_agent import DiagnosticStatus
 from backend.domain.runtime import V11_RUN_DEADLINE_MAX_SECONDS
 
 # 不透明 case ID 的形态：固定前缀 + 16 位十六进制，稳定且不携带源信息。
@@ -319,13 +320,36 @@ class CandidatePrediction(BaseModel):
     onset_window_end: datetime | None = None
 
 
+class CandidateLifecycleAudit(BaseModel):
+    """候选发布链路的安全摘要；不携带模型原始输出。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["candidate-lifecycle-v1"] = "candidate-lifecycle-v1"
+    raw_structured_output_count: int = Field(default=0, ge=0)
+    raw_structured_output_hashes: list[str] = Field(default_factory=list, max_length=16)
+    parsed_draft_count: int = Field(default=0, ge=0)
+    parsed_draft_hashes: list[str] = Field(default_factory=list, max_length=16)
+    admitted_candidate_count: int = Field(default=0, ge=0)
+    admitted_candidate_hashes: list[str] = Field(default_factory=list, max_length=16)
+    persisted_candidate_count: int = Field(default=0, ge=0)
+    persisted_candidate_hash: str | None = Field(default=None, max_length=64)
+    authoritative_candidate_ids: list[str] = Field(default_factory=list, max_length=3)
+    published_candidate_count: int = Field(default=0, ge=0)
+    published_candidate_hash: str | None = Field(default=None, max_length=64)
+    failure_categories: list[str] = Field(default_factory=list, max_length=16)
+    drop_reasons: list[str] = Field(default_factory=list, max_length=16)
+
+
 class CasePrediction(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     case_id: str = Field(pattern=OPAQUE_CASE_ID_PATTERN)
     configuration: RcaEvalConfiguration
     completed: bool
+    diagnostic_status: DiagnosticStatus | None = None
     candidates: list[CandidatePrediction] = Field(default_factory=list, max_length=3)
+    candidate_lifecycle: CandidateLifecycleAudit | None = None
     runtime_run_id: str = Field(min_length=1, max_length=128)
     execution_contract_hash: str = Field(pattern=_SHA256_PATTERN)
     available_evidence_ids: list[str] = Field(default_factory=list)

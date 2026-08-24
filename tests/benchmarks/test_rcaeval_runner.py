@@ -361,17 +361,21 @@ def test_single_control_drops_candidate_citing_unknown_references(tmp_path: Path
         {
             "summary": "Candidate references model-invented IDs.",
             "findings": [],
-            "candidates": [
-                {
-                    "summary": "candidate with bogus refs",
-                    "rank": 1,
-                    "confidence": 0.5,
-                    "affected_entity": "carts",
-                    "failure_mechanism": "thread pool exhaustion",
-                    "supporting_finding_ids": ["finding-bogus"],
-                    "supporting_evidence_ids": ["ev-bogus"],
-                }
-            ],
+                "candidates": [
+                    {
+                        "cause_type": None,
+                        "affected_entity": "carts",
+                        "failure_mechanism": "thread pool exhaustion",
+                        "summary": "candidate with bogus refs",
+                        "confidence": 0.5,
+                        "supporting_evidence_ids": ["ev-bogus"],
+                        "contradicting_evidence_ids": [],
+                        "rationale": "bounded evidence-backed diagnosis",
+                        "uncertainty": "",
+                        "onset_window_start": None,
+                        "onset_window_end": None,
+                    }
+                ],
         }
     )
     prediction, repository, runtime_store = _run_single_case(tmp_path, turn)
@@ -393,7 +397,7 @@ def test_single_control_drops_candidate_citing_unknown_references(tmp_path: Path
     assert len(audits) == 1
     assert audits[0].failure_category == FailureCategory.INVALID_REFERENCE
     assert audits[0].error_message == (
-        "candidate draft rejected: candidate_finding_reference"
+        "candidate draft rejected: candidate_evidence_reference"
     )
 
 
@@ -530,7 +534,15 @@ def test_single_control_runs_through_persisted_sqlite_v11_runtime(tmp_path: Path
 
     persisted = runtime_store.get_run(prediction.runtime_run_id)
     assert prediction.completed is True
+    assert prediction.diagnostic_status == DiagnosticStatus.INCONCLUSIVE
     assert prediction.candidates == []
+    assert prediction.candidate_lifecycle is not None
+    assert prediction.candidate_lifecycle.raw_structured_output_count == 1
+    assert prediction.candidate_lifecycle.parsed_draft_count == 0
+    assert prediction.candidate_lifecycle.admitted_candidate_count == 0
+    assert prediction.candidate_lifecycle.persisted_candidate_count == 0
+    assert prediction.candidate_lifecycle.published_candidate_count == 0
+    assert prediction.candidate_lifecycle.raw_structured_output_hashes
     assert persisted.status == RuntimeRunStatus.COMPLETED
     assert persisted.execution_contract["execution_contract_digest"] == (
         prediction.execution_contract_hash
