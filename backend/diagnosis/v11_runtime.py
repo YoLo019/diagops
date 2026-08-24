@@ -32,7 +32,7 @@ from agents import (
 from agents.models.interface import ModelProvider as AgentsModelProvider
 from agents.models.multi_provider import MultiProvider
 from openai import AsyncOpenAI
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from backend.config.settings import canonicalize_endpoint, endpoint_id
 from backend.db.models import InvestigationStatus
@@ -85,6 +85,8 @@ from backend.domain.hypotheses import CauseType
 from backend.domain.multi_agent import (
     AgentExecutionLayer,
     AuthorityMode,
+    CausalCheckName,
+    CausalCheckStatus,
     CriticVerdict,
     DiagnosticStatus,
     ExecutionActor,
@@ -249,14 +251,24 @@ class CriticOutput(BaseModel):
     tasks: list[LeadTaskDraft] = Field(default_factory=list, max_length=3)
 
 
-class CriticCompactCausalCheck(CausalCheck):
-    """live Critic 的短 check，保持七项因果检查语义不变。"""
+class CriticCompactCausalCheck(BaseModel):
+    """live Critic 的最小 check draft；summary 由服务端规范化。"""
 
     model_config = ConfigDict(extra="forbid")
 
-    summary: str = Field(min_length=1, max_length=32)
+    name: CausalCheckName
+    status: CausalCheckStatus
     evidence_ids: list[str] = Field(default_factory=list, max_length=1)
     gap: str | None = Field(default=None, max_length=32)
+
+    @model_validator(mode="after")
+    def validate_check_contract(self) -> CriticCompactCausalCheck:
+        if self.status in {CausalCheckStatus.PASS, CausalCheckStatus.FAIL}:
+            if not self.evidence_ids or self.gap is not None:
+                raise ValueError("pass and fail checks require evidence without gap")
+        elif not self.gap:
+            raise ValueError("unknown checks require a named gap")
+        return self
 
 
 class CriticCompactAssessmentDraft(BaseModel):
@@ -271,13 +283,6 @@ class CriticCompactAssessmentDraft(BaseModel):
         CriticVerdict.INCONCLUSIVE,
     ]
     checks: list[CriticCompactCausalCheck] = Field(min_length=7, max_length=7)
-    supporting_evidence_ids: list[
-        Annotated[str, Field(min_length=1, max_length=128)]
-    ] = Field(default_factory=list, max_length=2)
-    contradicting_evidence_ids: list[
-        Annotated[str, Field(min_length=1, max_length=128)]
-    ] = Field(default_factory=list, max_length=2)
-    summary: str = Field(min_length=1, max_length=32)
 
 
 class CriticCompactOutput(BaseModel):
@@ -285,7 +290,6 @@ class CriticCompactOutput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    summary: str = Field(default="", max_length=128)
     assessments: list[CriticCompactAssessmentDraft] = Field(
         default_factory=list, max_length=3
     )
@@ -893,13 +897,14 @@ def _structured_output_retry_feedback(output_type: type[BaseModel]) -> str:
         return (
             f"{common} For every listed candidate, emit exactly one concise "
             "assessment using its candidate_ref exactly as provided; use only "
-            "accept, reject, or inconclusive, emit seven named causal checks, "
+            "accept, reject, or inconclusive, emit seven named causal checks "
+            "with only name, status, evidence_ids, and gap fields, "
             "and cite at most one committed evidence ID per check. A pass or "
             "fail check must cite evidence and must not include gap; an unknown "
-            "check must include a short gap. Keep check summaries to one to "
-            "three words. Do not include top-level gap or supplemental task "
-            "fields in this bounded review. Do not return server assessment "
-            "IDs, candidate_id, or extra fields."
+            "check must include a short gap. Do not include summaries, top-level "
+            "evidence arrays, gap, or supplemental task fields in this bounded "
+            "review. Do not return server assessment IDs, candidate_id, or "
+            "extra fields."
         )
     if output_type is CriticOutput:
         return (
@@ -1764,7 +1769,8 @@ class V11Runtime:
             review = review.model_copy(
                 update={
                     "critic_assessments": assessments,
-                    "summary": output.summary or "Critic review completed.",
+                    "summary": getattr(output, "summary", "")
+                    or "Critic review completed.",
                 }
             )
         except asyncio.CancelledError:
@@ -2940,9 +2946,27 @@ class V11Runtime:
                 raise V11RuntimeContractError(
                     "critic assessment candidate reference is unknown"
                 )
+            supporting_evidence_ids = list(
+                getattr(draft, "supporting_evidence_ids", [])
+            )
+            contradicting_evidence_ids = list(
+                getattr(draft, "contradicting_evidence_ids", [])
+            )
+            checks = [
+                check
+                if isinstance(check, CausalCheck)
+                else CausalCheck(
+                    name=check.name,
+                    status=check.status,
+                    summary=check.status.value,
+                    evidence_ids=list(check.evidence_ids),
+                    gap=check.gap,
+                )
+                for check in draft.checks
+            ]
             references = {
-                *draft.supporting_evidence_ids,
-                *draft.contradicting_evidence_ids,
+                *supporting_evidence_ids,
+                *contradicting_evidence_ids,
                 *(evidence_id for check in draft.checks for evidence_id in check.evidence_ids),
             }
             if usable_evidence_ids is not None and not references <= usable_evidence_ids:
@@ -2956,14 +2980,17 @@ class V11Runtime:
                     else f"assessment-{uuid4().hex}",
                     candidate_id=candidate_ref,
                     verdict=draft.verdict,
-                    checks=list(draft.checks),
-                    supporting_evidence_ids=list(draft.supporting_evidence_ids),
-                    contradicting_evidence_ids=list(draft.contradicting_evidence_ids),
+                    checks=checks,
+                    supporting_evidence_ids=supporting_evidence_ids,
+                    contradicting_evidence_ids=contradicting_evidence_ids,
                     gap=getattr(draft, "gap", None),
                     supplemental_task_ids=list(
                         getattr(draft, "supplemental_task_ids", [])
                     ),
-                    summary=draft.summary,
+                    summary=(
+                        getattr(draft, "summary", None)
+                        or f"{draft.verdict.value} review"
+                    ),
                     runtime_run_id=runtime_run_id,
                     review_round=review_round,
                 )
@@ -3557,10 +3584,9 @@ class V11Runtime:
                 "evidence IDs. Do not request needs_evidence or tasks in this "
                 "bounded review; use inconclusive when evidence is insufficient. "
                 "For every check, pass or fail requires one committed evidence ID "
-                "and no gap; unknown requires a short gap. Keep each check "
-                "summary to one to three words and cite at most one evidence ID "
-                "per check; keep the assessment summary under eight words. Do "
-                "not emit top-level gap or supplemental_task_ids. Never return "
+                "and no gap; unknown requires a short gap. Emit only check name, "
+                "status, evidence_ids, and gap; do not emit summaries, top-level "
+                "evidence arrays, gap, or supplemental_task_ids. Never return "
                 "server assessment IDs or candidate_id."
                 if compact_output
                 else "Use candidate_ref exactly as provided. Return verdict, seven "
