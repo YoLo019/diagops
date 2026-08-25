@@ -11,7 +11,7 @@ from backend.domain.llm_analysis import LLMAnalysis
 from backend.domain.multi_agent import InvestigationStrategy, MultiAgentRunSummary
 from backend.domain.reports import IncidentReport
 from backend.providers.results import ProviderResult
-from backend.safety.redaction import assert_safe_value
+from backend.safety.redaction import assert_safe_value, redact_value
 
 _STRATEGY_KEY = "_diagops_investigation_strategy"
 _MULTI_AGENT_RUN_KEY = "_diagops_multi_agent_run"
@@ -50,7 +50,11 @@ def record_to_rows(record: InvestigationRecord) -> dict[str, Any]:
         "verification_suggestions": _child_rows(
             record.id, record.verification_suggestions
         ),
-        "report": record.report.model_dump(mode="json") if record.report else None,
+        "report": (
+            redact_value(record.report.model_dump(mode="json"))
+            if record.report
+            else None
+        ),
         "provider_results": _payload_rows(record.id, record.provider_results),
         "specialist_results": _payload_rows(record.id, record.specialist_results),
     }

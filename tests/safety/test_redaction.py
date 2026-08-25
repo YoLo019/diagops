@@ -5,6 +5,7 @@ import pytest
 from backend.db.models import InvestigationRecord
 from backend.db.serialization import record_to_rows
 from backend.domain.events import IncidentEvent
+from backend.domain.reports import IncidentReport
 from backend.safety.redaction import (
     UnsafePersistenceValue,
     escape_markdown,
@@ -109,3 +110,22 @@ def test_redacted_event_can_be_serialized() -> None:
     rows = record_to_rows(InvestigationRecord(event=event))
 
     assert "persistence-secret" not in json.dumps(rows)
+
+
+def test_report_serialization_redacts_model_generated_sensitive_text() -> None:
+    record = InvestigationRecord(
+        event=load_incident_case("deployment_regression"),
+        report=IncidentReport(
+            investigation_id="investigation-1",
+            summary="resource pressure",
+            markdown='username=Alice longNum="4111111111111111" ccv=123',
+        ),
+    )
+
+    rows = record_to_rows(record)
+
+    serialized = json.dumps(rows, ensure_ascii=False)
+    assert "Alice" not in serialized
+    assert "4111111111111111" not in serialized
+    assert "ccv=123" not in serialized
+    assert "[REDACTED]" in rows["report"]["markdown"]
