@@ -76,6 +76,14 @@ _SENSITIVE_COMPOUNDS = {
     "sessionid",
     "userid",
 }
+_NON_SECRET_COUNT_COMPOUNDS = {
+    "inputtokens",
+    "outputtokens",
+    "remainingmodelturns",
+    "tokenbudget",
+    "totalinputtokens",
+    "totaloutputtokens",
+}
 
 _FAILURE_LABELS = {
     "authentication": "provider authentication failed",
@@ -224,6 +232,8 @@ def _is_sensitive_key(key: str) -> bool:
     if set(segments) & _SENSITIVE_SEGMENTS:
         return True
     compact = "".join(segments)
+    if compact in _NON_SECRET_COUNT_COMPOUNDS:
+        return False
     return any(
         compact == marker or compact.endswith(marker)
         for marker in _SENSITIVE_COMPOUNDS

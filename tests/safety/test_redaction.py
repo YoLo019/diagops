@@ -129,3 +129,21 @@ def test_report_serialization_redacts_model_generated_sensitive_text() -> None:
     assert "4111111111111111" not in serialized
     assert "ccv=123" not in serialized
     assert "[REDACTED]" in rows["report"]["markdown"]
+
+
+def test_redaction_keeps_non_secret_token_counters_readable() -> None:
+    record = InvestigationRecord(
+        event=load_incident_case("deployment_regression"),
+        report=IncidentReport(
+            investigation_id="investigation-1",
+            summary="resource pressure",
+            markdown="summary",
+            total_input_tokens=5,
+            total_output_tokens=2,
+        ),
+    )
+
+    restored = IncidentReport(**record_to_rows(record)["report"])
+
+    assert restored.total_input_tokens == 5
+    assert restored.total_output_tokens == 2
