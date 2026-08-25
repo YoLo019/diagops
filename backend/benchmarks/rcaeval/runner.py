@@ -106,7 +106,7 @@ from backend.services.v11_projection import ensure_v11_projection_owner
 from backend.tools.provider_tools import VerifiedMemoryLookup, build_provider_tool_registry
 from backend.tools.registry import agent_manifest_hash
 
-PROMPT_VERSION = "v11-rcaeval-v4"
+PROMPT_VERSION = "v11-rcaeval-v5"
 EMPTY_MEMORY_IDENTITY = {"schema_version": "empty-run-owned-memory-v1", "entries": []}
 
 logger = logging.getLogger(__name__)
@@ -301,11 +301,17 @@ class SingleInvestigatorAgent(V11Runtime):
         try:
             prompt = (
                 "Return only diagnostic candidates. Use read-only evidence tools "
-                "when needed. Use the committed evidence digest first. Every "
+                "when needed. Use the committed evidence digest as a starting "
+                "point; it is not exhaustive. Every "
                 "candidate needs affected_entity, "
-                "failure_mechanism, and committed usable supporting evidence IDs. "
-                "Prefer one focused query; after usable evidence is available, "
-                "return the candidates without another query. "
+                "failure_class, failure_mechanism, and committed usable supporting "
+                "evidence IDs. failure_class must be the shortest stable "
+                "classification phrase directly supported by the evidence; keep "
+                "explanation in failure_mechanism. "
+                "Use a focused query when the digest does not distinguish the "
+                "affected entity or mechanism. Keep failure_mechanism concise and "
+                "specific rather than a generic symptom summary; if the mechanism "
+                "remains unresolved after bounded queries, return no candidate. "
                 "Do not emit server-owned IDs, ranks, runtime fields, review "
                 "fields, or invented references. When cited evidence has "
                 "scope_entity_ids, affected_entity must exactly match an entity "
@@ -321,7 +327,7 @@ class SingleInvestigatorAgent(V11Runtime):
                     "committed_evidence": evidence_digest,
                     "tool_manifest": manifest,
                 },
-                tools=(session.tools_for(instance_id, 1) if not evidence_digest else []),
+                tools=session.tools_for(instance_id, 1),
                 remaining_token_budget=self._remaining_token_budget,
                 remaining_tool_budget=self._remaining_tool_budget_for(
                     repository, investigation_id
@@ -721,6 +727,7 @@ class RcaEvalCaseRunner:
             candidates=[
                 CandidatePrediction(
                     affected_service=candidate.affected_entity or "unknown",
+                    failure_class=candidate.failure_class,
                     failure_mechanism=candidate.failure_mechanism or "unknown",
                     evidence_ids=list(candidate.supporting_evidence_ids),
                     onset_window_start=candidate.onset_window_start,

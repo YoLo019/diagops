@@ -37,7 +37,6 @@ from backend.db.repositories import InMemoryInvestigationRepository
 from backend.diagnosis import openai_compatible_model as compatible_model_module
 from backend.diagnosis import v11_runtime as v11_runtime_module
 from backend.diagnosis.adaptive_tools import ClassifiedRetryableError
-from backend.diagnosis.context import DiagnosisContext
 from backend.diagnosis.diagnostic_skills import (
     DIAGNOSTIC_SKILLS,
     SKILL_CATALOG_VERSION,
@@ -114,8 +113,8 @@ from backend.domain.runtime import (
 )
 from backend.domain.tool_calls import ToolSpec
 from backend.domain.v11_contracts import validate_v11_final_status
-from backend.providers.registry import build_mock_provider_registry
-from backend.providers.results import ProviderResult, ProviderStatus
+from backend.providers.registry import ProviderRegistry, build_mock_provider_registry
+from backend.providers.results import ProviderResult
 from backend.runtime.phase_executor import DiagnosisPhaseExecutor
 from backend.runtime.phases import V11_PHASE_ORDER, PhaseInput
 from backend.services.container import AppContainer
@@ -326,6 +325,7 @@ def test_single_control_schema_contains_only_diagnostic_candidate_fields():
     candidate = schema["$defs"]["InvestigatorCandidateDraft"]
     assert set(candidate["properties"]) == {
         "affected_entity",
+        "failure_class",
         "failure_mechanism",
         "supporting_evidence_ids",
         "contradicting_evidence_ids",
@@ -393,7 +393,7 @@ def test_investigator_prompt_keeps_tool_descriptions_without_schema_duplication(
     assert set(contracts) == set(registry.agent_manifest())
     assert "description" in contracts["read_runtime_state"]
     assert "input_schema" not in contracts["read_runtime_state"]
-    assert "unresolved cause" in prompt["rule"]
+    assert "specific mechanism" in prompt["rule"]
 
 
 def test_live_investigator_prompt_compacts_complete_evidence_context():
@@ -433,9 +433,13 @@ def test_live_investigator_prompt_compacts_complete_evidence_context():
         )
     )
 
-    assert "tool_contracts" not in prompt
-    assert "skills" not in prompt
+    assert set(prompt["tool_manifest"]) == set(registry.agent_manifest())
+    assert set(item["name"] for item in prompt["tool_contracts"]) == set(
+        registry.agent_manifest()
+    )
+    assert prompt["skills"]
     assert "Return zero or one candidate" in prompt["rule"]
+    assert "not exhaustive" in prompt["rule"]
     assert set(prompt["evidence"][0]) == {
         "id",
         "kind",
@@ -1078,6 +1082,7 @@ def _candidate_draft(
     del supporting_finding_ids, rank
     return {
         "affected_entity": "checkout-service",
+        "failure_class": "bounded failure class",
         "failure_mechanism": "bounded failure mechanism",
         "supporting_evidence_ids": (
             supporting_evidence_ids
@@ -4367,14 +4372,15 @@ async def test_v11_critic_and_lead_authority_complete_without_semantic_validatio
                     "evidence_ids": ["ev-metric"],
                 }
             ],
-                    "candidates": [
-                        {
-                            "affected_entity": "checkout-service",
-                            "failure_mechanism": "bounded failure mechanism",
-                            "supporting_evidence_ids": ["ev-metric"],
-                            "contradicting_evidence_ids": [],
-                        }
-                    ],
+            "candidates": [
+                {
+                    "affected_entity": "checkout-service",
+                    "failure_class": "bounded failure class",
+                    "failure_mechanism": "bounded failure mechanism",
+                    "supporting_evidence_ids": ["ev-metric"],
+                    "contradicting_evidence_ids": [],
+                }
+            ],
         },
         {
                 "summary": "all seven checks are complete",
@@ -4496,14 +4502,15 @@ async def test_v11_needs_evidence_has_one_round_two_batch_and_one_reconciliation
                     "blocking": True,
                 }
             ],
-                    "candidates": [
-                        {
-                            "affected_entity": "checkout-service",
-                            "failure_mechanism": "bounded failure mechanism",
-                            "supporting_evidence_ids": ["ev-metric"],
-                            "contradicting_evidence_ids": [],
-                        }
-                    ],
+            "candidates": [
+                {
+                    "affected_entity": "checkout-service",
+                    "failure_class": "bounded failure class",
+                    "failure_mechanism": "bounded failure mechanism",
+                    "supporting_evidence_ids": ["ev-metric"],
+                    "contradicting_evidence_ids": [],
+                }
+            ],
         },
         {
                 "assessments": [
@@ -4748,14 +4755,15 @@ async def test_v11_phase_executor_uses_runtime_phases_without_legacy_report_or_a
                     "evidence_ids": ["ev-metric"],
                 }
             ],
-                    "candidates": [
-                        {
-                            "affected_entity": "checkout-service",
-                            "failure_mechanism": "bounded failure mechanism",
-                            "supporting_evidence_ids": ["ev-metric"],
-                            "contradicting_evidence_ids": [],
-                        }
-                    ],
+            "candidates": [
+                {
+                    "affected_entity": "checkout-service",
+                    "failure_class": "bounded failure class",
+                    "failure_mechanism": "bounded failure mechanism",
+                    "supporting_evidence_ids": ["ev-metric"],
+                    "contradicting_evidence_ids": [],
+                }
+            ],
         },
         {
                 "assessments": [
@@ -4779,30 +4787,38 @@ async def test_v11_phase_executor_uses_runtime_phases_without_legacy_report_or_a
     async def turn(**_kwargs):
         return turns.pop(0)
 
-    async def collect_async(event, **_kwargs):
-        evidence = EvidenceItem(
-            id="ev-metric",
-            provider=EvidenceProvider.METRIC,
-            kind=EvidenceKind.METRIC_TREND,
-            timestamp=event.started_at,
-            summary="committed evidence",
-            runtime_run_id="run-v11",
-        )
-        result = ProviderResult(
-            provider=EvidenceProvider.METRIC,
-            evidence_items=[evidence],
-        )
-        skipped_result = ProviderResult(
-            provider=EvidenceProvider.RELATED_ALERT,
-            status=ProviderStatus.SKIPPED,
-            error_message="related alert provider unavailable",
-        )
-        provider_error = skipped_result.to_error_evidence()
-        return DiagnosisContext(
-            event=event,
-            evidence=[evidence, provider_error],
-            provider_results=[result, skipped_result],
-        )
+    evidence = EvidenceItem(
+        id="ev-metric",
+        provider=EvidenceProvider.METRIC,
+        kind=EvidenceKind.METRIC_TREND,
+        timestamp=record.event.started_at,
+        summary="committed evidence",
+        runtime_run_id="run-v11",
+    )
+
+    class StaticProvider:
+        def __init__(self, provider, evidence_items=()):
+            self.provider = provider
+            self.evidence_items = list(evidence_items)
+
+        def collect(self, _event):
+            return ProviderResult(
+                provider=self.provider,
+                evidence_items=list(self.evidence_items),
+            )
+
+    providers = ProviderRegistry(
+        [
+            StaticProvider(EvidenceProvider.LOG),
+            StaticProvider(EvidenceProvider.METRIC, [evidence]),
+            StaticProvider(EvidenceProvider.DEPLOY),
+            StaticProvider(EvidenceProvider.DEPENDENCY),
+            StaticProvider(EvidenceProvider.SERVICE_CATALOG),
+        ]
+    )
+
+    async def forbidden(*_args, **_kwargs):
+        raise AssertionError("V11 invoked the legacy coordinator")
 
     runtime = V11Runtime(
         model="fake",
@@ -4817,9 +4833,10 @@ async def test_v11_phase_executor_uses_runtime_phases_without_legacy_report_or_a
     )
     orchestrator = SimpleNamespace(
         repository=repository,
+        providers=providers,
         v11_runtime=runtime,
         agents_runtime=None,
-        coordinator=SimpleNamespace(collect_async=collect_async),
+        coordinator=SimpleNamespace(collect_async=forbidden),
         max_total_tool_calls=8,
     )
     executor = DiagnosisPhaseExecutor(orchestrator)

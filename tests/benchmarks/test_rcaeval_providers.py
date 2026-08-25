@@ -142,6 +142,30 @@ def test_metric_duplicate_series_from_distinct_files_have_distinct_evidence_ids(
     assert len(validate_investigation_evidence([result]).supporting_evidence) == 2
 
 
+def test_metric_provider_prefers_service_signal_columns_over_raw_container_noise(tmp_path):
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    (case_dir / "telemetry-00.csv").write_text(
+        "time,svc_container-memory-mapped-file,svc_cpu,svc_socket\n"
+        "2026-01-01T00:00:00Z,0,1,1\n"
+        "2026-01-01T00:01:00Z,0,1,1\n"
+        "2026-01-01T00:02:00Z,1000000000,10,2\n"
+        "2026-01-01T00:03:00Z,1000000000,10,2\n",
+        encoding="utf-8",
+    )
+    provider = RcaEvalMetricProvider(
+        case_dir,
+        case_id="re2-aaaaaaaaaaaaaaaa",
+        runtime_manifest_hash="a" * 64,
+        evidence_namespace="run-1",
+    )
+
+    result = provider.collect(incident_event_for_case(case_dir, "re2-aaaaaaaaaaaaaaaa"))
+    metrics = {item.payload["metric"] for item in result.evidence_items}
+
+    assert metrics == {"svc_cpu", "svc_socket"}
+
+
 def test_retry_namespace_keeps_rcaeval_evidence_ids_globally_unique(tmp_path):
     case_dir = tmp_path / "case"
     case_dir.mkdir()

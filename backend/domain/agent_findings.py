@@ -174,6 +174,8 @@ class RootCauseCandidate(BaseModel):
     id: str = Field(default_factory=lambda: f"candidate-{uuid4().hex}")
     cause_type: CauseType | None = None
     affected_entity: str | None = Field(default=None, max_length=128)
+    # 结构化分类与可读机制分开，避免评分/下游分类被一段解释性文本污染。
+    failure_class: str | None = Field(default=None, max_length=128)
     failure_mechanism: str | None = Field(default=None, max_length=256)
     summary: str = Field(min_length=1)
     rank: int = Field(ge=1)
@@ -192,6 +194,7 @@ class RootCauseCandidate(BaseModel):
         data = handler(self)
         for field_name in (
             "affected_entity",
+            "failure_class",
             "failure_mechanism",
             "onset_window_start",
             "onset_window_end",

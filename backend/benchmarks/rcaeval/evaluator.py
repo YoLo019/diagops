@@ -25,6 +25,7 @@ from backend.benchmarks.rcaeval.models import (
     AcceptancePolicy,
     AcceptanceResultArtifact,
     BootstrapResult,
+    CandidatePrediction,
     CasePrediction,
     EvaluationArtifact,
     EvaluationSummary,
@@ -59,6 +60,11 @@ def normalize_label(value: str) -> str:
     return " ".join(re.sub(r"[-_/]+", " ", value.casefold()).split())
 
 
+def _scored_failure_class(candidate: CandidatePrediction) -> str:
+    """优先使用结构化分类；旧 bundle 仍以机制字段作为兼容输入。"""
+    return candidate.failure_class or candidate.failure_mechanism
+
+
 def evaluate_predictions(
     predictions: list[CasePrediction], labels: list[LabelEntry]
 ) -> EvaluationSummary:
@@ -87,7 +93,7 @@ def evaluate_predictions(
         mechanism_match = bool(
             prediction.completed
             and top is not None
-            and normalize_label(top.failure_mechanism) == normalize_label(label.fault)
+            and normalize_label(_scored_failure_class(top)) == normalize_label(label.fault)
         )
         component += int(service_match)
         mechanism += int(mechanism_match)
@@ -96,7 +102,8 @@ def evaluate_predictions(
             prediction.completed
             and any(
                 normalize_label(candidate.affected_service) == normalize_label(label.service)
-                and normalize_label(candidate.failure_mechanism) == normalize_label(label.fault)
+                and normalize_label(_scored_failure_class(candidate))
+                == normalize_label(label.fault)
                 for candidate in prediction.candidates
             )
         )
@@ -653,7 +660,7 @@ def _correct_vector(
                 and candidate is not None
                 and normalize_label(candidate.affected_service)
                 == normalize_label(label.service)
-                and normalize_label(candidate.failure_mechanism)
+                and normalize_label(_scored_failure_class(candidate))
                 == normalize_label(label.fault)
             )
         )

@@ -34,6 +34,9 @@ def public_v11_candidate(candidate: RootCauseCandidate) -> RootCauseCandidate:
             "affected_entity": scrub_v11_text(candidate.affected_entity)
             if candidate.affected_entity is not None
             else None,
+            "failure_class": scrub_v11_text(candidate.failure_class)
+            if candidate.failure_class is not None
+            else None,
             "failure_mechanism": scrub_v11_text(candidate.failure_mechanism)
             if candidate.failure_mechanism is not None
             else None,

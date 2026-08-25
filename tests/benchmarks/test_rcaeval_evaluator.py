@@ -124,6 +124,24 @@ def test_evaluator_reproduces_exact_top1_supporting_metrics_and_failure_semantic
     assert summary.p95_latency_ms == 1000
 
 
+def test_evaluator_scores_structured_failure_class_before_explanation():
+    label = _label("re2-aaaaaaaaaaaaaaaa", "checkout", "cpu")
+    prediction = _prediction(label.case_id, "checkout", "a long readable explanation")
+    structured = prediction.model_copy(
+        update={
+            "candidates": [
+                prediction.candidates[0].model_copy(update={"failure_class": "CPU"})
+            ]
+        }
+    )
+
+    summary = evaluate_predictions([structured], [label])
+
+    assert summary.exact_top1 == 1
+    assert summary.mechanism_top1 == 1
+    assert summary.top3 == 1
+
+
 def test_evaluator_rejects_duplicate_missing_and_non_finite_rows():
     label = _label("re2-aaaaaaaaaaaaaaaa", "checkout", "cpu")
     prediction = _prediction(label.case_id, "checkout", "cpu")

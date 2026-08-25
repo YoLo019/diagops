@@ -375,6 +375,7 @@ def test_single_control_drops_candidate_citing_unknown_references(tmp_path: Path
                 "candidates": [
                     {
                         "affected_entity": "carts",
+                        "failure_class": "thread pool exhaustion",
                         "failure_mechanism": "thread pool exhaustion",
                         "supporting_evidence_ids": ["ev-bogus"],
                         "contradicting_evidence_ids": [],
@@ -445,6 +446,7 @@ def test_single_control_candidate_rejection_is_audited_without_terminal_failure(
             "candidates": [
                 {
                     "affected_entity": "carts",
+                    "failure_class": "unsupported",
                     "failure_mechanism": "unsupported mechanism",
                     "supporting_evidence_ids": ["ev-uncommitted"],
                 }
@@ -926,6 +928,7 @@ def test_single_control_rejects_server_owned_candidate_fields(tmp_path: Path):
             "candidates": [
                 {
                     "affected_entity": "carts",
+                    "failure_class": "latency",
                     "failure_mechanism": "latency increase",
                     "supporting_evidence_ids": ["ev-1"],
                     "id": "candidate-model-owned",

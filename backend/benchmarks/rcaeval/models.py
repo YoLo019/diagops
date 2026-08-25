@@ -314,6 +314,8 @@ class CandidatePrediction(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     affected_service: str = Field(min_length=1, max_length=128)
+    # 评分使用结构化分类；failure_mechanism 保留可读、可审计的解释。
+    failure_class: str | None = Field(default=None, max_length=128)
     failure_mechanism: str = Field(min_length=1, max_length=256)
     evidence_ids: list[str] = Field(default_factory=list, max_length=32)
     onset_window_start: datetime | None = None

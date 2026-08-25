@@ -6,6 +6,7 @@ import csv
 import hashlib
 import json
 import math
+import re
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -36,8 +37,12 @@ from backend.domain.tool_queries import (
 from backend.providers.results import ProviderResult, ProviderStatus
 from backend.safety.redaction import assert_safe_value, redact_text, redact_value
 
-ADAPTER_VERSION = "rcaeval-re2-v1"
+ADAPTER_VERSION = "rcaeval-re2-v2"
 _MAX_SCAN_ROWS = 250_000
+_SIGNAL_METRIC_PATTERN = re.compile(
+    r"_(?:cpu|mem|diskio|socket|workload|error|latency-(?:50|90|95|99))$",
+    re.IGNORECASE,
+)
 
 
 class _Telemetry:
@@ -202,20 +207,38 @@ class RcaEvalMetricProvider(_RcaEvalProvider):
     ) -> ProviderResult:
         requested = [item.casefold() for item in (query.metric_names if query else [])]
         instance = query.instance.casefold() if query and query.instance else None
-        limit = query.limit if query else 20
+        # 首次采集要给 Investigator 一个可查询的指标面；过小的 top-k 会
+        # 把 socket/disk/latency 等低幅度但有区分度的信号永久截掉。
+        limit = query.limit if query else 60
+        has_signal_columns = any(
+            _is_signal_metric(name)
+            for path in self.telemetry.metric_files
+            for name in self.telemetry._headers[path][1:]
+        )
         changes: list[tuple[float, str, str, float, float, datetime, str]] = []
         for path in self.telemetry.metric_files:
             header = self.telemetry._headers[path]
-            selected = [
+            candidates = [
                 (index, name)
                 for index, name in enumerate(header[1:], start=1)
                 if (not requested or any(token in name.casefold() for token in requested))
                 and (not instance or instance in name.casefold())
             ]
-            if not selected:
+            if not candidates:
                 continue
-            # 无过滤时限制列数；Agent 可通过 metric_names/instance 精确展开。
-            selected = selected[: 400 if requested or instance else 120]
+            if not requested:
+                preferred = [
+                    item for item in candidates if _is_signal_metric(item[1])
+                ]
+                # 优先使用适配器能识别的服务级信号；只有整套输入都没有
+                # 这类列时才保留通用 provider 的原始列，避免单个原始文件
+                # 把 RCAEval 的服务级信号筛选重新污染。
+                candidates = preferred if has_signal_columns else candidates
+                if not candidates:
+                    continue
+            # Agent 可通过 metric_names/instance 精确展开；未过滤的文件仍
+            # 设上列数上限，避免把宽表整体复制进一次 Provider 结果。
+            selected = candidates[:400]
             series: dict[str, list[tuple[datetime, float]]] = defaultdict(list)
             with path.open(encoding="utf-8", errors="replace", newline="") as handle:
                 reader = csv.reader(handle)
@@ -644,3 +667,8 @@ def _entity_from_metric(name: str) -> str:
         if separator in name:
             return name.split(separator, 1)[0][:128]
     return name.split("_", 1)[0][:128]
+
+
+def _is_signal_metric(name: str) -> bool:
+    """识别 RCAEval 适配器中的服务级信号列，排除原始容器噪声。"""
+    return bool(_SIGNAL_METRIC_PATTERN.search(name))

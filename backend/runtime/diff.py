@@ -171,6 +171,7 @@ class FrozenCandidate(_FrozenModel):
     supporting_evidence_ids: list[SafeId] = Field(default_factory=list, max_length=512)
     contradicting_evidence_ids: list[SafeId] = Field(default_factory=list, max_length=512)
     affected_entity: str | None = Field(default=None, max_length=128)
+    failure_class: str | None = Field(default=None, max_length=128)
     failure_mechanism: str | None = Field(default=None, max_length=256)
     onset_window_start: datetime | None = None
     onset_window_end: datetime | None = None
@@ -187,6 +188,7 @@ class FrozenCandidate(_FrozenModel):
             supporting_evidence_ids=self.supporting_evidence_ids,
             contradicting_evidence_ids=self.contradicting_evidence_ids,
             affected_entity=self.affected_entity,
+            failure_class=self.failure_class,
             failure_mechanism=self.failure_mechanism,
             onset_window_start=self.onset_window_start,
             onset_window_end=self.onset_window_end,
@@ -575,6 +577,7 @@ def freeze_business_projection(
                         "supporting_evidence_ids": item.supporting_evidence_ids,
                         "contradicting_evidence_ids": item.contradicting_evidence_ids,
                         "affected_entity": item.affected_entity,
+                        "failure_class": item.failure_class,
                         "failure_mechanism": item.failure_mechanism,
                         "onset_window_start": item.onset_window_start,
                         "onset_window_end": item.onset_window_end,
@@ -647,6 +650,7 @@ def freeze_business_projection(
                         "supporting_evidence_ids": item.supporting_evidence_ids,
                         "contradicting_evidence_ids": item.contradicting_evidence_ids,
                         "affected_entity": item.affected_entity,
+                        "failure_class": item.failure_class,
                         "failure_mechanism": item.failure_mechanism,
                         "onset_window_start": item.onset_window_start,
                         "onset_window_end": item.onset_window_end,
@@ -664,6 +668,7 @@ def freeze_business_projection(
                         "supporting_evidence_ids": item.supporting_evidence_ids,
                         "contradicting_evidence_ids": item.contradicting_evidence_ids,
                         "affected_entity": item.affected_entity,
+                        "failure_class": item.failure_class,
                         "failure_mechanism": item.failure_mechanism,
                         "onset_window_start": item.onset_window_start,
                         "onset_window_end": item.onset_window_end,
@@ -903,6 +908,7 @@ class RuntimeDiffService:
                 "rank": item.rank,
                 "confidence": item.confidence,
                 "affected_entity": item.affected_entity,
+                "failure_class": item.failure_class,
                 "failure_mechanism": item.failure_mechanism,
                 "onset_window_start": (
                     item.onset_window_start.isoformat()

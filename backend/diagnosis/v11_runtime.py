@@ -232,6 +232,14 @@ class InvestigatorCandidateDraft(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     affected_entity: str = Field(min_length=1, max_length=128)
+    failure_class: str = Field(
+        min_length=1,
+        max_length=128,
+        description=(
+            "Short stable failure classification directly supported by the evidence; "
+            "do not put an explanatory sentence here."
+        ),
+    )
     failure_mechanism: str = Field(min_length=1, max_length=256)
     supporting_evidence_ids: list[Annotated[str, Field(min_length=1, max_length=128)]] = Field(
         min_length=1, max_length=32
@@ -1016,7 +1024,7 @@ def _structured_output_retry_feedback(output_type: type[BaseModel]) -> str:
         )
     if output_type in {V11SingleControlOutput, InvestigatorCandidateOutput}:
         return (
-            f"{common} Return only candidates with affected_entity, "
+            f"{common} Return only candidates with affected_entity, failure_class, "
             "failure_mechanism, supporting_evidence_ids, and optional "
             "contradicting_evidence_ids. Cite only committed usable evidence IDs; "
             "when cited evidence has scope_entity_ids, affected_entity must "
@@ -1029,15 +1037,13 @@ def _structured_output_retry_feedback(output_type: type[BaseModel]) -> str:
             f"{common} Cite only committed usable evidence IDs available to this "
             "investigator. Do not emit candidate IDs, ranks, runtime IDs, review "
             "fields, or finding references. Every candidate must include a "
-            "non-empty affected_entity, a "
-            "non-empty failure_mechanism, and at least one supporting usable "
+            "non-empty affected_entity, a non-empty failure_class, a non-empty "
+            "failure_mechanism, and at least one supporting usable "
             "evidence ID. A non-gap finding must cite at least one usable evidence "
             "ID. If no candidate meets these requirements, return no candidates. "
-            "When the evidence supports a service-level failure symptom but not "
-            "a confirmed causal root cause, emit a bounded candidate with an "
-            "explicitly unresolved observed mechanism and keep the uncertainty "
-            "in the finding. Do not emit a candidate without an affected service "
-            "and usable evidence."
+            "If the specific mechanism remains unresolved after bounded queries, "
+            "return no candidate. Do not emit a candidate without an affected "
+            "service, failure_class, and usable evidence."
         )
     return common
 
@@ -2676,8 +2682,8 @@ class V11Runtime:
                     "task": _investigator_task_projection(task),
                     "agent_instance_id": instance_id,
                     "round": round_number,
-                    "tool_manifest": list(manifest) if not evidence_digest else [],
-                    "selected_skills": selected_skills if not evidence_digest else [],
+                    "tool_manifest": list(manifest),
+                    "selected_skills": selected_skills,
                     "own_committed_evidence_ids": [
                         item.id for item in evidence_digest
                     ],
@@ -2695,11 +2701,9 @@ class V11Runtime:
                 prompt=prompt,
                 output_type=output_type,
                 context=model_context,
-                tools=(
-                    session.tools_for(instance_id, round_number)
-                    if not evidence_digest
-                    else []
-                ),
+                # 首轮也保留完整只读工具面：初始 digest 只是有界锚点，不能
+                # 代替 Investigator 对关键区分信号的主动查询。
+                tools=session.tools_for(instance_id, round_number),
                 # 并发 Investigator 必须让 reservation 根据剩余槽位均分；传入
                 # 整笔剩余预算会让第一个请求独占余量，后续请求被误判 quota。
                 remaining_token_budget=None,
@@ -2938,6 +2942,7 @@ class V11Runtime:
         return RootCauseCandidate(
             cause_type=getattr(draft, "cause_type", None),
             affected_entity=draft.affected_entity,
+            failure_class=draft.failure_class,
             failure_mechanism=draft.failure_mechanism,
             summary=summary,
             rank=1,
@@ -3806,16 +3811,35 @@ class V11Runtime:
                 "incident": _live_incident_prompt_projection(event),
                 "task": _live_task_prompt_projection(task),
                 "evidence": [_live_evidence_prompt_projection(item) for item in evidence],
+                "tool_manifest": list(manifest),
+                "tool_contracts": [
+                    {
+                        "name": name,
+                        "description": self.tool_registry.get(name).description,
+                    }
+                    for name in manifest
+                ],
+                "skills": [_skill_projection(skill) for skill in self.skills],
                 "rule": (
-                    "Use only the committed evidence below. Return zero or one candidate. "
+                    "Use the committed evidence below as an initial digest; it is not "
+                    "exhaustive. Use the supplied read-only tools when the digest does "
+                    "not distinguish the affected entity or failure mechanism, and "
+                    "cite every query result used by the candidate. Return zero or one "
+                    "candidate. "
                     "Never invent evidence IDs or emit server fields such as id, rank, "
                     "runtime_run_id, review fields, or finding refs. A candidate needs "
-                    "non-empty affected_entity, failure_mechanism, and at least one "
+                    "non-empty affected_entity, failure_class, failure_mechanism, "
+                    "and at least one "
                     "supporting_evidence_ids value from the evidence; affected_entity "
                     "must match every cited scope_entity_ids value. Cite every directly "
-                    "relevant evidence ID. If only a symptom is supported, state the "
-                    "symptom and say the causal mechanism is unresolved; do not infer "
-                    "a cause. Return no candidate when no observation is supported."
+                    "relevant evidence ID. failure_class must be the shortest stable "
+                    "classification phrase directly supported by the evidence; keep "
+                    "explanation in failure_mechanism. Keep failure_mechanism a concise, specific "
+                    "mechanism or signal-family phrase, not a generic degradation "
+                    "summary. Do not append likely or unresolved wording when a bounded "
+                    "query directly identifies the mechanism. If the mechanism remains "
+                    "undetermined after the available read-only queries, return no "
+                    "candidate instead of publishing a symptom as a root cause."
                 ),
             }
             return json.dumps(redact_value(payload), ensure_ascii=False, sort_keys=True)
@@ -3825,22 +3849,16 @@ class V11Runtime:
             "task": _investigator_task_projection(task),
             "agent_instance_id": instance_id,
             "round": task.analysis_round,
-            "tool_manifest": list(manifest) if not has_committed_evidence else [],
+            "tool_manifest": list(manifest),
             "tool_contracts": [
                 {
                     "name": name,
                     "description": self.tool_registry.get(name).description,
                 }
                 for name in manifest
-            ]
-            if not has_committed_evidence
-            else [],
-            "skills": (
-                [_skill_projection(skill) for skill in self.skills]
-                if not has_committed_evidence
-                else []
-            ),
-            "selected_skills": selected_skills if not has_committed_evidence else [],
+            ],
+            "skills": [_skill_projection(skill) for skill in self.skills],
+            "selected_skills": selected_skills,
             "own_committed_evidence": [
                 _evidence_projection(item) for item in evidence
             ],
@@ -3859,15 +3877,17 @@ class V11Runtime:
                 "candidate evidence fields. When cited evidence has "
                 "scope_entity_ids, affected_entity must exactly match an entity "
                 "in every cited evidence scope. Every candidate must include a "
-                "non-empty affected_entity, a non-empty failure_mechanism, and "
+                "non-empty affected_entity, a non-empty failure_class, a non-empty "
+                "failure_mechanism, and "
                 "at least one supporting usable evidence ID. Cite every directly "
                 "relevant committed evidence ID for the candidate, not just the "
-                "first signal. If evidence supports only an observed symptom, "
-                "write that symptom and explicitly say the causal mechanism is "
-                "unresolved; do not write likely, indicates, leak, pressure, or "
-                "causing unless the evidence directly supports that claim. If no "
-                "candidate observation is supported, return an empty candidates "
-                "list."
+                "first signal. failure_class must be the shortest stable classification "
+                "phrase directly supported by the evidence; keep explanation in "
+                "failure_mechanism. Use read-only tools to close a material information "
+                "gap before concluding. failure_mechanism must be a concise, "
+                "specific mechanism or signal-family phrase supported by the cited "
+                "evidence, not a generic symptom paragraph. If the mechanism remains "
+                "unresolved after bounded queries, return an empty candidates list."
                 if has_committed_evidence
                 else "Do not use sibling drafts or invent evidence IDs. Do not "
                 "emit candidate IDs, ranks, runtime IDs, review fields, or "
@@ -3875,11 +3895,14 @@ class V11Runtime:
                 "candidate evidence fields. When cited evidence has "
                 "scope_entity_ids, affected_entity must exactly match an entity "
                 "in every cited evidence scope. Every candidate must include a "
-                "non-empty affected_entity, a non-empty failure_mechanism, and "
-                "at least one supporting usable evidence ID. If the causal "
-                "mechanism is unresolved but a service-level failure symptom is "
-                "supported, state that observed symptom and the unresolved cause "
-                "in failure_mechanism; otherwise emit no candidate."
+                "non-empty affected_entity, a non-empty failure_class, a non-empty "
+                "failure_mechanism, and "
+                "at least one supporting usable evidence ID. failure_class must be "
+                "the shortest stable classification phrase directly supported by "
+                "the evidence; keep explanation in failure_mechanism. Use read-only tools "
+                "to close a material information gap before concluding. If the "
+                "specific mechanism remains unresolved after bounded queries, emit "
+                "no candidate."
             ),
         }
         return json.dumps(redact_value(payload), ensure_ascii=False, sort_keys=True)
@@ -3920,9 +3943,10 @@ class V11Runtime:
                     "only accept, reject, or inconclusive and exactly seven named checks: "
                     "temporal, topology, mechanism, blast_radius, symptom_vs_cause, "
                     "counterevidence, alternatives. A pass or fail check needs one "
-                    "committed evidence ID and no gap; unknown needs a short gap. A "
-                    "symptom candidate may be accepted when its observation is directly "
-                    "supported even if the deeper cause is unresolved. Emit only the "
+                    "committed evidence ID and no gap; unknown needs a short gap. Do "
+                    "not accept a candidate that only restates a symptom or says the "
+                    "mechanism is unresolved; accept only when the cited evidence "
+                    "supports a specific mechanism. Emit only the "
                     "declared candidate_ref, verdict, and check name/status/evidence_ids/gap; "
                     "do not emit IDs, summaries, tasks, or extra fields."
                 ),
@@ -3961,10 +3985,9 @@ class V11Runtime:
                 "inconclusive; emit seven named causal checks and only committed "
                 "evidence IDs. Do not request needs_evidence or tasks in this "
                 "bounded review; use inconclusive when evidence is insufficient. "
-                "Accept a symptom-level candidate when its stated observation is "
-                "directly supported by committed evidence, even if the deeper "
-                "causal mechanism remains unresolved; use inconclusive only when "
-                "the candidate's stated observation itself is unsupported. "
+                "Do not accept a symptom-level candidate when the deeper causal "
+                "mechanism remains unresolved; use inconclusive or reject until "
+                "the cited evidence supports a specific mechanism. "
                 "For every check, pass or fail requires one committed evidence ID "
                 "and no gap; unknown requires a short gap. Emit only check name, "
                 "status, evidence_ids, and gap; do not emit summaries, top-level "

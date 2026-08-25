@@ -12,6 +12,12 @@ from backend.diagnosis.agents_runtime import (
     AgentsRcaRuntimeResult,
     ConflictReviewOutcome,
 )
+from backend.diagnosis.context import (
+    DiagnosisContext,
+    SpecialistResult,
+    provider_status_to_specialist_status,
+)
+from backend.diagnosis.coordinator import AGENT_NAMES_BY_PROVIDER
 from backend.diagnosis.evidence_validation import (
     EvidenceContractError,
     validate_hypotheses,
@@ -395,7 +401,44 @@ class DiagnosisPhaseExecutor:
 
     async def _v11_evidence_collection(self, state: _DiagnosisState) -> PhaseOutput:
         """V11 先持久化只读证据，再让 Agent 生成诊断候选。"""
-        return await self.evidence_collection(state, record_legacy_execution=False)
+        # 隔离测试和最小 Runtime 宿主可能没有 V11 Runtime；此时只能跳过，
+        # 不能回退到 legacy coordinator，否则 V11 会悄悄重新走旧诊断链路。
+        if not hasattr(self._orchestrator, "v11_runtime"):
+            return await self._v11_pass(state)
+        providers = getattr(self._orchestrator, "providers", None)
+        if providers is None:
+            raise RuntimeError("V11 evidence collection requires a provider registry")
+        provider_results = await providers.collect_results_async(
+            state.event,
+            max_parallel_steps=self._max_parallel_steps_per_run,
+            check_execution=state.check_execution,
+            parallel_limit=self._parallel_limit,
+        )
+        specialist_results = [
+            SpecialistResult(
+                agent_name=AGENT_NAMES_BY_PROVIDER.get(
+                    str(result.provider), f"{result.provider}Analyst"
+                ),
+                status=provider_status_to_specialist_status(result.status),
+                evidence_items=result.evidence_items,
+                summary=(
+                    f"{result.provider} provider returned "
+                    f"{len(result.evidence_items)} evidence item(s)"
+                ),
+                errors=[result.error_message] if result.error_message else [],
+                duration_ms=result.duration_ms,
+            )
+            for result in provider_results
+        ]
+        context = DiagnosisContext(
+            event=state.event,
+            evidence=providers.evidence_from_results(provider_results),
+            provider_results=provider_results,
+            specialist_results=specialist_results,
+        )
+        return await self._persist_evidence_context(
+            state, context, record_legacy_execution=False
+        )
 
     async def _v11_report_generation(self, state: _DiagnosisState) -> PhaseOutput:
         """把 V11 review 投影为报告和 candidate-owned 只读建议。"""
@@ -537,13 +580,24 @@ class DiagnosisPhaseExecutor:
     async def evidence_collection(
         self, state: _DiagnosisState, *, record_legacy_execution: bool = True
     ) -> PhaseOutput:
-        record, safe_event = self._required(state)
         context = await self._orchestrator.coordinator.collect_async(
             state.event,
             max_parallel_steps=self._max_parallel_steps_per_run,
             check_execution=state.check_execution,
             parallel_limit=self._parallel_limit,
         )
+        return await self._persist_evidence_context(
+            state, context, record_legacy_execution=record_legacy_execution
+        )
+
+    async def _persist_evidence_context(
+        self,
+        state: _DiagnosisState,
+        context: DiagnosisContext,
+        *,
+        record_legacy_execution: bool,
+    ) -> PhaseOutput:
+        record, safe_event = self._required(state)
         state.hit_fault("provider_before_commit")
         runtime_run_id = state.runtime_run_id
 
