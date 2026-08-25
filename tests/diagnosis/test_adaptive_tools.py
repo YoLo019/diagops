@@ -828,6 +828,19 @@ def test_model_behavior_error_is_retryable_invalid_output():
     )
 
 
+def test_openai_api_timeout_is_retryable_model_transport_noise():
+    import httpx
+    import openai
+
+    from backend.diagnosis.adaptive_tools import retryable_failure_category
+
+    exc = openai.APITimeoutError(
+        request=httpx.Request("POST", "https://endpoint.invalid/v1")
+    )
+
+    assert retryable_failure_category(exc) == FailureCategory.TIMEOUT
+
+
 @pytest.mark.anyio
 async def test_retry_coordinator_retries_model_behavior_error_once():
     from agents.exceptions import ModelBehaviorError

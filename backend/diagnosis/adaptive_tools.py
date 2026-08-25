@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from agents import FunctionTool
 from agents.exceptions import ModelBehaviorError
-from openai import APIConnectionError, RateLimitError
+from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
 from pydantic import BaseModel, ValidationError
 
 from backend.domain.agent_findings import AgentName
@@ -135,7 +135,11 @@ def retryable_failure_category(exc: BaseException) -> FailureCategory | None:
     """
     if isinstance(exc, RateLimitError):
         return FailureCategory.RATE_LIMIT
+    if isinstance(exc, APITimeoutError):
+        return FailureCategory.TIMEOUT
     if isinstance(exc, APIConnectionError):
+        return FailureCategory.TRANSPORT
+    if isinstance(exc, APIStatusError) and getattr(exc, "status_code", 0) >= 500:
         return FailureCategory.TRANSPORT
     if isinstance(exc, ModelBehaviorError):
         # 模型/网关输出畸形（JSON 垃圾、schema 漂移）：重试一次换一批生成，

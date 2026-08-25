@@ -140,6 +140,29 @@ class V11RuntimeUnavailable(RuntimeError):
     """表示 V11 没有可用的模型调用入口。"""
 
 
+def _reject_control_text(value: Any) -> None:
+    if isinstance(value, str):
+        if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
+            raise ValueError("structured output contains unsafe text")
+        return
+    if isinstance(value, dict):
+        for item in value.values():
+            _reject_control_text(item)
+        return
+    if isinstance(value, (list, tuple, set, frozenset)):
+        for item in value:
+            _reject_control_text(item)
+
+
+class _SafeStructuredOutput(BaseModel):
+    """在模型边界先拒绝控制字符，让 retry 能修复而非终态失败。"""
+
+    @model_validator(mode="after")
+    def validate_safe_text(self):
+        _reject_control_text(self.model_dump(mode="python"))
+        return self
+
+
 class EvidenceScopeDraft(BaseModel):
     """模型可声明的有界证据范围；持久化时转换为普通 JSON map。"""
 
@@ -170,7 +193,7 @@ class LeadPlanningTaskDraft(LeadTaskDraft):
     analysis_round: Literal[1] = 1
 
 
-class LeadPlanningOutput(BaseModel):
+class LeadPlanningOutput(_SafeStructuredOutput):
     model_config = ConfigDict(extra="forbid")
 
     decision: LeadDecision
@@ -198,7 +221,7 @@ class LeadPlanningDecisionDraft(BaseModel):
     selected_skills: list[SelectedSkill] = Field(default_factory=list, max_length=4)
 
 
-class LeadPlanningCompactOutput(BaseModel):
+class LeadPlanningCompactOutput(_SafeStructuredOutput):
     """live Lead 的最小 planning 输出；不暴露 server-owned task 字段。"""
 
     model_config = ConfigDict(extra="forbid")
@@ -249,7 +272,7 @@ class InvestigatorCandidateDraft(BaseModel):
     ] = Field(default_factory=list, max_length=32)
 
 
-class InvestigatorOutput(BaseModel):
+class InvestigatorOutput(_SafeStructuredOutput):
     model_config = ConfigDict(extra="forbid")
 
     summary: str = Field(default="", max_length=512)
@@ -259,7 +282,7 @@ class InvestigatorOutput(BaseModel):
     )
 
 
-class InvestigatorCandidateOutput(BaseModel):
+class InvestigatorCandidateOutput(_SafeStructuredOutput):
     """已有完整证据时使用的紧凑候选输出契约。"""
 
     model_config = ConfigDict(extra="forbid")
@@ -269,7 +292,7 @@ class InvestigatorCandidateOutput(BaseModel):
     )
 
 
-class V11SingleControlOutput(BaseModel):
+class V11SingleControlOutput(_SafeStructuredOutput):
     """Single control 的最小诊断输出；planning/task 由服务端预注册。"""
 
     model_config = ConfigDict(extra="forbid")
@@ -298,7 +321,7 @@ class CriticAssessmentDraft(BaseModel):
     summary: str = Field(min_length=1, max_length=512)
 
 
-class CriticOutput(BaseModel):
+class CriticOutput(_SafeStructuredOutput):
     model_config = ConfigDict(extra="forbid")
 
     summary: str = Field(default="", max_length=512)
@@ -344,7 +367,7 @@ class CriticCompactAssessmentDraft(BaseModel):
     checks: list[CriticCompactCausalCheck] = Field(min_length=7, max_length=7)
 
 
-class CriticCompactOutput(BaseModel):
+class CriticCompactOutput(_SafeStructuredOutput):
     """已有完整证据时使用的有界 Critic 输出。"""
 
     model_config = ConfigDict(extra="forbid")
@@ -354,7 +377,7 @@ class CriticCompactOutput(BaseModel):
     )
 
 
-class LeadAdjudicationOutput(BaseModel):
+class LeadAdjudicationOutput(_SafeStructuredOutput):
     model_config = ConfigDict(extra="forbid")
 
     decision: LeadDecision
@@ -928,6 +951,13 @@ def _investigator_failure_audit(exc: BaseException) -> tuple[str, FailureCategor
             f"investigator output invalid: {audit_code[:256]}",
             FailureCategory.INVALID_OUTPUT,
         )
+    provider_category = retryable_failure_category(exc)
+    if provider_category in {
+        FailureCategory.TIMEOUT,
+        FailureCategory.RATE_LIMIT,
+        FailureCategory.TRANSPORT,
+    }:
+        return f"investigator {provider_category.value}", provider_category
     code_by_message = {
         "model token budget exhausted": (
             "model_token_budget_exhausted",
@@ -965,6 +995,13 @@ def _critic_failure_audit(exc: BaseException) -> tuple[str, FailureCategory]:
             f"critic output invalid: {audit_code[:256]}",
             FailureCategory.INVALID_OUTPUT,
         )
+    provider_category = retryable_failure_category(exc)
+    if provider_category in {
+        FailureCategory.TIMEOUT,
+        FailureCategory.RATE_LIMIT,
+        FailureCategory.TRANSPORT,
+    }:
+        return f"critic {provider_category.value}", provider_category
     message = str(exc)
     if "candidate reference" in message:
         return "critic candidate reference rejected", FailureCategory.INVALID_REFERENCE
@@ -987,7 +1024,8 @@ def _structured_output_retry_feedback(output_type: type[BaseModel]) -> str:
         "The previous structured response was rejected. Return a new response "
         "that satisfies the declared JSON schema exactly: output one JSON object, "
         "use the declared enum values, respect every list bound, and add no extra "
-        "fields. Do not return markdown or explain the correction."
+        "fields. Keep every text value on one printable line; do not emit control "
+        "characters or line breaks. Do not return markdown or explain the correction."
     )
     if output_type is LeadPlanningCompactOutput:
         return (
@@ -1848,37 +1886,67 @@ class V11Runtime:
                 if self.turn is None and len(review.candidates) <= self.max_investigators
                 else CriticOutput
             )
-            turn = await self._call_model(
-                actor=ExecutionActor.CRITIC.value,
-                prompt=self._critic_prompt(
-                    repository, investigation_id, event, review, round_number=1
-                ),
-                output_type=output_type,
-                context=self._critic_context(
-                    repository, investigation_id, review, round_number=1
-                ),
-                tools=[],
-                remaining_token_budget=self._remaining_token_budget,
-                remaining_tool_budget=remaining_tool_budget,
-                repository=repository,
-                investigation_id=investigation_id,
-                task_id=f"critic-review-{self.runtime_run_id}",
-                step_kind=ExecutionStepKind.CRITIC_REVIEW,
-                analysis_round=1,
+            critic_prompt = self._critic_prompt(
+                repository, investigation_id, event, review, round_number=1
             )
-            output = self._parse_output(turn.output, output_type)
-            assessments = self._normalize_assessments(
-                output.assessments,
-                candidate_ids={item.id for item in review.candidates},
-                runtime_run_id=self.runtime_run_id or "",
-                review_round=1,
-                usable_evidence_ids={
-                    item.id
-                    for item in repository.get(investigation_id).evidence
-                    if item.status in {EvidenceStatus.SUCCESS, EvidenceStatus.PARTIAL}
-                    and item.runtime_run_id == self.runtime_run_id
-                },
+            critic_context = self._critic_context(
+                repository, investigation_id, review, round_number=1
             )
+            candidate_ids = {item.id for item in review.candidates}
+            usable_evidence_ids = {
+                item.id
+                for item in repository.get(investigation_id).evidence
+                if item.status in {EvidenceStatus.SUCCESS, EvidenceStatus.PARTIAL}
+                and item.runtime_run_id == self.runtime_run_id
+            }
+            # Critic 的引用错误是可纠正的模型合同错误：给一次带白名单的
+            # correction turn，避免把整个 15-case side 交给 case-level retry。
+            for critic_validation_attempt in range(2):
+                turn = await self._call_model(
+                    actor=ExecutionActor.CRITIC.value,
+                    prompt=critic_prompt,
+                    output_type=output_type,
+                    context=critic_context,
+                    tools=[],
+                    remaining_token_budget=self._remaining_token_budget,
+                    remaining_tool_budget=remaining_tool_budget,
+                    repository=repository,
+                    investigation_id=investigation_id,
+                    task_id=f"critic-review-{self.runtime_run_id}",
+                    step_kind=ExecutionStepKind.CRITIC_REVIEW,
+                    analysis_round=1,
+                )
+                output = self._parse_output(turn.output, output_type)
+                try:
+                    assessments = self._normalize_assessments(
+                        output.assessments,
+                        candidate_ids=candidate_ids,
+                        runtime_run_id=self.runtime_run_id or "",
+                        review_round=1,
+                        usable_evidence_ids=usable_evidence_ids,
+                    )
+                    break
+                except V11RuntimeContractError as exc:
+                    message = str(exc)
+                    recoverable_reference_error = (
+                        "critic candidate reference is invalid" in message
+                        or "critic assessment evidence reference is invalid" in message
+                    )
+                    if (
+                        critic_validation_attempt == 0
+                        and recoverable_reference_error
+                    ):
+                        critic_prompt = (
+                            f"{critic_prompt}\n\n"
+                            "Correction: the previous response used a server-owned "
+                            "reference outside the committed whitelist. Use only "
+                            f"these candidate_ref values: {sorted(candidate_ids)}. "
+                            f"Use only these evidence_ids values: {sorted(usable_evidence_ids)}. "
+                            "If a check has no usable supporting evidence, return "
+                            "unknown with a named gap and an empty evidence_ids list."
+                        )
+                        continue
+                    raise
             tasks, supplemental_task_id_map = self._supplemental_tasks(
                 output,
                 assessments,
@@ -3917,7 +3985,12 @@ class V11Runtime:
         round_number: int,
     ) -> str:
         findings = repository.list_agent_findings(investigation_id)
-        evidence = _critic_evidence(review, findings, repository.get(investigation_id).evidence)
+        evidence = _usable_critic_evidence(
+            review,
+            findings,
+            repository.get(investigation_id).evidence,
+            runtime_run_id=self.runtime_run_id,
+        )
         compact_output = self.turn is None and len(review.candidates) <= self.max_investigators
         if compact_output:
             payload = {
@@ -3938,6 +4011,7 @@ class V11Runtime:
                 "evidence": [
                     _live_evidence_prompt_projection(item) for item in evidence
                 ],
+                "allowed_evidence_ids": [item.id for item in evidence],
                 "rule": (
                     "Assess every candidate exactly once using its candidate_ref. Return "
                     "only accept, reject, or inconclusive and exactly seven named checks: "
@@ -3948,7 +4022,9 @@ class V11Runtime:
                     "mechanism is unresolved; accept only when the cited evidence "
                     "supports a specific mechanism. Emit only the "
                     "declared candidate_ref, verdict, and check name/status/evidence_ids/gap; "
-                    "do not emit IDs, summaries, tasks, or extra fields."
+                    "do not emit IDs, summaries, tasks, or extra fields. Every "
+                    "evidence_ids value must be copied exactly from allowed_evidence_ids; "
+                    "when no allowed evidence supports a check, use unknown with a gap."
                 ),
             }
             return json.dumps(redact_value(payload), ensure_ascii=False, sort_keys=True)
@@ -3971,6 +4047,7 @@ class V11Runtime:
             ],
             "findings": [item.model_dump(mode="json") for item in findings],
             "evidence": [_evidence_projection(item) for item in evidence],
+            "allowed_evidence_ids": [item.id for item in evidence],
             "prior_assessments": [
                 {
                     "candidate_ref": item.candidate_id,
@@ -3992,12 +4069,15 @@ class V11Runtime:
                 "and no gap; unknown requires a short gap. Emit only check name, "
                 "status, evidence_ids, and gap; do not emit summaries, top-level "
                 "evidence arrays, gap, or supplemental_task_ids. Never return "
-                "server assessment IDs or candidate_id."
+                "server assessment IDs or candidate_id. Every evidence_ids value "
+                "must be copied exactly from allowed_evidence_ids; when no allowed "
+                "evidence supports a check, use unknown with a gap."
                 if compact_output
                 else "Use candidate_ref exactly as provided. Return verdict, seven "
                 "named causal checks, and only committed evidence IDs; never "
                 "return server assessment IDs or candidate_id. Unknown requires "
-                "a named gap."
+                "a named gap. Every evidence_ids value must be copied exactly from "
+                "allowed_evidence_ids."
             ),
         }
         return json.dumps(redact_value(payload), ensure_ascii=False, sort_keys=True)
@@ -4011,11 +4091,17 @@ class V11Runtime:
         round_number: int,
     ) -> dict[str, Any]:
         findings = repository.list_agent_findings(investigation_id)
-        evidence = _critic_evidence(review, findings, repository.get(investigation_id).evidence)
+        evidence = _usable_critic_evidence(
+            review,
+            findings,
+            repository.get(investigation_id).evidence,
+            runtime_run_id=self.runtime_run_id,
+        )
         return {
             "round": round_number,
             "candidate_refs": [item.id for item in review.candidates],
             "evidence_ids": [item.id for item in evidence],
+            "allowed_evidence_ids": [item.id for item in evidence],
             "tools": [],
         }
 
@@ -5362,6 +5448,24 @@ def _critic_evidence(
         return evidence_items
     selected = [item for item in evidence_items if item.id in referenced_ids]
     return selected or evidence_items
+
+
+def _usable_critic_evidence(
+    review: CoordinationReview,
+    findings: Iterable[AgentFinding],
+    evidence: Iterable[EvidenceItem],
+    *,
+    runtime_run_id: str | None,
+) -> list[EvidenceItem]:
+    selected = _critic_evidence(review, findings, evidence)
+    if runtime_run_id is None:
+        return selected
+    return [
+        item
+        for item in selected
+        if item.status in {EvidenceStatus.SUCCESS, EvidenceStatus.PARTIAL}
+        and item.runtime_run_id == runtime_run_id
+    ]
 
 
 def _skill_projection(skill: DiagnosticSkill) -> dict[str, Any]:

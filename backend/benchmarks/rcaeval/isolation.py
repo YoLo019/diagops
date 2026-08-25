@@ -8,7 +8,8 @@
 
 时序契约：evaluator 启动器只接受「已冻结」的 prediction bundle——调用方必须
 提供冻结时记录的 bundle 哈希，启动前逐文件复核，任何冻结后改动都会 fail
-closed；标签包只以只读方式打开并记录其 manifest 哈希。
+closed；prediction runtime 在 pair 首侧逐文件复核并由 custodian receipt 绑定，
+后续侧只复核 manifest 身份；标签包只以只读方式打开并记录其 manifest 哈希。
 """
 
 from __future__ import annotations
@@ -122,6 +123,7 @@ def build_prediction_launch(
     runtime_package: Path,
     predictions_dir: Path,
     argv: list[str],
+    verified_runtime_manifest_hash: str | None = None,
     forbidden_locators: tuple[str, ...] = (),
     env_allowlist: tuple[str, ...] = PREDICTION_ENV_ALLOWLIST,
     provider_roots: tuple[Path, ...] = (),
@@ -130,7 +132,11 @@ def build_prediction_launch(
 ) -> PredictionLaunchSpec:
     """构造 prediction 进程启动规格；任何标签/scorer 定位符或穿越即 fail closed。"""
     runtime_root = _resolve_no_traversal(runtime_package, "runtime package")
-    manifest_text = _verify_runtime_package(runtime_root)
+    manifest_text = (
+        _read_verified_manifest_text(runtime_root, verified_runtime_manifest_hash)
+        if verified_runtime_manifest_hash is not None
+        else _verify_runtime_package(runtime_root)
+    )
     _reject_argv_traversal(argv)
     predictions_root = _resolve_no_traversal(predictions_dir, "predictions directory")
     if _is_within(predictions_root, runtime_root):
@@ -253,15 +259,43 @@ def _is_within(path: Path, root: Path) -> bool:
 
 
 def _verify_runtime_package(runtime_root: Path) -> str:
+    manifest_text = _read_verified_manifest_text(runtime_root, None)
+    _verify_checksums(runtime_root)
+    return manifest_text
+
+
+def _read_verified_manifest_text(
+    runtime_root: Path, expected_manifest_hash: str | None
+) -> str:
+    """只读 manifest 身份；完整 package checksum 由 pair 首侧负责。"""
+    if expected_manifest_hash is not None and not _SHA256_PATTERN.fullmatch(
+        expected_manifest_hash
+    ):
+        raise ValueError("expected runtime manifest hash must be a sha256 hex digest")
     manifest_path = runtime_root / "manifest.json"
     if not manifest_path.is_file():
         raise ValueError("runtime package has no manifest.json; fail closed")
-    manifest_text = manifest_path.read_bytes().decode("utf-8")
-    manifest = RuntimeManifest.model_validate(json.loads(manifest_text))
+    reject_reparse_path(manifest_path, "runtime manifest")
+    try:
+        manifest_text = manifest_path.read_bytes().decode("utf-8")
+        manifest = RuntimeManifest.model_validate(json.loads(manifest_text))
+    except (OSError, UnicodeDecodeError, TypeError, ValueError) as exc:
+        raise ValueError("runtime manifest is unreadable; fail closed") from exc
     if _manifest_hash(manifest) != manifest.manifest_hash:
         raise ValueError("runtime manifest hash mismatch: package root validation fails closed")
-    _verify_checksums(runtime_root)
+    if expected_manifest_hash is not None and manifest.manifest_hash != expected_manifest_hash:
+        raise ValueError("runtime manifest differs from the verified pair identity")
     return manifest_text
+
+
+def read_runtime_manifest(
+    runtime_root: Path, expected_manifest_hash: str | None = None
+) -> RuntimeManifest:
+    """读取已绑定的 runtime manifest，不遍历 package 内容。"""
+    resolved = _resolve_no_traversal(runtime_root, "runtime package")
+    return RuntimeManifest.model_validate_json(
+        _read_verified_manifest_text(resolved, expected_manifest_hash)
+    )
 
 
 def verify_runtime_package(runtime_root: Path) -> RuntimeManifest:

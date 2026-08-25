@@ -140,6 +140,7 @@ def main() -> None:
 
 def _add_prediction_arguments(parser) -> None:
     parser.add_argument("--runtime", type=Path, required=True)
+    parser.add_argument("--runtime-manifest-hash")
     parser.add_argument("--partition", choices=("ob30", "ss15", "tt90"), required=True)
     parser.add_argument(
         "--configuration",
@@ -270,6 +271,7 @@ def _preflight_launch_construction(arguments) -> None:
 def _launch_predict(arguments) -> None:
     from backend.benchmarks.rcaeval.isolation import (
         build_prediction_launch,
+        read_runtime_manifest,
         verify_runtime_package,
     )
     from backend.benchmarks.rcaeval.ledger import (
@@ -294,14 +296,29 @@ def _launch_predict(arguments) -> None:
     canonical_root = ledger.canonical_root
     if not _same_path(arguments.runtime, canonical_root / "runtime"):
         raise ValueError("runtime package is not the custodian-frozen runtime root")
-    if verify_runtime_package(arguments.runtime).manifest_hash != ledger.runtime_manifest_hash:
-        raise ValueError("runtime manifest differs from the custodian root manifest")
     if not _same_path(arguments.label_package, canonical_root / "labels"):
         raise ValueError("label package is not the custodian-frozen label root")
     if not _within(pair_root, canonical_root):
         raise ValueError("pair root must stay inside the canonical custodian root")
     pair_root.mkdir(parents=True, exist_ok=True)
+    arguments._verified_runtime_manifest_hash = ledger.runtime_manifest_hash
     pair_identity = _prediction_pair_identity(arguments)
+    receipt_valid = ledger.has_valid_runtime_verification_receipt(
+        pair_root,
+        pair_identity=pair_identity,
+        runtime_root=arguments.runtime,
+        runtime_manifest_hash=ledger.runtime_manifest_hash,
+    )
+    if receipt_valid:
+        runtime_manifest = read_runtime_manifest(
+            arguments.runtime, ledger.runtime_manifest_hash
+        )
+    else:
+        # 26.6 GB runtime 的逐文件校验只在 pair 首侧执行；后续侧复用
+        # custodian seal receipt，并只重读小 manifest 做身份确认。
+        runtime_manifest = verify_runtime_package(arguments.runtime)
+        if runtime_manifest.manifest_hash != ledger.runtime_manifest_hash:
+            raise ValueError("runtime manifest differs from the custodian root manifest")
     sides = _formal_configuration_names(arguments.partition)
     # 离线预检必须在 reauthorize 之前：token 一次性，本地可判的失败
     # （capability 准入、API key、构造守卫）不允许再空烧 epoch（epoch-5/6 教训）。
@@ -317,6 +334,12 @@ def _launch_predict(arguments) -> None:
         prediction_set_hash=pair_identity,
         expected_sides=sides,
     )
+    ledger.ensure_runtime_verification_receipt(
+        pair_root,
+        pair_identity=pair_identity,
+        runtime_root=arguments.runtime,
+        runtime_manifest_hash=runtime_manifest.manifest_hash,
+    )
     prediction_lease = ledger.record_side_started(arguments.configuration, str(output))
     try:
         ledger.heartbeat(prediction_lease)
@@ -328,6 +351,8 @@ def _launch_predict(arguments) -> None:
             str(_repository_root()),
             "--runtime",
             str(arguments.runtime),
+            "--runtime-manifest-hash",
+            runtime_manifest.manifest_hash,
             "--partition",
             arguments.partition,
             "--configuration",
@@ -356,6 +381,7 @@ def _launch_predict(arguments) -> None:
             runtime_package=arguments.runtime,
             predictions_dir=output,
             argv=child_argv,
+            verified_runtime_manifest_hash=runtime_manifest.manifest_hash,
             forbidden_locators=(
                 str(arguments.label_package.resolve()),
                 str(evaluator_path),
@@ -398,7 +424,10 @@ def _predict(arguments) -> None:
     if os.environ.get("RCAEVAL_PREDICTION_CHILD") != "1":
         raise ValueError("predict worker must be invoked through launch-predict")
     # 重依赖仅属于可信 prediction 进程；evaluator 模块不会导入这条闭包。
-    from backend.benchmarks.rcaeval.isolation import verify_runtime_package
+    from backend.benchmarks.rcaeval.isolation import (
+        read_runtime_manifest,
+        verify_runtime_package,
+    )
     from backend.benchmarks.rcaeval.models import (
         EXPECTED_PARTITION_COUNTS,
         EndpointCapabilityIdentity,
@@ -424,7 +453,11 @@ def _predict(arguments) -> None:
         validate_capability_for_prediction,
     )
 
-    manifest = verify_runtime_package(arguments.runtime)
+    manifest = (
+        read_runtime_manifest(arguments.runtime, arguments.runtime_manifest_hash)
+        if arguments.runtime_manifest_hash
+        else verify_runtime_package(arguments.runtime)
+    )
     artifact = read_capability_artifact(arguments.capability_artifact)
     canonical_endpoint = canonicalize_endpoint(arguments.base_url)
     validate_capability_for_prediction(
@@ -778,17 +811,23 @@ def _formal_configuration_names(partition: str) -> tuple[str, ...]:
     return ("single_intended",)
 
 
-def _prediction_pair_identity(arguments) -> str:
+def _prediction_pair_identity(
+    arguments, *, runtime_manifest_hash: str | None = None
+) -> str:
     from backend.benchmarks.rcaeval.isolation import verify_runtime_package
     from backend.services.model_capability import read_capability_artifact
     from backend.services.source_identity import resolve_source_identity
 
-    manifest = verify_runtime_package(arguments.runtime)
+    manifest_hash = runtime_manifest_hash or getattr(
+        arguments, "_verified_runtime_manifest_hash", None
+    )
+    if manifest_hash is None:
+        manifest_hash = verify_runtime_package(arguments.runtime).manifest_hash
     capability = read_capability_artifact(arguments.capability_artifact)
     source_identity = resolve_source_identity(_repository_root())
     payload = {
         "partition": arguments.partition,
-        "runtime_manifest_hash": manifest.manifest_hash,
+        "runtime_manifest_hash": manifest_hash,
         "capability_artifact_hash": capability.artifact_hash,
         "source_revision": source_identity.revision,
         "source_manifest_hash": source_identity.manifest_hash,

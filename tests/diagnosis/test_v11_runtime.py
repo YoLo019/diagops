@@ -339,6 +339,23 @@ def test_single_control_schema_contains_only_diagnostic_candidate_fields():
     } & set(candidate["properties"])
 
 
+def test_structured_outputs_reject_control_text_at_model_boundary():
+    with pytest.raises(ValidationError, match="unsafe text"):
+        V11SingleControlOutput.model_validate(
+            {
+                "candidates": [
+                    {
+                        "affected_entity": "checkout-service",
+                        "failure_class": "cpu saturation",
+                        "failure_mechanism": "line one\nline two",
+                        "supporting_evidence_ids": ["ev-metric"],
+                        "contradicting_evidence_ids": [],
+                    }
+                ]
+            }
+        )
+
+
 def test_lead_prompt_exposes_exact_skill_identifiers():
     prompt = json.loads(
         V11Runtime(model=None, turn=object())._lead_prompt(
@@ -4346,6 +4363,8 @@ async def test_v11_critic_and_lead_authority_complete_without_semantic_validatio
         }
         for name in CausalCheckName
     ]
+    invalid_checks = [dict(item) for item in checks]
+    invalid_checks[0]["evidence_ids"] = ["ev-not-committed"]
     turns = [
         {
             "decision": {
@@ -4383,11 +4402,22 @@ async def test_v11_critic_and_lead_authority_complete_without_semantic_validatio
             ],
         },
         {
-                "summary": "all seven checks are complete",
-                "assessments": [
-                    {
-                        "candidate_ref": "candidate-ref-from-server",
-                        "verdict": CriticVerdict.ACCEPT.value,
+            "summary": "the first response used an invalid evidence ID",
+            "assessments": [
+                {
+                    "candidate_ref": "candidate-ref-from-server",
+                    "verdict": CriticVerdict.ACCEPT.value,
+                    "checks": invalid_checks,
+                    "summary": "accepted by the seven mechanical checks",
+                }
+            ],
+        },
+        {
+            "summary": "the corrected response uses committed evidence",
+            "assessments": [
+                {
+                    "candidate_ref": "candidate-ref-from-server",
+                    "verdict": CriticVerdict.ACCEPT.value,
                     "checks": checks,
                     "summary": "accepted by the seven mechanical checks",
                 }
@@ -4433,7 +4463,8 @@ async def test_v11_critic_and_lead_authority_complete_without_semantic_validatio
     )
     candidate_id = repository.get_coordination_review(record.id).candidates[0].id
     turns[0]["assessments"][0]["candidate_ref"] = candidate_id
-    turns[1]["decision"]["candidate_ids"] = [candidate_id]
+    turns[1]["assessments"][0]["candidate_ref"] = candidate_id
+    turns[2]["decision"]["candidate_ids"] = [candidate_id]
     review = await runtime.critic_review(
         repository=repository,
         investigation_id=record.id,

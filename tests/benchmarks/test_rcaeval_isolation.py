@@ -449,6 +449,67 @@ def test_prediction_launch_happy_path(packages):
     assert Path(spec.cwd) == packages["runtime"].resolve()
 
 
+def test_prediction_launch_reuses_verified_runtime_manifest(packages, monkeypatch):
+    from backend.benchmarks.rcaeval import isolation
+
+    monkeypatch.setattr(
+        isolation,
+        "_verify_runtime_package",
+        lambda _root: pytest.fail("full runtime verification repeated"),
+    )
+
+    spec = build_prediction_launch(
+        runtime_package=packages["runtime"],
+        predictions_dir=packages["predictions"],
+        argv=_argv(),
+        verified_runtime_manifest_hash=_runtime_hash(),
+        environ={},
+    )
+
+    assert spec.argv == tuple(_argv())
+
+
+def test_runtime_verification_receipt_is_pair_bound(packages):
+    from backend.benchmarks.rcaeval.ledger import (
+        CustodianPairLedger,
+        create_custodian_manifest,
+    )
+
+    custodian_manifest = create_custodian_manifest(
+        packages["runtime"].parent,
+        runtime_manifest_hash=_runtime_hash(),
+        label_manifest_hash="c" * 64,
+    )
+    pair_root = packages["runtime"].parent / "pair"
+    pair_root.mkdir()
+    ledger = CustodianPairLedger.from_manifest(custodian_manifest)
+    ledger.initialize(
+        partition="ob30",
+        prediction_set_hash="a" * 64,
+        expected_sides=("single_intended",),
+    )
+
+    ledger.ensure_runtime_verification_receipt(
+        pair_root,
+        pair_identity="a" * 64,
+        runtime_root=packages["runtime"],
+        runtime_manifest_hash=_runtime_hash(),
+    )
+
+    assert ledger.has_valid_runtime_verification_receipt(
+        pair_root,
+        pair_identity="a" * 64,
+        runtime_root=packages["runtime"],
+        runtime_manifest_hash=_runtime_hash(),
+    )
+    assert not ledger.has_valid_runtime_verification_receipt(
+        pair_root,
+        pair_identity="b" * 64,
+        runtime_root=packages["runtime"],
+        runtime_manifest_hash=_runtime_hash(),
+    )
+
+
 def test_prediction_launch_rejects_label_locator_in_argv(packages):
     argv = _argv() + ["--extra", str(packages["labels"])]
     with pytest.raises(ValueError, match="label/scorer locator"):

@@ -66,6 +66,7 @@ class CustodianRootManifest:
 
 SEAL_KEY_FILENAME = "pair-ledger-seal.key"
 SEAL_ANCHOR_FILENAME = "pair-ledger-seal.anchor"
+RUNTIME_VERIFICATION_DIRNAME = ".runtime-verification"
 
 
 def create_custodian_manifest(
@@ -930,6 +931,118 @@ class CustodianPairLedger:
                 (row["reauthorization_epoch"] + 1, token_hash, authorized_evaluation_identity),
             )
             self._commit(connection, "reauthorize")
+
+    def has_valid_runtime_verification_receipt(
+        self,
+        pair_root: Path,
+        *,
+        pair_identity: str,
+        runtime_root: Path,
+        runtime_manifest_hash: str,
+    ) -> bool:
+        """检查首侧完整 runtime 校验留下的 custodian seal receipt。"""
+        receipt_path, payload = self._runtime_verification_receipt(
+            pair_root,
+            pair_identity=pair_identity,
+            runtime_root=runtime_root,
+            runtime_manifest_hash=runtime_manifest_hash,
+        )
+        if not receipt_path.exists():
+            return False
+        self._assert_runtime_verification_receipt(receipt_path, payload)
+        return True
+
+    def ensure_runtime_verification_receipt(
+        self,
+        pair_root: Path,
+        *,
+        pair_identity: str,
+        runtime_root: Path,
+        runtime_manifest_hash: str,
+    ) -> None:
+        """原子创建或复核 pair 级 runtime 完整校验凭证。"""
+        receipt_path, payload = self._runtime_verification_receipt(
+            pair_root,
+            pair_identity=pair_identity,
+            runtime_root=runtime_root,
+            runtime_manifest_hash=runtime_manifest_hash,
+        )
+        encoded = _canonical_json(
+            {
+                **payload,
+                "mac": self._runtime_verification_mac(payload),
+            }
+        )
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        reject_reparse_path(receipt_path.parent, "runtime verification receipt directory")
+        try:
+            with receipt_path.open("x", encoding="utf-8", newline="") as handle:
+                handle.write(encoded)
+        except FileExistsError:
+            self._assert_runtime_verification_receipt(receipt_path, payload)
+
+    def _runtime_verification_receipt(
+        self,
+        pair_root: Path,
+        *,
+        pair_identity: str,
+        runtime_root: Path,
+        runtime_manifest_hash: str,
+    ) -> tuple[Path, dict[str, str]]:
+        if self._manifest is None:
+            raise ValueError("custodian manifest is required")
+        if not _valid_hash(pair_identity) or not _valid_hash(runtime_manifest_hash):
+            raise ValueError("runtime verification identities must be sha256")
+        pair_locator = canonical_locator(Path(pair_root))
+        pair_path = Path(pair_locator)
+        canonical_root = Path(self._manifest.canonical_root)
+        if pair_path != canonical_root and canonical_root not in pair_path.parents:
+            raise ValueError("runtime verification receipt escapes custodian root")
+        runtime_locator = canonical_creation_locator(Path(runtime_root))
+        payload = {
+            "schema_version": "rcaeval-runtime-verification-v1",
+            "pair_identity": pair_identity,
+            "runtime_locator": runtime_locator,
+            "runtime_manifest_hash": runtime_manifest_hash,
+            "custodian_manifest_hash": self._manifest.manifest_hash,
+        }
+        receipt_path = (
+            canonical_root
+            / RUNTIME_VERIFICATION_DIRNAME
+            / f"{pair_identity}.json"
+        )
+        return receipt_path, payload
+
+    def _runtime_verification_mac(self, payload: dict[str, str]) -> str:
+        if self._seal_key is None:
+            raise ValueError("custodian seal key is required")
+        return hmac.new(
+            self._seal_key,
+            _canonical_json(payload).encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+
+    def _assert_runtime_verification_receipt(
+        self, path: Path, expected_payload: dict[str, str]
+    ) -> None:
+        reject_reparse_path(path, "runtime verification receipt")
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError) as exc:
+            raise ValueError("runtime verification receipt is unreadable") from exc
+        if not isinstance(payload, dict) or set(payload) != {
+            *expected_payload,
+            "mac",
+        }:
+            raise ValueError("runtime verification receipt schema is invalid")
+        actual_payload = {key: payload[key] for key in expected_payload}
+        if actual_payload != expected_payload:
+            raise ValueError("runtime verification receipt identity differs")
+        mac = payload["mac"]
+        if not isinstance(mac, str) or not _valid_hash(mac):
+            raise ValueError("runtime verification receipt MAC is invalid")
+        if not hmac.compare_digest(mac, self._runtime_verification_mac(expected_payload)):
+            raise ValueError("runtime verification receipt MAC is invalid")
 
     def snapshot(self) -> dict[str, object]:
         with self._connection() as connection:
