@@ -570,8 +570,11 @@ def _evaluate(arguments) -> None:
         raise ValueError("evaluation output must stay outside the frozen prediction root")
     evaluation_path = output_dir / "evaluation.json"
     ledger = CustodianPairLedger.from_manifest(arguments.custodian_manifest)
-    if not _same_path(prediction_root.parent, ledger.canonical_root):
-        raise ValueError("prediction root is not mapped to the canonical custodian root")
+    # prediction side 可以按 epoch 放在 custodian root 的受控子目录中；
+    # 只要解析后的输入根仍在 canonical root 内，就与 launch-predict 的
+    # 路径契约一致，同时继续拒绝 root 外的 evaluator 输入。
+    if not _within(prediction_root, ledger.canonical_root):
+        raise ValueError("prediction root is not mapped inside the canonical custodian root")
     if not _same_path(arguments.label_package, ledger.canonical_root / "labels"):
         raise ValueError("label package is not the custodian-frozen label root")
     if arguments.runtime_manifest_hash != ledger.runtime_manifest_hash:
