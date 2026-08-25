@@ -4002,6 +4002,14 @@ async def test_v11_validator_failure_is_failed_without_inconclusive_fallback():
     assert review.critic_assessments == []
     assert review.diagnostic_status is None
     assert repository.get(record.id).status == InvestigationStatus.FAILED
+    validation_failures = [
+        item
+        for item in repository.list_executions(record.id)
+        if item.step_kind == ExecutionStepKind.RESULT_VALIDATION
+        and item.status == AgentExecutionStatus.FAILED
+    ]
+    assert validation_failures
+    assert validation_failures[0].error_message == "result validation correction failed"
 
 
 @pytest.mark.anyio

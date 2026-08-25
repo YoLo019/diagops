@@ -17,6 +17,7 @@ from backend.domain.runtime import (
     RuntimeAttempt,
     RuntimeAttemptStatus,
     RuntimeEventType,
+    RuntimeFailureCategory,
     RuntimePhase,
     RuntimeResumeState,
     RuntimeRun,
@@ -985,6 +986,43 @@ async def test_phase_failure_emits_safe_phase_and_run_failure_events() -> None:
     assert "secret" not in str(
         [item.safe_payload for item in store.list_events(run.id)]
     ).lower()
+    await coordinator.shutdown()
+
+
+@pytest.mark.anyio
+async def test_persistence_failure_is_terminalized_when_terminal_write_recovers() -> None:
+    store, run, executor, _coordinator = _services()
+
+    class FailingPhaseOnceWriter(RuntimeWriter):
+        def __init__(self, runtime_store) -> None:
+            super().__init__(runtime_store)
+            self.failed = False
+
+        async def submit(self, commit):
+            if not self.failed:
+                self.failed = True
+                raise RuntimePersistenceError("phase write failed")
+            return await super().submit(commit)
+
+    writer = FailingPhaseOnceWriter(store)
+    coordinator = RuntimeCoordinator(
+        store=store,
+        writer=writer,
+        phase_executor=executor,
+        heartbeat_seconds=1,
+    )
+
+    with pytest.raises(RuntimePersistenceError, match="phase write failed"):
+        await coordinator.execute(run.id, owner="worker-a")
+
+    persisted = store.get_run(run.id)
+    assert persisted.status == RuntimeRunStatus.FAILED
+    assert persisted.failure_category == RuntimeFailureCategory.PERSISTENCE_FAILURE
+    assert store.list_attempts(run.id)[0].status == RuntimeAttemptStatus.FAILED
+    assert [item.event_type.value for item in store.list_events(run.id)[-2:]] == [
+        "phase.failed",
+        "run.failed",
+    ]
     await coordinator.shutdown()
 
 

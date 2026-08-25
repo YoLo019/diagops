@@ -92,6 +92,7 @@ from backend.reports.generator import ReportGenerator
 from backend.runtime.coordinator import RuntimeCoordinator
 from backend.runtime.phase_executor import DiagnosisPhaseExecutor
 from backend.runtime.sqlite_store import SQLiteRuntimeStore
+from backend.runtime.store import RuntimePersistenceError
 from backend.runtime.telemetry import RuntimeTelemetry
 from backend.runtime.writer import RuntimeWriter
 from backend.safety.redaction import (
@@ -642,7 +643,17 @@ class RcaEvalCaseRunner:
         try:
             asyncio.run(execute())
         except Exception as exc:
-            failure_category = type(exc).__name__
+            diagnostic = _safe_exception_diagnostic(exc, Path.cwd())
+            logger.warning(
+                "rcaeval case runtime failed exception_type=%s location=%s",
+                diagnostic["exception_type"],
+                diagnostic["location"],
+            )
+            failure_category = (
+                RuntimeFailureCategory.PERSISTENCE_FAILURE.value
+                if isinstance(exc, RuntimePersistenceError)
+                else type(exc).__name__
+            )
         persisted = self.runtime_store.get_run(run.id)
         _assert_persisted_contract(persisted, contract)
         record = self.repository.get(record.id)

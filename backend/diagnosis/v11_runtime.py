@@ -2445,7 +2445,9 @@ class V11Runtime:
                     repository,
                     investigation_id,
                     review,
-                    message="result validation rejected",
+                    # Validator code 是服务端固定枚举；写入它能区分结构性
+                    # output 违约的根因，同时不暴露模型原文或敏感 payload。
+                    message=f"result validation rejected: {first_error.code}",
                     failure_category=self._result_validation_failure_category(
                         first_error.code
                     ),

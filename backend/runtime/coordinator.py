@@ -506,6 +506,25 @@ class RuntimeCoordinator:
             # 持久化层需要用稳定错误包装事务异常；仅当根因是故障注入时，仍按进程崩溃语义处理。
             if isinstance(exc.__cause__, RuntimeInjectedFault):
                 return self.store.get_run(run.id)
+            # 真实持久化失败不是可发布的运行结果。先用同一 lease 尝试写入
+            # 明确的 failed 终态；如果数据库仍不可写，则保留 running 交给
+            # lease audit/recovery，不能用本地异常覆盖 durable 状态。
+            try:
+                await self._fail_if_owned(
+                    run.id,
+                    attempt,
+                    owner,
+                    run.lease_version,
+                    phase=active_phase,
+                    failure_category=RuntimeFailureCategory.PERSISTENCE_FAILURE,
+                )
+            except (RuntimeConflict, RuntimeLeaseLost, RuntimePersistenceError):
+                logger.warning(
+                    "runtime persistence failure could not be terminalized "
+                    "run_id=%s exception_type=%s",
+                    run.id,
+                    type(exc).__name__,
+                )
             raise
         except Exception as exc:
             self.fault_injector.hit("parallel_session_failure")
