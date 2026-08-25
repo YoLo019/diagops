@@ -55,6 +55,24 @@ def test_redact_value_handles_nested_and_split_key_values() -> None:
     assert "secret" not in json.dumps(redacted)
 
 
+def test_redact_text_masks_log_identifiers_and_payment_fields() -> None:
+    value = (
+        'Posting Customer: {"username":"Alice","longNum":"4111111111111111",'
+        '"expires":"1232","ccv":"123","customer id":"cust-42"} '
+        "session id: sess-42 user=usr-42"
+    )
+
+    redacted = redact_text(value)
+
+    assert "Alice" not in redacted
+    assert "4111111111111111" not in redacted
+    assert "1232" not in redacted
+    assert "123" not in redacted
+    assert "cust-42" not in redacted
+    assert "sess-42" not in redacted
+    assert "usr-42" not in redacted
+
+
 def test_escape_markdown_redacts_and_neutralizes_injected_heading() -> None:
     rendered = escape_markdown("## forged\nBearer hidden-token *bold*")
 

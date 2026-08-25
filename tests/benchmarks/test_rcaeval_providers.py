@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from backend.benchmarks.rcaeval.providers import (
     RcaEvalLogProvider,
     RcaEvalMetricProvider,
@@ -83,6 +85,34 @@ def test_log_duplicate_rows_have_distinct_evidence_ids(tmp_path):
     assert len(ids) == 2
     assert len(ids) == len(set(ids))
     assert len(validate_investigation_evidence([result]).supporting_evidence) == 2
+
+
+def test_log_evidence_persists_only_redacted_message(tmp_path):
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    (case_dir / "telemetry-00.csv").write_text(
+        "time,container_name,message,level\n"
+        '2026-01-01T00:00:00Z,checkout,"Posting Customer: '
+        '{""username"":""Alice"",""longNum"":""4111111111111111"",'
+        '""ccv"":""123""}",info\n',
+        encoding="utf-8",
+    )
+    provider = RcaEvalLogProvider(
+        case_dir,
+        case_id="re2-aaaaaaaaaaaaaaaa",
+        runtime_manifest_hash="a" * 64,
+        evidence_namespace="run-1",
+    )
+
+    item = provider.collect(
+        incident_event_for_case(case_dir, "re2-aaaaaaaaaaaaaaaa")
+    ).evidence_items[0]
+
+    persisted = json.dumps(item.model_dump(mode="json"), ensure_ascii=False)
+    assert "Alice" not in persisted
+    assert "4111111111111111" not in persisted
+    assert "ccv" in persisted
+    assert "[REDACTED]" in persisted
 
 
 def test_metric_duplicate_series_from_distinct_files_have_distinct_evidence_ids(tmp_path):

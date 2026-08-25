@@ -34,6 +34,7 @@ from backend.domain.tool_queries import (
     TraceQuery,
 )
 from backend.providers.results import ProviderResult, ProviderStatus
+from backend.safety.redaction import assert_safe_value, redact_text, redact_value
 
 ADAPTER_VERSION = "rcaeval-re2-v1"
 _MAX_SCAN_ROWS = 250_000
@@ -109,14 +110,18 @@ class _RcaEvalProvider:
         entity_ids: list[str] | None = None,
         identity: str | None = None,
     ) -> EvidenceItem:
+        safe_summary = redact_text(summary)[:512]
+        safe_payload = redact_value(payload)
+        assert_safe_value(safe_summary)
+        assert_safe_value(safe_payload)
         canonical = json.dumps(
             [
                 self.evidence_namespace,
                 self.case_id,
                 provider.value,
                 kind.value,
-                summary,
-                payload,
+                safe_summary,
+                safe_payload,
                 identity,
             ],
             ensure_ascii=False,
@@ -128,8 +133,8 @@ class _RcaEvalProvider:
             provider=provider,
             kind=kind,
             timestamp=timestamp,
-            summary=summary[:512],
-            payload=payload,
+            summary=safe_summary,
+            payload=safe_payload,
             scope=EvidenceScope(entity_ids=entity_ids or [], observed_at=timestamp),
             provenance=EvidenceProvenance(
                 source_class=EvidenceSourceClass.PUBLIC_DATASET,

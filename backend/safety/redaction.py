@@ -12,7 +12,13 @@ _ModelT = TypeVar("_ModelT", bound=BaseModel)
 
 _BEARER = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
 _ASSIGNMENT = re.compile(
-    r'''(?i)\b([a-z][a-z0-9_-]*)(\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;]+)'''
+    r'''(?i)\b([a-z][a-z0-9_-]*)(\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;{}]+)'''
+)
+_JSON_ASSIGNMENT = re.compile(
+    r'''(?i)(["']?([a-z][a-z0-9_-]*)["']?\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;{}]+)'''
+)
+_IDENTIFIER_ASSIGNMENT = re.compile(
+    r'''(?i)\b((?:(?:account|customer|session|user)\s+id|user)["']?\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;{}]+)'''
 )
 _ENCODED_ASSIGNMENT = re.compile(
     r"(?i)\b([a-z][a-z0-9_-]*)(?:%3a|%3d)(?:%22|%27)?[^\s,;&]+"
@@ -38,20 +44,38 @@ _MARKDOWN = re.compile(r"([\\`*_{}\[\]()#+!|>])")
 _CAMEL_LOWER_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _CAMEL_ACRONYM_BOUNDARY = re.compile(r"(?<=[A-Z])(?=[A-Z][a-z])")
 _SENSITIVE_SEGMENTS = {
+    "ccv",
+    "cvv",
     "authorization",
+    "expires",
     "cookie",
     "credential",
     "credentials",
+    "firstname",
+    "lastname",
     "passwd",
     "password",
     "path",
+    "phone",
     "pwd",
     "secret",
     "token",
     "uri",
+    "username",
     "url",
 }
-_SENSITIVE_COMPOUNDS = {"accesskey", "apikey", "baseurl", "privatekey"}
+_SENSITIVE_COMPOUNDS = {
+    "accesskey",
+    "accountid",
+    "apikey",
+    "baseurl",
+    "cardnumber",
+    "customerid",
+    "longnum",
+    "privatekey",
+    "sessionid",
+    "userid",
+}
 
 _FAILURE_LABELS = {
     "authentication": "provider authentication failed",
@@ -105,6 +129,8 @@ def redact_text(value: str) -> str:
     value = _PROVIDER_CREDENTIAL.sub("[REDACTED]", value)
     value = _BEARER.sub("[REDACTED]", value)
     value = _ENCODED_ASSIGNMENT.sub(_redact_encoded_assignment, value)
+    value = _IDENTIFIER_ASSIGNMENT.sub(_redact_identifier_assignment, value)
+    value = _JSON_ASSIGNMENT.sub(_redact_json_assignment, value)
     value = _ASSIGNMENT.sub(_redact_assignment, value)
     value = _EMAIL.sub("[REDACTED_EMAIL]", value)
     value = _WINDOWS_PATH.sub("[REDACTED_PATH]", value)
@@ -171,6 +197,16 @@ def _redact_assignment(match: re.Match[str]) -> str:
     if not _is_sensitive_key(key):
         return match.group(0)
     return f"{key}{match.group(2)}[REDACTED]"
+
+
+def _redact_identifier_assignment(match: re.Match[str]) -> str:
+    return f"{match.group(1)}[REDACTED]"
+
+
+def _redact_json_assignment(match: re.Match[str]) -> str:
+    if not _is_sensitive_key(match.group(2)):
+        return match.group(0)
+    return f"{match.group(1)}[REDACTED]"
 
 
 def _redact_encoded_assignment(match: re.Match[str]) -> str:
