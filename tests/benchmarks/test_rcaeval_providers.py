@@ -110,3 +110,40 @@ def test_metric_duplicate_series_from_distinct_files_have_distinct_evidence_ids(
     assert len(ids) == 2
     assert len(ids) == len(set(ids))
     assert len(validate_investigation_evidence([result]).supporting_evidence) == 2
+
+
+def test_retry_namespace_keeps_rcaeval_evidence_ids_globally_unique(tmp_path):
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    (case_dir / "telemetry-00.csv").write_text(
+        "time,container_name,message,level\n"
+        "2026-01-01T00:00:00Z,checkout,request failed,error\n",
+        encoding="utf-8",
+    )
+    event = incident_event_for_case(case_dir, "re2-aaaaaaaaaaaaaaaa")
+    first = RcaEvalLogProvider(
+        case_dir,
+        case_id="re2-aaaaaaaaaaaaaaaa",
+        runtime_manifest_hash="a" * 64,
+        evidence_namespace="run-1",
+    ).collect(event)
+    retry = RcaEvalLogProvider(
+        case_dir,
+        case_id="re2-aaaaaaaaaaaaaaaa",
+        runtime_manifest_hash="a" * 64,
+        evidence_namespace="run-2",
+    ).collect(event)
+
+    assert first.evidence_items[0].id != retry.evidence_items[0].id
+    assert (
+        first.evidence_items[0].id
+        == RcaEvalLogProvider(
+            case_dir,
+            case_id="re2-aaaaaaaaaaaaaaaa",
+            runtime_manifest_hash="a" * 64,
+            evidence_namespace="run-1",
+        )
+        .collect(event)
+        .evidence_items[0]
+        .id
+    )

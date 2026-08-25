@@ -111,6 +111,7 @@ class _RcaEvalProvider:
     ) -> EvidenceItem:
         canonical = json.dumps(
             [
+                self.evidence_namespace,
                 self.case_id,
                 provider.value,
                 kind.value,
