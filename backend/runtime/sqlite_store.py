@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
@@ -8,6 +10,7 @@ from pydantic import ValidationError
 from sqlalchemy import func, insert, or_, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
 
 from backend.db.models import InvestigationStatus
 from backend.db.schema import (
@@ -51,6 +54,28 @@ from backend.runtime.store import (
 from backend.safety.redaction import safe_failure
 
 logger = logging.getLogger(__name__)
+
+_SQLITE_PHASE_COMMIT_RETRY_DELAYS_SECONDS = (0.25, 0.75)
+
+
+def _is_transient_sqlite_write_error(error: BaseException) -> bool:
+    """只识别 SQLite 写锁瞬态错误，避免重试约束或数据完整性失败。"""
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (sqlite3.OperationalError, SQLAlchemyOperationalError)):
+            message = str(current).lower()
+            if "locked" in message or "busy" in message:
+                return True
+            if isinstance(current, SQLAlchemyOperationalError):
+                original = current.orig
+                if isinstance(original, sqlite3.OperationalError):
+                    original_message = str(original).lower()
+                    if "locked" in original_message or "busy" in original_message:
+                        return True
+        current = current.__cause__
+    return False
 
 
 class SQLiteRuntimeStore:
@@ -1319,6 +1344,23 @@ class SQLiteRuntimeStore:
             raise RuntimePersistenceError("failed to reserve V11 model turn") from exc
 
     def commit_phase(self, commit) -> RuntimeCheckpoint:
+        for retry_index, delay in enumerate(
+            _SQLITE_PHASE_COMMIT_RETRY_DELAYS_SECONDS,
+            start=1,
+        ):
+            try:
+                return self._commit_phase(commit)
+            except RuntimePersistenceError as exc:
+                if not _is_transient_sqlite_write_error(exc):
+                    raise
+                logger.warning(
+                    "sqlite phase commit deferred run_id=%s phase=%s "
+                    "retry=%s category=sqlite_busy",
+                    commit.run_id,
+                    commit.phase.value,
+                    retry_index,
+                )
+                time.sleep(delay)
         return self._commit_phase(commit)
 
     def _commit_phase(self, commit) -> RuntimeCheckpoint:

@@ -1,5 +1,6 @@
 import time
 from datetime import UTC, datetime, timedelta
+from sqlite3 import OperationalError as SQLiteOperationalError
 
 import pytest
 from sqlalchemy import event, select
@@ -19,6 +20,7 @@ from backend.runtime.sqlite_store import SQLiteRuntimeStore
 from backend.runtime.store import (
     RuntimeConflict,
     RuntimeLeaseLost,
+    RuntimePersistenceError,
     RuntimeTerminalCommit,
     RuntimeTerminalEvent,
 )
@@ -188,6 +190,49 @@ def test_phase_commit_rechecks_lease_after_expensive_projection(
     assert runtime_store.list_checkpoints(leased.id) == []
     assert runtime_store.get_run(leased.id).current_phase is None
     assert runtime_store.get_attempt(attempt.id).status == RuntimeAttemptStatus.RUNNING
+
+
+def test_phase_commit_retries_transient_sqlite_write_lock(
+    runtime_store, monkeypatch
+) -> None:
+    if not isinstance(runtime_store, SQLiteRuntimeStore):
+        return
+
+    from tests.runtime.test_memory_store import _leased_attempt
+
+    leased, attempt = _leased_attempt(runtime_store)
+    commit = PhaseCommit(
+        run_id=leased.id,
+        attempt_id=attempt.id,
+        lease_owner="worker-a",
+        lease_version=leased.lease_version,
+        phase=RuntimePhase.INTAKE,
+        business_mutation=BusinessMutation(investigation_id="inv-1"),
+        safe_payload={"status": "completed"},
+        resume_state=RuntimeResumeState(),
+    )
+    original_commit_phase = runtime_store._commit_phase
+    failures = 0
+
+    def flaky_commit_phase(current_commit):
+        nonlocal failures
+        if failures < 2:
+            failures += 1
+            try:
+                raise SQLiteOperationalError("database is locked")
+            except SQLiteOperationalError as exc:
+                raise RuntimePersistenceError(
+                    "sqlite phase commit rolled back"
+                ) from exc
+        return original_commit_phase(current_commit)
+
+    monkeypatch.setattr(runtime_store, "_commit_phase", flaky_commit_phase)
+    monkeypatch.setattr("backend.runtime.sqlite_store.time.sleep", lambda _delay: None)
+
+    checkpoint = runtime_store.commit_phase(commit)
+
+    assert failures == 2
+    assert checkpoint.completed_phase == RuntimePhase.INTAKE
 
 
 def test_terminal_commit_rechecks_lease_after_expensive_projection(
