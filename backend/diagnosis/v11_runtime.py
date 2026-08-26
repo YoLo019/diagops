@@ -4966,6 +4966,7 @@ class V11Runtime:
                             if (
                                 actor == ExecutionActor.INVESTIGATOR.value
                                 and step_kind == ExecutionStepKind.INVESTIGATOR_ANALYSIS
+                                and self.max_investigators > 1
                             ):
                                 sdk_turn_ceiling = min(
                                     sdk_turn_ceiling,
