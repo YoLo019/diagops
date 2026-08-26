@@ -2732,7 +2732,7 @@ class V11Runtime:
                 # 单个高分症状就把同一服务的区分信号或其它候选实体丢掉；
                 # 完整证据仍只保存在服务端，候选只能引用本次摘要中的 ID。
                 max_per_kind=2,
-                max_total=12,
+                max_total=4,
             )
             # live SDK 请求在已有证据时使用紧凑 Draft schema；注入 turn 仍保留
             # 完整 Investigator schema，以便 deterministic 测试覆盖 finding 合同。
@@ -3911,13 +3911,13 @@ class V11Runtime:
                     "relevant evidence ID. failure_class must be the shortest stable "
                     "classification phrase directly supported by the evidence. When a "
                     "cited item has signal_family, copy that exact value into "
-                    "failure_class; a scoped anomaly with signal_family is sufficient "
-                    "to classify an observed signal, but it is not by itself proof of "
-                    "root cause when several entity clusters are anomalous. First "
-                    "compare anomaly clusters by entity and signal family; do not "
-                    "choose the largest change score as root cause by itself. Use "
-                    "traces or dependency evidence to localize the faulty entity "
-                    "among correlated symptoms, and use logs to distinguish the "
+                    "failure_class; a directly scoped signal family is an "
+                    "evidence-backed mechanism classification. Do not suppress it "
+                    "merely because a deeper causal chain is unavailable. When several "
+                    "clusters are present, use entity scope and correlated signal "
+                    "families to choose the candidate rather than an unscoped amplitude "
+                    "alone. Use traces or dependency evidence when they provide a "
+                    "discriminating connection, and use logs to discriminate the "
                     "resource mechanism. Keep "
                     "explanation in failure_mechanism. Keep failure_mechanism a concise, specific "
                     "mechanism or signal-family phrase, not a generic degradation "
@@ -3969,12 +3969,14 @@ class V11Runtime:
                 "relevant committed evidence ID for the candidate, not just the "
                 "first signal. failure_class must be the shortest stable classification "
                 "phrase directly supported by the evidence. When a cited item has "
-                "signal_family, copy that exact value into failure_class; a scoped "
-                "anomaly with signal_family is sufficient to publish a candidate. "
-                "Compare anomaly clusters by entity and signal family before selecting "
-                "a root cause; do not choose the largest change score alone. Use traces "
-                "or dependency evidence to localize the faulty entity among correlated "
-                "symptoms, and logs to distinguish the resource mechanism. Keep "
+                "signal_family, copy that exact value into failure_class; a directly "
+                "scoped signal family is an evidence-backed mechanism classification. "
+                "Do not suppress it merely because a deeper causal chain is unavailable. "
+                "When several clusters are present, use entity scope and correlated "
+                "signal families to choose the candidate rather than an unscoped "
+                "amplitude alone. Use traces or dependency evidence when they provide a "
+                "discriminating connection, and use logs to discriminate the resource "
+                "mechanism. Keep "
                 "explanation in failure_mechanism. Use read-only tools to close a "
                 "material information gap before concluding. failure_mechanism must "
                 "be a concise, "
@@ -4043,16 +4045,18 @@ class V11Runtime:
                     "only accept, reject, or inconclusive and exactly seven named checks: "
                     "temporal, topology, mechanism, blast_radius, symptom_vs_cause, "
                     "counterevidence, alternatives. A pass or fail check needs one "
-                    "committed evidence ID and no gap; unknown needs a short gap. Do "
-                    "not accept a candidate that only restates a symptom or says the "
-                    "mechanism is unresolved; accept only when the cited evidence "
-                    "supports a specific mechanism. When several entity clusters are "
-                    "anomalous, compare their topology and temporal relationships "
-                    "before accepting the highest-amplitude symptom. A candidate "
-                    "whose failure_class "
-                    "copies a cited signal_family and whose scoped anomaly evidence "
-                    "matches is an evidence-backed classification, but the copied "
-                    "family alone is not sufficient root-cause localization. Emit only the "
+                    "committed evidence ID and no gap; unknown needs a short gap. A "
+                    "candidate with no scoped support or only a generic degradation "
+                    "paragraph is not acceptable. A candidate with a directly scoped "
+                    "signal family may pass the mechanism check even when deeper "
+                    "causality is not observable. A "
+                    "candidate whose failure_class copies a cited signal_family and "
+                    "whose scoped anomaly evidence matches is an evidence-backed "
+                    "mechanism classification. Deeper upstream causality is not "
+                    "required when the committed evidence does not expose it. When "
+                    "several clusters are anomalous, prefer the candidate with the "
+                    "clearest entity-scoped and correlated evidence, but do not reject "
+                    "a scoped candidate merely because another cluster also exists. Emit only the "
                     "declared candidate_ref, verdict, and check name/status/evidence_ids/gap; "
                     "do not emit IDs, summaries, tasks, or extra fields. Every "
                     "evidence_ids value must be copied exactly from allowed_evidence_ids; "
@@ -4095,14 +4099,14 @@ class V11Runtime:
                 "inconclusive; emit seven named causal checks and only committed "
                 "evidence IDs. Do not request needs_evidence or tasks in this "
                 "bounded review; use inconclusive when evidence is insufficient. "
-                "Do not accept a symptom-level candidate when the deeper causal "
-                "mechanism remains unresolved; use inconclusive or reject until "
-                "the cited evidence supports a specific mechanism. When several entity "
-                "clusters are anomalous, compare their topology and temporal "
-                "relationships before accepting the highest-amplitude symptom. A candidate whose "
-                "failure_class copies a cited signal_family and whose scoped anomaly "
-                "evidence matches is an evidence-backed classification, but the copied "
-                "family alone is not sufficient root-cause localization. "
+                "Do not accept a candidate with no scoped support or only a generic "
+                "degradation paragraph. A candidate whose failure_class copies a cited "
+                "signal_family and whose scoped anomaly evidence matches is an "
+                "evidence-backed mechanism classification. Deeper upstream causality is "
+                "not required when the committed evidence does not expose it. When "
+                "several clusters are anomalous, prefer the candidate with the clearest "
+                "entity-scoped and correlated evidence, but do not reject a scoped "
+                "candidate merely because another cluster also exists. "
                 "For every check, pass or fail requires one committed evidence ID "
                 "and no gap; unknown requires a short gap. Emit only check name, "
                 "status, evidence_ids, and gap; do not emit summaries, top-level "
@@ -5398,9 +5402,11 @@ def _select_evidence_digest(
         and _digest_entity(item) is not None
     ]
     if metric_items:
-        # 给 logs/traces/dependency 预留最多四个位置；若这类证据不存在，
-        # 后面的剩余指标会补齐预算。
-        metric_limit = max(1, max_total - min(4, max_total // 6))
+        # 给 logs/traces/dependency 至少预留一个位置；若这类证据不存在，
+        # 后面的剩余指标会补齐预算。小摘要也必须保留一个非指标锚点，
+        # 否则模型只能看到症状强度，无法利用日志或依赖关系区分机制。
+        non_metric_reserve = min(4, max(1, max_total // 6))
+        metric_limit = max(1, max_total - non_metric_reserve)
         selected = _select_entity_signal_evidence(metric_items, metric_limit)
         selected_ids = {item.id for item in selected}
         remaining = [item for item in usable if item.id not in selected_ids]

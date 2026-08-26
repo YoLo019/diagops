@@ -222,7 +222,7 @@ def _single_control_evidence_digest(evidence: list[Any]) -> list[dict[str, Any]]
         for item in _select_evidence_digest(
             evidence,
             max_per_kind=2,
-            max_total=12,
+            max_total=24,
         )
     ]
 
@@ -335,11 +335,13 @@ class SingleInvestigatorAgent(V11Runtime):
                 "classification phrase directly supported by the evidence; keep "
                 "explanation in failure_mechanism. "
                 "Use a focused query when the digest does not distinguish the "
-                "affected entity or mechanism. First compare anomaly clusters by "
-                "entity and signal family; do not choose the largest change score "
-                "as root cause by itself. Use traces or dependency evidence to "
-                "localize the faulty entity among correlated symptoms, and use "
-                "logs to distinguish the resource mechanism. Keep "
+                "affected entity or mechanism. A directly scoped signal family is "
+                "an evidence-backed mechanism classification; do not suppress it "
+                "merely because a deeper causal chain is unavailable. When several "
+                "clusters are present, use entity scope and correlated signal families "
+                "to choose the candidate rather than an unscoped amplitude alone. "
+                "Use traces or dependency evidence when they provide a discriminating "
+                "connection, and use logs to discriminate the resource mechanism. Keep "
                 "failure_mechanism concise and "
                 "specific rather than a generic symptom summary; if the mechanism "
                 "remains unresolved after bounded queries, return no candidate. "
