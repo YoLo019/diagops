@@ -200,7 +200,7 @@ def _single_control_evidence_digest(evidence: list[Any]) -> list[dict[str, Any]]
         for item in _select_evidence_digest(
             evidence,
             max_per_kind=2,
-            max_total=24,
+            max_total=12,
         )
     ]
 

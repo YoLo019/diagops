@@ -2725,7 +2725,7 @@ class V11Runtime:
                 # 单个高分症状就把同一服务的区分信号或其它候选实体丢掉；
                 # 完整证据仍只保存在服务端，候选只能引用本次摘要中的 ID。
                 max_per_kind=2,
-                max_total=24,
+                max_total=12,
             )
             # live SDK 请求在已有证据时使用紧凑 Draft schema；注入 turn 仍保留
             # 完整 Investigator schema，以便 deterministic 测试覆盖 finding 合同。
