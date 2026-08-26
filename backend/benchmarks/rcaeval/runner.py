@@ -148,8 +148,24 @@ def _is_candidate_rejection(execution: AgentExecution) -> bool:
 def _unresolved_case_failure_category(
     executions: list[AgentExecution],
 ) -> str | None:
-    """返回未被成功 retry 覆盖的 execution 失败类别。"""
+    """返回阻断案例发布的 execution 失败类别。
+
+    V11 允许 round-one 的单个 Investigator 失败：只要同一 run 仍有另一个
+    Investigator 完成，后续有效结论会以 ``partial`` 发布，失败 execution
+    继续留在 candidate lifecycle 审计中。Critic、Lead、validator 以及全员
+    Investigator 失败仍然 fail-closed。
+    """
     resolved_failure_ids = _resolved_execution_ids(executions)
+    completed_round_one_runs = {
+        execution.runtime_run_id
+        for execution in executions
+        if (
+            execution.status == AgentExecutionStatus.COMPLETED
+            and execution.step_kind == ExecutionStepKind.INVESTIGATOR_ANALYSIS
+            and execution.analysis_round == 1
+            and execution.runtime_run_id is not None
+        )
+    }
     categories: set[str] = set()
     category_map = {
         FailureCategory.INVALID_OUTPUT.value: RuntimeFailureCategory.OUTPUT_VALIDATION.value,
@@ -164,6 +180,12 @@ def _unresolved_case_failure_category(
         }:
             continue
         if execution.id in resolved_failure_ids or _is_candidate_rejection(execution):
+            continue
+        if (
+            execution.step_kind == ExecutionStepKind.INVESTIGATOR_ANALYSIS
+            and execution.analysis_round == 1
+            and execution.runtime_run_id in completed_round_one_runs
+        ):
             continue
         category = execution.failure_category.value
         categories.add(category_map.get(category, category))

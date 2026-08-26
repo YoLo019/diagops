@@ -109,6 +109,18 @@ def test_unresolved_case_failure_category_uses_only_live_execution_failures():
 
     assert _unresolved_case_failure_category([failed_transport]) == "transport"
 
+    other_investigator_completed = failed_transport.model_copy(
+        update={
+            "id": "exec-other-investigator-completed",
+            "task_id": "other-investigator-task-audit",
+            "status": AgentExecutionStatus.COMPLETED,
+            "failure_category": FailureCategory.NONE,
+        }
+    )
+    assert _unresolved_case_failure_category(
+        [failed_transport, other_investigator_completed]
+    ) is None
+
     recovered = failed_transport.model_copy(
         update={
             "id": "exec-transport-attempt-2",
