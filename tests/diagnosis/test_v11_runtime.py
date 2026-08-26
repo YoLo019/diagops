@@ -1617,6 +1617,47 @@ async def test_strict_output_tool_transport_configures_agent_finalization(monkey
 
 
 @pytest.mark.anyio
+async def test_v11_investigator_sdk_turn_ceiling_preserves_critic_slot(monkeypatch):
+    class StrictOutput(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+        value: str
+
+    captured: dict[str, int] = {}
+
+    async def fake_run(_agent, *_args, **kwargs):
+        captured["max_turns"] = kwargs["max_turns"]
+        return SimpleNamespace(
+            final_output=StrictOutput(value="ok"), raw_responses=[]
+        )
+
+    monkeypatch.setattr(v11_runtime_module, "_run_with_model_lifecycle", fake_run)
+    runtime = V11Runtime(
+        model=OpenAICompatibleChatCompletionsModel(
+            model="compat-model",
+            api_key="local-secret",
+            base_url="http://127.0.0.1:8000/v1",
+        ),
+        model_provider=ModelProvider.OPENAI_COMPATIBLE,
+        model_name="compat-model",
+        max_turns=8,
+    )
+
+    await runtime._call_model(
+        actor=ExecutionActor.INVESTIGATOR.value,
+        prompt="return a structured result",
+        output_type=StrictOutput,
+        context={"request": "bounded"},
+        tools=[],
+        remaining_token_budget=None,
+        remaining_tool_budget=8,
+        step_kind=ExecutionStepKind.INVESTIGATOR_ANALYSIS,
+    )
+
+    assert captured["max_turns"] == 2
+
+
+@pytest.mark.anyio
 async def test_strict_output_tool_transport_completes_real_sdk_tool_loop(monkeypatch):
     class StrictOutput(BaseModel):
         model_config = ConfigDict(extra="forbid")

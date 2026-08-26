@@ -131,6 +131,13 @@ _LIVE_INCONCLUSIVE_RESULT_VALIDATION_CODES = frozenset(
     }
 )
 
+# Multi 的 run-level turn budget 需要同时覆盖 Lead、最多三个首轮
+# Investigator 和 Critic。每个 Investigator 至多两次 SDK request（通常是
+# 一次工具调用前的请求和一次收口请求），才能在全局 8-turn 合同内为 Critic
+# 保留至少一个 turn；这只是更严格的 actor-level ceiling，不会增加或绕过
+# durable run budget。
+_INVESTIGATOR_SDK_TURN_CEILING = 2
+
 
 class V11RuntimeContractError(ValueError):
     """表示 Agent 输出违反 V11 的机械合同。"""
@@ -4952,6 +4959,14 @@ class V11Runtime:
                             if self._model_turn_budget_enabled:
                                 assert self._remaining_model_turns is not None
                                 sdk_turn_ceiling = self._remaining_model_turns
+                            if (
+                                actor == ExecutionActor.INVESTIGATOR.value
+                                and step_kind == ExecutionStepKind.INVESTIGATOR_ANALYSIS
+                            ):
+                                sdk_turn_ceiling = min(
+                                    sdk_turn_ceiling,
+                                    _INVESTIGATOR_SDK_TURN_CEILING,
+                                )
                             raw_result = await asyncio.wait_for(
                                 _run_with_model_lifecycle(
                                     agent,
