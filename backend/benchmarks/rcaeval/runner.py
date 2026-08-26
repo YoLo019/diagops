@@ -197,7 +197,11 @@ def _single_control_evidence_digest(evidence: list[Any]) -> list[dict[str, Any]]
     """按证据类型轮转提供小型、可引用的模型上下文摘要。"""
     return [
         redact_value(_evidence_projection(item))
-        for item in _select_evidence_digest(evidence)
+        for item in _select_evidence_digest(
+            evidence,
+            max_per_kind=2,
+            max_total=24,
+        )
     ]
 
 
@@ -309,7 +313,12 @@ class SingleInvestigatorAgent(V11Runtime):
                 "classification phrase directly supported by the evidence; keep "
                 "explanation in failure_mechanism. "
                 "Use a focused query when the digest does not distinguish the "
-                "affected entity or mechanism. Keep failure_mechanism concise and "
+                "affected entity or mechanism. First compare anomaly clusters by "
+                "entity and signal family; do not choose the largest change score "
+                "as root cause by itself. Use traces or dependency evidence to "
+                "localize the faulty entity among correlated symptoms, and use "
+                "logs to distinguish the resource mechanism. Keep "
+                "failure_mechanism concise and "
                 "specific rather than a generic symptom summary; if the mechanism "
                 "remains unresolved after bounded queries, return no candidate. "
                 "Do not emit server-owned IDs, ranks, runtime fields, review "

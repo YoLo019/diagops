@@ -64,6 +64,7 @@ def normalize_label(value: str) -> str:
 # canonical family，标签侧使用数据集的短 fault vocabulary。这里只接受固定、预先
 # 记录的别名，不根据某次模型最终文本做语义猜测。
 _RCA_EVAL_FAULT_ALIASES = {
+    "error": "loss",
     "memory": "mem",
     "disk io": "disk",
     "network corruption": "loss",

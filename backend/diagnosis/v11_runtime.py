@@ -81,7 +81,7 @@ from backend.domain.agent_plan import (
     SelectedSkill,
 )
 from backend.domain.events import IncidentEvent
-from backend.domain.evidence import EvidenceItem, EvidenceStatus
+from backend.domain.evidence import EvidenceItem, EvidenceKind, EvidenceStatus
 from backend.domain.hypotheses import CauseType
 from backend.domain.multi_agent import (
     AgentExecutionLayer,
@@ -2718,11 +2718,11 @@ class V11Runtime:
         try:
             evidence_digest = _select_evidence_digest(
                 seed_evidence,
-                # 每类保留两个有界锚点，避免只看到单个高分信号就把
-                # 同一服务的反证/影响指标误判为证据缺口；完整证据仍只
-                # 保存在服务端，且候选只能引用本次摘要中的 ID。
+                # 以实体为中心保留一组有限的 signal family，避免只看到
+                # 单个高分症状就把同一服务的区分信号或其它候选实体丢掉；
+                # 完整证据仍只保存在服务端，候选只能引用本次摘要中的 ID。
                 max_per_kind=2,
-                max_total=4,
+                max_total=24,
             )
             # live SDK 请求在已有证据时使用紧凑 Draft schema；注入 turn 仍保留
             # 完整 Investigator schema，以便 deterministic 测试覆盖 finding 合同。
@@ -3902,7 +3902,13 @@ class V11Runtime:
                     "classification phrase directly supported by the evidence. When a "
                     "cited item has signal_family, copy that exact value into "
                     "failure_class; a scoped anomaly with signal_family is sufficient "
-                    "to publish a candidate. Keep "
+                    "to classify an observed signal, but it is not by itself proof of "
+                    "root cause when several entity clusters are anomalous. First "
+                    "compare anomaly clusters by entity and signal family; do not "
+                    "choose the largest change score as root cause by itself. Use "
+                    "traces or dependency evidence to localize the faulty entity "
+                    "among correlated symptoms, and use logs to distinguish the "
+                    "resource mechanism. Keep "
                     "explanation in failure_mechanism. Keep failure_mechanism a concise, specific "
                     "mechanism or signal-family phrase, not a generic degradation "
                     "summary. Do not append likely or unresolved wording when a bounded "
@@ -3955,7 +3961,11 @@ class V11Runtime:
                 "phrase directly supported by the evidence. When a cited item has "
                 "signal_family, copy that exact value into failure_class; a scoped "
                 "anomaly with signal_family is sufficient to publish a candidate. "
-                "Keep explanation in failure_mechanism. Use read-only tools to close a "
+                "Compare anomaly clusters by entity and signal family before selecting "
+                "a root cause; do not choose the largest change score alone. Use traces "
+                "or dependency evidence to localize the faulty entity among correlated "
+                "symptoms, and logs to distinguish the resource mechanism. Keep "
+                "explanation in failure_mechanism. Use read-only tools to close a "
                 "material information gap before concluding. failure_mechanism must "
                 "be a concise, "
                 "specific mechanism or signal-family phrase supported by the cited "
@@ -4026,10 +4036,13 @@ class V11Runtime:
                     "committed evidence ID and no gap; unknown needs a short gap. Do "
                     "not accept a candidate that only restates a symptom or says the "
                     "mechanism is unresolved; accept only when the cited evidence "
-                    "supports a specific mechanism. A candidate whose failure_class "
+                    "supports a specific mechanism. When several entity clusters are "
+                    "anomalous, compare their topology and temporal relationships "
+                    "before accepting the highest-amplitude symptom. A candidate "
+                    "whose failure_class "
                     "copies a cited signal_family and whose scoped anomaly evidence "
-                    "matches is an evidence-backed classification, not an unsupported "
-                    "symptom. Emit only the "
+                    "matches is an evidence-backed classification, but the copied "
+                    "family alone is not sufficient root-cause localization. Emit only the "
                     "declared candidate_ref, verdict, and check name/status/evidence_ids/gap; "
                     "do not emit IDs, summaries, tasks, or extra fields. Every "
                     "evidence_ids value must be copied exactly from allowed_evidence_ids; "
@@ -4074,10 +4087,12 @@ class V11Runtime:
                 "bounded review; use inconclusive when evidence is insufficient. "
                 "Do not accept a symptom-level candidate when the deeper causal "
                 "mechanism remains unresolved; use inconclusive or reject until "
-                "the cited evidence supports a specific mechanism. A candidate whose "
+                "the cited evidence supports a specific mechanism. When several entity "
+                "clusters are anomalous, compare their topology and temporal "
+                "relationships before accepting the highest-amplitude symptom. A candidate whose "
                 "failure_class copies a cited signal_family and whose scoped anomaly "
-                "evidence matches is an evidence-backed classification, not an "
-                "unsupported symptom. "
+                "evidence matches is an evidence-backed classification, but the copied "
+                "family alone is not sufficient root-cause localization. "
                 "For every check, pass or fail requires one committed evidence ID "
                 "and no gap; unknown requires a short gap. Emit only check name, "
                 "status, evidence_ids, and gap; do not emit summaries, top-level "
@@ -4163,7 +4178,9 @@ class V11Runtime:
                     "and persistent fields. Keep each task concise and return only the "
                     "declared task draft fields. Use only the listed skill identifiers "
                     "or select none. Focus tasks on distinct information gaps that can "
-                    "be checked with the committed evidence."
+                    "be checked with the committed evidence. Prefer a sequence of "
+                    "metric anomaly inventory, trace/dependency localization, and "
+                    "log/resource discrimination when those gaps are present."
                 ),
             }
             return json.dumps(redact_value(payload), ensure_ascii=False, sort_keys=True)
@@ -5341,14 +5358,130 @@ def _select_evidence_digest(
     max_per_kind: int = 4,
     max_total: int = 16,
 ) -> list[EvidenceItem]:
-    """为模型提供有界的可引用 evidence 摘要，不改变服务端完整投影。"""
+    """为模型提供有界的可引用 evidence 摘要，不改变服务端完整投影。
+
+    有 signal family 的指标先按实体聚类，再在实体内轮转不同 family；这样
+    低幅但能区分 socket/disk/error 的指标不会被单个高分 CPU/latency 指标
+    永久遮蔽。非指标证据仍按 kind 保留少量锚点，避免 digest 变成只看指标。
+    没有 signal family 的旧证据继续使用原有 kind 轮转规则。
+    """
     usable = [
         item
         for item in evidence
         if item.status in {EvidenceStatus.SUCCESS, EvidenceStatus.PARTIAL}
     ]
+
+    metric_items = [
+        item
+        for item in usable
+        if item.kind == EvidenceKind.METRIC_TREND
+        and isinstance(item.payload.get("signal_type"), str)
+        and item.payload["signal_type"].strip()
+        and _digest_entity(item) is not None
+    ]
+    if metric_items:
+        # 给 logs/traces/dependency 预留最多四个位置；若这类证据不存在，
+        # 后面的剩余指标会补齐预算。
+        metric_limit = max(1, max_total - min(4, max_total // 6))
+        selected = _select_entity_signal_evidence(metric_items, metric_limit)
+        selected_ids = {item.id for item in selected}
+        remaining = [item for item in usable if item.id not in selected_ids]
+        non_metric = [
+            item for item in remaining if item.kind != EvidenceKind.METRIC_TREND
+        ]
+        selected.extend(
+            _select_evidence_by_kind(
+                non_metric,
+                max_per_kind=max_per_kind,
+                max_total=max_total - len(selected),
+            )
+        )
+        if len(selected) < max_total:
+            selected_ids = {item.id for item in selected}
+            selected.extend(
+                item
+                for item in metric_items
+                if item.id not in selected_ids
+            )
+        return selected[:max_total]
+
+    return _select_evidence_by_kind(
+        usable,
+        max_per_kind=max_per_kind,
+        max_total=max_total,
+    )
+
+
+def _select_entity_signal_evidence(
+    evidence: list[EvidenceItem], limit: int
+) -> list[EvidenceItem]:
+    """按实体轮转 signal family，保留同一实体的可比较故障画像。"""
+    if limit <= 0:
+        return []
+    by_entity: dict[str, list[EvidenceItem]] = {}
+    for item in evidence:
+        entity = _digest_entity(item)
+        if entity is not None:
+            by_entity.setdefault(entity, []).append(item)
+    ordered_entities = sorted(
+        by_entity,
+        key=lambda entity: (
+            -max(_digest_score(item) for item in by_entity[entity]),
+            entity,
+        ),
+    )[:5]
+    queues: list[list[EvidenceItem]] = []
+    for entity in ordered_entities:
+        items = by_entity[entity]
+        by_family: dict[str, list[EvidenceItem]] = {}
+        for item in items:
+            family = str(item.payload.get("signal_type", ""))
+            by_family.setdefault(family, []).append(item)
+        family_heads = [
+            min(
+                family_items,
+                key=lambda item: (-_digest_score(item), item.timestamp, item.id),
+            )
+            for family_items in by_family.values()
+        ]
+        family_heads.sort(
+            key=lambda item: (
+                -_digest_score(item),
+                str(item.payload.get("signal_type", "")),
+                item.id,
+            )
+        )
+        head_ids = {item.id for item in family_heads}
+        extras = sorted(
+            (item for item in items if item.id not in head_ids),
+            key=lambda item: (-_digest_score(item), item.timestamp, item.id),
+        )
+        queues.append(family_heads + extras)
+
+    selected: list[EvidenceItem] = []
+    offset = 0
+    while len(selected) < limit:
+        added = False
+        for queue in queues:
+            if offset < len(queue):
+                selected.append(queue[offset])
+                added = True
+                if len(selected) == limit:
+                    break
+        if not added:
+            break
+        offset += 1
+    return selected
+
+
+def _select_evidence_by_kind(
+    evidence: list[EvidenceItem], *, max_per_kind: int, max_total: int
+) -> list[EvidenceItem]:
+    """按 kind 轮转选择非指标证据；选择顺序完全由持久化字段决定。"""
+    if max_total <= 0:
+        return []
     groups: dict[str, list[EvidenceItem]] = {}
-    for item in usable:
+    for item in evidence:
         groups.setdefault(item.kind.value, []).append(item)
     for items in groups.values():
         items.sort(
@@ -5382,6 +5515,20 @@ def _select_evidence_digest(
                 if len(selected) >= max_total:
                     return selected
     return selected
+
+
+def _digest_entity(item: EvidenceItem) -> str | None:
+    entity = item.payload.get("entity")
+    if isinstance(entity, str) and entity.strip():
+        return entity.strip()
+    if item.scope and item.scope.entity_ids:
+        return sorted(item.scope.entity_ids)[0]
+    return None
+
+
+def _digest_score(item: EvidenceItem) -> float:
+    score = item.payload.get("change_score", 0.0)
+    return float(score) if isinstance(score, int | float) and not isinstance(score, bool) else 0.0
 
 
 def _evidence_for_task(

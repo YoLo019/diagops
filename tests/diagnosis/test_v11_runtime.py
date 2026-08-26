@@ -514,6 +514,32 @@ def test_v11_evidence_digest_is_bounded_and_excludes_unusable_items():
     }
 
 
+def test_v11_metric_digest_keeps_signal_families_within_an_entity():
+    evidence = []
+    for entity, score in (("decoy", 100.0), ("root", 80.0)):
+        for family, offset in (("cpu", 0), ("latency", 1), ("socket", 2)):
+            evidence.append(
+                EvidenceItem(
+                    id=f"ev-{entity}-{family}",
+                    provider=EvidenceProvider.METRIC,
+                    kind=EvidenceKind.METRIC_TREND,
+                    timestamp=datetime(2026, 1, 1, offset, tzinfo=UTC),
+                    summary=f"{entity} {family} anomaly",
+                    payload={
+                        "entity": entity,
+                        "signal_type": family,
+                        "change_score": score - offset,
+                    },
+                    scope=EvidenceScope(entity_ids=[entity]),
+                )
+            )
+
+    selected = _select_evidence_digest(evidence, max_total=8)
+
+    selected_ids = {item.id for item in selected}
+    assert {"ev-root-cpu", "ev-root-latency", "ev-root-socket"} <= selected_ids
+
+
 def test_evidence_projection_exposes_server_owned_scope_entities():
     item = EvidenceItem(
         id="ev-scoped",

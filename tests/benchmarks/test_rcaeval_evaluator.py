@@ -149,6 +149,7 @@ def test_evaluator_scores_frozen_canonical_family_aliases():
         ("re2-cccccccccccccccc", "loss", "network_corruption"),
         ("re2-dddddddddddddddd", "delay", "network_latency"),
         ("re2-eeeeeeeeeeeeeeee", "delay", "latency"),
+        ("re2-ffffffffffffffff", "loss", "error"),
     ]
     labels = [_label(case_id, "checkout", label_fault) for case_id, label_fault, _ in cases]
     predictions = []
