@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from statistics import fmean
 
+from backend.diagnosis.signal_semantics import classify_metric_signal
 from backend.domain.events import IncidentEvent
 from backend.domain.evidence import (
     EvidenceItem,
@@ -37,7 +38,7 @@ from backend.domain.tool_queries import (
 from backend.providers.results import ProviderResult, ProviderStatus
 from backend.safety.redaction import assert_safe_value, redact_text, redact_value
 
-ADAPTER_VERSION = "rcaeval-re2-v2"
+ADAPTER_VERSION = "rcaeval-re2-v3"
 _MAX_SCAN_ROWS = 250_000
 _SIGNAL_METRIC_PATTERN = re.compile(
     r"_(?:cpu|mem|diskio|socket|workload|error|latency-(?:50|90|95|99))$",
@@ -286,6 +287,7 @@ class RcaEvalMetricProvider(_RcaEvalProvider):
                 payload={
                     "entity": entity,
                     "metric": metric[:256],
+                    "signal_type": classify_metric_signal(metric),
                     "baseline_mean": baseline,
                     "observation_mean": observation,
                     "change_score": score,

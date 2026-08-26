@@ -94,6 +94,20 @@ def test_tcp_wait_and_rtt_are_network_latency(metric_name):
 @pytest.mark.parametrize(
     ("metric_name", "expected"),
     [
+        ("catalogue_mem", "memory"),
+        ("orders_diskio", "disk_io"),
+        ("payment_socket", "socket"),
+        ("user_latency-50", "latency"),
+        ("carts_workload", "traffic"),
+    ],
+)
+def test_service_signal_suffixes_map_to_canonical_families(metric_name, expected):
+    assert classify_metric_signal(metric_name) == expected
+
+
+@pytest.mark.parametrize(
+    ("metric_name", "expected"),
+    [
         ("container_memory_usage_bytes", "memory"),
         ("container_cpu_usage_seconds_total", "cpu"),
         ("node_disk_read_iops", "disk_io"),

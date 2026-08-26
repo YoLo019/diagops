@@ -433,6 +433,7 @@ def test_live_investigator_prompt_compacts_complete_evidence_context():
             kind=EvidenceKind.LOG_PATTERN,
             timestamp=datetime(2026, 1, 1, tzinfo=UTC),
             summary="bounded signal",
+            payload={"signal_type": "network_latency"},
             scope=EvidenceScope(entity_ids=["service-a"]),
         )
     ]
@@ -450,11 +451,9 @@ def test_live_investigator_prompt_compacts_complete_evidence_context():
         )
     )
 
-    assert set(prompt["tool_manifest"]) == set(registry.agent_manifest())
-    assert set(item["name"] for item in prompt["tool_contracts"]) == set(
-        registry.agent_manifest()
-    )
-    assert prompt["skills"]
+    assert "tool_manifest" not in prompt
+    assert "tool_contracts" not in prompt
+    assert "skills" not in prompt
     assert "Return zero or one candidate" in prompt["rule"]
     assert "not exhaustive" in prompt["rule"]
     assert set(prompt["evidence"][0]) == {
@@ -463,7 +462,10 @@ def test_live_investigator_prompt_compacts_complete_evidence_context():
         "observed_at",
         "summary",
         "scope_entity_ids",
+        "signal_family",
     }
+    assert prompt["evidence"][0]["signal_family"] == "network_latency"
+    assert "copy that exact value into failure_class" in prompt["rule"]
     assert "id" not in prompt["task"]
     assert "runtime_run_id" not in prompt["task"]
 

@@ -25,8 +25,9 @@ _NETWORK_SCOPE_TOKENS = ("network", "tcp", "udp", "socket", "packet")
 _CORRUPTION_TOKENS = ("drop", "dropped", "error", "loss", "corrupt", "retransmit")
 _NETWORK_LATENCY_TOKENS = ("latency", "delay", "rtt", "wait")
 _NETWORK_TRAFFIC_TOKENS = ("bytes", "packets", "bandwidth", "throughput")
-_TRAFFIC_TOKENS = ("qps", "request_count", "traffic")
+_TRAFFIC_TOKENS = ("qps", "request_count", "traffic", "workload")
 _DISK_TOKENS = ("disk", "iops", "io_wait", "iowait")
+_SOCKET_TOKENS = ("socket", "sockets")
 _PROCESS_TOKENS = ("restart", "process")
 _ERROR_TOKENS = ("error", "fail", "5xx")
 
@@ -34,6 +35,7 @@ _ERROR_TOKENS = ("error", "fail", "5xx")
 _FAMILY_ORDER = (
     "network_corruption",
     "network_latency",
+    "socket",
     "memory",
     "cpu",
     "disk_io",
@@ -83,9 +85,11 @@ def classify_metric_signal(metric_name: str) -> str:
             return "network_latency"
         if any(token in name for token in _NETWORK_TRAFFIC_TOKENS):
             return "traffic"
+        if any(token in name for token in _SOCKET_TOKENS):
+            return "socket"
     if any(token in name for token in _TRAFFIC_TOKENS):
         return "traffic"
-    if "memory" in name:
+    if "memory" in name or "mem" in name:
         return "memory"
     if "cpu" in name:
         return "cpu"

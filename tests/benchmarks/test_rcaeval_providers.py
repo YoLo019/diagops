@@ -162,8 +162,13 @@ def test_metric_provider_prefers_service_signal_columns_over_raw_container_noise
 
     result = provider.collect(incident_event_for_case(case_dir, "re2-aaaaaaaaaaaaaaaa"))
     metrics = {item.payload["metric"] for item in result.evidence_items}
+    signal_types = {
+        item.payload["metric"]: item.payload["signal_type"]
+        for item in result.evidence_items
+    }
 
     assert metrics == {"svc_cpu", "svc_socket"}
+    assert signal_types == {"svc_cpu": "cpu", "svc_socket": "socket"}
 
 
 def test_retry_namespace_keeps_rcaeval_evidence_ids_globally_unique(tmp_path):

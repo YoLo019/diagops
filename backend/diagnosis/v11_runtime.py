@@ -1067,6 +1067,9 @@ def _structured_output_retry_feedback(output_type: type[BaseModel]) -> str:
             "contradicting_evidence_ids. Cite only committed usable evidence IDs; "
             "when cited evidence has scope_entity_ids, affected_entity must "
             "match an entity in every cited evidence scope; "
+            "when cited evidence includes signal_family, copy one exact signal_family "
+            "value into failure_class and do not paraphrase it; a scoped anomaly "
+            "with signal_family is sufficient to submit the candidate; "
             "do not emit server-owned IDs, ranks, runtime fields, review fields, "
             "or finding references."
         )
@@ -1079,6 +1082,9 @@ def _structured_output_retry_feedback(output_type: type[BaseModel]) -> str:
             "failure_mechanism, and at least one supporting usable "
             "evidence ID. A non-gap finding must cite at least one usable evidence "
             "ID. If no candidate meets these requirements, return no candidates. "
+            "When cited evidence includes signal_family, copy one exact signal_family "
+            "value into failure_class and do not paraphrase it; a scoped anomaly "
+            "with signal_family is sufficient to submit the candidate. "
             "If the specific mechanism remains unresolved after bounded queries, "
             "return no candidate. Do not emit a candidate without an affected "
             "service, failure_class, and usable evidence."
@@ -3879,21 +3885,13 @@ class V11Runtime:
                 "incident": _live_incident_prompt_projection(event),
                 "task": _live_task_prompt_projection(task),
                 "evidence": [_live_evidence_prompt_projection(item) for item in evidence],
-                "tool_manifest": list(manifest),
-                "tool_contracts": [
-                    {
-                        "name": name,
-                        "description": self.tool_registry.get(name).description,
-                    }
-                    for name in manifest
-                ],
-                "skills": [_skill_projection(skill) for skill in self.skills],
                 "rule": (
                     "Use the committed evidence below as an initial digest; it is not "
                     "exhaustive. Use the supplied read-only tools when the digest does "
-                    "not distinguish the affected entity or failure mechanism, and "
-                    "cite every query result used by the candidate. Return zero or one "
-                    "candidate. "
+                    "not distinguish the affected entity or failure mechanism. Do not "
+                    "query merely to restate a scoped signal_family already present in "
+                    "the digest. Cite every query result used by the candidate. Return "
+                    "zero or one candidate. "
                     "Never invent evidence IDs or emit server fields such as id, rank, "
                     "runtime_run_id, review fields, or finding refs. A candidate needs "
                     "non-empty affected_entity, failure_class, failure_mechanism, "
@@ -3901,13 +3899,17 @@ class V11Runtime:
                     "supporting_evidence_ids value from the evidence; affected_entity "
                     "must match every cited scope_entity_ids value. Cite every directly "
                     "relevant evidence ID. failure_class must be the shortest stable "
-                    "classification phrase directly supported by the evidence; keep "
+                    "classification phrase directly supported by the evidence. When a "
+                    "cited item has signal_family, copy that exact value into "
+                    "failure_class; a scoped anomaly with signal_family is sufficient "
+                    "to publish a candidate. Keep "
                     "explanation in failure_mechanism. Keep failure_mechanism a concise, specific "
                     "mechanism or signal-family phrase, not a generic degradation "
                     "summary. Do not append likely or unresolved wording when a bounded "
                     "query directly identifies the mechanism. If the mechanism remains "
-                    "undetermined after the available read-only queries, return no "
-                    "candidate instead of publishing a symptom as a root cause."
+                    "undetermined after the available read-only queries and no cited "
+                    "evidence has signal_family, return no candidate instead of "
+                    "publishing a symptom as a root cause."
                 ),
             }
             return json.dumps(redact_value(payload), ensure_ascii=False, sort_keys=True)
@@ -3950,9 +3952,12 @@ class V11Runtime:
                 "at least one supporting usable evidence ID. Cite every directly "
                 "relevant committed evidence ID for the candidate, not just the "
                 "first signal. failure_class must be the shortest stable classification "
-                "phrase directly supported by the evidence; keep explanation in "
-                "failure_mechanism. Use read-only tools to close a material information "
-                "gap before concluding. failure_mechanism must be a concise, "
+                "phrase directly supported by the evidence. When a cited item has "
+                "signal_family, copy that exact value into failure_class; a scoped "
+                "anomaly with signal_family is sufficient to publish a candidate. "
+                "Keep explanation in failure_mechanism. Use read-only tools to close a "
+                "material information gap before concluding. failure_mechanism must "
+                "be a concise, "
                 "specific mechanism or signal-family phrase supported by the cited "
                 "evidence, not a generic symptom paragraph. If the mechanism remains "
                 "unresolved after bounded queries, return an empty candidates list."
@@ -3969,8 +3974,8 @@ class V11Runtime:
                 "the shortest stable classification phrase directly supported by "
                 "the evidence; keep explanation in failure_mechanism. Use read-only tools "
                 "to close a material information gap before concluding. If the "
-                "specific mechanism remains unresolved after bounded queries, emit "
-                "no candidate."
+                "specific mechanism remains unresolved after bounded queries and no "
+                "cited evidence has signal_family, emit no candidate."
             ),
         }
         return json.dumps(redact_value(payload), ensure_ascii=False, sort_keys=True)
@@ -4002,6 +4007,7 @@ class V11Runtime:
                     {
                         "candidate_ref": item.id,
                         "affected_entity": item.affected_entity,
+                        "failure_class": item.failure_class,
                         "failure_mechanism": item.failure_mechanism,
                         "supporting_evidence_ids": item.supporting_evidence_ids,
                         "contradicting_evidence_ids": item.contradicting_evidence_ids,
@@ -4020,7 +4026,10 @@ class V11Runtime:
                     "committed evidence ID and no gap; unknown needs a short gap. Do "
                     "not accept a candidate that only restates a symptom or says the "
                     "mechanism is unresolved; accept only when the cited evidence "
-                    "supports a specific mechanism. Emit only the "
+                    "supports a specific mechanism. A candidate whose failure_class "
+                    "copies a cited signal_family and whose scoped anomaly evidence "
+                    "matches is an evidence-backed classification, not an unsupported "
+                    "symptom. Emit only the "
                     "declared candidate_ref, verdict, and check name/status/evidence_ids/gap; "
                     "do not emit IDs, summaries, tasks, or extra fields. Every "
                     "evidence_ids value must be copied exactly from allowed_evidence_ids; "
@@ -4037,6 +4046,7 @@ class V11Runtime:
                     "candidate_ref": item.id,
                     "cause_type": item.cause_type,
                     "affected_entity": item.affected_entity,
+                    "failure_class": item.failure_class,
                     "failure_mechanism": item.failure_mechanism,
                     "summary": item.summary,
                     "supporting_evidence_ids": item.supporting_evidence_ids,
@@ -4064,7 +4074,10 @@ class V11Runtime:
                 "bounded review; use inconclusive when evidence is insufficient. "
                 "Do not accept a symptom-level candidate when the deeper causal "
                 "mechanism remains unresolved; use inconclusive or reject until "
-                "the cited evidence supports a specific mechanism. "
+                "the cited evidence supports a specific mechanism. A candidate whose "
+                "failure_class copies a cited signal_family and whose scoped anomaly "
+                "evidence matches is an evidence-backed classification, not an "
+                "unsupported symptom. "
                 "For every check, pass or fail requires one committed evidence ID "
                 "and no gap; unknown requires a short gap. Emit only check name, "
                 "status, evidence_ids, and gap; do not emit summaries, top-level "
@@ -5269,13 +5282,17 @@ def _live_incident_prompt_projection(
 
 def _live_evidence_prompt_projection(item: EvidenceItem) -> dict[str, Any]:
     """live prompt 省略已由服务端过滤的 provider/status，保留可归因字段。"""
-    return {
+    payload = {
         "id": item.id,
         "kind": item.kind.value,
         "observed_at": item.timestamp.astimezone(UTC).isoformat(),
         "summary": item.summary,
         "scope_entity_ids": sorted(item.scope.entity_ids) if item.scope else [],
     }
+    signal_family = item.payload.get("signal_type")
+    if isinstance(signal_family, str) and signal_family.strip():
+        payload["signal_family"] = signal_family[:64]
+    return payload
 
 
 def _live_task_prompt_projection(task: DiagnosisTask) -> dict[str, Any]:
@@ -5291,7 +5308,7 @@ def _live_task_prompt_projection(task: DiagnosisTask) -> dict[str, Any]:
 
 
 def _evidence_projection(item: EvidenceItem) -> dict[str, Any]:
-    return {
+    payload = {
         "id": item.id,
         "provider": item.provider.value,
         "kind": item.kind.value,
@@ -5300,6 +5317,10 @@ def _evidence_projection(item: EvidenceItem) -> dict[str, Any]:
         "summary": item.summary,
         "scope_entity_ids": sorted(item.scope.entity_ids) if item.scope else [],
     }
+    signal_family = item.payload.get("signal_type")
+    if isinstance(signal_family, str) and signal_family.strip():
+        payload["signal_family"] = signal_family[:64]
+    return payload
 
 
 def _investigator_task_projection(task: DiagnosisTask) -> dict[str, Any]:

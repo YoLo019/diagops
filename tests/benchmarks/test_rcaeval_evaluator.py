@@ -142,6 +142,36 @@ def test_evaluator_scores_structured_failure_class_before_explanation():
     assert summary.top3 == 1
 
 
+def test_evaluator_scores_frozen_canonical_family_aliases():
+    cases = [
+        ("re2-aaaaaaaaaaaaaaaa", "mem", "memory"),
+        ("re2-bbbbbbbbbbbbbbbb", "disk", "disk_io"),
+        ("re2-cccccccccccccccc", "loss", "network_corruption"),
+        ("re2-dddddddddddddddd", "delay", "network_latency"),
+        ("re2-eeeeeeeeeeeeeeee", "delay", "latency"),
+    ]
+    labels = [_label(case_id, "checkout", label_fault) for case_id, label_fault, _ in cases]
+    predictions = []
+    for case_id, _, canonical_family in cases:
+        prediction = _prediction(case_id, "checkout", canonical_family)
+        predictions.append(
+            prediction.model_copy(
+                update={
+                    "candidates": [
+                        prediction.candidates[0].model_copy(
+                            update={"failure_class": canonical_family}
+                        )
+                    ]
+                }
+            )
+        )
+
+    summary = evaluate_predictions(predictions, labels)
+
+    assert summary.exact_top1 == 1
+    assert summary.mechanism_top1 == 1
+
+
 def test_evaluator_rejects_duplicate_missing_and_non_finite_rows():
     label = _label("re2-aaaaaaaaaaaaaaaa", "checkout", "cpu")
     prediction = _prediction(label.case_id, "checkout", "cpu")

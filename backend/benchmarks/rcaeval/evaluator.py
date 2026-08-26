@@ -56,8 +56,26 @@ def scorer_dependency_hash() -> str:
 
 
 def normalize_label(value: str) -> str:
-    """冻结 normalizer：大小写、空白和分隔符，不做语义别名。"""
+    """冻结基础 normalizer：大小写、空白和分隔符。"""
     return " ".join(re.sub(r"[-_/]+", " ", value.casefold()).split())
+
+
+# 这是 scorer 在标签揭示前冻结的 RCAEval 适配表：诊断侧使用 provider-neutral
+# canonical family，标签侧使用数据集的短 fault vocabulary。这里只接受固定、预先
+# 记录的别名，不根据某次模型最终文本做语义猜测。
+_RCA_EVAL_FAULT_ALIASES = {
+    "memory": "mem",
+    "disk io": "disk",
+    "network corruption": "loss",
+    "network latency": "delay",
+    "latency": "delay",
+}
+
+
+def normalize_fault_label(value: str) -> str:
+    """按冻结的 RCAEval canonical-family 别名归一化 fault。"""
+    normalized = normalize_label(value)
+    return _RCA_EVAL_FAULT_ALIASES.get(normalized, normalized)
 
 
 def _scored_failure_class(candidate: CandidatePrediction) -> str:
@@ -93,7 +111,8 @@ def evaluate_predictions(
         mechanism_match = bool(
             prediction.completed
             and top is not None
-            and normalize_label(_scored_failure_class(top)) == normalize_label(label.fault)
+            and normalize_fault_label(_scored_failure_class(top))
+            == normalize_fault_label(label.fault)
         )
         component += int(service_match)
         mechanism += int(mechanism_match)
@@ -102,8 +121,8 @@ def evaluate_predictions(
             prediction.completed
             and any(
                 normalize_label(candidate.affected_service) == normalize_label(label.service)
-                and normalize_label(_scored_failure_class(candidate))
-                == normalize_label(label.fault)
+                and normalize_fault_label(_scored_failure_class(candidate))
+                == normalize_fault_label(label.fault)
                 for candidate in prediction.candidates
             )
         )
@@ -660,8 +679,8 @@ def _correct_vector(
                 and candidate is not None
                 and normalize_label(candidate.affected_service)
                 == normalize_label(label.service)
-                and normalize_label(_scored_failure_class(candidate))
-                == normalize_label(label.fault)
+                and normalize_fault_label(_scored_failure_class(candidate))
+                == normalize_fault_label(label.fault)
             )
         )
     return values
