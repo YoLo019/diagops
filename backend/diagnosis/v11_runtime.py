@@ -907,17 +907,21 @@ def _candidate_lifecycle_trace(
 
 
 def _resolved_execution_ids(executions: Iterable[AgentExecution]) -> set[str]:
-    """返回被同一逻辑动作的成功 retry 覆盖的失败 execution ID。"""
+    """返回被同一逻辑动作的成功 retry 覆盖的失败 execution ID。
+
+    SDK 在 transport 失败与后续 retry 成功时可能写入不同的 agent name；
+    task/run/step/round 才是 durable 的逻辑动作身份。agent name 属于执行
+    实例展示字段，不能让已成功的 retry 被误判为未解决失败。
+    """
     items = list(executions)
     completed_attempts: dict[
-        tuple[str | None, str, str, ExecutionStepKind | None, int | None], int
+        tuple[str | None, str, ExecutionStepKind | None, int | None], int
     ] = {}
     for item in items:
         if item.status != AgentExecutionStatus.COMPLETED:
             continue
         key = (
             item.runtime_run_id,
-            item.agent_name,
             item.task_id,
             item.step_kind,
             item.analysis_round,
@@ -932,7 +936,6 @@ def _resolved_execution_ids(executions: Iterable[AgentExecution]) -> set[str]:
         and completed_attempts.get(
             (
                 item.runtime_run_id,
-                item.agent_name,
                 item.task_id,
                 item.step_kind,
                 item.analysis_round,

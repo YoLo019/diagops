@@ -112,6 +112,7 @@ def test_unresolved_case_failure_category_uses_only_live_execution_failures():
     recovered = failed_transport.model_copy(
         update={
             "id": "exec-transport-attempt-2",
+            "agent_name": "single-investigator",
             "status": AgentExecutionStatus.COMPLETED,
             "attempt": 2,
             "failure_category": FailureCategory.NONE,
