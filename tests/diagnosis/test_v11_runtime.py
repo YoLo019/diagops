@@ -456,6 +456,8 @@ def test_live_investigator_prompt_compacts_complete_evidence_context():
     assert "skills" not in prompt
     assert "Return zero or one candidate" in prompt["rule"]
     assert "not exhaustive" in prompt["rule"]
+    assert "at least two distinct usable supporting evidence IDs" in prompt["rule"]
+    assert "never cite unrelated evidence just to reach two" in prompt["rule"]
     assert set(prompt["evidence"][0]) == {
         "id",
         "kind",

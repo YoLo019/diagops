@@ -3889,6 +3889,17 @@ class V11Runtime:
         selected_skills: list[str],
     ) -> str:
         has_committed_evidence = bool(evidence) and self.turn is None
+        multi_candidate_evidence_rule = (
+            " This is a multi-investigator run: a candidate must cite at least two "
+            "distinct usable supporting evidence IDs that jointly support the same "
+            "affected entity and mechanism. Prefer different evidence kinds/providers "
+            "when both are relevant. If the digest has only one relevant item, use one "
+            "bounded read-only query to obtain a second corroborating item; never cite "
+            "unrelated evidence just to reach two. If no second relevant item is "
+            "available, return no candidate."
+            if self.max_investigators > 1
+            else ""
+        )
         if has_committed_evidence:
             payload = {
                 "role": "general investigator",
@@ -3926,6 +3937,7 @@ class V11Runtime:
                     "undetermined after the available read-only queries and no cited "
                     "evidence has signal_family, return no candidate instead of "
                     "publishing a symptom as a root cause."
+                    + multi_candidate_evidence_rule
                 ),
             }
             return json.dumps(redact_value(payload), ensure_ascii=False, sort_keys=True)
@@ -3983,6 +3995,7 @@ class V11Runtime:
                 "specific mechanism or signal-family phrase supported by the cited "
                 "evidence, not a generic symptom paragraph. If the mechanism remains "
                 "unresolved after bounded queries, return an empty candidates list."
+                + multi_candidate_evidence_rule
                 if has_committed_evidence
                 else "Do not use sibling drafts or invent evidence IDs. Do not "
                 "emit candidate IDs, ranks, runtime IDs, review fields, or "
@@ -3998,6 +4011,7 @@ class V11Runtime:
                 "to close a material information gap before concluding. If the "
                 "specific mechanism remains unresolved after bounded queries and no "
                 "cited evidence has signal_family, emit no candidate."
+                + multi_candidate_evidence_rule
             ),
         }
         return json.dumps(redact_value(payload), ensure_ascii=False, sort_keys=True)
