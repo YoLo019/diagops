@@ -22,11 +22,11 @@
 
 ### 5. 为什么是 Lead、Investigator、Critic？
 
-Lead 负责信息价值和最终责任，Investigator 负责相互隔离地取证，Critic 负责反证和因果充分性。这样分别处理规划偏差、相互影响和自我确认问题。
+Lead 负责信息价值和任务规划，Investigator 负责相互隔离地取证，Critic 负责反证与最终因果判断；终态 authority phase 负责把通过项发布。这样分别处理规划偏差、相互影响、自我确认和发布责任问题。
 
 ### 6. 为什么不让三个 Agent 投票？
 
-同一模型的错误高度相关，多数意见不等于证据。项目要求 Critic 逐项审查，再由 Lead 对 accepted candidate 裁决。
+同一模型的错误高度相关，多数意见不等于证据。项目要求 Critic 逐项审查；current live 路径再由终态阶段机械发布 accepted candidate，不增加一次随机投票。
 
 ### 7. 为什么不继续用 LogAgent、MetricAgent、DeploymentAgent？
 
@@ -42,11 +42,11 @@ Lead 负责信息价值和最终责任，Investigator 负责相互隔离地取�
 
 ### 10. 谁是最终诊断权威？
 
-V11 中是 Lead Agent 的结构化裁决。Critic 决定候选是否通过审查；确定性 Validator 只有否决机械违规的权力，不能替换根因。
+V11 中要区分路径：current live 路径由 Critic verdict 提供最终诊断判断，`lead_adjudication` 阶段机械投影 accepted Candidate IDs；注入式测试/兼容路径仍支持 Lead 结构化裁决。确定性 Validator 只有否决机械违规的权力，不能替换根因。
 
 ### 11. 如果 Agent 输出错误怎么办？
 
-结构错误由 Pydantic 拒绝；引用错误在草稿准入或最终校验拒绝；必要阶段允许一次无工具 correction；仍不合法就 inconclusive 或 failed，不由代码补造答案。
+结构错误由 Pydantic 拒绝；候选引用错误在草稿准入或最终校验拒绝；Critic 的 Candidate/Evidence 引用错误最多允许一次带精确白名单的 correction。current live 终态校验不会再调用缺少上下文的模型修结构错误：只有受控的证据不足类错误可确定性降级为 inconclusive，其余直接 failed，代码不会补造答案。
 
 ### 12. 使用了什么 Agent 框架？
 
@@ -136,15 +136,15 @@ lease 到期审计把 Run 标记 interrupted；人工 resume 验证 execution co
 
 ### 32. 保存 chain-of-thought 吗？
 
-不保存。只保存任务、工具调用、Finding、Critic checks、Lead concise rationale、usage 和安全失败信息。
+不保存。只保存任务、工具调用、Finding、Candidate 生命周期摘要、Critic checks、终态 decision summary、usage 和安全失败信息。原始模型候选正文只保留安全哈希，不保留私有思维过程。
 
 ### 33. partial 和 inconclusive 有什么区别？
 
 partial 有有效诊断，但有非关键失败且仍满足独立证据要求；inconclusive 表示证据不足以支持根因，是负责任的安全停止。
 
-### 34. 确定性 fallback 什么时候能用？
+### 34. 确定性 legacy 路径什么时候能用？
 
-只有 Agent 尚未产生可接受诊断输出且 Runtime 未配置、认证前失败或 endpoint 预先不可用等特定条件；必须明确标为 legacy fallback，不能冒充 V11。
+它只能在明确的 V10/legacy execution contract 下提供历史兼容行为，必须标为 `legacy_deterministic` authority，不能冒充 V11 Agent diagnosis。V11 required actor、Validator 或持久化失败不能靠确定性根因偷偷补救。
 
 ## 评测与取舍
 
@@ -175,6 +175,80 @@ partial 有有效诊断，但有非关键失败且仍满足独立证据要求；
 ### 41. 下一步你会做什么？
 
 先完成精确 endpoint/model 的 capability admission 和冻结 SS15/TT90 gate，取得可信效果结论；再根据失败分布决定是改 prompt、证据 Provider 还是模型，而不是先扩框架或加写能力。
+
+## Agent 工程进阶
+
+### 42. Context engineering 和 prompt engineering 有什么区别？
+
+Prompt engineering 主要写角色、目标和输出指令；context engineering 还决定模型可见哪些事实、工具结果和历史状态，以及如何做预算、压缩、隔离和引用。V11 的 Evidence digest、Critic 引用闭包和 compact schema 都属于后者。
+
+### 43. 当前 Evidence digest 是不是 LLM 摘要/上下文压缩模型？
+
+不是。Round 1 调用点将 `_select_evidence_digest` 限为四条、每 kind 最多两条，并按实体/signal family/kind 确定性抽取已有 Evidence；它不生成新事实，完整 ledger 不变。函数通用默认值更大，不应混淆。
+
+### 44. 怎样压缩上下文又不丢失 Evidence 引用？
+
+把 Evidence ID、时间、实体、状态、scope 和 provenance 放在不可压缩事实层；只压缩可重建叙事。若引入摘要器，摘要 schema 必须只能引用当前 Run 已存在的 ID，且时间/实体范围不能扩大，并用 citation recall、faithfulness 和反证保留率回归测试。
+
+### 45. Tool Calling 是否支持并行？
+
+独立 Provider/Investigator 可并行，但受 `RunStepGate` 和 Run 全局预算约束。每个调用在开始和提交后都检查 deadline/lease；并行不表示无限 `gather`，也不允许绕过单 Writer 的事务顺序。
+
+### 46. Tool timeout 为什么不总是 retry？
+
+timeout 可能意味着远端已执行但响应丢失。当前工具路径只对明确 transport/rate-limit 最多 retry 一次，裸 `TimeoutError` 不盲目重发；模型 `_call_model` 有另一条外层 retry 实现，当前最多三次 retry，因此必须按路径和副作用解释。
+
+### 47. 当前项目是 RAG 吗？
+
+只有受 guard 的 `lookup_memory`：它从同 service/environment 的 verified relational memory 读取，并排除未来、当前 Run 和祖先 lineage。没有 embedding、向量数据库、hybrid retrieval 或 reranker，所以不能称为向量 RAG。
+
+### 48. 什么时候值得引入向量 RAG？
+
+当关系/关键词检索在实测数据量和语义 miss 上成为瓶颈时。先做 ACL、时间、service/environment SQL filter，再做 hybrid vector/BM25 和 rerank；必须证明 recall@k、staleness、ACL leakage、citation faithfulness 与下游诊断质量改善。
+
+### 49. MCP 已经接入了吗？
+
+没有。项目当前是内部 `ToolSpec → ToolRegistry → ProviderRegistry` 契约，且没有 MCP SDK 依赖。MCP 章节讲的是互操作设计和安全迁移，不是当前功能。
+
+### 50. MCP 与内部 ToolRegistry 的区别？
+
+内部 Registry 是本进程的强类型能力边界；MCP 是 Host/Client/Server 间的开放协议。接入 MCP 仍必须把远端 schema/description/result 视为不可信，经本地 allowlist、scope、budget、Evidence normalizer 和 manifest hash 才能给 Agent 使用。
+
+### 51. 什么是 model capability admission？
+
+它证明精确 endpoint/model 能满足 non-streaming、tool call、strict structured output、usage、deadline、并发和 V11 role schema 等协议条件，并绑定代码/SDK/adapter/环境身份。它不证明诊断准确率。
+
+### 52. 当前是否做动态模型路由？
+
+没有。legacy `router.py` 做的是任务类型到旧 Agent/tool 的静态映射；V11 在创建 Run 时从配置冻结 provider/model/endpoint identity。动态路由需把每个 actor 的模型身份和 routing policy hash 纳入 contract，并重新做公平评测。
+
+### 53. 怎样观测一次 Agent Run？
+
+用 `investigation_id → run_id → attempt_id → phase → AgentExecution → logical model/tool call → Evidence ID` 关联。SQLite RuntimeEvent/Checkpoint 是审计真相，OTel 提供 allowlisted trace 关联和低基数延迟/错误聚合，SSE 只负责通知和 sequence catch-up。
+
+### 54. 为什么不保存完整 prompt、response 或 Chain-of-Thought？
+
+它们可能含敏感 payload、注入文本和未验证推测，也会带来高基数观测成本。项目保存任务、工具、Evidence refs、checks、短 summary、usage 和安全 hash，足以重建可审计的业务轨迹而不暴露私有推理。
+
+### 55. 如何防间接 prompt injection 和 tool poisoning？
+
+外部日志/Trace/Provider/工具描述都按 data 处理；最小投影、redaction、schema、manifest/read-only、scope、预算和输出校验由代码强制。即使模型遵循恶意文本，服务端也会拒绝危险工具或越界参数；第三方工具还需供应链 hash、egress policy 和 sandbox。
+
+### 56. 怎样评测 Agent trajectory？
+
+除最终答案外，测 plan validity、tool precision、invalid-call/duplicate rate、new Evidence yield、citation precision/recall、Critic check coverage、stop reason、retry correctness、read-only/leakage violations。最终效果、轨迹和安全门不能相互替代。
+
+### 57. 怎样做成本和延迟优化？
+
+先减少无效 context、重复 schema、无关工具和无新 Evidence 回合；再使用 reservation、并发 gate、幂等和安全缓存；最后才考虑小模型 cascade/队列。指标至少包括 tokens/cost、evidence yield、p95、retry、inconclusive 和质量 delta。
+
+### 58. SQLite 如何扩展到生产？
+
+先测 Writer queue、commit p95、锁竞争和 active Run；若确有瓶颈，再把 durable store/queue 演进到网络数据库和 worker，同时重新验证 lease、CAS、idempotency、checkpoint、SSE catch-up 和 backup/restore。不能只换数据库而假定语义不变。
+
+### 59. 目前最重要的未实现能力是什么？
+
+正式 SS15/TT90 效果结论、通用上下文 compaction、vector RAG、MCP、动态 model routing、多节点/多租户治理、统一 dashboard 和写操作 HITL 都未作为当前 V11 产品能力实现。应该根据测量和风险逐项引入，而不是一次性堆框架。
 
 ## 反问面试官时可展开的点
 

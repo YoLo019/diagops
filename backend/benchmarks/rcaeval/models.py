@@ -17,7 +17,11 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from backend.domain.multi_agent import DiagnosticStatus
-from backend.domain.runtime import V11_RUN_DEADLINE_MAX_SECONDS
+from backend.domain.runtime import (
+    V11_DEFAULT_MAX_INVESTIGATORS,
+    V11_DEFAULT_MAX_ROUNDS,
+    V11_RUN_DEADLINE_MAX_SECONDS,
+)
 
 # 不透明 case ID 的形态：固定前缀 + 16 位十六进制，稳定且不携带源信息。
 OPAQUE_CASE_ID_PATTERN = r"^re2-[0-9a-f]{16}$"
@@ -225,8 +229,14 @@ class RcaEvalConfiguration(StrEnum):
 EXPECTED_CONFIGURATION_TOPOLOGY: dict[RcaEvalConfiguration, tuple[int, int]] = {
     RcaEvalConfiguration.SINGLE_INTENDED: (1, 1),
     RcaEvalConfiguration.SINGLE_EQUAL_TOKEN: (1, 1),
-    RcaEvalConfiguration.MULTI_INTENDED: (3, 2),
-    RcaEvalConfiguration.MULTI_EQUAL_TOKEN: (3, 2),
+    RcaEvalConfiguration.MULTI_INTENDED: (
+        V11_DEFAULT_MAX_INVESTIGATORS,
+        V11_DEFAULT_MAX_ROUNDS,
+    ),
+    RcaEvalConfiguration.MULTI_EQUAL_TOKEN: (
+        V11_DEFAULT_MAX_INVESTIGATORS,
+        V11_DEFAULT_MAX_ROUNDS,
+    ),
 }
 
 
@@ -243,8 +253,8 @@ class EvaluationBudget(BaseModel):
     timeout_seconds: float = Field(
         gt=0, le=V11_RUN_DEADLINE_MAX_SECONDS, allow_inf_nan=False
     )
-    max_investigators: int = Field(ge=1, le=3)
-    max_rounds: int = Field(ge=1, le=2)
+    max_investigators: int = Field(ge=1, le=V11_DEFAULT_MAX_INVESTIGATORS)
+    max_rounds: int = Field(ge=1, le=V11_DEFAULT_MAX_ROUNDS)
 
 
 class EndpointCapabilityIdentity(BaseModel):
@@ -289,8 +299,8 @@ def materialize_ss15_configurations(
         RcaEvalConfiguration.MULTI_INTENDED: EvaluationBudget(
             configuration=RcaEvalConfiguration.MULTI_INTENDED,
             token_budget=multi_budget,
-            max_investigators=3,
-            max_rounds=2,
+            max_investigators=V11_DEFAULT_MAX_INVESTIGATORS,
+            max_rounds=V11_DEFAULT_MAX_ROUNDS,
             **common,
         ),
         RcaEvalConfiguration.SINGLE_EQUAL_TOKEN: EvaluationBudget(
@@ -303,8 +313,8 @@ def materialize_ss15_configurations(
         RcaEvalConfiguration.MULTI_EQUAL_TOKEN: EvaluationBudget(
             configuration=RcaEvalConfiguration.MULTI_EQUAL_TOKEN,
             token_budget=equal_budget,
-            max_investigators=3,
-            max_rounds=2,
+            max_investigators=V11_DEFAULT_MAX_INVESTIGATORS,
+            max_rounds=V11_DEFAULT_MAX_ROUNDS,
             **common,
         ),
     }

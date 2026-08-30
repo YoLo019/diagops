@@ -1,0 +1,816 @@
+# 19. MCP 与 Agent 互操作：从内部 Tool 到开放协议
+
+## 1. 先建立四个零基础概念
+
+### 1.1 API、协议、SDK、编排框架不是一回事
+
+可以把一次 Agent 调用拆成四层：
+
+| 层 | 它规定什么 | 例子 |
+| --- | --- | --- |
+| API | 某个服务能做什么以及参数长什么样 | GET /health、tools/call |
+| 协议 | 不同实现之间如何发现、传输、报错和协商 | JSON-RPC 2.0、MCP |
+| SDK | 把协议封装成某种语言的函数和类型 | Python MCP client SDK（本仓库未安装） |
+| 编排框架 | 什么时候调用模型、工具和其他 Agent | DiagOps durable Runtime、LangGraph 等 |
+
+MCP 是“连接 LLM 应用和外部上下文/能力的协议”，**不是模型，也不是自动产生
+推理的 Agent 框架**。它可以让不同的 Host 以统一方式发现和调用服务器能力，
+但不会替 Host 决定根因，也不会自动赋予工具安全权限。
+
+### 1.2 Host、Client、Server 的关系
+
+MCP 使用三个角色：
+
+~~~text
+┌──────────────────────────── Host（LLM 应用）────────────────────────────┐
+│  模型 + 对话/Agent 编排 + 用户界面                                       │
+│        ┌──────────── MCP Client（连接器）────────────┐                   │
+│        │ 发现能力、转发 tools/list 和 tools/call、做策略检查              │
+│        └──────────────────────┬─────────────────────┘                   │
+└───────────────────────────────┼─────────────────────────────────────────┘
+                                │ stdio 或 Streamable HTTP
+                         ┌──────▼──────┐
+                         │ MCP Server  │  提供 tools / resources / prompts
+                         └──────┬──────┘
+                                │
+                    数据库、日志、第三方 API 或本地文件
+~~~
+
+- **Host** 是用户实际使用的应用，例如 IDE、聊天产品或本项目的 Runtime。
+- **Client** 是 Host 内部针对某个 Server 的连接器；它不是最终用户，也不是模型。
+- **Server** 是暴露上下文和能力的独立服务。一个 Host 可以同时连接多个 Server。
+
+MCP Server 的 serverInfo 是自报信息，协议明确规定不能把它当成安全身份；真正的
+认证、授权、网络隔离和供应链验证仍由 Host/平台完成。
+
+### 1.3 MCP 与函数调用的区别
+
+模型的 function calling 只描述“模型怎样请求一个函数”。MCP 还描述：
+
+- 如何发现函数（tools/list）以及能力变化通知；
+- 如何以 JSON-RPC 传输请求、结果、错误、取消和进度；
+- 如何同时暴露资源和提示模板；
+- 如何协商版本、能力、缓存和 HTTP 授权；
+- 多个不同 Host 如何复用同一个 Server。
+
+因此，MCP Server 的工具最终仍可能被 Host 转成 OpenAI/Anthropic 等模型的函数
+schema；MCP 不会取代模型供应商的 tool-calling wire format。
+
+### 1.4 MCP 与 RAG、Agent-to-Agent（A2A）也不同
+
+- **RAG** 是“如何从知识库检索内容并注入上下文”的应用模式；MCP 可以承载一个
+  检索工具或资源，但不规定向量库、切分或重排算法。
+- **A2A/Agent handoff** 解决“Agent 之间如何委托任务”；MCP 主要解决 Host 与
+  工具/资源 Server 的互操作。把 MCP Server 直接当成可信 Agent 是危险的。
+- **编排框架** 决定状态机、重试、预算和恢复；MCP 只定义跨进程消息语义。
+
+## 2. 为什么业界会需要 MCP
+
+如果每个 LLM 应用都为 GitHub、数据库、监控、文件系统各写一套插件，集成数量
+大致是 Host 数 × 数据源数。MCP 试图把它变成“每个数据源实现一次 Server，
+每个 Host 实现一次 Client”。
+
+收益与代价必须一起讲：
+
+| 收益 | 代价/风险 |
+| --- | --- |
+| 统一发现和 JSON Schema，减少重复适配 | 动态工具描述扩大了不可信输入面 |
+| 同一 Server 可被 IDE、聊天和 Agent 复用 | 网络往返、版本和可用性增加 |
+| tools/resources/prompts 有明确语义 | 工具数量过多会稀释模型注意力和 prompt cache |
+| 可用 OAuth、HTTP、stdio 等传输 | 凭证、租户和 egress 边界更复杂 |
+| 支持缓存、订阅、异步 Tasks 扩展 | 需要处理能力漂移、分页、取消和重试 |
+
+对 DiagOps，最重要的收益不是“增加更多工具”，而是未来可以让一个受控的监控
+适配器独立部署，同时保持统一的 Provider-neutral 查询契约。若没有第二个 Host、
+跨进程部署或第三方生态需求，先用进程内 ToolRegistry 更简单。
+
+## 3. 2026-07-28 规范的协议骨架
+
+### 3.1 JSON-RPC 2.0 是消息格式
+
+MCP 消息必须是 UTF-8 JSON-RPC 2.0。请求的关键字段如下：
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": "req-17",
+  "method": "tools/list",
+  "params": {}
+}
+~~~
+
+- id 必须是字符串或整数，不能为 null，同一发送方未完成请求不能重复。
+- 成功响应带相同 id 和 result；错误响应带 error.code、error.message。
+- Notification 没有 id，接收方不能回复。
+- 最新规范的 result 需要 resultType：通常是 complete；如果需要额外输入，是
+  input_required。
+
+常见 JSON-RPC 错误码包括 -32600（无效请求）、-32602（无效参数）和 -32603
+（内部错误）。MCP 还定义了 -32020 HeaderMismatch、-32021
+MissingRequiredClientCapability、-32022 UnsupportedProtocolVersion。应用自己的
+错误不要占用 MCP 保留范围。
+
+### 3.2 最新版是“每请求元数据”的无状态模型
+
+2026-07-28 与早期教程差异很大：
+
+1. 每个请求的 _meta 必须带 io.modelcontextprotocol/protocolVersion 和
+   io.modelcontextprotocol/clientCapabilities；clientInfo 建议每次带上。
+2. Server 必须实现 server/discover，Client 可以先调用它了解版本、能力和身份，
+   也可以直接发请求并处理版本错误。
+3. 不再依赖连接级 initialize/notifications/initialized 会话；Server 不能把
+   TCP/stdio 连接当作会话或用户身份。需要跨请求的状态必须用显式句柄作为参数。
+4. 旧版（2025-11-25 及更早）仍可能使用 initialize。支持双时代的 Client 需要
+   按规范探测并回退，不能把两套语义混在同一个 Run。
+
+这和 DiagOps 的设计原则很相似：每一次 Tool 调用都显式携带 Run、Agent、scope、
+预算和幂等身份，而不是依赖某个长连接的隐式状态。
+
+### 3.3 MRTR：服务器需要输入时不能偷偷发请求
+
+现代 MCP 用 Multi Round-Trip Requests（MRTR）替代旧的 Server-initiated JSON-RPC
+请求。Server 返回：
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": "req-18",
+  "result": {
+    "resultType": "input_required",
+    "inputRequests": {
+      "consent": {
+        "method": "elicitation/create",
+        "params": {"mode": "form", "message": "是否允许读取该资源？"}
+      }
+    },
+    "requestState": "opaque-server-state"
+  }
+}
+~~~
+
+Host 展示并获得用户输入后，用**新的 JSON-RPC id** 重试原操作，并带 inputResponses
+与 requestState。不能把用户的同意当成 Server 已经拥有的永久会话，也不能把
+requestState 原样展示给模型。
+
+### 3.4 两种标准传输
+
+| 传输 | 适用场景 | 关键点 |
+| --- | --- | --- |
+| stdio | Host 启动本地子进程 | 换行分隔 JSON；凭证通常从进程环境读取；服务端日志走 stderr |
+| Streamable HTTP | 独立部署的远程 Server | 每次请求 POST 到一个端点，响应可为 JSON 或请求范围的 SSE 流 |
+
+早期 HTTP+SSE transport 已被弃用。最新 Streamable HTTP 移除了连接级
+Mcp-Session-Id 和 SSE Last-Event-ID 恢复语义：响应流断开时，Client 应用新的
+请求 id 重新发起请求，并由应用自己的幂等策略防止重复副作用。HTTP 还要求把方法、
+工具名等元数据放在规定头部；请求体仍是语义真相源，头体不一致必须拒绝。
+
+### 3.5 三类 Server 能力与三类 Client 能力
+
+| 能力 | 谁提供 | 谁决定何时使用 | 作用 |
+| --- | --- | --- | --- |
+| Tools | Server | 通常由模型控制 | 查询、计算或执行外部操作 |
+| Resources | Server | 通常由应用控制 | 可读取的上下文、文件或文档 |
+| Prompts | Server | 通常由用户控制 | 可发现的提示模板/斜杠命令 |
+| Elicitation | Client | 用户 | Server 请求补充表单或 URL 交互 |
+| Sampling | Client | 用户/Host | Server 请求 Host 调模型（已弃用） |
+| Roots | Client | 用户/Host | 给 Server 的目录提示（已弃用，且不是 ACL） |
+
+2026-07-28 将 Sampling、Roots、Logging 标为 deprecated；新实现不应把它们当成
+首选扩展。长耗时操作迁移到官方 Tasks 扩展，异步句柄必须显式传递。
+
+### 3.6 Schema、缓存和订阅
+
+- inputSchema/outputSchema 使用 JSON Schema，默认至少支持 2020-12。外部 $ref
+  不能默认联网解析；解析器应限制深度、子 schema 数量和验证时间。
+- tools/list、resources/list 等结果带 ttlMs 和 cacheScope，提示 Client 可以
+  缓存多久以及是否允许共享缓存。
+- 工具列表应稳定排序，便于缓存和模型前缀缓存；若声明 listChanged，Server
+  可以通过 subscriptions/listen 通知变化。
+- 工具 annotations（例如“只读”）除非来自已信任 Server，否则必须按不可信数据
+  处理；不能只因为 annotation 写了 readOnlyHint 就放行高风险动作。
+
+## 4. 一次完整交互示例
+
+以下示例省略了部分冗长字段，但保留最新规范要求的 _meta。它展示“发现→列出
+工具→调用→错误”的最小闭环。
+
+### 4.1 发现 Server
+
+~~~json
+// Client -> Server
+{
+  "jsonrpc": "2.0",
+  "id": "discover-1",
+  "method": "server/discover",
+  "params": {
+    "_meta": {
+      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+      "io.modelcontextprotocol/clientInfo": {"name": "diagops-host", "version": "0.1"},
+      "io.modelcontextprotocol/clientCapabilities": {}
+    }
+  }
+}
+~~~
+
+~~~json
+// Server -> Client
+{
+  "jsonrpc": "2.0",
+  "id": "discover-1",
+  "result": {
+    "resultType": "complete",
+    "supportedVersions": ["2026-07-28"],
+    "capabilities": {"tools": {}},
+    "_meta": {"io.modelcontextprotocol/serverInfo": {"name": "readonly-telemetry", "version": "2.1"}},
+    "ttlMs": 3600000,
+    "cacheScope": "public"
+  }
+}
+~~~
+
+serverInfo 只适合展示和日志；Host 不能据此自动开启权限或选择性地跳过安全校验。
+
+### 4.2 列出工具
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/list",
+  "params": {
+    "_meta": {
+      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+      "io.modelcontextprotocol/clientCapabilities": {}
+    }
+  }
+}
+~~~
+
+返回的 tools 项至少包含 name、description 和合法的 inputSchema；可以有
+outputSchema、图标和 annotations。Host 应先做本地 allowlist、命名空间和 schema
+检查，再把一小部分工具投影给模型，不能把 Server 的全部描述原样拼到 prompt。
+
+### 4.3 调用只读工具
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "tools/call",
+  "params": {
+    "name": "query_metrics",
+    "arguments": {"entity": "checkout-service", "window_minutes": 10},
+    "_meta": {
+      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+      "io.modelcontextprotocol/clientCapabilities": {},
+      "traceparent": "00-..."
+    }
+  }
+}
+~~~
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "resultType": "complete",
+    "content": [{"type": "text", "text": "5xx rate increased after 14:02"}],
+    "structuredContent": {"entity": "checkout-service", "rate": 0.31},
+    "isError": false,
+    "_meta": {"io.modelcontextprotocol/serverInfo": {"name": "readonly-telemetry", "version": "2.1"}}
+  }
+}
+~~~
+
+isError=false 只表示 Server 认为工具调用完成，不代表因果结论正确。DiagOps
+适配器仍需把返回内容脱敏、归一化为 Evidence、持久化并分配本地 Evidence ID，
+模型只能引用本地已提交的 ID。
+
+### 4.4 错误不是成功文本
+
+参数不合法应使用 JSON-RPC error 或工具结果中的明确错误状态，不能返回一段看起来
+像正常指标的字符串：
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "error": {
+    "code": -32602,
+    "message": "invalid params"
+  }
+}
+~~~
+
+适配器应把它映射到内部的 failed/provider_gap/invalid_output 等安全类别，
+而不是让模型自行猜测“可能查到了什么”。
+
+## 5. MCP 和 DiagOps 的逐项映射
+
+下面是**概念映射**，不是“已经实现 MCP”的证明：
+
+| MCP 概念 | DiagOps 当前对应物 | 重要差异 |
+| --- | --- | --- |
+| Host | V11Runtime + durable Runtime | 当前在同一进程内调用 Agents SDK，没有 MCP Client |
+| Client | 尚无 | 未来负责发现、远端认证、传输和策略过滤 |
+| Server | 尚无 | 当前 Provider 是进程内适配器，不是 JSON-RPC 服务 |
+| Tool | ToolSpec | 有 read_only/exposure，但不是 MCP tools/list 响应 |
+| tools/list | ToolRegistry.agent_manifest() | 只返回冻结的九个 Agent 工具，不做网络发现 |
+| tools/call | AdaptiveToolSession.invoke() | 额外检查 Run scope、预算、lease、幂等和 deadline |
+| Resource | Evidence/Provider 结果 | Evidence 有本地 owner/provenance，不能直接暴露原文 |
+| Prompt | V11 role prompt | 由服务端生成并版本化，不接受远端 Server 任意覆盖 |
+| Capability | execution contract + manifest hash | contract 还冻结 model、技能、预算和 authority |
+| Trace context | RuntimeTelemetry span | 属性 allowlisted/脱敏且不保存 prompt/CoT；关联 ID 不应用作 metric label |
+| Error | FailureCategory、ToolCall 状态 | 需要保留 MCP 原始码与本地安全分类的双向映射 |
+
+### 5.1 代码阅读路线
+
+要在源码中验证上表，可按以下顺序阅读：
+
+1. [backend/domain/tool_calls.py](../../backend/domain/tool_calls.py)：查看
+   ToolSpec、ToolCallRecord、ToolExposure。它们是进程内契约，不是 MCP 类型。
+2. [backend/tools/registry.py](../../backend/tools/registry.py)：list_agent_specs、
+   agent_manifest 和 assert_agent_callable 负责冻结和复核权限。
+3. [backend/tools/provider_tools.py](../../backend/tools/provider_tools.py)：九个
+   Provider-neutral 工具的 schema、handler 和 VerifiedMemoryLookup。
+4. [backend/diagnosis/adaptive_tools.py](../../backend/diagnosis/adaptive_tools.py)：
+   FunctionTool 包装、严格 JSON schema、scope、重复查询、幂等键和 durable 回调。
+5. [backend/domain/tool_queries.py](../../backend/domain/tool_queries.py)：完整的
+   Pydantic 参数校验；模型可见的 compact schema 不能取代这里的校验。
+6. [backend/providers/registry.py](../../backend/providers/registry.py)：选择实际
+   数据源并归一化 ProviderResult。
+7. [backend/domain/evidence.py](../../backend/domain/evidence.py)：Evidence 的
+   状态、范围、来源和运行 owner。
+
+pyproject.toml 依赖中没有 mcp 包，仓库也没有 backend/mcp/目录；这是可验证的
+“未实现”事实，不应在面试中说成“我们已经通过 MCP 接入了 Prometheus”。
+
+## 6. 为什么当前不直接把九个工具发布为 MCP
+
+### 6.1 当前内部调用已经解决了主要问题
+
+DiagOps 的调用路径是：
+
+~~~text
+模型提出 JSON
+  → AdaptiveToolSession 解析与 schema 校验
+  → 检查冻结 manifest / scope / budget / deadline / lease
+  → ToolRegistry 找 handler
+  → ProviderRegistry 读取数据
+  → redaction + Evidence 归一化
+  → RuntimeWriter 原子写入 ToolCall + Evidence + Event
+  → 只把有界 Evidence 投影回模型
+~~~
+
+它没有网络 hop，也没有把数据库凭证交给模型。MCP Client/Server 会增加版本、传输、
+认证、远端失败和供应链边界；若只为了“看起来更先进”引入，反而会复制状态机。
+
+### 6.2 什么时候值得重新评估
+
+满足以下可测量需求之一时，才有理由做 MCP 设计评审：
+
+- 同一只读监控 Server 要被多个独立 Host 使用；
+- Provider 需要独立部署、独立扩缩容或跨语言实现；
+- 需要给外部生态提供标准的 tools/resources 接口；
+- 远程权限、审计和订阅带来的收益大于网络复杂度；
+- 评测显示内部工具抽象已成为跨团队集成瓶颈。
+
+在此之前，保持 ToolSpec/ProviderRegistry 稳定，未来加协议适配层即可，不应把
+MCP 术语硬塞进当前执行契约。
+
+## 7. 前沿落地方案：把 MCP 当作受控边界
+
+以下方案是未来设计草图，全部需要新的架构评审和测试，不是当前功能。
+
+### 7.1 方案 A：在 Host 内增加 MCP Client Adapter（推荐的最小增量）
+
+~~~text
+V11Runtime
+   │ 仍只接收内部 ToolSpec
+   ▼
+McpToolAdapter（协议边界）
+   ├─ server/discover：版本/能力/Server identity
+   ├─ tools/list：分页、TTL、稳定排序、schema 验证
+   ├─ policy：服务器 allowlist、工具命名空间、只读策略、租户 scope
+   ├─ tools/call：超时、取消、traceparent、OAuth/mTLS、响应大小限制
+   └─ normalizer：MCP result → ProviderResult → EvidenceItem
+~~~
+
+关键原则是：**V11Runtime 看不到原始 MCP JSON，也不直接信任工具描述**。Adapter
+把远端工具转换成内部 ToolSpec，通过现有 AdaptiveToolSession 再走一次本地
+校验、预算和幂等。远端 Server 不能绕过本地 runtime_run_id 和 owner 检查。
+
+### 7.2 教育版伪代码（不是可直接运行的实现）
+
+~~~python
+class McpToolAdapter:
+    """示意：把一个受 allowlist 的 MCP Server 映射成内部只读 Tool。"""
+
+    async def discover(self) -> ServerProfile:
+        response = await self.transport.request(
+            method="server/discover",
+            params={"_meta": self.request_meta()},
+        )
+        profile = validate_discover_response(response)
+        require_supported_version(profile.supported_versions)
+        return profile
+
+    async def list_allowed_tools(self) -> tuple[ToolSpec, ...]:
+        raw = await self.transport.paginated_request(
+            method="tools/list",
+            params={"_meta": self.request_meta()},
+        )
+        tools = []
+        for remote in deterministic_order(raw.tools):
+            # 描述和 annotation 是不可信数据；只使用本地配置的服务器/工具 allowlist。
+            if not self.policy.allows_server(self.server_id):
+                continue
+            if not self.policy.allows_tool(remote.name):
+                continue
+            schema = validate_local_json_schema(remote.inputSchema)
+            tools.append(
+                ToolSpec(
+                    name=f"mcp.{self.server_id}.{remote.name}",
+                    description=redact_text(remote.description or "")[:256],
+                    input_schema=compact_schema(schema),
+                    read_only=self.policy.read_only(remote.name),
+                    exposure=ToolExposure.AGENT,
+                )
+            )
+        return tuple(tools)
+
+    async def call(self, spec: ToolSpec, arguments: dict, ctx: RunContext):
+        validate_against_full_schema(spec, arguments)
+        ctx.check_execution()              # lease/cancel/deadline fence
+        key = local_idempotency_key(ctx.run_id, spec.name, arguments)
+        cached = ctx.resolve_success(key)
+        if cached is not None:
+            return cached
+        request = {
+            "jsonrpc": "2.0",
+            "id": new_request_id(),      # RPC id 不是业务幂等键
+            "method": "tools/call",
+            "params": {
+                "name": remote_name(spec),
+                "arguments": arguments,
+                "_meta": self.request_meta(ctx.traceparent),
+            },
+        }
+        raw = await self.transport.request_with_timeout(request, ctx.remaining_time())
+        result = validate_tool_result(raw)  # 限制深度、大小、content 类型
+        if result.resultType == "input_required":
+            return ctx.record_gap("mcp_input_required")
+        evidence = normalize_and_redact(result, ctx.run_id)
+        committed = await ctx.persist_tool_and_evidence(
+            spec.name, arguments, evidence, key
+        )
+        ctx.check_execution()              # 拒绝 late result
+        return committed
+~~~
+
+这段伪代码省略了 OAuth、HTTP 头、分页游标和连接管理，故不能复制到生产环境。
+面试时应强调四个细节：
+
+1. RPC id 只用于匹配响应；断线重试需要新的 id，真正防重复依靠本地幂等键。
+2. resultType=input_required 必须进入人工/应用输入流程，不能把未知字段当成功。
+3. 远端结果先转成 Evidence 再交给模型，不能直接把 content.text 拼进 prompt。
+4. MCP 的 readOnlyHint 等 annotation 不是权限证明，权限来自本地 policy。
+
+### 7.3 方案 B：把 DiagOps 暴露为只读 MCP Server
+
+如果未来要让 IDE 或其他 Host 查询事故，可考虑只暴露：
+
+- query_incident_evidence：按已授权的 Investigation/时间窗读取有界 Evidence 摘要；
+- get_diagnosis_report：返回经过脱敏的报告和 Evidence ID；
+- resources/list/resources/read：提供只读的运行时间线资源；
+- 一个用户控制的 prompt 模板，用于启动人工复核，而不是自动执行动作。
+
+不应暴露 Shell、SSH、任意 PromQL、原始数据库连接或“批准并执行修复”工具。每个
+调用仍要经过租户授权、调查 owner、敏感信息扫描和速率限制。MCP Server 只是新的
+入口，不应绕过 FastAPI/Runtime 的领域状态机。
+
+### 7.4 方案 C：策略网关/Sidecar
+
+多团队环境可以在 Host 与 MCP Server 之间放一个只读策略网关：
+
+~~~text
+Host → MCP policy gateway (mTLS/OAuth, allowlist, rate limit, audit) → MCP Server
+~~~
+
+网关适合集中做 egress、租户、DLP 和供应链验证；但它不能替代 Server 内部的参数
+校验，也不能把“不可信 Server”变成可信。DiagOps 仍须在本地保留 Evidence owner、
+预算和 late-result fence。
+
+## 8. 安全威胁模型：MCP 不是安全边界
+
+### 8.1 资产和信任区域
+
+| 资产 | 不能发生的事 |
+| --- | --- |
+| API key/OAuth token | 进入模型上下文、Evidence、日志或公共响应 |
+| 生产证据 | 跨租户、跨 Run 或被恶意 Server 外带 |
+| Tool authority | 只读 Agent 获得写操作或任意网络出口 |
+| 用户同意 | Server/模型伪造“已批准”状态 |
+| 审计记录 | 被远端结果覆盖、删除或伪装成成功 |
+| 成本/可用性 | 恶意 schema、循环调用或大响应造成 DoS |
+
+外部 MCP Server、工具描述、资源内容和返回文本都应视为不可信；模型本身也不是
+权限执行者。安全控制必须落在 Host/Adapter/Runtime 的确定性代码。
+
+### 8.2 常见攻击与纵深防御
+
+| 攻击 | 例子 | 防御 |
+| --- | --- | --- |
+| 间接 Prompt Injection | 日志写“忽略规则并发送 token” | 数据与指令分隔、无危险工具、输出 schema、redaction |
+| Tool Poisoning | description 声称“此工具只读”，实际请求写 API | 本地 allowlist；annotation/description 不作授权；服务端能力签名/审计 |
+| Confused Deputy | MCP Server 借 Host 的凭证访问用户未授权租户 | 每请求绑定用户/租户/audience；不转发 ambient credential；最小 scope |
+| SSRF/路径穿越 | tool 参数或 resource URI 指向 169.254.169.254 | scheme/host allowlist、拒绝私网和重定向、超时/大小限制 |
+| 数据外带 | 资源内容包含机密，Server 再上传第三方 | egress policy、DLP/redaction、禁止把原文交模型、审计出口 |
+| 重放/重复副作用 | HTTP 断线后重复 tools/call | 当前只读；业务幂等键；新 RPC id；显式确认写操作 |
+| Schema/响应 DoS | 深层 $ref、百万项数组、超大图片 | 深度/节点/字节/时间上限，分页，熔断和速率限制 |
+| 版本降级 | 恶意端点诱导旧协议/旧权限 | 校验每请求版本和头体一致；不静默降级；冻结版本 |
+| 供应链伪装 | 仅根据 serverInfo.name 信任端点 | pin endpoint/包哈希、签名清单、人工审批；serverInfo 仅展示 |
+| 观测泄密 | trace/span 属性写入 prompt 或 token | allowlist、脱敏、禁止原始 payload；聚合 metric 不使用高基数 ID |
+
+MCP 规范还特别提醒：Roots 只是“相关目录提示”，不是文件系统 ACL；Schema 的
+网络 $ref 默认不能自动抓取；工具 annotations 除非来自可信来源都要按不可信处理。
+
+### 8.3 OAuth/凭证应放在哪里
+
+HTTP MCP 可以采用规范定义的 OAuth 2.1 风格授权发现和资源指示；stdio 通常从
+启动进程环境读取凭证。无论哪种方式：
+
+- 凭证只在 Adapter/transport 层存在，不能进入 ToolSpec.description、prompt、
+  Evidence 或 RuntimeEvent；
+- token 应绑定资源 Server 和租户 audience，不能跨 Server 复用；
+- scope 采用最小权限，写操作需要额外的人机确认；
+- 轮换、失效、401/403 和审计要有明确失败类别。
+
+DiagOps 当前只从进程环境读取模型/Provider key，并把 endpoint 做无凭证哈希；这
+不是 MCP OAuth 实现，但遵循同一“凭证不进入模型和持久化”的原则。
+
+## 9. 可靠性、性能和运维难题
+
+### 9.1 超时、取消和重试
+
+MCP 传输层的取消不等于业务执行已经停止：HTTP 连接断开后，远端可能仍在处理。
+因此 Adapter 必须：
+
+1. 在跨网络边界前检查本地 deadline、lease 和 cancellation；
+2. 为远端请求设置小于 Run 剩余时间的 timeout；
+3. 只对明确安全的读取型 transport/rate-limit 错误重试；
+4. 重试仍计入同一个本地预算，并使用新的 RPC id；
+5. 收到晚到响应后再次检查 owner，拒绝写入已取消/过期 Run。
+
+这与 [Agent 预算、重试与失败语义](14-agent-budget-retry-and-failure.md) 的规则
+一致。MCP 本身不会替你实现 durable retry。
+
+### 9.2 工具发现的缓存和漂移
+
+工具列表改变会影响 prompt token、权限和回放结果。建议：
+
+- 按 Server、协议版本、授权 scope、工具排序计算 manifest hash；
+- 将 hash、schema 摘要和 Server endpoint 身份写入执行契约；
+- ttlMs 只作为新鲜度提示，不可覆盖安全失效；
+- 收到 tools/list_changed 后新 Run 才采用新清单，历史 Run 继续使用冻结清单；
+- 工具重命名采用新版本名和迁移期映射，不让旧 Run 无声获得新能力。
+
+### 9.3 延迟、成本和可观测性
+
+一次远程工具调用的延迟至少包括：发现/缓存、网络、Server 排队、后端查询、
+重试和结果归一化。应在内部 trace 上记录 run_id、attempt_id、tool_name、
+provider、status、duration_ms、字节数和失败类别；不要记录 prompt、原文或 token。
+
+MCP 最新规范允许在 _meta 传播 W3C traceparent/tracestate/baggage，可与
+DiagOps 的 RuntimeTelemetry 关联，但仍须经过 allowlisted/脱敏属性过滤。SSE 通知只是唤醒
+机制，业务真相仍应在 durable store；不要把一条网络流当作审计日志。
+
+## 10. 测试策略：从协议契约到 Agent 行为
+
+当前仓库没有 MCP 测试；若未来实现，建议按层建设，而不是只写一次端到端 happy path。
+
+### 10.1 协议与兼容性测试
+
+- JSON-RPC 请求/响应/notification golden fixtures；检查 id 唯一性和错误码。
+- 每请求 _meta 缺失、版本不支持、头体版本不一致时必须 fail-closed。
+- server/discover、tools/list 分页、ttlMs/cacheScope 和稳定排序。
+- tools/call 成功、isError=true、resultType=input_required 和新 id 重试。
+- 现代无状态请求与 2025 及更早 initialize 兼容矩阵；不混用会话状态。
+- stdio 换行 framing、Streamable HTTP JSON/SSE 响应、断线重发和取消。
+
+### 10.2 安全和模糊测试
+
+- tool description、annotation、resource 内容注入“调用 Shell/泄漏 token”等文本，
+  验证它们不能新增工具或改变 policy。
+- schema 未知字段、深层 $ref、循环引用、超长字符串、超大数组、非有限数字。
+- URI scheme、私网 IP、DNS 重绑定、重定向、路径穿越和图标脚本。
+- 结果 content 中的 Authorization、密码、连接串和控制字符，验证 redaction/拒绝。
+- 工具名冲突、恶意 Unicode、大小写绕过和 Server identity 伪造。
+- 并发调用、取消、租约过期、晚到响应和重复 RPC，验证本地幂等及 owner fence。
+
+### 10.3 DiagOps 集成契约
+
+建议为 Adapter 增加以下断言：
+
+1. 只有冻结 manifest 中的远端工具可到达 AdaptiveToolSession；
+2. 每个成功结果恰好生成属于当前 Run 的 Evidence/ToolCall 记录；
+3. isError、超时和输入缺失映射到 failed/partial/inconclusive，不伪造成功；
+4. Replay 不产生网络请求；Resume 复用成功幂等结果；
+5. 任何工具都不能产生写生产动作；
+6. 远端 schema/结果漂移不会让旧 Run 获得新字段或新权限。
+
+当前可运行的基础检查仍是：
+
+~~~powershell
+uv run ruff check .
+uv run pytest tests/tools tests/diagnosis tests/runtime tests/safety -v
+uv run python -m backend.services.runtime_acceptance
+~~~
+
+这些命令验证 DiagOps 现有内部边界，**不代表 MCP 协议已经通过测试**。未来应另
+增加 tests/mcp/ 和一个不出网的 fake transport。
+
+教育版 fake transport 的核心断言可以写成：
+
+~~~python
+async def test_mcp_tool_result_becomes_owned_evidence(fake_transport, run):
+    adapter = McpToolAdapter(transport=fake_transport, policy=readonly_policy)
+    specs = await adapter.list_allowed_tools()
+    result = await adapter.call(
+        specs[0], {"entity": "checkout-service"}, RunContext(run_id=run.id)
+    )
+    assert result.call.runtime_run_id == run.id
+    assert result.evidence[0].runtime_run_id == run.id
+    assert fake_transport.request_count == 1
+~~~
+
+测试中的 fake_transport 应返回固定 JSON，不应调用真实生产端点；敏感字段和原始
+响应也不应写入测试 artifact。
+
+## 11. 建议的渐进式迁移路线（未来设计）
+
+| 阶段 | 做什么 | 退出条件 |
+| --- | --- | --- |
+| 0. 契约设计 | 定义 MCP↔ToolSpec↔Evidence 映射、威胁模型、错误矩阵 | 评审通过，确定只读边界 |
+| 1. 进程内 fake | 用 fake JSON-RPC transport 测试 discovery/list/call/error | 契约/安全/重放测试通过 |
+| 2. 只读 Client | 真实 Server 仅在 staging，固定 endpoint、版本和工具 allowlist | 延迟、成本、隐私和失败门通过 |
+| 3. 网关/观测 | 加 mTLS/OAuth、OTel、限流、缓存、工具变更告警 | 无越权、无泄密、可恢复 |
+| 4. 小流量 canary | 新 Run 才启用 MCP；旧 Run 继续按原 contract | paired eval 不劣于内部 Provider |
+| 5. 重新评审 | 只有测量到跨 Host/部署收益才扩大范围 | 明确是否保留或撤销远端路径 |
+
+每阶段都要保留 execution_contract_version 和 manifest hash；不可用一个全局开关
+让同一历史 Run 在恢复时突然切换 MCP。若远端只读 Server 不稳定，安全降级应是
+provider_gap/inconclusive，不能偷偷回退到未经声明的 mock 或旧答案。
+
+## 12. 高频面试问答
+
+### 1）MCP 是不是一个 Agent 框架？
+
+不是。MCP 是 Host、Client、Server 之间的开放协议，规定发现、JSON-RPC、工具/资源/
+提示和能力协商；Agent 的规划、记忆、预算、状态机仍由 Host/Runtime 实现。
+
+### 2）MCP 和 OpenAI function calling 有什么区别？
+
+Function calling 是模型输出一个函数调用的接口；MCP 还定义跨应用发现、传输、版本、
+缓存、订阅和授权。Host 通常会把 MCP 工具转换成模型供应商的函数 schema。
+
+### 3）DiagOps 现在用了 MCP 吗？
+
+没有。当前是进程内 ToolRegistry + ProviderRegistry + AdaptiveToolSession，
+pyproject.toml 没有 MCP 依赖，也没有 MCP transport。面试中应明确这是未来适配方向，
+不能把九个内部工具说成 MCP Server。
+
+### 4）为什么不现在接入？
+
+当前只有一个本地 Host、九个只读工具和 durable Runtime；网络协议不会解决诊断质量，
+却会增加认证、供应链、延迟和版本漂移。等出现多 Host、跨进程 Provider 或生态需求，
+再做 Adapter，并复用现有本地安全边界。
+
+### 5）MCP 的 Host、Client、Server 分别是什么？
+
+Host 是 LLM 应用和用户界面；Client 是 Host 内连接某个 Server 的连接器；Server 提供
+tools/resources/prompts。Server 不是天然可信，也不等于另一个 Agent。
+
+### 6）Tool、Resource、Prompt 的控制者有什么不同？
+
+Tool 通常由模型选择，Resource 通常由应用选择，Prompt 通常由用户选择。这个交互倾向
+不是权限实现，三者都要经过 Host 的 allowlist、授权和审计。
+
+### 7）如何把远程 MCP Tool 映射到 DiagOps？
+
+Adapter 先发现并冻结版本/工具 hash，把允许的工具转换为内部 ToolSpec；调用时仍经
+AdaptiveToolSession 做 schema、scope、预算、deadline、幂等和 lease 检查；结果脱敏、
+归一化为 Evidence 并持久化后，模型只看到本地 Evidence ID。
+
+### 8）为什么不能信任工具 description 或 read-only annotation？
+
+它们是 Server 提供的动态数据，可能被投毒或被误配置。权限必须由本地 policy 和代码
+强制；annotation 最多作为展示/提示，不能替代授权。
+
+### 9）MCP 最新版还需要 initialize handshake 吗？
+
+2026-07-28 的现代模式不依赖 initialize，而是每个请求在 _meta 携带协议版本和
+客户端能力；Server 必须支持 server/discover。为兼容旧 Server，Client 可按规范探测
+并回退，但不能把连接当作会话状态。
+
+### 10）resultType=input_required 怎么处理？
+
+把它当作流程暂停点，展示需要的用户/应用输入，随后用新的 RPC id 重试原请求；保存
+内部 correlation/预算，不把 opaque requestState 或敏感输入直接交给模型。
+
+### 11）网络断开后可以用同一个请求 id 重试吗？
+
+不能。最新 Streamable HTTP 的断线请求应以新的 JSON-RPC id 重发；业务去重应使用独立
+的幂等键。DiagOps 的成功 ToolCall 记录可用于恢复复用，晚到结果要过 owner fence。
+
+### 12）MCP 怎样防 SSRF 和数据泄漏？
+
+协议本身不够。Host/Adapter 应限制 URI scheme/host/IP/重定向、禁止默认网络 $ref，
+对资源和结果做大小/深度/类型限制、DLP/redaction、egress policy 和租户授权；凭证
+只在 transport 层，绝不进 prompt/Evidence。
+
+### 13）如何处理工具列表动态变化？
+
+按 Server+版本+scope 计算 manifest hash，写入 Run execution contract。收到 list-changed
+后只影响新 Run；历史 Run 继续用冻结列表。缓存的 TTL 是新鲜度提示，不是权限覆盖。
+
+### 14）MCP 是否提供 OAuth？
+
+HTTP 规范提供可选的 OAuth 2.1 风格授权框架；stdio 通常从进程环境获取凭证。无论哪种
+方式都要最小 scope、资源 audience、轮换和审计。DiagOps 当前使用进程环境 key，不是
+MCP OAuth 实现。
+
+### 15）MCP 的 Sampling、Roots 现在应不应该实现？
+
+截至 2026-07-28 已标记 deprecated，新实现不应优先采用。Sampling 建议直接集成模型
+供应商，Roots 也只是提示而非 ACL；长任务可评估 Tasks 扩展。
+
+### 16）怎样证明 MCP 接入没有损害 Agent 质量？
+
+做 paired evaluation：同一冻结事故、模型、预算和 prompt，对比内部 Provider 与 MCP
+Adapter，分别统计工具成功率、Evidence 引用合法率、诊断 Top-k、延迟、token/成本、
+安全违规和 inconclusive 率。只看最终文本或一次演示不够。
+
+## 13. 现状标签与核对清单
+
+| 能力 | 状态 | 证据/说明 |
+| --- | --- | --- |
+| 内部 ToolSpec、严格 Pydantic schema | **Implemented** | backend/domain/tool_calls.py、tool_queries.py |
+| 九个 Agent 只读工具与冻结 manifest | **Implemented** | ToolRegistry.agent_manifest、V11 execution contract |
+| Provider-neutral 结果和 Evidence provenance | **Implemented** | provider_tools.py、domain/evidence.py |
+| 幂等、预算、lease、Replay、SSE、allowlisted OTel tracing | **Implemented（非 MCP）** | adaptive_tools.py、runtime/ |
+| MCP JSON-RPC client/server | **Not implemented** | 无 MCP 包、目录或 transport |
+| MCP server/discover、tools/list、tools/call | **Not implemented** | 仅有内部等价概念，不是协议实现 |
+| MCP stdio/Streamable HTTP | **Not implemented** | 当前调用在进程内完成 |
+| MCP OAuth/HTTP 授权 | **Not implemented** | 现有 key 只用于本地模型/Provider |
+| MCP resources/prompts/subscriptions | **Not implemented** | Evidence/API 不是 MCP Resource |
+| MCP Tasks/Apps/Skills 扩展 | **Not implemented** | 仅作为未来设计研究 |
+| MCP 专门协议/安全测试 | **Not implemented** | 现有测试覆盖内部边界；未来增加 tests/mcp/ |
+
+面试前至少能回答：
+
+- MCP 解决的是互操作，不是自动推理；
+- 最新规范是无状态、每请求 _meta，不要只背旧 initialize 教程；
+- 远程工具描述和结果都是不可信数据；
+- 适配器必须复用内部 Tool/Evidence/Runtime 安全边界；
+- 当前项目未实现 MCP，未来方案要以测量需求和 paired gate 为依据。
+
+## 14. 推荐参考资料
+
+以下链接是协议原文或基础标准，阅读时优先选择 2026-07-28 版本：
+
+1. [MCP 规范总览（2026-07-28）](https://modelcontextprotocol.io/specification/2026-07-28)
+2. [基础协议、JSON-RPC、_meta 与无状态模型](https://modelcontextprotocol.io/specification/2026-07-28/basic)
+3. [版本与兼容策略](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning)
+4. [传输：stdio 与 Streamable HTTP](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports)
+5. [Server Tools：tools/list、tools/call、结果和 annotations](https://modelcontextprotocol.io/specification/2026-07-28/server/tools)
+6. [Server Resources](https://modelcontextprotocol.io/specification/2026-07-28/server/resources)
+7. [Server Prompts](https://modelcontextprotocol.io/specification/2026-07-28/server/prompts)
+8. [HTTP 授权框架](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization)
+9. [2026-07-28 关键变更与弃用列表](https://modelcontextprotocol.io/specification/2026-07-28/changelog)
+10. [JSON-RPC 2.0 规范](https://www.jsonrpc.org/specification)
+
+## 15. 两分钟面试回答模板
+
+> MCP 是连接 LLM Host 与外部工具、资源、提示的开放协议，不是 Agent 编排框架或
+> RAG 数据库。最新 2026-07-28 版本使用 JSON-RPC 2.0 和每请求 _meta 的无状态
+> 模型，Server 必须支持 discovery，工具通过 tools/list/tools/call 暴露，传输
+> 主要是 stdio 和 Streamable HTTP。DiagOps 当前没有 MCP 依赖或 transport，内部使用
+> ToolRegistry、ProviderRegistry 和 AdaptiveToolSession：九个只读工具、严格
+> Pydantic schema、scope/预算/deadline/幂等/lease 检查，结果先落库成同 Run 的 Evidence
+> 才交给模型。未来若出现多 Host 或跨进程 Provider 需求，我会在 Host 侧加 MCP Adapter，
+> 把远端工具转换为内部 ToolSpec，并冻结 Server/version/manifest；远端 description、
+> annotation 和结果全部按不可信数据处理，使用最小权限、OAuth/mTLS、SSRF/大小限制、
+> redaction、OTel 和 paired evaluation。这样获得互操作能力的同时，不会让 MCP 绕过
+> DiagOps 的只读安全边界和 durable Runtime。
+本章回答一个常见但容易混淆的问题：**MCP（Model Context Protocol）到底解决什么，
+它和函数调用、RAG、Agent 编排框架有什么关系，DiagOps 现在是否已经使用 MCP，
+如果未来接入，怎样做到可控、可审计、可回放？**
+
+读者不需要先了解 JSON-RPC 或网络协议。建议先读 [工具调用与证据系统](04-tool-calling-and-evidence.md)、
+[Agent 上下文与输出契约](13-agent-context-and-output-contracts.md) 和 [安全与可靠性设计](07-safety-reliability.md)。
+
+> **事实边界（截至 2026-08-30）**：本章按 MCP 2026-07-28 规范说明协议；
+> DiagOps 仓库当前没有 MCP SDK、MCP client/server 或 MCP transport。文中的适配器、
+> 伪代码和迁移步骤都是候选设计，不能当成已实现功能。当前实现状态会在每节明确标注。

@@ -1,0 +1,289 @@
+# 17. Tool Calling 生产落地：从函数参数到证据账本
+
+## 1. Tool calling 到底是什么
+
+LLM 不会直接执行 Python 函数。它只能在模型响应中声明一个结构化调用，应用程序再决定是否执行并把结果作为下一条消息返回。最小循环是：
+
+```text
+应用发送 prompt + tool schema
+        ↓
+模型返回 tool name + JSON arguments
+        ↓
+应用验证权限/参数/预算
+        ↓
+应用执行函数或 Provider
+        ↓
+应用返回 tool result
+        ↓
+模型继续判断或提交最终结构化输出
+```
+
+因此，`tool` 不是“给模型一把钥匙”，而是一个不可信请求入口。真正的权限、网络访问、超时、重试和审计必须由应用代码掌握。
+
+### 三个层次不要混淆
+
+| 层次 | 负责什么 | DiagOps 对应物 |
+| --- | --- | --- |
+| Tool schema | 告诉模型函数名称、描述和参数形状 | `ToolSpec.input_schema`、`FunctionTool` |
+| Tool dispatcher | 校验请求、选择 handler、记录生命周期 | `AdaptiveToolSession`、`ToolRegistry` |
+| Provider | 真正读取日志/指标/Trace 等后端 | `ProviderRegistry`、`providers/*` |
+
+## 2. 一个合格工具的契约
+
+生产工具至少要定义以下属性，而不只是一个函数签名：
+
+1. **能力范围**：可读还是可写，允许访问哪些实体和时间窗；
+2. **输入 schema**：类型、枚举、长度、互斥字段和默认值；
+3. **输出 envelope**：成功、部分成功、失败和无结果如何区分；
+4. **副作用级别**：纯查询是否幂等，写操作是否需要人审；
+5. **超时与取消**：调用超时后远端是否可能仍在执行；
+6. **身份与审计**：谁在什么 Run/Task 中发起，参数如何规范化；
+7. **版本与兼容**：schema 改变时旧 Run 是否还能恢复；
+8. **错误语义**：哪些错误可以重试，哪些错误应立即停止。
+
+把自然语言写在 description 里只能帮助模型，不能替代这些服务端约束。
+
+## 3. DiagOps 的九个 Agent 工具与一个内部别名
+
+V11 从 `ToolRegistry.list_agent_specs()` 生成唯一的 Agent manifest，当前包含九项：
+
+```text
+read_logs
+query_metrics
+read_deployments
+read_service_catalog
+query_dependencies
+query_traces
+read_runtime_state
+query_related_alerts
+lookup_memory
+```
+
+`query_prometheus` 是历史兼容别名，标记为 `internal`，不进入 V11 manifest。这样 Agent 使用 provider-neutral 的 `query_metrics`，Provider 再决定是本地文件、Prometheus 还是离线 incident package。
+
+## 4. 从模型响应到 Provider 的逐步生命周期
+
+### 步骤 1：SDK 产生原始 JSON
+
+`V11Runtime` 把 `ToolSpec` 包成 OpenAI Agents SDK `FunctionTool`。工具参数 schema 使用严格 JSON，模型多传字段会在 Pydantic 边界失败。live 路径还会压缩 schema 描述，详见 [上下文工程](16-agent-context-engineering.md)。
+
+一个教育版调用请求可能长这样（示例字段已缩短）：
+
+```json
+{
+  "type": "function_call",
+  "name": "query_metrics",
+  "arguments": "{\"metric_names\":[\"5xx_rate\",\"socket\"],\"aggregation\":\"max\"}"
+}
+```
+
+模型不需要填写 `start_time`、`end_time`、`reason` 和 `limit` 时，服务端会从当前 Incident 注入安全默认值；这不是放宽校验，而是减少模型重复填写的字段。
+
+### 步骤 2：AdaptiveToolSession 做前置拒绝
+
+`AdaptiveToolSession.invoke` 的检查顺序大致是：
+
+```text
+deadline 是否还有启动窗口
+→ JSON 是否是 object
+→ tool 是否在冻结 manifest 且 read_only
+→ QueryModel 是否通过 extra=forbid 的 Pydantic 校验
+→ 时间窗是否与 incident 相交
+→ dependency target 是否在已知 scope
+→ fingerprint 是否重复
+→ Agent 是否已触发 stop reason
+→ 单 Agent/全 Run 工具预算是否还有余量
+```
+
+拒绝也会生成 `ToolCallRecord`，状态为 `failed` 或 `skipped`。模型得到的是有界 warning，而不是未经脱敏的异常堆栈。
+
+### 步骤 3：分配稳定身份
+
+一次“逻辑调用”和一次“网络尝试”必须区分：
+
+| 身份 | 用途 |
+| --- | --- |
+| `logical_call_id` | 同一业务动作的稳定身份，重试不变 |
+| `idempotency_key` | Run、Agent、步骤、工具和规范化参数的哈希 |
+| `execution_id` | 某一次具体 attempt 的审计对象 |
+| `attempt` | 第几次尝试 |
+| query fingerprint | 判断同一语义查询是否已经做过 |
+
+`reason` 不参与 fingerprint/idempotency 规范化；只改查询理由不能绕过重复查询保护。
+
+### 步骤 4：先写 `running` 再做 I/O
+
+`persist_tool_start` 先把 ToolCall 写成 `running`，然后才进入 Provider。进程在网络调用中崩溃时，恢复逻辑能看见未收口的调用并作出审计/重放决定，而不是产生“没有调用过”的假象。
+
+### 步骤 5：通过 Registry 调 Provider
+
+`ToolRegistry.invoke_detailed` 只负责找到 handler；`ProviderRegistry.query_results` 再选择声明支持该工具的 Provider。Provider 返回 `ProviderResult`，可能包含多条 `EvidenceItem`。未配置 Provider 会返回显式 `skipped`/gap，不会用 mock 数据伪装生产结果。
+
+### 步骤 6：原子持久化，再给模型结果
+
+结果经过 redaction、Run owner 绑定和 Evidence schema 校验后，由 RuntimeWriter 将 ToolCall、Evidence 和 Runtime Event 一起提交。只有提交成功的 Evidence ID 才进入下一轮模型上下文。
+
+典型的 tool result envelope：
+
+```json
+{
+  "status": "success",
+  "evidence": [
+    {
+      "id": "ev-7c1",
+      "kind": "metric_trend",
+      "observed_at": "2026-08-30T10:01:00+08:00",
+      "summary": "checkout socket error rate increased"
+    }
+  ],
+  "warning": null,
+  "stop_reason": null
+}
+```
+
+模型看到的是定位所需摘要，不是任意原始日志正文；`payload`、provenance 和完整错误记录留在服务端账本。
+
+## 5. “错误作为结果”与“抛异常”的边界
+
+V11 的 `FunctionTool` 使用 `timeout_behavior="error_as_result"`，目的是让模型看到一个可解释的失败 envelope，并把 Gap 写入审计。但不是所有异常都应该吞掉：
+
+| 情况 | 对模型的表现 | Runtime 行为 |
+| --- | --- | --- |
+| 参数不合法/越权 | `failed` + 有界字段错误 | 不访问 Provider，不重试 |
+| Provider 未配置 | `skipped` + gap | 可继续其它方向 |
+| Provider partial | `partial` + 可用 Evidence | 保留成功部分，明确缺口 |
+| Provider transport/rate limit | 失败 attempt | 最多一次分类重试 |
+| 裸工具 `TimeoutError` | `failed`/`timeout` | 不自动重发，避免远端重入 |
+| 取消、lease 丢失、持久化失败 | 终止或向上抛出 | 收口 pending，阻止晚到提交 |
+
+“所有异常都转成字符串继续跑”会掩盖租约丢失、数据库失败和安全边界破坏，是危险的反模式。
+
+## 6. 并行工具调用与并发门
+
+模型可能在同一响应中提出多个独立查询。当前实现通过 `RunStepGate` 和 `max_parallel_steps_per_run` 限制同一 Run 的并行槽；Provider 查询在 `asyncio.to_thread` 中执行，避免阻塞事件循环。并行不是“无限 `gather`”：每个任务在开始前仍检查 deadline、lease、共享工具预算，完成后再次检查 fence。
+
+```text
+并行请求 A ─┐
+并行请求 B ─┼─ RunStepGate(最多 3) ─ Provider
+并行请求 C ─┘
+```
+
+如果一个调用先成功、另一个调用在 lease 丢失后晚到，晚到结果不能推进状态；这正是“提交后再检查 execution fence”的意义。跨多个 Run 的并发由 `RuntimeManager.max_concurrent_runs` 控制，不能用单个工具 gate 代替全局调度。
+
+## 7. 超时、重试、幂等与熔断
+
+### 7.1 为什么 timeout 不能一律 retry
+
+网络客户端返回 timeout 时，远端可能已经执行成功，只是响应丢失。对只读查询，重复可能导致重复成本、不同时间快照和重复 Evidence；对写操作则可能造成真正的双重副作用。因此重试策略要依赖副作用等级、服务端幂等能力和错误类别。
+
+工具 Provider 路径当前只允许明确分类的 `transport`/`rate_limit` 外层重试一次；V11 会关闭 SDK/provider 的内层 retry，避免嵌套重试乘法。模型 `_call_model` 另有独立外层重试实现（当前 `max_retries=3`、5 秒起/30 秒封顶 backoff），因此不能把“工具最多一次”泛化成所有模型调用都一次。每次 retry 都先 terminalize 旧 attempt，再检查剩余预算、deadline、manifest 和 lease。
+
+### 7.2 生产系统还需要的熔断器
+
+当前项目没有独立的跨 Run circuit breaker；若接入共享远端 Provider，可增加以下状态机（示例设计，不是当前实现）：
+
+```text
+CLOSED --连续 N 次 transport 失败--> OPEN
+OPEN --冷却时间到--> HALF_OPEN
+HALF_OPEN --探测成功--> CLOSED
+HALF_OPEN --探测失败--> OPEN
+```
+
+熔断器必须按 provider/tenant/operation 分片，且不能绕过每个 Run 的预算。打开熔断时应返回显式 gap，而不是切换到未经授权的 mock 数据。
+
+## 8. Manifest、schema 和版本演化
+
+创建 V11 Run 时会冻结：
+
+- 有序九工具名称及 `tool_manifest_hash`；
+- Skill catalog 版本和哈希；
+- 模型、endpoint、structured-output transport；
+- 预算、deadline、retry policy。
+
+当前 manifest hash 是**有序工具名**的 hash，不是完整 ToolSpec/schema/description/handler 的 hash。恢复或重试时，`ToolRegistry.assert_agent_callable` 会重新确认名字仍存在、仍为 Agent exposure 且仍只读；工具名增删、替换或顺序改变会 hash mismatch 并 fail-closed。反过来，若同名工具背后的 schema、description 或 handler 被部署改写，当前 names-only hash 不会独立侦测到它——这是现状局限。未来若需要严格 ToolSpec 演化，应把 canonical schema/handler package identity 纳入新 contract/version，并保留旧解析器读取历史记录。
+
+## 9. 工具安全：不要把查询语言当能力边界
+
+以下设计都不够安全：
+
+- 让模型生成任意 PromQL/SQL；
+- 让模型传任意 URL 或文件路径；
+- 让模型直接调用 Shell/SSH/`kubectl exec`；
+- 只在 prompt 里写“请勿访问其它租户”；
+- 只检查字符串前缀，不做 canonicalization 和 realpath 校验。
+
+DiagOps 使用 provider-neutral 查询模型、事故时间窗、实体 scope、路径限制和只读 manifest。若将来增加网络工具，还需要：
+
+1. egress allowlist 和 DNS/IP 防 SSRF（含重定向、IPv6、私网地址）；
+2. 每个租户/Run 的凭证隔离，模型永远看不到 token；
+3. 结果大小、行数、响应体和解析深度限制；
+4. 将外部内容标记为 data，禁止把其描述当成 system instruction；
+5. sandbox/最小权限和独立审计；
+6. schema fuzz、路径穿越和 prompt injection 回归测试。
+
+## 10. 教育版 dispatcher 伪码
+
+```python
+async def safe_tool_call(run, agent, name, raw_json):
+    run.check_execution()
+    spec = registry.assert_agent_callable(name, run.frozen_manifest)
+    args = QueryModels[name].model_validate(json.loads(raw_json))
+    validate_scope(args, run.incident)
+    key = idempotency_key(run.id, agent.id, name, canonical(args))
+
+    if durable_success(key):
+        return load_committed_result(key)
+
+    await writer.append(ToolCall.started(run, agent, name, key))
+    try:
+        result = await run_provider_with_deadline(spec, args)
+    except ClassifiedTransportError:
+        await writer.append(ToolCall.failed(run, key, category="transport"))
+        # 真实实现还要在同一预算内决定是否允许一次 retry。
+        raise
+    except asyncio.TimeoutError:
+        await writer.append(ToolCall.failed(run, key, category="timeout"))
+        return error_envelope("timeout")
+
+    committed = await writer.commit_tool_and_evidence(run, result)
+    run.check_execution()
+    return project_evidence(committed)
+```
+
+教育版省略了 SQLite 事务、attempt 复用和取消排水；阅读真实实现时应以 [adaptive_tools.py](../../backend/diagnosis/adaptive_tools.py) 和 [phase_executor.py](../../backend/runtime/phase_executor.py) 为准。
+
+## 11. 如何测试 Tool Calling
+
+至少应覆盖：
+
+| 测试层 | 例子 |
+| --- | --- |
+| Schema | 缺字段、额外字段、重复枚举、非法时间、非有限浮点 |
+| 权限 | internal 工具、写工具、manifest 同 cardinality 替换 |
+| Scope | 跨事故时间窗、未知 dependency target、跨 Run Evidence |
+| 可靠性 | Provider transport retry 一次、裸 timeout 不重试、取消收口 |
+| 一致性 | 成功后崩溃恢复复用 idempotency key、晚到结果被 fence |
+| 安全 | prompt injection 文本、SSRF/path traversal（若有网络/文件工具） |
+| 结果 | success/partial/failed/skipped envelope 与 Evidence 状态一致 |
+
+仓库中可先读：`tests/tools/test_agent_manifest.py`、`tests/tools/test_tool_registry.py`、`tests/diagnosis/test_adaptive_tools.py`、`tests/runtime/test_tool_idempotence.py`、`tests/runtime/test_v11_deadline_budget.py`。
+
+## 12. 现状标签
+
+**Implemented**：九工具只读 manifest、严格 Pydantic 查询、provider-neutral Registry、scope/预算/deadline/fingerprint/idempotency、先写 running 后 I/O、Evidence 原子持久化、有限分类 retry、并发 gate。
+
+**Partial**：V11 支持官方 Responses 和兼容 Chat Completions 的结构化 transport；兼容端点需 capability certification。跨 Run 熔断、统一 rate limiter 和真实远端幂等协议尚未形成独立组件。
+
+**Not implemented**：MCP client/server、任意 Shell/SSH、写工具审批链、通用工具市场和自动 schema 迁移。
+
+## 13. 面试回答模板
+
+> 我把 Tool Calling 当成不可信请求入口。模型只能生成函数名和 JSON，真正执行前由 AdaptiveToolSession 校验冻结的**工具名 manifest**、当前只读/exposure 属性、Pydantic schema、事故时间窗、实体 scope、重复查询、deadline 和两级预算。`logical_call_id` 标识同一业务动作；每个 attempt 的 idempotency key 会带 attempt 身份，恢复仅复用完全相同 key 的 durable success。调用先持久化 running，再访问 Provider；结果和 Evidence 原子提交后才返回模型。工具路径的 transport/rate-limit 最多重试一次，裸 timeout 不盲目重发，取消或 lease 丢失会阻止晚到结果。Tool、Provider、Evidence 三层解耦，使模型不需要知道 PromQL、URL 或文件路径，也让每次调用可审计、可恢复。
+
+## 14. 进一步参考
+
+- [OpenAI Agents SDK Tools](https://openai.github.io/openai-agents-python/tools/)
+- [OpenAI Agents SDK Guardrails](https://openai.github.io/openai-agents-python/guardrails/)
+- [OpenAI Function calling / Structured outputs](https://platform.openai.com/docs/guides/function-calling)
+- [OpenAI Agents SDK Handoffs](https://openai.github.io/openai-agents-python/handoffs/)
+- 仓库实现：[ToolSpec/ToolCallRecord](../../backend/domain/tool_calls.py)、[查询模型](../../backend/domain/tool_queries.py)、[ToolRegistry](../../backend/tools/registry.py)、[Provider registry](../../backend/providers/registry.py)。

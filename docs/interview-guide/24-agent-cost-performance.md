@@ -1,0 +1,196 @@
+# 24. Agent 成本、延迟与吞吐：在预算内取得新证据
+
+## 1. Agent 性能不是一个 `max_tokens`
+
+一次诊断的资源消耗至少来自：
+
+```text
+模型输入/输出 token
++ 模型请求次数与重试
++ 工具/Provider 查询次数与返回字节
++ 并发槽、线程和数据库写入
++ 检索/重排/观测的额外开销
+```
+
+只把 `max_tokens` 调大，可能让回答变长却没有更多证据；只把模型换小，可能增加 retry 和错误审查成本。应先分解瓶颈，再选择优化。
+
+## 2. 成本和延迟的基本公式
+
+### 2.1 模型成本
+
+```text
+model_cost = input_tokens / 1,000,000 × input_price
+           + output_tokens / 1,000,000 × output_price
+           + cached_tokens / 1,000,000 × cached_price
+```
+
+外部 Provider、embedding/reranker、网络流量和人工审查也应按 Run/tenant 归属，不要把它们藏在“模型 cost”里。
+
+### 2.2 延迟分解
+
+```text
+wall_time = queue_wait
+          + context_build
+          + model_latency
+          + tool_latency (可并行)
+          + persistence
+          + retry/backoff
+          + frontend delivery
+```
+
+并行 Investigator 的关键近似是 `max(各分支耗时)` 而不是总和，但共享 gate、数据库锁和 Provider 限流会使实际情况更复杂。必须采集 p50/p95/p99，不能只看平均值。
+
+## 3. 当前 V11 的资源合同
+
+默认常量在 `backend/domain/runtime.py`：
+
+```text
+max_turns = 8（Run 级 model turn budget）
+max_investigators = 3
+max_rounds = 2
+max_tool_calls_per_specialist = 3
+max_total_tool_calls = 8
+tool_timeout_seconds = 10
+default timeout_seconds = 120（硬上限 300）
+```
+
+配置可收紧边界，但运行中的 Run 使用 sealed `execution_contract`，不会因当前配置变化而免费获得新额度。`AgentsSettings` 的 `token_budget`、`max_turns`、工具预算、每个 Investigator 工具上限和 timeout 会映射到合同；产品 V11 拓扑当前固定写入最多 3 个 Investigator、最多 2 轮，不是对应的 Settings 配置项。`RuntimeSettings.max_parallel_steps_per_run` 也是当前 Runtime 的并发设置，不是 V11 contract 字段。
+
+## 4. Reservation 为什么比“结束后记账”可靠
+
+并发请求如果都先发送、完成后才扣 token，可能同时超出预算。V11 的流程是：
+
+```text
+请求前估算 input + output cap
+→ token lock 内原子 reservation
+→ 通过 deadline/lease/checkpoint fence
+→ 请求完成读取 usage
+→ 按 actual settle，退回未使用 cap
+```
+
+`_ModelReservation`、`_ModelUsageAccumulator` 和 durable `model.started/completed/failed` 事件记录 reservation id、logical call、request index、attempt 和状态。若 provider 报告超过 reservation 的 usage，系统将预算置为耗尽并 fail-closed；不能把超额请求算成“估算误差后继续”。
+
+工具预算也遵循相似原则：同一逻辑调用由 `logical_call_id` 关联并防止重复扣全局额度；retry 会生成带新 attempt 的 idempotency key，resume 只复用完全相同 key 的 durable success。无论哪种路径，resume 都不会重置已消耗额度。
+
+## 5. 当前并发和公平性
+
+- `RuntimeManager.max_concurrent_runs` 限制进程内同时运行的 Run 数；
+- 每个 Run 的 `RunStepGate` 限制 Provider/Investigator 并行步骤；
+- 并行 Investigator 在模型 reservation 时按尚未占用槽位分配预算，避免先启动的分支独占余量；
+- RuntimeWriter 单写入队列避免多个 Agent 直接竞争业务写入；
+- EventHub 队列有界，慢前端不会阻塞 Writer。
+
+这解决的是资源公平和状态一致性，不保证每个 Agent 用到完全相同 token，也不等于跨多进程/多节点的全局限流。
+
+## 6. 低风险优化顺序
+
+### 6.1 减少无效输入
+
+1. 用角色投影消除重复 incident/服务器字段；
+2. 用 Evidence digest 保留实体和 signal family 的区分信号；
+3. 压缩工具 schema，但保持服务端完整校验；
+4. Critic 使用引用闭包，不重放无关 Provider 结果；
+5. 对稳定 system/tool 前缀使用 provider 的 prompt cache（若合同和租户隔离允许）。
+
+### 6.2 减少无效回合
+
+- 无新 Evidence 时停止当前 Investigator；
+- Lead 规划信息缺口而非固定查所有模态；
+- Critic 只允许一轮补证；
+- 对参数/schema 错误给精确 correction，不进行开放式反思；
+- 模型质量门不满足时返回 inconclusive，而不是无限 retry。
+
+### 6.3 优化并发和后端
+
+- 独立只读 Provider 并行，受 gate 和 Provider 速率限制；
+- 对同一查询使用 durable idempotency 复用；
+- 批量读取本地文件/遥测，但保持每条 Evidence provenance；
+- 将 OTel export 异步化，避免 collector 拖慢业务；
+- 只有在 SQLite 写锁/Run 规模形成实测瓶颈后再拆队列或数据库。
+
+## 7. 缓存的正确边界
+
+缓存有三种容易混淆的对象：
+
+| 缓存 | 能缓存什么 | 必须绑定 |
+| --- | --- | --- |
+| Prompt/prefix cache | 稳定指令和工具 schema 前缀 | model/endpoint/prompt/manifest/tenant |
+| Tool result cache | 同一只读查询的结果 | Run、规范化输入、数据快照/TTL、权限 |
+| Memory/index cache | embedding/倒排结果 | source hash、ACL、版本、过期时间 |
+
+不能把缓存当作正确性来源：Provider 数据可能随时间变化，历史 Run 的 cache 不能跨租户复用，工具结果缓存命中也要写一条可审计的 reused ToolCall。V11 当前只对 durable success 做同 Run 幂等复用，没有通用跨 Run result cache。
+
+## 8. 成本爆炸的反例
+
+```text
+每个 Investigator 10 次工具 × 3 个 Agent
+× 每次模型 retry 3 次 × 外层 retry 2 次
+≈ 180 次外部动作
+```
+
+即使每次只输出很短文本，也可能造成 Provider 拥塞和账单爆炸。防御必须在每个外部边界前执行：全局工具/token/turn reservation、单 Agent cap、最大轮次、deadline、并发门、分类 retry 和 backoff cap。不要只在最后报告“预算超了”。
+
+## 9. 教育版预算控制伪码
+
+```python
+async def budgeted_request(run, actor, prompt, output_cap):
+    estimate = estimate_input(prompt)
+    reservation = await run.reserve(
+        input_tokens=estimate,
+        output_tokens=output_cap,
+        actor=actor,
+    )
+    try:
+        response = await call_with_deadline(
+            prompt,
+            max_output_tokens=reservation.output_cap,
+        )
+        actual = usage_or_audited_estimate(response)
+        await run.settle(reservation.id, actual)
+        return response
+    except RetryableTransportError:
+        await run.mark_retrying(reservation.id)
+        raise
+    except Exception:
+        await run.release_unused(reservation.id)
+        raise
+```
+
+真实 V11 还要处理 request index、跨 Attempt 恢复、取消排水和持久化失败；请结合 [14-预算与重试](14-agent-budget-retry-and-failure.md) 阅读 `_reserve_model_budget`/`_settle_model_budget`。
+
+## 10. 性能仪表盘建议
+
+按 `model/provider/phase/actor/tenant`（低基数）展示：
+
+```text
+run throughput、active runs、queue wait
+model requests、input/output/cache tokens、cost
+tool calls、new evidence yield、duplicate/no-new stop
+retry/backoff、budget rejection、deadline timeout
+parallel slot utilization、Writer queue depth、SQLite commit latency
+p50/p95/p99 wall/model/tool/persist latency
+complete/partial/inconclusive/failed ratio
+```
+
+告警应关注 burn rate（预算/错误预算消耗速度）和异常变化，而不是为每个 Evidence ID 建一条时间序列。
+
+## 11. 现状标签
+
+**Implemented**：Run/actor/tool/deadline/round/token 多维预算、模型 reservation/settlement、共享并发 gate、幂等复用、no-new-evidence stop、RuntimeWriter、allowlisted tracing 与 token usage 审计。
+
+**Partial**：有 usage 估算和审计，但 `_estimate_model_input` 不是所有 provider 的精确 tokenizer；当前 V11 也没有统一的定价计算/持续 cost 写入。没有通用跨 Run cache、全局分布式限流和成本 dashboard。
+
+**Not implemented**：自动 cost-aware model cascade、KV/prefix cache 管理、跨节点公平调度、基于质量/成本的在线 bandit、自动预算调优。
+
+## 12. 面试回答模板
+
+> Agent 性能要看证据产出而不只是回答长度。我会把成本分为 input/output/cache token、工具/检索和重试，把延迟拆成排队、context build、model、tool、persistence 和 backoff。V11 在请求前用启发式输入估算和锁内 reservation，完成后按可信 usage settle，retry/resume 共享同一预算；并行 Investigator 受 RunStepGate 和公平 reservation 限制，no-new-evidence 会早停。优化顺序是减少无效 context/工具/回合，再做安全缓存和并行，最后才考虑换模型或队列。所有优化都要用 cost、evidence yield、质量、p95 和失败率的 paired 数据验证。
+
+## 13. 学习核对清单
+
+- [ ] 能写出模型成本和延迟分解公式。
+- [ ] 能解释 token reservation 为什么必须在请求前、并发锁内完成。
+- [ ] 能区分逻辑调用、网络 retry 和 resume 的计费关系。
+- [ ] 能列出至少三种减少无效 Agent 回合的方法。
+- [ ] 能设计带权限/TTL/hash 的工具结果缓存键。
+- [ ] 能用 evidence yield 而不是 tool count 评价效率。

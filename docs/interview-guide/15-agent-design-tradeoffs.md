@@ -1,0 +1,145 @@
+# 15. Agent 设计取舍与面试追问
+
+面试官通常不满足于“系统用了三个 Agent”，而会追问为什么这样设计、代价是什么、还有哪些未解决问题。
+
+## 1. 为什么是阶段机，不是自由 Agent 循环
+
+自由循环很难回答：崩溃后从哪恢复、花了多少 Token、哪次工具调用已成功、谁拥有执行权、何时必须停止、两次评测是否走了同样流程。
+
+DiagOps 把规划、调查、审查、补证、权威投影和校验变成明确阶段。代价是自由度较低，收益是可持久化、审计、取消和公平评测。
+
+## 2. 为什么不用现成编排框架
+
+项目已有 durable Runtime、SQLite、Checkpoint、lease、event stream 和工具契约。引入新框架会产生两个状态机和两套恢复语义。
+
+当前只需固定有限阶段和最多三路并行，标准 `asyncio` 加现有 Runtime 足够。只有出现测量过的动态大规模队列或跨进程调度需求，才值得重新评估。
+
+## 3. 为什么不使用 Agent handoff
+
+Handoff 适合开放协作，但本项目要求每阶段先持久化和校验：
+
+```text
+Lead 交任务意图
+→ Runtime 生成 Task 并落库
+→ Investigator 提交 Evidence
+→ Runtime 准入 Candidate
+→ Critic 审查
+```
+
+Agent 不直接共享隐式会话状态。这样恢复不依赖不可重建对话，第一轮隔离也更容易保证。
+
+## 4. 为什么 Critic 没工具
+
+Critic 若能自由查数据，就同时是调查员和裁判，可能选择性取证，审查边界也难复现。
+
+当前做法让 Critic 指明 gap，由有 Task/Assessment 归属的 Investigator 做唯一一轮补证。代价是多一个阶段，收益是证据产生者和审查者职责清楚。
+
+## 5. 为什么 live 路径取消第二次 Lead 模型判断
+
+Critic 已逐候选给出 verdict，而第二个 Lead 只能选择 accepted IDs。再调模型要么机械重复，要么引入随机分歧，还消耗冻结 turn/Token。
+
+当前做法把 accepted verdict 确定性投影为 LeadDecision：
+
+- 不增加新诊断规则；
+- 不重新解释证据；
+- 保留终态 authority 和审计对象；
+- 给 Critic 留出模型预算；
+- 同一 Critic 输出得到稳定发布集合。
+
+代价是 Lead 在 live 终态不再提供额外语义综合。项目接受它，因为 Critic 才是完成七项检查的判断者。
+
+## 6. 为什么仍叫 Lead adjudication
+
+这是领域职责名，不是实现机制名。它表达“终态权威投影”，不承诺必然调用 Lead 模型。面试中应明确 live 与注入式路径。
+
+## 7. 为什么 Validator 不自动修引用
+
+若 Candidate 引用不存在的 `ev-123`，自动换成相似的 `ev-124` 会让服务端成为诊断作者，可能引用错实体或时间窗，还会掩盖模型质量问题。
+
+所以 Validator 可以拒绝、局部丢弃或降级 inconclusive，但不能补造 Evidence 和根因字段。
+
+## 8. 为什么 Candidate 与发布结果分开
+
+```text
+Candidate ledger      = 调查与审查历史
+Root cause projection = 当前可发布结论
+```
+
+这种分离使 inconclusive 仍可解释，也避免“数据库里存在候选”被误读成“系统确认根因”。
+
+## 9. 为什么不保存 Chain-of-Thought
+
+私有推理可能包含未验证猜测、Provider 注入文本、敏感片段和大量不稳定内容。项目只保存任务、工具请求、Evidence refs、Findings、checks、简短 summary、usage 和失败类别，既能审计，又不暴露私有思维。
+
+## 10. 为什么 Provider-neutral
+
+Agent 说“查询 metrics”而不是写 PromQL，说“查询 traces”而不是写 Tempo URL。Provider 把稳定领域查询映射到具体后端。
+
+收益包括离线与真实后端复用、prompt 不绑定供应商、统一 scope 校验、凭证不暴露、评测可复现。代价是适配层维护和无法开放所有供应商高级语法；对只读诊断这是有意取舍。
+
+## 11. 为什么 SQLite 默认，不上队列或向量库
+
+SQLite 已支撑当前单节点 Run、事务、Checkpoint、事件和审计；memory repository 只用于测试。队列和向量库有各自适用场景，但当前九工具、有限并发和 verified memory 没有测量到需求，新增它们只会扩大运维、安全和一致性面。
+
+## 12. 当前设计的真实局限
+
+1. **正式效果结论未完成**：SS15/TT90 尚未完成，不能声称准确率提升或 V11 已发布。
+2. **multi 交叉证据主要由 prompt 要求**：机械层验证引用合法，不判断证据语义独立。
+3. **同模型相关偏差仍存在**：角色隔离能降低锚定，不能保证错误独立。
+4. **最多一轮补证可能过早停止**：这是可控成本与开放调查的取舍。
+5. **Provider 归一化可能损失细节**：换来安全、稳定和复现。
+6. **单节点 SQLite 有扩展边界**：当前规模合适，不代表任意吞吐。
+7. **Critic 仍可能判断错**：七项 schema 提高可检查性，不是正确性证明。
+
+## 13. 如果面试官问“你会怎样继续改”
+
+应从证据出发：
+
+1. 完成精确 endpoint/model capability admission；
+2. 执行冻结的 SS15 四配置比较；
+3. 开标签前做 Evidence audit；
+4. 再执行 TT90；
+5. 按失败分布定位 prompt、Provider、signal classification、预算或模型能力；
+6. 只有出现测量证据后才改架构。
+
+不要一上来回答“加更多 Agent、向量库、RAG、消息队列”。这些是手段，不是问题定义。
+
+## 14. 高频追问短答
+
+### 这是 Multi-Agent 还是工作流？
+
+两者都是。语义判断由多个角色化 Agent 完成，执行由确定性持久化工作流控制。
+
+### 为什么最多三个 Investigator？
+
+在当前合同中，它平衡方向多样性、默认 8-turn 预算、工具成本和并发复杂度，并通过 RCAEval 与 single control 比较。不是普遍理论最优值。
+
+### 为什么 Agent 不能直接重启服务？
+
+产品边界是只读诊断。建议必须引用证据，只有记录验证结果后才能声称修复；生产变更留给人类或独立审批系统。
+
+### 结构化输出是否消除幻觉？
+
+没有。它减少格式歧义，让引用可机械校验；语义正确性仍依赖 Evidence 和 Critic。
+
+### 为什么没有 RAG？
+
+当前知识来自事故 Evidence、服务目录和 verified memory，已有工具契约足够，没有测量到额外向量检索基础设施的需要。
+
+### 一个 Investigator 失败为何不全部失败？
+
+并行任务隔离，兄弟结果可能仍有效。系统保留失败审计并降级完整性；全部失败或必需审查失败才终止。
+
+### Inconclusive 是坏结果吗？
+
+不是。证据不足时拒绝发布根因，是高风险诊断系统的正确行为。
+
+### 最后谁决定根因？
+
+current live 路径中，Investigator 提候选，Critic 以七项检查给 verdict，Lead adjudication 阶段机械发布 accepted refs；Validator 只否决机械违规。
+
+## 15. 两分钟架构回答
+
+> DiagOps 把诊断语义权和执行控制权分开。Runtime 先持久化 Provider 初始证据，Lead 只规划一到三个信息缺口任务；通用 Investigator 第一轮相互隔离，通过同一冻结九工具 manifest 查证据。工具调用经过 schema、scope、预算、deadline、幂等和只读校验，只有落库后的 Evidence ID 才能引用。候选由服务端准入并生成 ID，Critic 没工具，对每个候选做七项固定检查，最多请求一轮有 ownership 的补证。当前 live 路径不再额外调用 Lead 模型重复判断，而把 Critic accepted refs 投影为权威结果。最终 Validator 校验完整引用图，能拒绝或在有限证据不足条件下降级 inconclusive，但不能生成根因。整个 Run 的 turn、Token、工具、deadline、重试和恢复预算都耐久化。这个设计牺牲开放式自由度，换取只读、安全、可恢复、可审计和可公平评测。
+
+把该设计放到 ReAct、Manager、Handoff、Graph、Debate、Blackboard 等前沿模式中比较，见 [前沿 Agent 设计对比](27-agent-frontier-patterns.md)；Context、MCP、RAG、模型路由、观测、成本和部署的具体取舍见学习手册的进阶专题目录。

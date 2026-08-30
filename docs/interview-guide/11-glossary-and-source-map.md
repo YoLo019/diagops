@@ -11,6 +11,12 @@
 | Agent | 带角色、目标、工具和循环的 LLM 应用单元 |
 | Multi-Agent | 多个有不同职责的 Agent 协作 |
 | Prompt | 给模型的指令和上下文 |
+| Context engineering | 决定模型本轮可见哪些事实、工具结果和历史状态，并控制预算、隔离和压缩的工程方法 |
+| Context window | 模型一次请求可接收/生成的 token 上限 |
+| Context compaction | 在长任务中保留必要状态、减少上下文 token 的过程；不等于删除事实账本 |
+| Evidence digest | 从完整 Evidence ledger 确定性选出的有界 prompt 视图，不是 LLM 摘要模型 |
+| Lost in the middle | 长上下文中关键材料位于中部而被模型忽略的现象 |
+| Prefix cache | 模型服务缓存稳定 prompt 前缀的机制；只能优化成本/延迟，不能作为正确性来源 |
 | Token | 模型处理文本的计费/预算单位 |
 | Turn | Agent/模型的一轮交互 |
 | Tool Call | 模型请求应用执行一个已注册函数 |
@@ -31,10 +37,21 @@
 | Lease | 带到期时间的临时执行所有权 |
 | Fence | 阻止旧执行者或晚到结果写入的检查 |
 | Idempotency | 同一逻辑操作重复发生仍只产生一次有效效果 |
+| Logical call | 一次业务动作的稳定身份；可包含多个网络 attempt/retry |
+| Reservation | 在模型/工具外部调用前预留预算，完成后再按实际用量结算 |
+| RAG | 检索增强生成：检索外部资料后投影到本轮 context；不等于把历史文本塞进 prompt |
+| Embedding | 把文本映射成向量，用于语义相似检索；本项目当前未使用 |
+| Reranker | 对初步检索候选做更精细相关性排序的模型/规则 |
+| MCP | Model Context Protocol，Host/Client/Server 间发现与调用工具、资源、prompt 的开放协议；本项目当前未接入 |
+| Model routing | 按任务/能力/成本/延迟选择模型的策略；与任务路由不同，V11 当前不做动态模型路由 |
 | Replay | 不重跑外部能力，只用历史记录验证执行 |
 | Rerun | 真正重新执行一次 |
 | SSE | 服务端向浏览器单向推送事件的 HTTP 技术 |
 | OpenTelemetry | 统一的 Trace/Metric/Log 可观测性标准 |
+| Span / Trace | Span 是一次可观测操作，Trace 是关联 Span 的调用链；不是业务 Evidence 真相源 |
+| Trajectory evaluation | 对 Agent 的计划、工具、证据、重试和停止轨迹做评测，而不只看最终答案 |
+| LLM-as-a-judge | 用另一个模型按 rubric 评价开放式输出；需要人审校准，不能替代确定性安全检查 |
+| SLO / RTO / RPO | 服务目标；恢复时间目标；可容忍的数据丢失目标 |
 | Prometheus | 常见指标采集和查询系统 |
 | Tempo | Grafana 的分布式 Trace 后端 |
 | OpenRCA | 外部 RCA 数据集/评测兼容流程 |
@@ -51,13 +68,15 @@
 | Lead Plan | Lead | Runtime/Investigators | `V11Runtime.plan_lead` |
 | DiagnosisTask | 服务端从 Lead draft 构造 | Investigator | `V11Runtime._build_plan` |
 | ToolCallRecord | AdaptiveToolSession | Runtime/UI/Audit | `domain/tool_calls.py` |
-| EvidenceItem | Provider/Tool bridge | Investigator/Critic/Lead | `domain/evidence.py` |
-| AgentFinding | Investigator | Critic/Lead | `domain/agent_findings.py` |
-| RootCauseCandidate | Investigator draft，服务端换 ID | Critic/Lead | `domain/agent_findings.py` |
-| CriticAssessment | Critic | Round 2/Lead | `V11Runtime.critic_review` |
-| LeadDecision | Lead | Validator/Report | `domain/agent_plan.py` |
+| EvidenceItem | Provider/Tool bridge | Investigator/Critic/authority audit | `domain/evidence.py` |
+| AgentFinding | Investigator | Critic/Validator | `domain/agent_findings.py` |
+| RootCauseCandidate | Investigator draft，服务端换 ID | Critic/authority projection | `domain/agent_findings.py` |
+| CriticAssessment | Critic | Round 2/authority projection | `V11Runtime.critic_review` |
+| LeadDecision | live：服务端投影 Critic verdict；注入路径：Lead | Validator/Report | `domain/agent_plan.py` |
 | CoordinationReview | V11Runtime 聚合 | API/Report/UI | `domain/agent_findings.py` |
 | RuntimeCheckpoint | Runtime Store commit | Resume/Replay | `domain/runtime.py` |
+
+`RootCauseCandidate.failure_class` 是短而稳定的故障分类；`failure_mechanism` 是面向人的因果机制解释。两者不能混用。`Evidence digest` 是给单个 Agent 的有界起始上下文，不是完整 Evidence ledger 的替代品。
 
 ## 3. 按问题找源码
 
@@ -89,6 +108,12 @@
 | OpenRCA | [backend/benchmarks/openrca](../../backend/benchmarks/openrca/) |
 | RCAEval | [backend/benchmarks/rcaeval](../../backend/benchmarks/rcaeval/) |
 | 当前完成度 | [docs/superpowers/current.md](../superpowers/current.md) |
+| Context 投影、digest、token reservation | [backend/diagnosis/v11_runtime.py](../../backend/diagnosis/v11_runtime.py)、[adaptive_tools.py](../../backend/diagnosis/adaptive_tools.py) |
+| Memory 与 verified lookup | [backend/memory/store.py](../../backend/memory/store.py)、[provider_tools.py](../../backend/tools/provider_tools.py) |
+| 模型 capability admission | [backend/services/model_capability.py](../../backend/services/model_capability.py) |
+| allowlisted OTel trace / 指标维度 | [backend/runtime/telemetry.py](../../backend/runtime/telemetry.py) |
+| Agent 评测与标签隔离 | [backend/benchmarks/rcaeval](../../backend/benchmarks/rcaeval/) |
+| MCP 当前状态/演进 | [19-MCP 与互操作](19-mcp-and-agent-interoperability.md) |
 
 ## 4. 关键函数调用地图
 
@@ -168,7 +193,8 @@ AdaptiveToolSession.invoke
 | 下一步查什么 | Lead |
 | 证据说明什么 | Investigator |
 | 因果是否充分 | Critic |
-| 最终选哪个候选 | Lead |
+| 最终判断候选是否通过 | Critic |
+| 把 accepted 候选发布为权威结果 | Lead adjudication authority phase |
 | 工具能否调用 | ToolRegistry + AdaptiveToolSession |
 | 数据怎样读取 | Provider |
 | 引用和结构是否合法 | Validator |

@@ -1,10 +1,9 @@
-import hashlib
-import json
 from collections.abc import Callable
 from dataclasses import dataclass
 
 from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem, JsonValue
+from backend.domain.runtime import v11_tool_manifest_hash
 from backend.domain.tool_calls import ToolCallRecord, ToolExposure, ToolSpec
 from backend.providers.results import ProviderResult
 
@@ -100,7 +99,4 @@ class ToolRegistry:
 
 def agent_manifest_hash(manifest: tuple[str, ...]) -> str:
     """为有序 Agent 工具名单生成无凭据的稳定身份。"""
-    canonical = json.dumps(
-        list(manifest), ensure_ascii=True, separators=(",", ":")
-    )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return v11_tool_manifest_hash(manifest)

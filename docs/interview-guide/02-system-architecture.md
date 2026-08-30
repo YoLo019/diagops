@@ -116,7 +116,7 @@ V11Runtime 在 Agent 阶段创建 OpenAI Agents SDK 的 `Agent`，传入：
 
 ### 4.5 结果校验、报告与完成
 
-Lead 裁决后，`validate_v11_result` 只做机械可判定的校验，例如：
+终态 authority projection 后，`validate_v11_result` 只做机械可判定的校验，例如：
 
 - 引用 ID 是否存在、已提交且属于同一 Run；
 - 任务、Finding、Candidate、Assessment 的所有权是否一致；

@@ -230,12 +230,11 @@ V11 Run 创建时冻结：
 
 - execution contract version 与 authority mode；
 - Provider、model、API mode、endpoint identity；
-- capability artifact identity；
+- compatible endpoint 准入时的 capability artifact identity；
 - prompt、tool manifest、skill catalog identity；
-- Provider profile/artifact identity；
-- Token、Tool、turn、Investigator、round、retry、timeout 限制。
+- Token、Tool、turn、每个 Investigator 的工具上限、Investigator 数、round、retry、timeout 和 topology 限制。
 
-API key 不进入契约；endpoint 保存无凭证的规范化哈希身份。恢复、Replay、Diff 和 Benchmark 都先验证契约与兼容列一致。当前环境配置不能覆盖历史 Run 的语义。
+API key 不进入契约；endpoint 保存无凭证的规范化哈希身份。V11 phase profile 由持久化的 execution contract version 选择，`max_parallel_steps_per_run` 仍来自当前 Runtime 设置；Provider profile/source package identity 则在特定 Provider 或 benchmark 工件中另行冻结，不是每个产品 Run contract 的通用字段。恢复、Replay、Diff 和 Benchmark 都先验证各自适用的契约/工件身份。当前环境配置不能覆盖历史 Run 的语义。
 
 ## 16. 面试回答模板
 

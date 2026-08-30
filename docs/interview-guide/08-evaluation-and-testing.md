@@ -163,6 +163,27 @@ Run 创建时验证该工件，避免只凭厂商名称作能力假设。
 - 人工 Evidence audit 支持率；
 - 单 Agent 与 Multi-Agent 的公平预算比较。
 
+### SS15 当前协议
+
+RCAEval 原始 RE2 数据包含 270 个 case，其中 Sock Shop 部分是 5 个服务 × 6 种故障 × 3 次重复，共 90 个 case。SS15 不是随手挑 15 行，而是用冻结 seed 和 SHA-256 从 30 个 service/fault 单元中选择 15 个不同单元，再为每个单元选择一次重复。这样减少同一故障重复样本造成的虚假稳定性。
+
+三个 partition 的职责不同：
+
+| Partition | 数量 | 用途 |
+| --- | ---: | --- |
+| OB30 | 30 | 开发观察，不计分、不形成发布结论 |
+| SS15 | 15 | sealed validation，只能按冻结协议执行 |
+| TT90 | 90 | 最终一次 paired acceptance |
+
+SS15 必须运行四个配置：
+
+- `single_intended`：单 Agent 预期预算 `B`；
+- `multi_intended`：Multi-Agent 预期预算，上限 `3B`；
+- `single_equal_token`：单 Agent 使用 `3B`；
+- `multi_equal_token`：Multi-Agent 使用 `3B`。
+
+前两项比较产品预期配置，后两项控制 Token 变量，避免“Multi 更准只是因为花了更多 Token”的错误结论。历史 SS30 工件只读保留，不做 migration，也不能与新 SS15 custodian root 混用。
+
 如果准确率提升但 Evidence 引用无效或成本失控，也不能接受。
 
 ## 11. 当前项目状态
@@ -196,3 +217,5 @@ npm.cmd --prefix frontend run build
 ## 13. 面试回答模板
 
 “我把验证分成工程正确性、安全可靠性和诊断效果三层。单元与集成测试固定领域契约、九工具白名单、引用校验、SQLite 迁移、并发、取消、幂等、Checkpoint、Replay 和 SSE；key-free acceptance 不调用真实模型。Production Gate 验证本地受控多服务链路。OpenRCA 只作为历史兼容回归，V11 效果用标签隔离、源码与能力工件冻结的 RCAEval 比较单 Agent 和 Multi-Agent，同时统计证据有效性、Token、成本、延迟和只读违规。当前正式 SS15/TT90 尚未完成，所以不能声称准确率已经提升。”
+
+如果想系统学习 trajectory、LLM-as-a-judge、paired statistics、数据污染和线上 shadow，请继续读 [Agent 评测科学](23-agent-evaluation-science.md)。

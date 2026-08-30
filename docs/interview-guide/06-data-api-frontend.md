@@ -1,5 +1,7 @@
 # 06. 数据、API 与前端
 
+本手册以 Agent 为重点。本章主要帮助你理解 Agent 产物怎样持久化和对外投影；前端只保留能支持面试架构说明的最小概览，不要求逐个组件背诵。
+
 ## 1. 两套相互关联的数据
 
 项目同时保存：
@@ -58,7 +60,7 @@ Investigator 的结构化发现。Finding 区分 observation、candidate、contr
 
 ### CriticAssessment / CoordinationReview
 
-Assessment 记录候选的七项因果检查、verdict 和补证任务。Review 聚合 candidates、assessments、Lead decision、diagnostic status、authority mode 和 summary。
+Assessment 记录候选的七项因果检查、verdict 和补证任务。Review 聚合 candidates、assessments、Lead decision、diagnostic status、authority mode 和 summary。current live 路径的 LeadDecision 是服务端对 Critic accepted refs 的权威投影，不代表又调用了一次 Lead 模型。
 
 ### IncidentReport
 
@@ -189,7 +191,7 @@ EventSource 断开后，前端会从 REST `/events?after=...` 补 durable events
 V11 报告生成器会：
 
 - 验证 Review 和 Run 都是 Agent authority 且 owner 一致；
-- 只呈现被 Lead 接受的 diagnoses 和 alternatives；
+- 对外诊断只呈现终态 authority IDs 授权的 diagnoses 和 alternatives；
 - 展示 Critic 检查、不确定性和 Evidence IDs；
 - 对 `inconclusive` 明确写无激活诊断；
 - 校验 Action/Verification 引用已接受 Candidate；

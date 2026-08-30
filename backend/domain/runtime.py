@@ -8,7 +8,7 @@ from copy import deepcopy
 from datetime import UTC, datetime
 from enum import StrEnum
 from math import isfinite
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -168,6 +168,24 @@ _EXECUTION_CONTRACT_DIGEST = "execution_contract_digest"
 # （2026-08-15 运营噪声链）。守卫统一引用此常量，不再各自硬编码。
 V11_RUN_DEADLINE_MAX_SECONDS = 300.0
 
+# V11 的默认执行边界是产品、离线适配器和能力认证共用的输入来源。调用方
+# 可以通过显式配置收紧边界，但不应重新复制这些数字。
+V11_DEFAULT_MAX_TURNS = 8
+V11_DEFAULT_TOOL_BUDGET = 8
+V11_DEFAULT_MAX_INVESTIGATORS = 3
+V11_DEFAULT_MAX_ROUNDS = 2
+V11_DEFAULT_MAX_TOOL_CALLS_PER_SPECIALIST = 3
+V11_DEFAULT_TOOL_TIMEOUT_SECONDS = 10.0
+V11_DEFAULT_TIMEOUT_SECONDS = 120.0
+V11_MULTI_TOPOLOGY_MODE = "multi_lead_investigators_critic"
+V11_SINGLE_TOPOLOGY_MODE = "single_one_context"
+V11_RETRY_POLICY: dict[str, object] = {
+    "max_retries": 1,
+    "retryable_categories": ["transport", "rate_limit"],
+    "provider_max_retries": 0,
+    "sdk_max_retries": 0,
+}
+
 _V11_CONTRACT_REQUIRED_KEYS = {
     "execution_contract_version",
     "authority_mode",
@@ -211,7 +229,151 @@ _V11_TOPOLOGY_KEYS = {
     "subagent",
     "hidden_model_calls",
 }
-_V11_TOPOLOGY_MODES = {"multi_lead_investigators_critic", "single_one_context"}
+_V11_TOPOLOGY_MODES = {V11_MULTI_TOPOLOGY_MODE, V11_SINGLE_TOPOLOGY_MODE}
+
+
+class V11ExecutionContractInput(BaseModel):
+    """Provider-neutral inputs used to materialize a sealed V11 contract.
+
+    Product and offline adapters own how these values are discovered; this model
+    only describes the execution boundary and deliberately has no benchmark or
+    provider implementation dependency.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # 空值仅用于无 Agent 配置时创建隔离的 V11 projection owner；正式
+    # provider admission 仍由产品容器在模型身份校验阶段拒绝。
+    model_provider: str | None
+    model_name: str | None
+    prompt_version: str | None
+    api_mode: str
+    endpoint_id: str | None = None
+    capability_artifact_hash: str | None = None
+    structured_output_transport: Literal[
+        "native_json_schema", "strict_output_tool"
+    ] = "native_json_schema"
+    tool_manifest: tuple[str, ...]
+    tool_manifest_hash: str | None = None
+    skill_catalog: dict[str, Any]
+    max_turns: int = Field(default=V11_DEFAULT_MAX_TURNS, ge=1)
+    max_investigators: int = Field(
+        default=V11_DEFAULT_MAX_INVESTIGATORS,
+        ge=1,
+        le=V11_DEFAULT_MAX_INVESTIGATORS,
+    )
+    max_rounds: int = Field(
+        default=V11_DEFAULT_MAX_ROUNDS,
+        ge=1,
+        le=V11_DEFAULT_MAX_ROUNDS,
+    )
+    token_budget: int = Field(gt=0)
+    max_tool_calls_per_specialist: int = Field(
+        default=V11_DEFAULT_MAX_TOOL_CALLS_PER_SPECIALIST, ge=1
+    )
+    tool_timeout_seconds: float = Field(
+        default=V11_DEFAULT_TOOL_TIMEOUT_SECONDS, gt=0, allow_inf_nan=False
+    )
+    tool_budget: int = Field(default=V11_DEFAULT_TOOL_BUDGET, gt=0)
+    timeout_seconds: float = Field(
+        default=V11_DEFAULT_TIMEOUT_SECONDS,
+        gt=0,
+        le=V11_RUN_DEADLINE_MAX_SECONDS,
+        allow_inf_nan=False,
+    )
+    topology_mode: Literal[
+        "multi_lead_investigators_critic", "single_one_context"
+    ] | None = None
+    retry_policy: dict[str, Any] = Field(default_factory=lambda: deepcopy(V11_RETRY_POLICY))
+
+
+def v11_tool_manifest_hash(manifest: tuple[str, ...]) -> str:
+    """按工具名顺序计算无凭据 manifest 身份。"""
+    encoded = json.dumps(
+        list(manifest), ensure_ascii=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def build_v11_execution_contract(
+    values: V11ExecutionContractInput | None = None, **kwargs: Any
+) -> dict[str, Any]:
+    """从共享 provider-neutral 输入构造并 seal V11 execution contract。"""
+    if values is not None and kwargs:
+        raise TypeError("provide either values or keyword inputs, not both")
+    inputs = values or V11ExecutionContractInput(**kwargs)
+    manifest = tuple(inputs.tool_manifest)
+    if not manifest or len(set(manifest)) != len(manifest):
+        raise ValueError("V11 tool manifest must be non-empty and unique")
+    manifest_hash = v11_tool_manifest_hash(manifest)
+    if inputs.tool_manifest_hash is not None and inputs.tool_manifest_hash != manifest_hash:
+        raise ValueError("V11 tool manifest hash does not match manifest")
+
+    mode = inputs.topology_mode
+    if mode is None:
+        mode = (
+            V11_MULTI_TOPOLOGY_MODE
+            if inputs.max_rounds == V11_DEFAULT_MAX_ROUNDS and inputs.max_investigators >= 2
+            else V11_SINGLE_TOPOLOGY_MODE
+        )
+    if mode == V11_MULTI_TOPOLOGY_MODE:
+        if (
+            inputs.max_investigators < 2
+            or inputs.max_rounds != V11_DEFAULT_MAX_ROUNDS
+        ):
+            raise ValueError("V11 multi topology requires investigators and two rounds")
+        one_context, critic = False, True
+    elif mode == V11_SINGLE_TOPOLOGY_MODE:
+        if inputs.max_investigators != 1 or inputs.max_rounds != 1:
+            raise ValueError("V11 single topology requires one context and one round")
+        one_context, critic = True, False
+    else:
+        raise ValueError("V11 topology mode is not frozen")
+
+    provider = getattr(inputs.model_provider, "value", inputs.model_provider)
+    retry_policy = deepcopy(inputs.retry_policy)
+    contract = {
+        "execution_contract_version": ExecutionContractVersion.V11.value,
+        "authority_mode": AuthorityMode.AGENT.value,
+        "model_provider": provider,
+        "model_name": inputs.model_name,
+        "prompt_version": inputs.prompt_version,
+        "api_mode": inputs.api_mode,
+        "endpoint_id": inputs.endpoint_id,
+        "capability_artifact_hash": inputs.capability_artifact_hash,
+        "tool_manifest": list(manifest),
+        "tool_manifest_hash": manifest_hash,
+        "skill_catalog": deepcopy(inputs.skill_catalog),
+        "capability_identity": {
+            "provider": provider,
+            "model": inputs.model_name,
+            "api_mode": inputs.api_mode,
+            "structured_output_transport": inputs.structured_output_transport,
+            "endpoint_id": inputs.endpoint_id,
+            "artifact_hash": inputs.capability_artifact_hash,
+        },
+        "limits": {
+            "max_turns": inputs.max_turns,
+            "model_turn_budget_scope": "run",
+            "max_investigators": inputs.max_investigators,
+            "max_rounds": inputs.max_rounds,
+            "token_budget": inputs.token_budget,
+            "max_tool_calls_per_specialist": inputs.max_tool_calls_per_specialist,
+            "tool_timeout_seconds": inputs.tool_timeout_seconds,
+        },
+        "topology": {
+            "mode": mode,
+            "one_context": one_context,
+            "critic": critic,
+            "subagent": False,
+            "hidden_model_calls": False,
+        },
+        "retry_policy": retry_policy,
+        "tool_budget": inputs.tool_budget,
+        "token_budget": inputs.token_budget,
+        "timeout_seconds": inputs.timeout_seconds,
+    }
+    return seal_v11_execution_contract(contract)
 
 
 def _validate_v11_topology(contract: dict[str, Any]) -> None:
@@ -232,13 +394,13 @@ def _validate_v11_topology(contract: dict[str, Any]) -> None:
     if (
         not isinstance(investigators, int)
         or isinstance(investigators, bool)
-        or not 1 <= investigators <= 3
+        or not 1 <= investigators <= V11_DEFAULT_MAX_INVESTIGATORS
         or not isinstance(rounds, int)
         or isinstance(rounds, bool)
-        or rounds not in {1, 2}
+        or rounds not in {1, V11_DEFAULT_MAX_ROUNDS}
     ):
         raise ValueError("V11 execution contract topology limits are invalid")
-    if mode == "single_one_context":
+    if mode == V11_SINGLE_TOPOLOGY_MODE:
         if topology.get("one_context") is not True or topology.get("critic") is not False:
             raise ValueError("V11 single topology flags are inconsistent")
         if (investigators, rounds) != (1, 1):
@@ -246,7 +408,7 @@ def _validate_v11_topology(contract: dict[str, Any]) -> None:
     else:
         if topology.get("one_context") is not False or topology.get("critic") is not True:
             raise ValueError("V11 multi topology flags are inconsistent")
-        if investigators < 2 or rounds != 2:
+        if investigators < 2 or rounds != V11_DEFAULT_MAX_ROUNDS:
             raise ValueError("V11 multi topology requires investigators and two rounds")
 
 
@@ -423,10 +585,10 @@ class RuntimeRun(RuntimeModel):
             budget = (
                 limits.get("max_turns")
                 if isinstance(limits, dict)
-                else contract.get("max_turns", 8)
+                else contract.get("max_turns", V11_DEFAULT_MAX_TURNS)
             )
             if not isinstance(budget, int) or budget < 1:
-                budget = 8
+                budget = V11_DEFAULT_MAX_TURNS
             if data.get("remaining_model_turns") is None:
                 data["remaining_model_turns"] = budget
         return cls(**data)
@@ -498,14 +660,14 @@ class RuntimeRun(RuntimeModel):
             model_turn_budget = (
                 limits.get("max_turns")
                 if isinstance(limits, dict)
-                else self.execution_contract.get("max_turns", 8)
+                else self.execution_contract.get("max_turns", V11_DEFAULT_MAX_TURNS)
             )
             if not isinstance(model_turn_budget, int) or model_turn_budget < 1:
                 if _EXECUTION_CONTRACT_DIGEST in self.execution_contract:
                     raise ValueError(
                         "V11 execution contract model-turn budget is missing"
                     )
-                model_turn_budget = 8
+                model_turn_budget = V11_DEFAULT_MAX_TURNS
             if self.remaining_model_turns is None:
                 if (
                     _EXECUTION_CONTRACT_DIGEST in self.execution_contract

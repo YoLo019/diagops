@@ -60,7 +60,7 @@ DiagOps 的安全目标不是“模型永远不犯错”，而是即使模型、
 - 原始 prompt；
 - chain-of-thought/隐藏推理；
 - 原始 Provider request/response；
-- 任意 Evidence/日志正文；
+- 未经投影、可能含敏感信息的原始 Provider payload、日志正文或异常正文；
 - 任意 URL、PromQL、Shell 命令；
 - Benchmark 标签、答案和注入 marker。
 
@@ -98,7 +98,7 @@ Finding、Candidate、Assessment、LeadDecision、Action 和 Verification 形成
 - V11 独立阶段表和处理器；
 - forbidden-call tests 防 V11 调用 deterministic RCA；
 - V11 Report 不接收 Hypotheses；
-- 旧 fallback 必须标成 `legacy_deterministic_fallback`；
+- 旧路径必须明确标成 `legacy_deterministic` authority，不能冒充 V11 Agent authority；
 - Benchmark 中 fallback 不能算 V11 Agent 正确结果。
 
 ## 8. 输出不可信与 fail-closed
@@ -108,7 +108,7 @@ Finding、Candidate、Assessment、LeadDecision、Action 和 Verification 形成
 1. 结构化输出 schema；
 2. 草稿级引用和 scope 准入；
 3. Critic 工作流约束；
-4. Lead 只能引用 accepted Candidate；
+4. 终态 authority 只能发布 Critic accepted Candidate；live 路径由服务端投影这些引用；
 5. 最终 `validate_v11_result`；
 6. Report/Action/Verification 再校验引用和 owner；
 7. Public projection 再做安全文本清洗。
@@ -175,4 +175,6 @@ Finding、Candidate、Assessment、LeadDecision、Action 和 Verification 形成
 
 ## 14. 面试回答模板
 
-“安全设计从能力边界开始，而不是只依赖 prompt。Agent manifest 只有九个只读工具，没有 Shell、SSH 或 remediation。每个工具参数使用严格 schema，并限制时间窗、实体范围、数量、预算和 deadline；Provider 输出先脱敏、结构化和落库，结论只能引用同 Run 的已提交 Evidence。模型输出经过草稿准入、Critic、Lead 引用约束和最终机械校验，Validator 可拒绝但不能改写根因。Runtime 用 lease fence、单 Writer、Checkpoint CAS、取消收口和安全失败枚举保证可靠执行。凭证只在进程环境，原始 prompt、隐藏推理和敏感 payload 不持久化。评测标签与 runtime package 分离，防止 benchmark 泄漏。”
+“安全设计从能力边界开始，而不是只依赖 prompt。Agent manifest 只有九个只读工具，没有 Shell、SSH 或 remediation。每个工具参数使用严格 schema，并限制时间窗、实体范围、数量、预算和 deadline；Provider 输出先脱敏、结构化和落库，结论只能引用同 Run 的已提交 Evidence。模型输出经过草稿准入、Critic 七项检查、终态 accepted-ref 投影和最终机械校验，Validator 可拒绝但不能改写根因。Runtime 用 lease fence、单 Writer、Checkpoint CAS、取消收口和安全失败枚举保证可靠执行。凭证只在进程环境，原始 prompt、隐藏推理和敏感 payload 不持久化。评测标签与 runtime package 分离，防止 benchmark 泄漏。”
+
+更系统的攻击面、MCP/供应链、SSRF、memory poisoning、HITL 与对抗测试见 [Agent 安全攻防与治理](22-agent-security-threat-model.md)。

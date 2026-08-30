@@ -160,12 +160,12 @@ curl.exe -X POST http://127.0.0.1:8000/events/simulated/deployment_regression
 
 ## 5. 如果要演示 V11
 
-只有在你已有合规本地配置和通过的 capability artifact 时才做。必须：
+只有在你已有合规本地配置时才做；若使用 generic `openai_compatible` endpoint，还必须有与当前 source/SDK/环境匹配的通过 capability artifact。必须：
 
 - Agent enabled；
 - 明确 Provider/model；
 - key 只放当前进程环境；
-- 对 generic compatible endpoint 使用能力认证；
+- 对 generic compatible endpoint 使用能力认证（官方 OpenAI 路径当前不以该 artifact 作为 container admission 条件）；
 - 说明本次是工程演示还是正式 gate；
 - 展示 Lead/Investigator/Critic 和 Evidence 引用，而不只展示最终报告。
 
@@ -205,7 +205,7 @@ rg -n "commit_phase|RuntimeCheckpoint|replay" backend/runtime backend/domain
 
 1. **问题**：事故调查跨多数据源，人工慢且有确认偏差；
 2. **边界**：系统只读，不自动修复；
-3. **架构**：Lead → isolated Investigators → Critic → Lead → Validator；
+3. **架构**：Lead planning → isolated Investigators → Critic → authority projection → Validator；
 4. **工具**：冻结九工具，严格 schema、scope、budget、Evidence ledger；
 5. **可靠性**：versioned phases、single writer、checkpoint、resume/replay；
 6. **页面**：展示 Evidence、Agent 过程和 Runtime timeline；
@@ -238,3 +238,13 @@ uv run pytest tests/safety/test_redaction.py -q
 ```
 
 这些测试分别对应工具白名单、结果引用、重放真实性、恢复幂等和脱敏，是面试最有代表性的工程保障。
+
+## 10. 从源码路线进入进阶 Agent 专题
+
+| 想深入的问题 | 先读源码 | 再读学习章 |
+| --- | --- | --- |
+| Context 为什么不是整库 dump | `v11_runtime.py` 的 `_live_*_projection`、`_select_evidence_digest` | [16-上下文工程](16-agent-context-engineering.md) |
+| Tool 怎样抵抗重试/越权 | `adaptive_tools.py`、`tool_queries.py`、`provider_tools.py` | [17-Tool Calling](17-agent-tool-calling-in-depth.md) |
+| 历史经验怎样安全复用 | `memory/store.py`、`VerifiedMemoryLookup` | [18-Memory 与 RAG](18-memory-and-rag.md) |
+| endpoint 怎样准入 | `model_capability.py`、`openai_compatible_model.py` | [20-模型路由与能力](20-model-routing-and-capability.md) |
+| 一次 Run 怎样观测/评测 | `telemetry.py`、`event_hub.py`、`benchmarks/rcaeval` | [21-观测](21-agent-observability.md)、[23-评测](23-agent-evaluation-science.md) |

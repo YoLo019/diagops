@@ -10,8 +10,11 @@ The local platform includes:
   evidence providers.
 - Rule-based RCA, evidence-backed Markdown reports, recommended actions, and
   verification tracking.
-- An optional, default-off OpenAI Agents SDK review layer with deterministic RCA
-  fallback.
+- An optional, default-off OpenAI Agents SDK integration. The current V11 path
+  gives diagnostic authority to evidence-backed Lead/Investigator/Critic
+  reasoning; deterministic code owns safety, validation and durable execution,
+  while legacy deterministic RCA remains a separately labelled compatibility
+  path.
 - Vite React investigation console for list/detail, evidence, hypotheses,
   action status, verification results, reports, and frozen OpenRCA results.
 
@@ -223,20 +226,30 @@ curl http://127.0.0.1:8000/investigations
 
 ## Multi-Agent Workflow
 
-DiagOps runs a read-only multi-agent investigation process:
+The current V11 design is a read-only, durable Agent workflow:
 
-- A task planner creates diagnosis tasks for logs, metrics, deployments,
-  dependencies, service context, memory lookup, RCA synthesis, and optional LLM
-  review.
-- Agent routing assigns each task to the matching specialist agent and tool
-  names.
-- Shared context records evidence-backed facts that agents can read during the
-  same investigation.
-- Tool calls are recorded so the Agent process can show which read-only
-  provider wrapper ran, with inputs, status, duration, and output evidence IDs.
-- Memory and feedback store reusable incident summaries and human review notes.
-- The Chinese frontend includes an Agent panel for plan, task graph, timeline,
-  context, tool calls, and memory views.
+- Runtime first persists initial Provider evidence, then a Lead plans one to
+  three information-gap tasks.
+- Up to three generic Investigators run with isolated round-one context and the
+  same frozen nine-tool read-only manifest.
+- Tool calls are validated, budgeted, idempotent and persisted before their
+  Evidence IDs can be cited.
+- A Critic reviews each candidate through fixed causal/counter-evidence checks;
+  at most one owned supplemental round is allowed.
+- In the live path, the authority phase mechanically publishes only Critic
+  accepted candidate references; deterministic validation can reject invalid
+  structure but cannot invent a root cause.
+- The frontend exposes plan, tasks, evidence, executions, tool calls, runtime
+  events and the resulting public projection.
+
+V11 engineering and its controlled evaluation protocol are present in the
+repository, but formal SS15/TT90 evaluation has not completed. Do not infer a
+release or accuracy-improvement claim from this architecture description.
+
+The historical task-type router and specialist names (LogAgent, MetricAgent,
+DeploymentAgent) remain legacy compatibility concepts; they are not the V11
+general-Investigator topology. The Chinese [interview study guide](docs/interview-guide/README.md)
+documents the current V11 path, Agent engineering topics, and explicit limits.
 
 The process does not execute rollback, restart, scale, or configuration
 changes. Tools are read-only provider wrappers plus execution records.
@@ -268,12 +281,10 @@ suggestions.
 
 ## Agentic RCA Workbench
 
-The read-only RCA workbench coordinates independent specialist findings:
-
-- LogAgent, MetricAgent, and DeploymentAgent produce independent findings.
-- The coordinator ranks multiple root-cause candidates instead of forcing one answer.
-- Candidates cite supporting and contradicting findings plus evidence IDs.
-- The frontend shows Agent 判断, 候选根因排序, and 证据链预览.
+The read-only workbench renders both historical projections and current V11
+Agent artifacts. V11 candidates cite supporting and contradicting Evidence,
+Critic assessments make causal checks inspectable, and the UI shows the
+runtime timeline rather than only a final prose answer.
 
 The workbench remains read-only. It does not execute rollback, restart,
 scaling, SSH, or configuration changes. Optional LLM enhancement is disabled by
@@ -366,12 +377,14 @@ prompts, raw response data, reasoning, and free-text model payloads. The runner
 is read-only: it records diagnostic results but does not execute remediation,
 rollback, restart, scaling, SSH, or configuration changes.
 
-## Adaptive Investigation And OpenRCA
+## Legacy Adaptive Investigation And OpenRCA
 
-DiagOps keeps `fixed` as the default investigation strategy. `fixed` uses the
-bounded seed collection and deterministic RCA fallback. `adaptive` gives
-LogAgent, MetricAgent, and DeploymentAgent their own registered read-only
-tools so they can request additional evidence within the configured budget.
+This section documents the V10/legacy adaptive path, retained for historical
+compatibility and OpenRCA workflows. It is not the V11 Lead/Investigator/Critic
+authority path described above. `fixed` uses bounded seed collection and
+deterministic RCA; `adaptive` gives LogAgent, MetricAgent, and DeploymentAgent
+their own registered read-only tools so they can request additional evidence
+within the configured budget.
 Select the strategy on a manual investigation or set `agents.strategy` in
 `config/diagops.yaml`.
 
@@ -538,9 +551,9 @@ uv run python -m backend.services.model_capability `
 ```
 
 Run each required configuration into a distinct child of one prediction root.
-SS30 requires all four configurations; TT90 requires only the two intended
+SS15 requires all four configurations; TT90 requires only the two intended
 configurations. `single_intended` uses `B`, `multi_intended` uses at most `3B`,
-and both equal-token SS30 configurations use exactly `3B`.
+and both equal-token SS15 configurations use exactly `3B`.
 All children must live under one canonical custodian root. `--pair-root` is
 only an output grouping path; the immutable `--custodian-manifest` selects the
 single SQLite ledger shared across configurations and evaluation output
@@ -552,21 +565,21 @@ paths are rejected before a side is recorded or a freeze marker is written.
 ```powershell
 uv run python -m backend.benchmarks.rcaeval launch-predict `
   --runtime D:\data\RCAEval\prepared-v11-m0\runtime `
-  --pair-root D:\data\RCAEval\v11-m5\ss30 `
-  --custodian-manifest D:\data\RCAEval\v11-m5\custodian-manifest.json `
+  --pair-root D:\data\RCAEval\v11-m5-ss15\ss15 `
+  --custodian-manifest D:\data\RCAEval\v11-m5-ss15\custodian-manifest.json `
   --label-package D:\data\RCAEval\prepared-v11-m0\labels `
-  --partition ss30 `
+  --partition ss15 `
   --configuration single_intended `
   --base-url $env:DIAGOPS_AGENTS_BASE_URL `
   --capability-artifact <passed-result.json> `
-  --database D:\data\RCAEval\v11-m5\ss30-single.db `
-  --output D:\data\RCAEval\v11-m5\ss30\single_intended `
+  --database D:\data\RCAEval\v11-m5-ss15\ss15-single.db `
+  --output D:\data\RCAEval\v11-m5-ss15\ss15\single_intended `
   --token-budget <B>
 
 uv run python -m backend.benchmarks.rcaeval freeze-set `
-  --root D:\data\RCAEval\v11-m5\ss30 `
-  --custodian-manifest D:\data\RCAEval\v11-m5\custodian-manifest.json `
-  --partition ss30
+  --root D:\data\RCAEval\v11-m5-ss15\ss15 `
+  --custodian-manifest D:\data\RCAEval\v11-m5-ss15\custodian-manifest.json `
+  --partition ss15
 ```
 
 Export and finish the four-part, single-reviewer evidence audit before labels
@@ -592,24 +605,24 @@ uv run python -m backend.benchmarks.rcaeval.audit export `
   --output <evidence-audit-export.json>
 
 uv run python -m backend.benchmarks.rcaeval evaluate `
-  --predictions-root D:\data\RCAEval\v11-m5\ss30 `
-  --custodian-manifest D:\data\RCAEval\v11-m5\custodian-manifest.json `
-  --partition ss30 `
+  --predictions-root D:\data\RCAEval\v11-m5-ss15\ss15 `
+  --custodian-manifest D:\data\RCAEval\v11-m5-ss15\custodian-manifest.json `
+  --partition ss15 `
   --prediction-set-hash <sha256> `
   --label-package D:\data\RCAEval\prepared-v11-m0\labels `
   --runtime-manifest-hash <sha256> `
   --label-manifest-hash <sha256> `
   --audit-export <evidence-audit-export.json> `
   --manual-audit <manual-audit.json> `
-  --output-dir D:\data\RCAEval\v11-m5\ss30-evaluation
+  --output-dir D:\data\RCAEval\v11-m5-ss15\ss15-evaluation
 
 uv run python -m backend.benchmarks.rcaeval freeze-policy `
-  --sealed-validation D:\data\RCAEval\v11-m5\ss30-evaluation\evaluation.json `
+  --sealed-validation D:\data\RCAEval\v11-m5-ss15\ss15-evaluation\evaluation.json `
   --tt90-manifest-hash <sha256> `
-  --output D:\data\RCAEval\v11-m5\acceptance-policy.json
+  --output D:\data\RCAEval\v11-m5-ss15\acceptance-policy.json
 ```
 
-OB30 is development-only and unscored. SS30 may be executed once per frozen
+OB30 is development-only and unscored. SS15 may be executed once per frozen
 candidate to seal the acceptance policy. TT90 is one paired attempt on the
 exact clean source; a non-resumable infrastructure failure is archived and
 requires explicit authorization before a fresh pair. RCAEval artifacts and

@@ -76,14 +76,19 @@ from backend.domain.multi_agent import (
     MultiAgentRunStatus,
 )
 from backend.domain.runtime import (
+    V11_DEFAULT_MAX_TOOL_CALLS_PER_SPECIALIST,
+    V11_MULTI_TOPOLOGY_MODE,
+    V11_RETRY_POLICY,
+    V11_SINGLE_TOPOLOGY_MODE,
     RuntimeEventType,
     RuntimeFailureCategory,
     RuntimeRun,
     RuntimeRunKind,
     RuntimeRunReason,
     RuntimeRunStatus,
+    V11ExecutionContractInput,
+    build_v11_execution_contract,
     execution_contract_digest,
-    seal_v11_execution_contract,
     validate_v11_execution_contract,
 )
 from backend.providers.registry import ProviderRegistry
@@ -104,7 +109,6 @@ from backend.safety.redaction import (
 from backend.services.source_identity import reject_reparse_path, resolve_source_identity
 from backend.services.v11_projection import ensure_v11_projection_owner
 from backend.tools.provider_tools import VerifiedMemoryLookup, build_provider_tool_registry
-from backend.tools.registry import agent_manifest_hash
 
 PROMPT_VERSION = "v11-rcaeval-v5"
 EMPTY_MEMORY_IDENTITY = {"schema_version": "empty-run-owned-memory-v1", "entries": []}
@@ -112,12 +116,8 @@ EMPTY_MEMORY_IDENTITY = {"schema_version": "empty-run-owned-memory-v1", "entries
 logger = logging.getLogger(__name__)
 
 
-RETRY_POLICY = {
-    "max_retries": 1,
-    "retryable_categories": ["transport", "rate_limit"],
-    "provider_max_retries": 0,
-    "sdk_max_retries": 0,
-}
+# benchmark 仅保留公开名称，实际策略由 provider-neutral V11 契约提供。
+RETRY_POLICY = V11_RETRY_POLICY
 
 
 # 案例级重试必须与 execution-level provider retry 的公开契约一致；否则
@@ -626,7 +626,9 @@ class RcaEvalCaseRunner:
             "max_turns": budget.max_turns,
             "timeout_seconds": budget.timeout_seconds,
             "max_total_tool_calls": budget.tool_budget,
-            "max_tool_calls_per_specialist": min(3, budget.tool_budget),
+            "max_tool_calls_per_specialist": min(
+                V11_DEFAULT_MAX_TOOL_CALLS_PER_SPECIALIST, budget.tool_budget
+            ),
             "token_budget": budget.token_budget,
         }
         if budget.configuration.is_multi:
@@ -831,52 +833,35 @@ def build_execution_contract(
     capability: EndpointCapabilityIdentity,
 ) -> dict[str, object]:
     manifest = runtime.tool_registry.agent_manifest()
-    contract = {
-        "execution_contract_version": ExecutionContractVersion.V11.value,
-        "authority_mode": AuthorityMode.AGENT.value,
-        "model_provider": capability.provider,
-        "model_name": capability.model,
-        "prompt_version": PROMPT_VERSION,
-        "api_mode": capability.api_mode,
-        "endpoint_id": capability.endpoint_id,
-        "capability_artifact_hash": capability.artifact_hash,
-        "tool_manifest": list(manifest),
-        "tool_manifest_hash": agent_manifest_hash(manifest),
-        "skill_catalog": skill_catalog_identity(runtime.tool_registry.list_agent_specs()),
-        "capability_identity": {
-            "provider": capability.provider,
-            "model": capability.model,
-            "api_mode": capability.api_mode,
-            "structured_output_transport": capability.structured_output_transport,
-            "endpoint_id": capability.endpoint_id,
-            "artifact_hash": capability.artifact_hash,
-        },
-        "limits": {
-            "max_turns": budget.max_turns,
-            "model_turn_budget_scope": "run",
-            "max_investigators": budget.max_investigators,
-            "max_rounds": budget.max_rounds,
-            "token_budget": budget.token_budget,
-            "max_tool_calls_per_specialist": min(3, budget.tool_budget),
-            "tool_timeout_seconds": runtime.tool_timeout_seconds,
-        },
-        "topology": {
-            "mode": (
-                "multi_lead_investigators_critic"
-                if budget.configuration.is_multi
-                else "single_one_context"
+    return build_v11_execution_contract(
+        V11ExecutionContractInput(
+            model_provider=capability.provider,
+            model_name=capability.model,
+            prompt_version=PROMPT_VERSION,
+            api_mode=capability.api_mode,
+            endpoint_id=capability.endpoint_id,
+            capability_artifact_hash=capability.artifact_hash,
+            structured_output_transport=capability.structured_output_transport,
+            tool_manifest=manifest,
+            skill_catalog=skill_catalog_identity(runtime.tool_registry.list_agent_specs()),
+            max_turns=budget.max_turns,
+            max_investigators=budget.max_investigators,
+            max_rounds=budget.max_rounds,
+            token_budget=budget.token_budget,
+            max_tool_calls_per_specialist=min(
+                V11_DEFAULT_MAX_TOOL_CALLS_PER_SPECIALIST, budget.tool_budget
             ),
-            "one_context": not budget.configuration.is_multi,
-            "critic": budget.configuration.is_multi,
-            "subagent": False,
-            "hidden_model_calls": False,
-        },
-        "retry_policy": RETRY_POLICY,
-        "tool_budget": budget.tool_budget,
-        "token_budget": budget.token_budget,
-        "timeout_seconds": budget.timeout_seconds,
-    }
-    return seal_v11_execution_contract(contract)
+            tool_timeout_seconds=runtime.tool_timeout_seconds,
+            tool_budget=budget.tool_budget,
+            timeout_seconds=budget.timeout_seconds,
+            topology_mode=(
+                V11_MULTI_TOPOLOGY_MODE
+                if budget.configuration.is_multi
+                else V11_SINGLE_TOPOLOGY_MODE
+            ),
+            retry_policy=RETRY_POLICY,
+        )
+    )
 
 
 def freeze_prediction_bundle(bundle: PredictionBundle, output_dir: Path) -> str:

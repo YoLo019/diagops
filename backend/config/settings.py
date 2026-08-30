@@ -7,6 +7,11 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from backend.domain.multi_agent import InvestigationStrategy, ModelProvider
+from backend.domain.runtime import (
+    V11_DEFAULT_MAX_TOOL_CALLS_PER_SPECIALIST,
+    V11_DEFAULT_MAX_TURNS,
+    V11_DEFAULT_TOOL_BUDGET,
+)
 
 _LOCAL_CLEARTEXT_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
@@ -141,12 +146,14 @@ class AgentsSettings(BaseModel):
     enabled: bool = False
     provider: ModelProvider = ModelProvider.OPENAI
     model: str | None = None
-    max_turns: int = Field(default=8, ge=1)
+    max_turns: int = Field(default=V11_DEFAULT_MAX_TURNS, ge=1)
     timeout_seconds: int = Field(default=60, ge=1)
     token_budget: int = Field(default=12000, ge=1, le=1_000_000)
     strategy: InvestigationStrategy = InvestigationStrategy.FIXED
-    max_tool_calls_per_specialist: int = Field(default=3, ge=1, le=10)
-    max_total_tool_calls: int = Field(default=8, ge=1, le=30)
+    max_tool_calls_per_specialist: int = Field(
+        default=V11_DEFAULT_MAX_TOOL_CALLS_PER_SPECIALIST, ge=1, le=10
+    )
+    max_total_tool_calls: int = Field(default=V11_DEFAULT_TOOL_BUDGET, ge=1, le=30)
     tool_timeout_seconds: int = Field(default=10, ge=1, le=60)
     openai_compatible: OpenAICompatibleSettings = Field(
         default_factory=OpenAICompatibleSettings

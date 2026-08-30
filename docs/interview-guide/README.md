@@ -13,12 +13,57 @@
 | 3 | [Agent 设计详解](03-agent-design.md) | Lead、Investigator、Critic 如何分工？为什么不投票？ |
 | 4 | [工具调用与证据系统](04-tool-calling-and-evidence.md) | 模型怎样“查数据”？为什么不能随便执行命令？ |
 | 5 | [持久化 Runtime](05-durable-runtime.md) | 超时、取消、宕机恢复、重放和并发怎样实现？ |
-| 6 | [数据、API 与前端](06-data-api-frontend.md) | 数据存在哪里？后端与页面怎样连接？ |
+| 6 | [数据、API 与前端概览](06-data-api-frontend.md) | 数据怎样落库和通过 API 暴露？前端只需了解什么？ |
 | 7 | [安全与可靠性](07-safety-reliability.md) | 如何防提示词注入、越权、幻觉和敏感信息泄漏？ |
 | 8 | [评测与测试](08-evaluation-and-testing.md) | 怎样证明系统有效，而不是只会演示？ |
 | 9 | [代码阅读与演示路线](09-code-reading-and-demo.md) | 面试前怎样读源码、启动项目、演示主链路？ |
 | 10 | [面试问答](10-interview-qa.md) | 高频追问如何作答？哪些话不能夸大？ |
 | 11 | [术语表与源码地图](11-glossary-and-source-map.md) | 陌生名词是什么意思？某个设计去哪看代码？ |
+| 12 | [Agent 逐阶段运行时](12-agent-runtime-deep-dive.md) | 一次真实 V11 Run 每一步具体发生什么？ |
+| 13 | [Agent 上下文与输出契约](13-agent-context-and-output-contracts.md) | 模型看见什么、交回什么，服务端又拥有什么？ |
+| 14 | [Agent 预算、重试与失败语义](14-agent-budget-retry-and-failure.md) | Token、turn、工具预算如何结算？失败为何不是一种状态？ |
+| 15 | [Agent 设计取舍与面试追问](15-agent-design-tradeoffs.md) | 为什么这样设计而不是投票、自由循环或编排框架？ |
+
+## 进阶专题：把 Agent 做成可上线的软件
+
+前 1–15 章先建立 DiagOps 的领域和源码地图；下面的专题把这些设计放到更通用的 Agent 工程问题中。每章都明确标出三种状态：`Implemented`（当前源码已有）、`Partial`（已有一部分或只在特定路径成立）、`Not implemented`（前沿方案/演进建议，不能在面试中说成现状）。
+
+| 顺序 | 专题 | 读完能回答什么 | 当前状态 |
+| --- | --- | --- | --- |
+| 16 | [上下文工程与压缩](16-agent-context-engineering.md) | 如何选证据、压缩长上下文而不丢引用？ | digest/投影已实现；通用 compaction 未接入 |
+| 17 | [Tool Calling 生产落地](17-agent-tool-calling-in-depth.md) | schema、并行、超时、重试、幂等和安全怎样闭环？ | 九个只读工具链已实现 |
+| 18 | [Memory 与 RAG](18-memory-and-rag.md) | verified memory 与向量 RAG 有什么区别？如何防投毒和陈旧？ | 关系型 verified lookup 已实现；向量 RAG 未实现 |
+| 19 | [MCP 与 Agent 互操作](19-mcp-and-agent-interoperability.md) | MCP 的协议、适用场景和安全边界是什么？ | 当前明确未实现 |
+| 20 | [模型路由与能力准入](20-model-routing-and-capability.md) | 任务路由和模型路由有何不同？如何证明 endpoint 可用？ | 静态身份/能力认证已实现；动态路由未实现 |
+| 21 | [Agent 可观测性](21-agent-observability.md) | 如何关联一次 Run 的模型、工具、证据和延迟？ | durable event + allowlisted OTel tracing 已实现 |
+| 22 | [Agent 安全攻防](22-agent-security-threat-model.md) | 如何系统防注入、越权、SSRF、投毒和成本攻击？ | 核心只读/校验边界已实现；企业治理部分未实现 |
+| 23 | [Agent 评测科学](23-agent-evaluation-science.md) | 怎样同时评测答案、轨迹、成本和安全？ | RCAEval/paired gate 已实现；正式 SS15/TT90 未完成 |
+| 24 | [成本、延迟与吞吐](24-agent-cost-performance.md) | 如何在预算内提高证据产出而不是盲目加 Token？ | reservation/并发/早停已实现 |
+| 25 | [部署、扩展与上线](25-agent-deployment-and-operations.md) | 单节点如何演进到可治理的生产部署？ | 本地优先；多节点/多租户未实现 |
+| 26 | [从零实现与调试实验](26-agent-hands-on-labs.md) | 如何亲手验证 Tool、Context、Runtime、Memory 和 Eval？ | 使用现有 key-free 测试和教学实验 |
+| 27 | [前沿 Agent 模式对比](27-agent-frontier-patterns.md) | ReAct、Manager、Handoff、Graph、Debate、Blackboard 如何选？ | V11 是受限 graph + evidence blackboard + Critic |
+| 28 | [Agent 岗位简历亮点素材](28-agent-resume-highlights.md) | 如何把当前项目真实能力写成 Agent 后端岗位简历？ | 仅使用可核验事实，指标待真实数据补齐 |
+
+## Agent 生产生命周期速览
+
+把下面这条链作为阅读导航。每个箭头都对应一种常见故障：
+
+```text
+输入规范化
+  → 上下文构建/压缩（污染、丢证据、超窗）
+  → 规划与模型能力准入（路由漂移、schema 不支持）
+  → 模型回合（超时、重试乘法、成本爆炸）
+  → Tool Calling（越权、重复副作用、SSRF）
+  → Evidence/Memory 写入（投毒、跨 Run 串线、来源丢失）
+  → 验证/裁决（幻觉、引用错、过度自信）
+  → 报告/HITL（把建议误说成已修复）
+  → 观测/评测（只看准确率、无法 replay）
+  → 部署治理（租户、备份、SLO、回滚）
+```
+
+## 阅读方法
+
+每个进阶专题建议按“术语 → 失败案例 → 当前代码 → 不变量 → 前沿实现 → 实验/指标 → 面试回答”的顺序阅读。代码链接优先于概念博客；如果文档中的设计建议与源码冲突，以当前 `V11Runtime`、`execution_contract`、`docs/superpowers/current.md` 和测试事实为准。
 
 ## 一句话版本
 
@@ -26,7 +71,7 @@ DiagOps 是一个只读的 SRE 事故诊断平台：它让多个有不同职责�
 
 ## 30 秒面试版本
 
-“DiagOps 面向应用服务事故诊断。告警进入 FastAPI 后会形成 Investigation 和持久化 Runtime Run。V11 由 Lead 规划信息缺口，最多三个相互隔离的 Investigator 并行使用九个只读工具收集日志、指标、Trace、发布、依赖等证据，Critic 对每个候选做因果和反证检查，必要时只允许一轮补充调查，最后由 Lead 裁决。所有结论必须引用本次 Run 已持久化的 Evidence ID。确定性层负责工具白名单、参数范围、预算、幂等、超时、取消、Checkpoint、重放和结果结构校验，但不能替换 Agent 的诊断结论。”
+“DiagOps 面向应用服务事故诊断。告警进入 FastAPI 后会形成 Investigation 和持久化 Runtime Run。V11 由 Lead 规划信息缺口，最多三个相互隔离的 Investigator 并行使用九个只读工具收集日志、指标、Trace、发布、依赖等证据，Critic 对每个候选做固定的七项因果与反证检查，必要时只允许一轮补充调查。当前 live 路径不会再额外调用一次 Lead 模型重复判断，而是在 Lead adjudication 阶段把 Critic 接受的候选机械投影为权威结果。所有结论必须引用本次 Run 已持久化的 Evidence ID。确定性层负责权限、预算、幂等、超时、恢复和结构校验，但不能凭规则发明根因。”
 
 ## 你应当建立的三个核心认识
 
@@ -47,5 +92,12 @@ DiagOps 是一个只读的 SRE 事故诊断平台：它让多个有不同职责�
 - [领域模型](../../backend/domain/)
 - [数据库结构](../../backend/db/schema.py)
 - [前端工作台](../../frontend/src/App.tsx)
+- [关键领域词义](../../CONTEXT.md)
+- [当前迭代状态](../superpowers/current.md)
+- [模型能力认证](../../backend/services/model_capability.py)
+- [Runtime 遥测](../../backend/runtime/telemetry.py)
+- [V11 评测模型](../../backend/benchmarks/rcaeval/models.py)
 
 文档中的“设计目标”与“已实现行为”会明确区分。遇到 README、历史设计和当前源码表述不同，以当前 V11 源码、当前迭代状态和持久化执行契约为准。
+
+> 面试诚实边界：仓库没有 `langgraph`、MCP SDK、向量数据库或自动修复工具依赖；本手册介绍这些前沿方案是为了帮助你做架构比较和后续设计，不代表项目已经接入。

@@ -32,10 +32,16 @@ from backend.domain.multi_agent import (
     ModelProvider,
 )
 from backend.domain.runtime import (
+    V11_DEFAULT_MAX_INVESTIGATORS,
+    V11_DEFAULT_MAX_ROUNDS,
+    V11_DEFAULT_TIMEOUT_SECONDS,
+    V11_MULTI_TOPOLOGY_MODE,
+    V11_RETRY_POLICY,
     RuntimeRun,
     RuntimeRunKind,
     RuntimeRunReason,
-    seal_v11_execution_contract,
+    V11ExecutionContractInput,
+    build_v11_execution_contract,
 )
 from backend.providers.registry import build_provider_registry_from_settings
 from backend.rca.analyzer import RcaAnalyzer
@@ -65,7 +71,6 @@ from backend.tools.provider_tools import (
     build_provider_tool_registry,
     current_investigation_id,
 )
-from backend.tools.registry import agent_manifest_hash
 
 logger = logging.getLogger(__name__)
 _TELEMETRY_SHUTDOWN_TIMEOUT_SECONDS = 5.0
@@ -138,7 +143,8 @@ class AppContainer:
                     tool_registry=self.tool_registry,
                     max_turns=self.settings.agents.max_turns,
                     timeout_seconds=min(
-                        120.0, float(self.settings.agents.timeout_seconds)
+                        V11_DEFAULT_TIMEOUT_SECONDS,
+                        float(self.settings.agents.timeout_seconds),
                     ),
                     max_total_tool_calls=self.settings.agents.max_total_tool_calls,
                     max_tool_calls_per_specialist=(
@@ -427,61 +433,35 @@ class AppContainer:
             if len(tool_manifest) != 9:
                 raise RuntimeContractError("V11 requires exactly nine Agent tools")
             skill_identity = skill_catalog_identity(self.tool_registry.list_agent_specs())
-            contract = {
-                "execution_contract_version": version.value,
-                "authority_mode": authority.value,
-                "model_provider": effective_provider.value
-                if isinstance(effective_provider, ModelProvider)
-                else effective_provider,
-                "model_name": effective_model,
-                "prompt_version": effective_prompt,
-                "api_mode": self._api_mode_for(effective_provider),
-                "endpoint_id": endpoint_identity,
-                "capability_artifact_hash": capability_hash,
-                "tool_manifest": list(tool_manifest),
-                "tool_manifest_hash": agent_manifest_hash(tool_manifest),
-                "skill_catalog": skill_identity,
-                "capability_identity": {
-                    "provider": (
+            contract = build_v11_execution_contract(
+                V11ExecutionContractInput(
+                    model_provider=(
                         effective_provider.value
                         if isinstance(effective_provider, ModelProvider)
                         else effective_provider
                     ),
-                    "model": effective_model,
-                    "api_mode": self._api_mode_for(effective_provider),
-                    "structured_output_transport": structured_output_transport,
-                    "endpoint_id": endpoint_identity,
-                    "artifact_hash": capability_hash,
-                },
-                "limits": {
-                    "max_turns": self.settings.agents.max_turns,
-                    "model_turn_budget_scope": "run",
-                    "max_investigators": 3,
-                    "max_rounds": 2,
-                    "token_budget": self.settings.agents.token_budget,
-                    "max_tool_calls_per_specialist": (
+                    model_name=effective_model,
+                    prompt_version=effective_prompt,
+                    api_mode=self._api_mode_for(effective_provider),
+                    endpoint_id=endpoint_identity,
+                    capability_artifact_hash=capability_hash,
+                    structured_output_transport=structured_output_transport,
+                    tool_manifest=tool_manifest,
+                    skill_catalog=skill_identity,
+                    max_turns=self.settings.agents.max_turns,
+                    max_investigators=V11_DEFAULT_MAX_INVESTIGATORS,
+                    max_rounds=V11_DEFAULT_MAX_ROUNDS,
+                    token_budget=self.settings.agents.token_budget,
+                    max_tool_calls_per_specialist=(
                         self.settings.agents.max_tool_calls_per_specialist
                     ),
-                    "tool_timeout_seconds": self.settings.agents.tool_timeout_seconds,
-                },
-                "topology": {
-                    "mode": "multi_lead_investigators_critic",
-                    "one_context": False,
-                    "critic": True,
-                    "subagent": False,
-                    "hidden_model_calls": False,
-                },
-                "retry_policy": {
-                    "max_retries": 1,
-                    "retryable_categories": ["transport", "rate_limit"],
-                    "provider_max_retries": 0,
-                    "sdk_max_retries": 0,
-                },
-                "tool_budget": self.settings.agents.max_total_tool_calls,
-                "token_budget": self.settings.agents.token_budget,
-                "timeout_seconds": float(self.settings.agents.timeout_seconds),
-            }
-            contract = seal_v11_execution_contract(contract)
+                    tool_timeout_seconds=self.settings.agents.tool_timeout_seconds,
+                    tool_budget=self.settings.agents.max_total_tool_calls,
+                    timeout_seconds=float(self.settings.agents.timeout_seconds),
+                    topology_mode=V11_MULTI_TOPOLOGY_MODE,
+                    retry_policy=V11_RETRY_POLICY,
+                )
+            )
         run = RuntimeRun.create_new(
             investigation_id=investigation_id,
             run_kind=RuntimeRunKind.LIVE,

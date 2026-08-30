@@ -8,7 +8,10 @@ import pytest
 from agents import AgentOutputSchema
 
 from backend.config.settings import endpoint_id
-from backend.diagnosis.v11_runtime import V11SingleControlOutput
+from backend.diagnosis.v11_runtime import (
+    V11_WORKFLOW_OUTPUT_TYPES,
+    V11SingleControlOutput,
+)
 from backend.services.model_capability import (
     CAPABILITY_MANIFEST,
     REQUIRED_CONTRACTS,
@@ -194,11 +197,13 @@ class _FakeCompletions:
         with_tool_calls=True,
         supports_native_schema=True,
         supports_strict_output_tool=True,
+        supports_full_critic_schema=True,
     ):
         self._with_usage = with_usage
         self._with_tool_calls = with_tool_calls
         self._supports_native_schema = supports_native_schema
         self._supports_strict_output_tool = supports_strict_output_tool
+        self._supports_full_critic_schema = supports_full_critic_schema
         self.requests = []
 
     async def create(self, **kwargs):
@@ -207,9 +212,25 @@ class _FakeCompletions:
         if response_format and response_format.get("type") == "json_schema":
             if not self._supports_native_schema:
                 raise RuntimeError("native schema unsupported")
-            return _FakeResponse(
-                _FakeMessage(content=json.dumps(_PRODUCTION_RESULT))
-            )
+            schema = response_format.get("json_schema", {}).get("schema", {})
+            schema_name = schema.get("title")
+            if (
+                schema_name == "CriticOutput"
+                and not self._supports_full_critic_schema
+            ):
+                raise RuntimeError("full critic schema unsupported")
+            if schema_name == "V11SingleControlOutput":
+                payload = _PRODUCTION_RESULT
+            else:
+                import backend.services.model_capability as capability_module
+
+                output_type = next(
+                    item
+                    for item in capability_module.V11_WORKFLOW_OUTPUT_TYPES
+                    if item.__name__ == schema_name
+                )
+                payload = capability_module._role_probe_payload(output_type)
+            return _FakeResponse(_FakeMessage(content=json.dumps(payload)))
         if response_format:
             return _FakeResponse(_FakeMessage(content='{"ok": true}'))
         if kwargs.get("tools"):
@@ -219,6 +240,31 @@ class _FakeCompletions:
             if "submit_structured_output" in function_names:
                 if not self._supports_strict_output_tool:
                     return _FakeResponse(_FakeMessage(tool_calls=None))
+                output_tool = next(
+                    tool
+                    for tool in kwargs["tools"]
+                    if tool["function"]["name"] == "submit_structured_output"
+                )
+                if (
+                    not self._supports_full_critic_schema
+                    and "CriticOutput"
+                    in output_tool["function"].get("description", "")
+                ):
+                    raise RuntimeError("full critic schema unsupported")
+                prompt = kwargs["messages"][0].get("content", "")
+                marker = "Return exactly this JSON for the requested workflow role: "
+                if marker in prompt:
+                    payload = prompt.split(marker, 1)[1]
+                    return _FakeResponse(
+                        _FakeMessage(
+                            tool_calls=[
+                                _FakeToolCall(
+                                    "submit_structured_output",
+                                    json.dumps({"payload_json": payload}),
+                                )
+                            ]
+                        )
+                    )
                 is_follow_up = any(
                     message.get("role") == "tool" for message in kwargs["messages"]
                 )
@@ -323,6 +369,29 @@ async def test_native_certification_uses_exact_single_production_schema():
     AgentOutputSchema(V11SingleControlOutput).validate_json(
         json.dumps(_PRODUCTION_RESULT)
     )
+
+
+@pytest.mark.anyio
+async def test_remote_role_schema_rejecting_full_critic_fails_closed():
+    """compact schema 成功不能掩盖正式 reconciliation schema 不兼容。"""
+    completions = _FakeCompletions(supports_full_critic_schema=False)
+
+    artifact = await certify_endpoint_async(
+        base_url=_CANONICAL_URL,
+        model="compat-model",
+        api_key="local-secret",
+        client_factory=lambda: _FakeClient(completions),
+    )
+
+    observations = {item.capability: item.passed for item in artifact.observations}
+    assert observations["v11_remote_role_schema_capability"] is False
+    assert artifact.result == "failed"
+    sent_schema_names = {
+        request["response_format"]["json_schema"]["schema"].get("title")
+        for request in completions.requests
+        if request.get("response_format", {}).get("type") == "json_schema"
+    }
+    assert {item.__name__ for item in V11_WORKFLOW_OUTPUT_TYPES} <= sent_schema_names
 
 
 def test_capability_manifest_hash_tracks_the_shared_production_schema(monkeypatch):

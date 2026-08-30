@@ -1,3 +1,4 @@
+from inspect import signature
 from math import inf, nan
 
 import pytest
@@ -6,6 +7,10 @@ from pydantic import ValidationError
 from backend.domain.multi_agent import InvestigationStrategy
 from backend.domain.runtime import (
     ALLOWED_TRANSITIONS,
+    V11_DEFAULT_MAX_INVESTIGATORS,
+    V11_DEFAULT_MAX_ROUNDS,
+    V11_DEFAULT_MAX_TURNS,
+    V11_DEFAULT_TOOL_BUDGET,
     RuntimeActorType,
     RuntimeAttempt,
     RuntimeAttemptStatus,
@@ -18,7 +23,10 @@ from backend.domain.runtime import (
     RuntimeRunKind,
     RuntimeRunReason,
     RuntimeRunStatus,
+    V11ExecutionContractInput,
+    build_v11_execution_contract,
     ensure_run_transition,
+    validate_v11_execution_contract,
 )
 
 
@@ -508,3 +516,42 @@ def test_runtime_run_accepts_realistic_model_identifiers(model_name: str) -> Non
     )
 
     assert run.model_name == model_name
+
+
+def test_v11_contract_builder_is_the_shared_budget_source() -> None:
+    """产品默认值、runtime 默认值与契约拓扑不能各自漂移。"""
+    from backend.benchmarks.rcaeval.models import (
+        EXPECTED_CONFIGURATION_TOPOLOGY,
+        RcaEvalConfiguration,
+    )
+    from backend.config.settings import AgentsSettings
+    from backend.diagnosis.v11_runtime import V11Runtime
+
+    settings = AgentsSettings()
+    assert settings.max_turns == V11_DEFAULT_MAX_TURNS
+    assert settings.max_total_tool_calls == V11_DEFAULT_TOOL_BUDGET
+    runtime_signature = signature(V11Runtime)
+    assert runtime_signature.parameters["max_turns"].default == V11_DEFAULT_MAX_TURNS
+    assert (
+        runtime_signature.parameters["max_total_tool_calls"].default
+        == V11_DEFAULT_TOOL_BUDGET
+    )
+    assert EXPECTED_CONFIGURATION_TOPOLOGY[RcaEvalConfiguration.MULTI_INTENDED] == (
+        V11_DEFAULT_MAX_INVESTIGATORS,
+        V11_DEFAULT_MAX_ROUNDS,
+    )
+
+    contract = build_v11_execution_contract(
+        V11ExecutionContractInput(
+            model_provider="openai",
+            model_name="drift-test",
+            prompt_version="v11-test",
+            api_mode="responses",
+            tool_manifest=("read_logs",),
+            skill_catalog={},
+            token_budget=100,
+        )
+    )
+    validate_v11_execution_contract(contract)
+    assert contract["limits"]["max_turns"] == V11_DEFAULT_MAX_TURNS
+    assert contract["tool_budget"] == V11_DEFAULT_TOOL_BUDGET

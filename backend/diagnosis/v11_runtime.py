@@ -99,6 +99,13 @@ from backend.domain.multi_agent import (
     MultiAgentRunStatus,
 )
 from backend.domain.runtime import (
+    V11_DEFAULT_MAX_INVESTIGATORS,
+    V11_DEFAULT_MAX_ROUNDS,
+    V11_DEFAULT_MAX_TOOL_CALLS_PER_SPECIALIST,
+    V11_DEFAULT_MAX_TURNS,
+    V11_DEFAULT_TIMEOUT_SECONDS,
+    V11_DEFAULT_TOOL_BUDGET,
+    V11_DEFAULT_TOOL_TIMEOUT_SECONDS,
     V11_RUN_DEADLINE_MAX_SECONDS,
     RuntimePhase,
     validate_v11_execution_contract,
@@ -361,7 +368,7 @@ class CriticCompactCausalCheck(BaseModel):
 
 
 class CriticCompactAssessmentDraft(BaseModel):
-    """已有完整证据时的无 supplemental task Critic 草稿。"""
+    """live Critic 的紧凑 assessment；补证字段仍受有界合同约束。"""
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -369,25 +376,83 @@ class CriticCompactAssessmentDraft(BaseModel):
     verdict: Literal[
         CriticVerdict.ACCEPT,
         CriticVerdict.REJECT,
+        CriticVerdict.NEEDS_EVIDENCE,
         CriticVerdict.INCONCLUSIVE,
     ]
     checks: list[CriticCompactCausalCheck] = Field(min_length=7, max_length=7)
+    gap: str | None = Field(default=None, max_length=64)
+    supplemental_task_ids: list[str] = Field(default_factory=list, max_length=3)
+
+    @model_validator(mode="after")
+    def validate_supplemental_contract(self) -> CriticCompactAssessmentDraft:
+        """仅 needs_evidence 可携带补证引用，且必须声明有界任务批次。"""
+        if self.verdict == CriticVerdict.NEEDS_EVIDENCE:
+            if not self.gap or not 1 <= len(self.supplemental_task_ids) <= 3:
+                raise ValueError(
+                    "needs_evidence requires one gap and a bounded supplemental task batch"
+                )
+        elif self.gap is not None or self.supplemental_task_ids:
+            raise ValueError("supplemental fields require needs_evidence")
+        return self
+
+
+class CriticCompactTaskDraft(BaseModel):
+    """live Critic 补证任务的最小草稿；服务端补齐 owner/工具字段。"""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    id: str = Field(min_length=1, max_length=128)
+    title: str = Field(min_length=1, max_length=96)
+    description: str = Field(min_length=1, max_length=256)
+    information_gap: str = Field(min_length=1, max_length=160)
+    expected_discriminator: str | None = Field(default=None, max_length=160)
 
 
 class CriticCompactOutput(_SafeStructuredOutput):
-    """已有完整证据时使用的有界 Critic 输出。"""
+    """已有完整证据时使用的有界 Critic 输出，支持一次补证批次。"""
 
     model_config = ConfigDict(extra="forbid")
 
     assessments: list[CriticCompactAssessmentDraft] = Field(
         default_factory=list, max_length=3
     )
+    tasks: list[CriticCompactTaskDraft] = Field(default_factory=list, max_length=3)
 
 
 class LeadAdjudicationOutput(_SafeStructuredOutput):
     model_config = ConfigDict(extra="forbid")
 
     decision: LeadDecision
+
+
+# 所有可能由 V11 live workflow 发送给 provider 的结构化输出类型必须在此集中
+# 声明。能力认证、execution contract 及运行时测试均从这份清单派生，避免某个
+# fallback 或 reconciliation schema 只在正式运行时才首次暴露兼容性问题。
+V11_WORKFLOW_OUTPUT_TYPES: tuple[type[BaseModel], ...] = (
+    LeadPlanningCompactOutput,
+    LeadPlanningOutput,
+    InvestigatorCandidateOutput,
+    InvestigatorOutput,
+    CriticCompactOutput,
+    CriticOutput,
+    LeadAdjudicationOutput,
+    # 单上下文 V11 入口同样经过 compatible provider；将其放入同一清单，
+    # 避免 capability 只认证 Multi 角色而遗漏该 live fallback。
+    V11SingleControlOutput,
+)
+
+# 对外名称用于 capability/service 层；赋值而非重新列举，确保不存在第二份清单。
+V11_PRODUCTION_OUTPUT_TYPES = V11_WORKFLOW_OUTPUT_TYPES
+
+
+def v11_workflow_output_schemas() -> dict[str, dict[str, object]]:
+    """返回 live workflow 所有结构化输出的严格 JSON schema。"""
+    return {
+        output_type.__name__: AgentOutputSchema(
+            output_type, strict_json_schema=True
+        ).json_schema()
+        for output_type in V11_WORKFLOW_OUTPUT_TYPES
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -1050,14 +1115,15 @@ def _structured_output_retry_feedback(output_type: type[BaseModel]) -> str:
         return (
             f"{common} For every listed candidate, emit exactly one concise "
             "assessment using its candidate_ref exactly as provided; use only "
-            "accept, reject, or inconclusive, emit seven named causal checks "
+            "accept, reject, inconclusive, or needs_evidence, emit seven named "
+            "causal checks "
             "with only name, status, evidence_ids, and gap fields, "
             "and cite at most one committed evidence ID per check. A pass or "
             "fail check must cite evidence and must not include gap; an unknown "
-            "check must include a short gap. Do not include summaries, top-level "
-            "evidence arrays, gap, or supplemental task fields in this bounded "
-            "review. Do not return server assessment IDs, candidate_id, or "
-            "extra fields."
+            "check must include a short gap. A needs_evidence assessment must "
+            "include one gap, one or more supplemental_task_ids, and matching "
+            "compact tasks. Do not return server assessment IDs, candidate_id, "
+            "or extra fields."
         )
     if output_type is CriticOutput:
         return (
@@ -1116,20 +1182,20 @@ class V11Runtime:
         model_name: str | None = None,
         tool_registry: ToolRegistry | None = None,
         turn: TurnCallable | None = None,
-        max_turns: int = 8,
-        timeout_seconds: float = 120.0,
-        max_investigators: int = 3,
-        max_rounds: int = 2,
-        max_total_tool_calls: int = 8,
-        max_tool_calls_per_specialist: int = 3,
+        max_turns: int = V11_DEFAULT_MAX_TURNS,
+        timeout_seconds: float = V11_DEFAULT_TIMEOUT_SECONDS,
+        max_investigators: int = V11_DEFAULT_MAX_INVESTIGATORS,
+        max_rounds: int = V11_DEFAULT_MAX_ROUNDS,
+        max_total_tool_calls: int = V11_DEFAULT_TOOL_BUDGET,
+        max_tool_calls_per_specialist: int = V11_DEFAULT_MAX_TOOL_CALLS_PER_SPECIALIST,
         token_budget: int | None = None,
-        tool_timeout_seconds: float = 10.0,
+        tool_timeout_seconds: float = V11_DEFAULT_TOOL_TIMEOUT_SECONDS,
         parallel_limit: RunStepGate | None = None,
         skills: tuple[DiagnosticSkill, ...] = DIAGNOSTIC_SKILLS,
     ) -> None:
-        if not 1 <= max_investigators <= 3:
+        if not 1 <= max_investigators <= V11_DEFAULT_MAX_INVESTIGATORS:
             raise ValueError("max_investigators must be between one and three")
-        if max_rounds not in {1, 2}:
+        if max_rounds not in {1, V11_DEFAULT_MAX_ROUNDS}:
             raise ValueError("max_rounds must be one or two")
         if max_total_tool_calls < 1:
             raise ValueError("max_total_tool_calls must be positive")
@@ -1945,7 +2011,14 @@ class V11Runtime:
                 except V11RuntimeContractError as exc:
                     message = str(exc)
                     recoverable_reference_error = (
-                        "critic candidate reference is invalid" in message
+                        (
+                            "candidate reference" in message
+                            and (
+                                "unknown" in message
+                                or "invalid" in message
+                                or "rejected" in message
+                            )
+                        )
                         or "critic assessment evidence reference is invalid" in message
                     )
                     if (
@@ -4032,7 +4105,11 @@ class V11Runtime:
             repository.get(investigation_id).evidence,
             runtime_run_id=self.runtime_run_id,
         )
-        compact_output = self.turn is None and len(review.candidates) <= self.max_investigators
+        compact_output = (
+            self.turn is None
+            and round_number == 1
+            and len(review.candidates) <= self.max_investigators
+        )
         if compact_output:
             payload = {
                 "role": "critic",
@@ -4054,9 +4131,11 @@ class V11Runtime:
                     _live_evidence_prompt_projection(item) for item in evidence
                 ],
                 "allowed_evidence_ids": [item.id for item in evidence],
+                "round": round_number,
                 "rule": (
                     "Assess every candidate exactly once using its candidate_ref. Return "
-                    "only accept, reject, or inconclusive and exactly seven named checks: "
+                    "only accept, reject, inconclusive, or needs_evidence and exactly "
+                    "seven named checks: "
                     "temporal, topology, mechanism, blast_radius, symptom_vs_cause, "
                     "counterevidence, alternatives. A pass or fail check needs one "
                     "committed evidence ID and no gap; unknown needs a short gap. A "
@@ -4070,9 +4149,13 @@ class V11Runtime:
                     "required when the committed evidence does not expose it. When "
                     "several clusters are anomalous, prefer the candidate with the "
                     "clearest entity-scoped and correlated evidence, but do not reject "
-                    "a scoped candidate merely because another cluster also exists. Emit only the "
-                    "declared candidate_ref, verdict, and check name/status/evidence_ids/gap; "
-                    "do not emit IDs, summaries, tasks, or extra fields. Every "
+                    "a scoped candidate merely because another cluster also exists. A "
+                    "needs_evidence assessment must include a short gap, one or more "
+                    "supplemental_task_ids, and matching compact tasks containing only "
+                    "id, title, description, information_gap, and optional "
+                    "expected_discriminator. Emit only the declared candidate_ref, "
+                    "verdict, checks, and bounded supplemental fields; do not emit "
+                    "server IDs or extra fields. Every "
                     "evidence_ids value must be copied exactly from allowed_evidence_ids; "
                     "when no allowed evidence supports a check, use unknown with a gap."
                 ),
@@ -4108,32 +4191,12 @@ class V11Runtime:
                 for item in review.critic_assessments
             ],
             "rule": (
-                "Use candidate_ref exactly as provided. Return exactly one concise "
-                "assessment per candidate with verdict accept, reject, or "
-                "inconclusive; emit seven named causal checks and only committed "
-                "evidence IDs. Do not request needs_evidence or tasks in this "
-                "bounded review; use inconclusive when evidence is insufficient. "
-                "Do not accept a candidate with no scoped support or only a generic "
-                "degradation paragraph. A candidate whose failure_class copies a cited "
-                "signal_family and whose scoped anomaly evidence matches is an "
-                "evidence-backed mechanism classification. Deeper upstream causality is "
-                "not required when the committed evidence does not expose it. When "
-                "several clusters are anomalous, prefer the candidate with the clearest "
-                "entity-scoped and correlated evidence, but do not reject a scoped "
-                "candidate merely because another cluster also exists. "
-                "For every check, pass or fail requires one committed evidence ID "
-                "and no gap; unknown requires a short gap. Emit only check name, "
-                "status, evidence_ids, and gap; do not emit summaries, top-level "
-                "evidence arrays, gap, or supplemental_task_ids. Never return "
-                "server assessment IDs or candidate_id. Every evidence_ids value "
-                "must be copied exactly from allowed_evidence_ids; when no allowed "
-                "evidence supports a check, use unknown with a gap."
-                if compact_output
-                else "Use candidate_ref exactly as provided. Return verdict, seven "
-                "named causal checks, and only committed evidence IDs; never "
-                "return server assessment IDs or candidate_id. Unknown requires "
-                "a named gap. Every evidence_ids value must be copied exactly from "
-                "allowed_evidence_ids."
+                "Use candidate_ref exactly as provided. Return verdict, seven named "
+                "causal checks, and only committed evidence IDs; never return server "
+                "assessment IDs or candidate_id. A needs_evidence assessment must "
+                "include a gap, supplemental_task_ids, and matching tasks; unknown "
+                "checks require a named gap. Every evidence_ids value must be copied "
+                "exactly from allowed_evidence_ids."
             ),
         }
         return json.dumps(redact_value(payload), ensure_ascii=False, sort_keys=True)

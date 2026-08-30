@@ -22,6 +22,8 @@ RuntimeWriter 持久化后，Evidence ID 才能被 Agent 引用
 
 工具是稳定的 Agent 接口，Provider 是可替换的数据源实现，Evidence 是经过验证和持久化的结果。
 
+V11 还有一条“Agent 调工具之前”的初始证据路径：持久化阶段执行器先直接调用 `ProviderRegistry.collect_results_async`，把 Provider 结果归一成 `DiagnosisContext` 并落库。随后 Investigator 才从这本完整 Evidence ledger 的有界摘要出发，按自己的任务继续调用工具。两条路径最终使用同一个 Evidence 合约，但前者是 Runtime 主动收集，后者是 Agent 自适应查询。
+
 ## 2. 九个 Agent 可见工具
 
 工具清单由 [build_provider_tool_registry](../../backend/tools/provider_tools.py) 注册，再由 [ToolRegistry.agent_manifest](../../backend/tools/registry.py) 过滤出 `read_only=True` 且 `exposure=agent` 的工具。
@@ -156,7 +158,7 @@ ToolRegistry 查找 handler，ProviderRegistry 选择声明支持该工具的 Pr
 
 ## 7. 重试策略
 
-工具路径对分类为 transport 或 rate limit 的瞬时故障最多重试一次；裸 timeout 不在工具路径自动重试。原因是超时调用可能仍在服务端执行，再重试容易产生重入和超过硬 deadline。
+工具路径对分类为 transport 或 rate limit 的瞬时故障最多重试一次；裸 `TimeoutError` 不在工具路径自动重试。模型 SDK 路径会把 `APITimeoutError` 分类为 `timeout`，把 HTTP 5xx `APIStatusError` 分类为 `transport`，但这些分类不会泛化成“所有 timeout 都安全可重试”。原因是工具超时调用可能仍在服务端执行，再重试容易产生重入和超过硬 deadline。
 
 重试前必须：
 
@@ -183,9 +185,23 @@ Evidence 的结构包括：
 | `provenance` | 来源档案、工件哈希、适配器版本 |
 | `runtime_run_id` | 所属运行，防串线 |
 
-`scope` 让校验器能机械发现明显矛盾，例如候选说 `checkout-service`，引用证据却只属于不相关的 `search-service`。但它不能判断“这个错误日志是否真是根因”，那仍是 Critic 和 Lead 的工作。
+`scope` 让校验器能机械发现明显矛盾，例如候选说 `checkout-service`，引用证据却只属于不相关的 `search-service`。但它不能判断“这个错误日志是否真是根因”，那仍是 Investigator 与 Critic 的语义工作。
 
-## 9. 证据状态与 Gap
+## 9. Evidence digest：给模型的是摘要，不是删减后的真相
+
+完整 Evidence ledger 可能很长，不能每次全部塞入 prompt。当前 Investigator 起始摘要默认最多 4 条，每个 Evidence kind 最多 2 条，只选 `success/partial`：
+
+- 带实体和 `signal_type` 的指标先按实体分组；
+- 同一实体内轮转 CPU、latency、socket、disk、error 等 signal family；
+- 按 change score 选择更强信号；
+- 为日志、Trace、依赖等非指标证据保留至少一个位置；
+- 老 Evidence 没有 signal family 时退回按 kind 轮转。
+
+这避免“一个高分 CPU 指标遮住真正有区分度的 socket 信号”，也避免摘要全是曲线而没有解释机制的日志。摘要只是起点，九工具和完整持久化账本没有被删除。
+
+multi run 的 prompt 还要求候选至少引用两条相关、不同的可用 Evidence ID；摘要不足时允许做一次有界只读查询找第二条。共享准入代码负责 ID、状态、Run 和 scope 合法性，证据是否在语义上真正互相印证仍由 Agent/Critic 判断。
+
+## 10. 证据状态与 Gap
 
 普通因果 Finding 和 Candidate 只能引用 usable evidence，也就是 success 或允许的 partial。Gap Finding 不同：它描述“想要的证据没有拿到”，因此可以引用已提交的 failed/skipped 证据记录来证明缺口。
 
@@ -196,7 +212,7 @@ Evidence 的结构包括：
 
 这是一个很好的面试设计点：失败记录本身也是审计证据，但不能被当作正向因果证据。
 
-## 10. Provider-neutral 的价值
+## 11. Provider-neutral 的价值
 
 Agent 只知道 `query_traces`，不知道底层是：
 
@@ -206,7 +222,7 @@ Agent 只知道 `query_traces`，不知道底层是：
 
 Provider 必须把不同后端归一为同一个 Evidence 合约。这样可以离线开发、做真实协议集成测试，并避免 prompt 依赖供应商语法。
 
-## 11. 为什么不使用任意 PromQL、URL、文件路径或 Shell
+## 12. 为什么不使用任意 PromQL、URL、文件路径或 Shell
 
 如果模型可以自由生成这些内容，会出现：
 
@@ -218,6 +234,6 @@ Provider 必须把不同后端归一为同一个 Evidence 合约。这样可以�
 
 项目只允许预定义参数和模板。Agent 表达“我要看 5xx_rate”，确定性 Provider 决定实际查询怎样构造。
 
-## 12. 面试回答模板
+## 13. 面试回答模板
 
 “工具调用分成 Agent Tool 和 Provider 两层。V11 从 ToolRegistry 冻结出九个只读工具并把清单哈希写入执行契约。SDK 只把模型的结构化请求交给 AdaptiveToolSession；会话校验 schema、事故时间窗、实体范围、工具权限、重复查询、deadline 和两级调用预算，再生成 logical ID 与 idempotency key。Provider 返回的内容先脱敏并原子持久化为 ToolCall 和 Evidence，模型只能引用已提交的 Evidence ID。恢复时复用同幂等键的成功结果，不重打外部系统。这样工具调用是受审计的数据读取，而不是给模型开一个任意执行入口。”

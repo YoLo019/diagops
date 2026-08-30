@@ -26,10 +26,16 @@ from agents import AgentOutputSchema
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.config.settings import canonicalize_endpoint, endpoint_id
+from backend.diagnosis import v11_runtime as _v11_runtime
 from backend.diagnosis.openai_compatible_model import COMPATIBLE_ADAPTER_VERSION
-from backend.diagnosis.v11_runtime import V11SingleControlOutput
+from backend.diagnosis.v11_runtime import (
+    V11SingleControlOutput,
+    _strict_output_tool,
+    v11_workflow_output_schemas,
+)
 from backend.safety.redaction import redact_text
 from backend.services.source_identity import resolve_source_identity
+from backend.services.v11_canary import run_v11_local_workflow_canary
 
 CAPABILITY_SCHEMA_VERSION = "model-capability-v1"
 CAPABILITY_API_MODE = "chat_completions"
@@ -42,6 +48,8 @@ CAPABILITY_MANIFEST = (
     "token_usage",
     "bounded_response_deadline",
     "configured_parallelism",
+    "v11_remote_role_schema_capability",
+    "v11_local_workflow_correctness",
 )
 DEFAULT_CERTIFICATION_DEADLINE_SECONDS = 30.0
 DEFAULT_CERTIFICATION_PARALLELISM = 3
@@ -52,17 +60,134 @@ REQUIRED_CONTRACTS = (
     "chat_completions.token_usage",
     "chat_completions.bounded_response_deadline",
     "chat_completions.configured_parallelism",
+    "v11.remote_role_schema_capability",
+    "v11.local_workflow_correctness",
 )
 STRUCTURED_OUTPUT_TRANSPORTS = ("native_json_schema", "strict_output_tool")
 _NATIVE_PROBE_RESULT = {
     "candidates": [],
 }
 
+# 兼容测试/调用方的只读别名；业务逻辑始终动态读取 runtime 模块中的唯一清单。
+V11_WORKFLOW_OUTPUT_TYPES = _v11_runtime.V11_WORKFLOW_OUTPUT_TYPES
+V11_PRODUCTION_OUTPUT_TYPES = _v11_runtime.V11_PRODUCTION_OUTPUT_TYPES
+# 旧测试/调用方可继续对 V11Runtime 类做故障注入；实际实现仍来自 diagnosis
+# 模块，认证服务不维护第二个 Runtime 类型。
+V11Runtime = _v11_runtime.V11Runtime
+
+
+async def _synthetic_v11_workflow_canary() -> bool:
+    """兼容旧认证调用面；实现委托给生产入口。"""
+    return await run_v11_local_workflow_canary()
+
 
 def _native_production_schema() -> dict[str, object]:
-    return AgentOutputSchema(
-        V11SingleControlOutput, strict_json_schema=True
-    ).json_schema()
+    # 保留既有单上下文 probe 名称，但 schema 由唯一 workflow 清单提供。
+    return _workflow_production_schemas()[V11SingleControlOutput.__name__]
+
+
+def _workflow_production_schemas() -> dict[str, dict[str, object]]:
+    """从 V11 唯一 live output-type 清单派生 manifest schema。"""
+    return v11_workflow_output_schemas()
+
+
+def _role_response_format(output_type: type[BaseModel]) -> dict[str, object]:
+    """构造与 compatible adapter 相同的 native strict JSON 请求。"""
+    schema = _workflow_production_schemas()[output_type.__name__]
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "final_output",
+            "strict": True,
+            "schema": schema,
+        },
+    }
+
+
+def _role_output_tool(output_type: type[BaseModel]) -> dict[str, object]:
+    """构造与 V11 `_strict_output_tool` 相同的 wire tool。"""
+    tool = _strict_output_tool(output_type)
+    return {
+        "type": "function",
+        "function": {
+            "name": tool.name,
+            "description": tool.description,
+            "strict": tool.strict_json_schema,
+            "parameters": tool.params_json_schema,
+        },
+    }
+
+
+def _role_probe_payload(output_type: type[BaseModel]) -> dict[str, object]:
+    """返回不含业务身份的最小合法 role payload。"""
+    if output_type is V11SingleControlOutput:
+        return dict(_NATIVE_PROBE_RESULT)
+    if output_type.__name__ == "LeadPlanningCompactOutput":
+        return {
+            "decision": {
+                "action": "investigate",
+                "summary": "Synthetic planning schema probe.",
+                "selected_skills": [],
+            },
+            "tasks": [],
+        }
+    if output_type.__name__ == "LeadPlanningOutput":
+        return {
+            "decision": {
+                "action": "investigate",
+                "summary": "Synthetic planning schema probe.",
+                "task_ids": ["probe-task"],
+                "candidate_ids": [],
+                "evidence_ids": [],
+                "selected_skills": [],
+                "stop_reason": None,
+            },
+            "tasks": [
+                {
+                    "id": "probe-task",
+                    "title": "Inspect synthetic signal",
+                    "description": "Inspect bounded synthetic evidence.",
+                    "analysis_round": 1,
+                    "tool_names": [],
+                    "strategy": None,
+                    "evidence_scope": None,
+                    "expected_discriminator": None,
+                    "information_gap": "synthetic_gap",
+                }
+            ],
+        }
+    if output_type.__name__ in {"InvestigatorCandidateOutput", "InvestigatorOutput"}:
+        payload: dict[str, object] = {"candidates": []}
+        if output_type.__name__ == "InvestigatorOutput":
+            payload.update({"summary": "", "findings": []})
+        return payload
+    if output_type.__name__ in {"CriticCompactOutput", "CriticOutput"}:
+        payload = {"assessments": []}
+        # Newer V11 contracts make ranking fields explicit.  Read the fields
+        # from the shared type rather than maintaining a second versioned list.
+        fields = getattr(output_type, "model_fields", {})
+        if "ranked_candidate_refs" in fields:
+            payload["ranked_candidate_refs"] = []
+        if "ranking_basis" in fields:
+            payload["ranking_basis"] = None
+        if "tasks" in fields:
+            payload["tasks"] = []
+        if "summary" in fields:
+            payload["summary"] = "Synthetic critic schema probe."
+        return payload
+    if output_type.__name__ == "LeadAdjudicationOutput":
+        return {
+            "decision": {
+                "action": "inconclusive",
+                "summary": "Synthetic adjudication schema probe.",
+                "task_ids": [],
+                "candidate_ids": [],
+                "evidence_ids": [],
+                "selected_skills": [],
+                "stop_reason": "schema_probe",
+            }
+        }
+    raise ValueError("unknown V11 workflow output type")
 
 
 def _native_response_format() -> dict[str, object]:
@@ -125,6 +250,7 @@ def capability_manifest_hash() -> str:
         {
             "capabilities": list(CAPABILITY_MANIFEST),
             "native_output_schema": _native_production_schema(),
+            "workflow_schemas": _workflow_production_schemas(),
         },
         ensure_ascii=True,
         separators=(",", ":"),
@@ -372,6 +498,7 @@ async def _probe_capabilities(
     deadline_seconds: float,
 ) -> list[CapabilityObservation]:
     """只通过远端可观测行为探测能力；不记录 prompt 与响应正文。"""
+    probe_results: dict[str, bool] = {}
 
     async def non_streaming() -> bool:
         response = await client.chat.completions.create(
@@ -483,6 +610,100 @@ async def _probe_capabilities(
             for call in final_calls
         )
 
+    async def remote_role_schema_capability() -> bool:
+        """探测实际 live workflow 每个 role schema 的选定 transport。"""
+        transport = (
+            "native_json_schema"
+            if probe_results.get("native_json_schema_with_tools")
+            else "strict_output_tool"
+            if probe_results.get("strict_output_tool")
+            else None
+        )
+        if transport is None:
+            return False
+        role_gate = asyncio.Semaphore(max(1, parallelism))
+
+        async def probe_role(output_type: type[BaseModel]) -> bool:
+            # role probes share the configured endpoint parallelism ceiling;
+            # otherwise the eight schema checks could mask a lower provider cap.
+            async with role_gate:
+                return await _probe_role(output_type)
+
+        async def _probe_role(output_type: type[BaseModel]) -> bool:
+            payload = _role_probe_payload(output_type)
+            # 先用同一 output type 验证 probe 自身，避免新增 required 字段后
+            # 探测器仍发送一个看似成功但无法被正式 Runtime 解析的样本。
+            try:
+                AgentOutputSchema(
+                    output_type, strict_json_schema=True
+                ).validate_json(json.dumps(payload, ensure_ascii=True))
+            except (TypeError, ValueError):
+                return False
+            request: dict[str, object] = {
+                "model": model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": (
+                            "Return exactly this JSON for the requested workflow role: "
+                            + json.dumps(payload, ensure_ascii=True, sort_keys=True)
+                        ),
+                    }
+                ],
+                "max_tokens": 768,
+            }
+            if transport == "native_json_schema":
+                request["response_format"] = _role_response_format(output_type)
+            else:
+                request["tools"] = [_role_output_tool(output_type)]
+                request["tool_choice"] = "required"
+            response = await client.chat.completions.create(**request)
+            if not response.choices:
+                return False
+            message = response.choices[0].message
+            if transport == "native_json_schema":
+                raw = message.content
+            else:
+                call = next(
+                    (
+                        item
+                        for item in (message.tool_calls or [])
+                        if item.function
+                        and item.function.name == "submit_structured_output"
+                    ),
+                    None,
+                )
+                if call is None:
+                    return False
+                envelope = json.loads(call.function.arguments)
+                if (
+                    not isinstance(envelope, dict)
+                    or set(envelope) != {"payload_json"}
+                    or not isinstance(envelope["payload_json"], str)
+                ):
+                    return False
+                raw = envelope.get("payload_json")
+            if not isinstance(raw, str):
+                return False
+            # Parse with the same schema validator used by V11 runtime.  This is
+            # deliberately after transport extraction so an endpoint that accepts
+            # the wire shape but emits malformed role output still fails closed.
+            AgentOutputSchema(output_type).validate_json(raw)
+            return True
+
+        results = await asyncio.gather(
+            *(
+                probe_role(output_type)
+                for output_type in _v11_runtime.V11_WORKFLOW_OUTPUT_TYPES
+            ),
+            return_exceptions=True,
+        )
+        return all(result is True for result in results)
+
+    async def local_workflow_correctness() -> bool:
+        """运行共享生产 phase/Store canary；不读取评估数据或标签。"""
+        return await _synthetic_v11_workflow_canary()
+
     async def tool_calls() -> bool:
         response = await client.chat.completions.create(
             model=model,
@@ -523,6 +744,8 @@ async def _probe_capabilities(
         ("strict_output_tool", strict_output_tool),
         ("token_usage", token_usage),
         ("configured_parallelism", configured_parallelism),
+        ("v11_remote_role_schema_capability", remote_role_schema_capability),
+        ("v11_local_workflow_correctness", local_workflow_correctness),
     )
     observations: list[CapabilityObservation] = []
     for name, probe in probes:
@@ -538,6 +761,7 @@ async def _probe_capabilities(
         observations.append(
             CapabilityObservation(capability=name, passed=bool(passed), detail=detail)
         )
+        probe_results[name] = bool(passed)
     observations.append(
         CapabilityObservation(
             capability="bounded_response_deadline",

@@ -139,6 +139,12 @@ def main() -> None:
 
 
 def _add_prediction_arguments(parser) -> None:
+    from backend.domain.runtime import (
+        V11_DEFAULT_MAX_TURNS,
+        V11_DEFAULT_TIMEOUT_SECONDS,
+        V11_DEFAULT_TOOL_BUDGET,
+    )
+
     parser.add_argument("--runtime", type=Path, required=True)
     parser.add_argument("--runtime-manifest-hash")
     parser.add_argument("--partition", choices=("ob30", "ss15", "tt90"), required=True)
@@ -157,13 +163,19 @@ def _add_prediction_arguments(parser) -> None:
     parser.add_argument("--database", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--token-budget", type=int, required=True)
-    parser.add_argument("--max-turns", type=int, default=8)
-    parser.add_argument("--tool-budget", type=int, default=8)
-    parser.add_argument("--timeout-seconds", type=float, default=120)
+    parser.add_argument("--max-turns", type=int, default=V11_DEFAULT_MAX_TURNS)
+    parser.add_argument("--tool-budget", type=int, default=V11_DEFAULT_TOOL_BUDGET)
+    parser.add_argument(
+        "--timeout-seconds", type=float, default=V11_DEFAULT_TIMEOUT_SECONDS
+    )
 
 
 def _build_evaluation_budget(configuration, arguments):
     from backend.benchmarks.rcaeval.models import EvaluationBudget
+    from backend.domain.runtime import (
+        V11_DEFAULT_MAX_INVESTIGATORS,
+        V11_DEFAULT_MAX_ROUNDS,
+    )
 
     return EvaluationBudget(
         configuration=configuration,
@@ -171,8 +183,8 @@ def _build_evaluation_budget(configuration, arguments):
         max_turns=arguments.max_turns,
         tool_budget=arguments.tool_budget,
         timeout_seconds=arguments.timeout_seconds,
-        max_investigators=3 if configuration.is_multi else 1,
-        max_rounds=2 if configuration.is_multi else 1,
+        max_investigators=V11_DEFAULT_MAX_INVESTIGATORS if configuration.is_multi else 1,
+        max_rounds=V11_DEFAULT_MAX_ROUNDS if configuration.is_multi else 1,
     )
 
 
@@ -210,15 +222,23 @@ def _preflight_launch_construction(arguments) -> None:
     """
     from backend.benchmarks.rcaeval.models import RcaEvalConfiguration
     from backend.benchmarks.rcaeval.runner import SingleInvestigatorAgent
+    from backend.diagnosis.diagnostic_skills import skill_catalog_identity
     from backend.diagnosis.v11_runtime import V11Runtime
     from backend.domain.multi_agent import InvestigationStrategy, ModelProvider
     from backend.domain.runtime import (
+        V11_DEFAULT_MAX_TOOL_CALLS_PER_SPECIALIST,
+        V11_MULTI_TOPOLOGY_MODE,
+        V11_SINGLE_TOPOLOGY_MODE,
         AuthorityMode,
         ExecutionContractVersion,
         RuntimeRun,
         RuntimeRunKind,
         RuntimeRunReason,
+        V11ExecutionContractInput,
+        build_v11_execution_contract,
     )
+    from backend.providers.registry import ProviderRegistry
+    from backend.tools.provider_tools import build_provider_tool_registry
 
     configuration = RcaEvalConfiguration(arguments.configuration)
     budget = _build_evaluation_budget(configuration, arguments)
@@ -227,18 +247,50 @@ def _preflight_launch_construction(arguments) -> None:
         "model": None,
         "model_provider": ModelProvider.OPENAI_COMPATIBLE,
         "model_name": "launch-preflight",
-        "tool_registry": None,
+        # 使用真实九工具 manifest，但不访问任何 Provider。
+        "tool_registry": build_provider_tool_registry(ProviderRegistry([]), None),
         "turn": None,
         "max_turns": budget.max_turns,
         "timeout_seconds": budget.timeout_seconds,
         "max_total_tool_calls": budget.tool_budget,
-        "max_tool_calls_per_specialist": min(3, budget.tool_budget),
+        "max_tool_calls_per_specialist": min(
+            V11_DEFAULT_MAX_TOOL_CALLS_PER_SPECIALIST, budget.tool_budget
+        ),
         "token_budget": budget.token_budget,
     }
     if configuration.is_multi:
         runtime_kwargs["max_investigators"] = budget.max_investigators
         runtime_kwargs["max_rounds"] = budget.max_rounds
-    runtime_type(**runtime_kwargs)
+    runtime = runtime_type(**runtime_kwargs)
+    manifest = runtime.tool_registry.agent_manifest()
+    preflight_contract = build_v11_execution_contract(
+        V11ExecutionContractInput(
+            model_provider=ModelProvider.OPENAI_COMPATIBLE.value,
+            model_name="launch-preflight",
+            prompt_version="launch-preflight",
+            api_mode="chat_completions",
+            endpoint_id=None,
+            capability_artifact_hash=None,
+            structured_output_transport="native_json_schema",
+            tool_manifest=manifest,
+            skill_catalog=skill_catalog_identity(runtime.tool_registry.list_agent_specs()),
+            max_turns=budget.max_turns,
+            max_investigators=budget.max_investigators,
+            max_rounds=budget.max_rounds,
+            token_budget=budget.token_budget,
+            max_tool_calls_per_specialist=min(
+                V11_DEFAULT_MAX_TOOL_CALLS_PER_SPECIALIST, budget.tool_budget
+            ),
+            tool_timeout_seconds=runtime.tool_timeout_seconds,
+            tool_budget=budget.tool_budget,
+            timeout_seconds=budget.timeout_seconds,
+            topology_mode=(
+                V11_MULTI_TOPOLOGY_MODE
+                if configuration.is_multi
+                else V11_SINGLE_TOPOLOGY_MODE
+            ),
+        )
+    )
     RuntimeRun.create_new(
         id="launch-preflight",
         investigation_id="launch-preflight",
@@ -257,14 +309,7 @@ def _preflight_launch_construction(arguments) -> None:
         timeout_seconds=budget.timeout_seconds,
         execution_contract_version=ExecutionContractVersion.V11,
         authority_mode=AuthorityMode.AGENT,
-        execution_contract={
-            "model_provider": ModelProvider.OPENAI_COMPATIBLE.value,
-            "model_name": "launch-preflight",
-            "prompt_version": "launch-preflight",
-            "tool_budget": budget.tool_budget,
-            "token_budget": budget.token_budget,
-            "timeout_seconds": budget.timeout_seconds,
-        },
+        execution_contract=preflight_contract,
     )
 
 
