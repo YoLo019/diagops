@@ -1,11 +1,11 @@
 # 28. Agent 岗位简历亮点素材：DiagOps 后端项目
 
-这份文档把 DiagOps 当前 V11 实现整理成 Agent 开发岗位可用的简历素材。它只写后端、Agent、Runtime、Tool、Evidence、安全和评测，不含前端内容。
+这份文档把 DiagOps 当前 V11 实现整理成 Agent 开发岗位可用的简历素材。它只写后端、Agent、Runtime、Tool、Evidence、安全和运行可靠性，不含前端内容。
 
 ## 使用前必读：不要把建议写成事实
 
 - 只有你亲自负责或能在面试中讲清源码、设计和取舍的内容，才使用“负责/设计/实现”；参与过但并非主责的内容改成“参与/协助”。
-- `[X]`、`[X ms]`、`[X%]` 一律等拿到真实埋点、压测或评测结果后填写，不能编造。
+- `[X]`、`[X ms]`、`[X%]` 一律等拿到真实埋点或压测结果后填写，不能编造。
 - 当前正式 SS15/TT90 效果评测未完成，不能写“V11 已发布”“准确率提升 X%”。
 - 当前没有 MCP、向量 RAG、动态模型路由、自动修复或生产写工具；不要把“前沿方案”写成项目现状。
 - V11 工具 manifest 冻结的是有序工具名及其 hash；同名工具的 schema/handler hash 是后续增强方向，不能夸大为已实现。
@@ -82,16 +82,16 @@ DiagOps 是一个只读的 SRE 事故诊断后端：以持久化 Runtime 驱动 
 | 43 | 将取消、超时、partial、inconclusive、failed 明确建模，证据不足时安全拒绝发布根因而不是猜答案。 | `inconclusive` 是合法结果 |
 | 44 | 基于 durable RuntimeEvent sequence 实现 SSE catch-up；内存通知只唤醒订阅者，数据库才是事件真相源。 | 断线使用 after sequence 补齐 |
 
-### E. 模型能力、安全、可观测性与评测
+### E. 模型调用可靠性、安全与可观测性
 
 | # | 可写成的亮点 | 面试展开点 |
 | ---: | --- | --- |
-| 45 | 为 OpenAI-compatible endpoint 实现 capability certification，验证非流式响应、tool call、结构化输出、usage、deadline、并发和 V11 role schema。 | 协议可用不等于诊断质量可用 |
-| 46 | 将 provider/model/endpoint identity、工具名 manifest、Skill catalog、预算、topology 和 retry policy seal 到 execution contract，恢复时不允许无声换模型或换工具名集合。 | 官方 OpenAI 与 compatible admission 条件不同 |
-| 47 | 设计 native JSON Schema 与 strict output tool 两种结构化 transport，兼容不同 Chat Completions endpoint 的能力差异。 | 兼容端点需通过 capability artifact |
+| 45 | 持久化模型请求的 started/completed/failed 生命周期、attempt、request index 和 input/output usage，避免 SDK 回调与最终结果重复记账。 | `_ModelUsageAccumulator`、reservation audit |
+| 46 | 为 Multi-Agent Run 增加全局 turn 上限与 Investigator actor-level turn ceiling，避免并行调查提前耗尽 Critic 所需预算。 | 默认 Run 级 8 turn，Multi Investigator 更严格 |
+| 47 | 对结构化输出、Critic Candidate/Evidence 引用实施有界 correction/retry，失败后保留审计而不是由服务端“猜测并修好”诊断结果。 | 精确白名单 correction、fail-closed |
 | 48 | 对模型、Provider、Tool 和持久化失败使用安全 failure category，而不是把原始异常、URL 或凭证暴露到 API/日志。 | timeout、transport、rate-limit、invalid-output 等 |
 | 49 | 实现敏感字段 redaction、endpoint canonicalization、最小上下文投影和只读工具边界，抵抗 prompt injection、数据泄漏与 excessive agency。 | prompt 不是安全边界 |
-| 50 | 建立 RCAEval 单/多 Agent、intended/equal-token 对照、标签隔离、Evidence audit、paired bootstrap/McNemar 的受控评测框架。 | 正式 SS15/TT90 尚未完成，不能写效果提升 |
+| 50 | 记录 Candidate 从模型草稿、服务端准入、持久化到最终发布的生命周期摘要与 drop reason，保留可审计链路但不保存私有推理。 | `candidate-lifecycle-v1` |
 
 ## 推荐写进简历的亮点
 
@@ -103,18 +103,17 @@ DiagOps 是一个只读的 SRE 事故诊断后端：以持久化 Runtime 驱动 
 2. **Agent Tool / Evidence 闭环**：构建九个只读工具的 ToolRegistry–ProviderRegistry–Evidence ledger 链路；工具调用经 schema、scope、预算、幂等和 deadline 校验，Evidence 持久化后才允许模型引用。
 3. **Durable Agent Runtime**：实现 Run/Attempt/lease/checkpoint/Replay 运行模型，借助单 Writer、CAS、execution fence 和幂等复用处理崩溃恢复、取消、重试和 late result。
 4. **Context engineering**：按角色构建最小 prompt 投影，设计实体/signal-family 感知的 Evidence digest 和 Critic 引用闭包，在固定 token 预算下保留高区分度证据。
-5. **模型能力准入与结构化输出**：实现兼容模型 endpoint 的 tool call、strict schema、usage、并发、deadline 等 capability certification，并冻结 execution contract 防止恢复时模型/工具漂移。
-6. **安全与评测**：以只读 manifest、脱敏、同 Run Evidence 引用和标签隔离保证 Agent 安全；构建 Single/Multi/equal-token 对照和 Evidence audit，避免只看最终答案。
+5. **结构化结果与发布约束**：设计 Finding–Candidate–Assessment–Decision 引用链，要求结论只引用同 Run 已提交 Evidence，并通过 Critic 七项检查与最终 Validator 阻止无证据结果发布。
+6. **预算、并发与失败收敛**：将 Token、model turn、工具次数、deadline、轮次设计为 Run 级边界；通过 reservation、RunStepGate、no-new-evidence stop 和安全终态控制循环、并发超卖与局部失败。
 
 ### 按岗位选择的补充亮点
 
 | 岗位方向 | 优先追加 |
 | --- | --- |
-| Agent 平台 / AI Infra | 18、19、37–44、45–47 |
-| LLM 应用 / Agent 后端 | 01–17、21–34、49–50 |
+| Agent 平台 / AI Infra | 18、19、37–47 |
+| LLM 应用 / Agent 后端 | 01–17、21–34、45–50 |
 | 分布式系统 / 后端基础设施 | 27–34、37–44、48 |
-| 安全 / 可信 AI | 23–33、35–36、48–50 |
-| 数据 / 评测工程 | 13–14、31–33、45、50 |
+| 安全 / 可信 AI | 23–33、35–36、47–50 |
 
 ### 不建议写入简历的表述
 
@@ -132,18 +131,17 @@ DiagOps 是一个只读的 SRE 事故诊断后端：以持久化 Runtime 驱动 
 - **数据与效果（取得真实数据后择 1–3 项填写）：**
   - 覆盖 **[X]** 个事故案例、**[X]** 类日志/指标/Trace/依赖 Evidence，单次 Run 平均 **[X]** 次模型调用、**[X]** 次工具调用。
   - Agent Run p95 耗时 **[X ms/s]**，单 Run Token 消耗 **[X]**，有效 Evidence 产出率 **[X%]**，重复查询拒绝率 **[X%]**。
-  - 在冻结的 Single/Multi 对照中，完成率 **[X%]**、Evidence 引用合法率 **[X%]**；仅填写已完成、可复现的真实评测数据。
 - **我的职责：** 负责 Multi-Agent Runtime、受控 Tool Calling、Evidence 证据链和可靠性边界的后端实现：
   - **Multi-Agent 编排：** 设计 Lead → 最多 3 个隔离 Investigator → Critic 的持久化阶段流；以信息缺口驱动任务拆分，Critic 对候选执行七项因果/反证检查，最多允许一轮有归属的补证。
   - **Tool Calling 与 Evidence：** 构建 ToolRegistry–ProviderRegistry–Evidence ledger 分层；对九个只读工具执行 Pydantic schema、事故时间窗、实体 scope、工具预算、deadline、重复查询和幂等校验，确保 Evidence 落库后才被模型引用。
   - **Context 与结构化输出：** 构建角色最小上下文投影、实体/signal-family 感知 Evidence digest 和 compact schema；服务端拥有 ID、owner、预算等字段，降低上下文噪声、模型伪造状态和并行主键冲突。
   - **Durable Runtime：** 实现 Run/Attempt/lease/checkpoint/Replay 机制；通过 RuntimeWriter、phase CAS、reservation、execution fence 和 late-result 拦截，处理并发、超时、取消、重试和崩溃恢复。
-  - **模型准入与安全：** 实现 OpenAI-compatible endpoint 的 capability certification，验证 tool call、strict structured output、usage、并发与 deadline；结合敏感信息脱敏、只读权限、同 Run 引用校验和安全失败分类，避免 Agent 越权与数据泄漏。
-  - **评测与可靠性：** 构建标签隔离的 Single/Multi/equal-token 对照、Evidence audit 和 paired 统计框架；将正确性、引用完整性、Token、延迟、只读违规和 failure category 分开评估。
+  - **结果约束与执行安全：** 设计 Finding–Candidate–Assessment–Decision 引用链，要求模型仅引用同 Run 已提交 Evidence；结合 Critic 七项检查、最终校验、敏感信息脱敏和安全失败分类，阻止无证据结论与越权结果发布。
+  - **预算与并发控制：** 将 Token、model turn、全局/单 Investigator 工具次数、deadline 和轮次纳入 Run 级执行边界；通过 reservation、RunStepGate、no-new-evidence stop 和局部失败收敛，控制并行调查的资源消耗与终止语义。
 
 ## 面试时的 30 秒版本
 
-“我做的是一个只读的 SRE Multi-Agent 诊断后端。核心不是让多个模型自由聊天，而是由 durable Runtime 驱动 Lead 规划、隔离 Investigator 取证、Critic 做七项因果审查。模型只能调用九个冻结的只读工具，工具结果先经 schema、scope、预算、幂等和持久化处理，生成 Evidence ID 后才允许引用。系统还实现了 Run/Attempt/lease/checkpoint/replay，能处理超时、取消、重试和恢复；我把模型能力准入、上下文压缩、安全脱敏和 Single/Multi 对照评测也纳入了同一条工程链路。”
+“我做的是一个只读的 SRE Multi-Agent 诊断后端。核心不是让多个模型自由聊天，而是由 durable Runtime 驱动 Lead 规划、隔离 Investigator 取证、Critic 做七项因果审查。模型只能调用九个冻结的只读工具，工具结果先经 schema、scope、预算、幂等和持久化处理，生成 Evidence ID 后才允许引用。系统还实现了 Run/Attempt/lease/checkpoint/replay，能处理超时、取消、重试和恢复；同时用结构化引用链、预算 reservation 和并发 gate 控制结论发布与资源消耗。”
 
 ## 附录：你提供的量化交易简历参考样式
 
