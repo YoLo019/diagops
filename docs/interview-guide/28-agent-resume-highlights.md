@@ -2,14 +2,6 @@
 
 这份文档把 DiagOps 当前 V11 实现整理成 Agent 开发岗位可用的简历素材。它只写后端、Agent、Runtime、Tool、Evidence、安全和运行可靠性，不含前端内容。
 
-## 使用前必读：不要把建议写成事实
-
-- 只有你亲自负责或能在面试中讲清源码、设计和取舍的内容，才使用“负责/设计/实现”；参与过但并非主责的内容改成“参与/协助”。
-- `[X]`、`[X ms]`、`[X%]` 一律等拿到真实埋点或压测结果后填写，不能编造。
-- 当前正式 SS15/TT90 效果评测未完成，不能写“V11 已发布”“准确率提升 X%”。
-- 当前没有 MCP、向量 RAG、动态模型路由、自动修复或生产写工具；不要把“前沿方案”写成项目现状。
-- V11 工具 manifest 冻结的是有序工具名及其 hash；同名工具的 schema/handler hash 是后续增强方向，不能夸大为已实现。
-
 ## 项目一句话
 
 DiagOps 是一个只读的 SRE 事故诊断后端：以持久化 Runtime 驱动 Lead、Investigator、Critic 多 Agent 协作，在预算内使用九个受控只读工具收集 Evidence，最终输出带证据引用、可恢复、可审计的根因候选。
@@ -95,16 +87,15 @@ DiagOps 是一个只读的 SRE 事故诊断后端：以持久化 Runtime 驱动 
 
 ## 推荐写进简历的亮点
 
-### 最推荐的 6 条：投递 Agent 后端/AI Infra 岗位
+### 最推荐的 5 条：投递 Agent 开发岗位
 
-如果这些确实是你的主责内容，优先使用下面六条；它们能同时体现 Agent、后端工程、安全和可靠性。
+如果这些确实是你的主责内容，优先使用下面五条：前三条体现 Agent 设计，后两条体现工程化落地。
 
-1. **受控 Multi-Agent 编排**：设计 Lead–Investigator–Critic 诊断工作流，将信息缺口规划、隔离取证、因果反证与权威发布拆分为持久化阶段，避免自由 Agent 群聊的状态和成本失控。
-2. **Agent Tool / Evidence 闭环**：构建九个只读工具的 ToolRegistry–ProviderRegistry–Evidence ledger 链路；工具调用经 schema、scope、预算、幂等和 deadline 校验，Evidence 持久化后才允许模型引用。
-3. **Durable Agent Runtime**：实现 Run/Attempt/lease/checkpoint/Replay 运行模型，借助单 Writer、CAS、execution fence 和幂等复用处理崩溃恢复、取消、重试和 late result。
-4. **Context engineering**：按角色构建最小 prompt 投影，设计实体/signal-family 感知的 Evidence digest 和 Critic 引用闭包，在固定 token 预算下保留高区分度证据。
-5. **结构化结果与发布约束**：设计 Finding–Candidate–Assessment–Decision 引用链，要求结论只引用同 Run 已提交 Evidence，并通过 Critic 七项检查与最终 Validator 阻止无证据结果发布。
-6. **预算、并发与失败收敛**：将 Token、model turn、工具次数、deadline、轮次设计为 Run 级边界；通过 reservation、RunStepGate、no-new-evidence stop 和安全终态控制循环、并发超卖与局部失败。
+1. **Evidence-driven Multi-Agent Orchestration**：设计 Lead–Investigator–Critic 协作流程：Lead 拆解问题，Investigator 独立取证，Critic 审查反证；所有候选和最终结论都必须引用本次诊断已保存的 Evidence。
+2. **Context Engineering**：使用 context projection、evidence digest 和 compact schema 为不同角色裁剪上下文，减少无关信息与 Token 消耗，降低 Agent 过早相互影响的风险。
+3. **Tool Calling & Evidence Loop**：让 Agent 围绕信息缺口选择日志、指标、Trace、依赖等九个只读工具；通过 schema、scope、idempotency 和 deadline 校验，将结果持久化为 Evidence 后再进入推理。
+4. **Agent Trace & Test Harness**：记录每次诊断的任务、模型调用、工具调用、Evidence、预算和失败事件；通过无需真实模型密钥的 Harness 覆盖超时、取消、重试和恢复等场景。
+5. **Durable Agent Runtime**：基于 checkpoint、lease、idempotency 和并发控制保障长任务可恢复，处理超时、取消、重试、进程中断和 late result。
 
 ### 按岗位选择的补充亮点
 
@@ -127,33 +118,17 @@ DiagOps 是一个只读的 SRE 事故诊断后端：以持久化 Runtime 驱动 
 
 **DiagOps｜Agent 后端开发项目｜20XX.XX–至今**
 
-- **项目简介：** 面向应用服务事故诊断场景，构建只读的 Multi-Agent 根因分析后端；以 Lead 规划、隔离 Investigator 取证、Critic 因果审查为核心，通过受控工具、Evidence ledger 和 durable Runtime 输出可追溯诊断结果。
+- **项目简介：** 面向应用服务事故诊断场景，构建只读的 Multi-Agent 根因分析后端；通过角色协作、受控工具、证据链和可恢复运行机制输出可追溯的根因候选。
 - **数据与效果（取得真实数据后择 1–3 项填写）：**
-  - 覆盖 **[X]** 个事故案例、**[X]** 类日志/指标/Trace/依赖 Evidence，单次 Run 平均 **[X]** 次模型调用、**[X]** 次工具调用。
-  - Agent Run p95 耗时 **[X ms/s]**，单 Run Token 消耗 **[X]**，有效 Evidence 产出率 **[X%]**，重复查询拒绝率 **[X%]**。
-- **我的职责：** 负责 Multi-Agent Runtime、受控 Tool Calling、Evidence 证据链和可靠性边界的后端实现：
-  - **Multi-Agent 编排：** 设计 Lead → 最多 3 个隔离 Investigator → Critic 的持久化阶段流；以信息缺口驱动任务拆分，Critic 对候选执行七项因果/反证检查，最多允许一轮有归属的补证。
-  - **Tool Calling 与 Evidence：** 构建 ToolRegistry–ProviderRegistry–Evidence ledger 分层；对九个只读工具执行 Pydantic schema、事故时间窗、实体 scope、工具预算、deadline、重复查询和幂等校验，确保 Evidence 落库后才被模型引用。
-  - **Context 与结构化输出：** 构建角色最小上下文投影、实体/signal-family 感知 Evidence digest 和 compact schema；服务端拥有 ID、owner、预算等字段，降低上下文噪声、模型伪造状态和并行主键冲突。
-  - **Durable Runtime：** 实现 Run/Attempt/lease/checkpoint/Replay 机制；通过 RuntimeWriter、phase CAS、reservation、execution fence 和 late-result 拦截，处理并发、超时、取消、重试和崩溃恢复。
-  - **结果约束与执行安全：** 设计 Finding–Candidate–Assessment–Decision 引用链，要求模型仅引用同 Run 已提交 Evidence；结合 Critic 七项检查、最终校验、敏感信息脱敏和安全失败分类，阻止无证据结论与越权结果发布。
-  - **预算与并发控制：** 将 Token、model turn、全局/单 Investigator 工具次数、deadline 和轮次纳入 Run 级执行边界；通过 reservation、RunStepGate、no-new-evidence stop 和局部失败收敛，控制并行调查的资源消耗与终止语义。
+  - 覆盖 **[X]** 个事故案例、**[X]** 类日志/指标/Trace/依赖证据，单次诊断平均 **[X]** 次模型调用、**[X]** 次工具调用。
+  - Agent 诊断 p95 耗时 **[X ms/s]**，单次 Token 消耗 **[X]**，有效证据产出率 **[X%]**，重复查询拒绝率 **[X%]**。
+- **我的职责：** 负责多 Agent 协作、工具调用、证据链和运行可靠性的后端实现：
+  - **Evidence-driven Multi-Agent Orchestration：** 设计 Lead → 最多 3 个隔离 Investigator → Critic 的协作流程；Lead 拆解信息缺口，Investigator 独立取证，Critic 对候选做因果与反证审查，所有结论必须引用本次诊断已保存的 Evidence。
+  - **Context Engineering：** 使用 context projection、evidence digest 和 compact schema 为不同角色裁剪上下文，减少无关信息与 Token 消耗，降低 Agent 过早相互影响的风险。
+  - **Tool Calling & Evidence Loop：** 让 Agent 围绕信息缺口选择日志、指标、Trace、依赖等九个只读工具；通过 schema、scope、idempotency 和 deadline 校验，将结果保存为 Evidence 后再进入后续推理。
+  - **Agent Trace & Test Harness：** 记录任务、模型调用、工具调用、Evidence、预算和失败事件；构建无需真实模型密钥的 Harness，覆盖超时、取消、重试、服务重启和 late result 等场景。
+  - **Durable Agent Runtime：** 基于 checkpoint、lease、idempotency 和并发控制保障长任务可恢复，处理超时、取消、重试、进程中断和 late result。
 
 ## 面试时的 30 秒版本
 
-“我做的是一个只读的 SRE Multi-Agent 诊断后端。核心不是让多个模型自由聊天，而是由 durable Runtime 驱动 Lead 规划、隔离 Investigator 取证、Critic 做七项因果审查。模型只能调用九个冻结的只读工具，工具结果先经 schema、scope、预算、幂等和持久化处理，生成 Evidence ID 后才允许引用。系统还实现了 Run/Attempt/lease/checkpoint/replay，能处理超时、取消、重试和恢复；同时用结构化引用链、预算 reservation 和并发 gate 控制结论发布与资源消耗。”
-
-## 附录：你提供的量化交易简历参考样式
-
-**量化交易系统｜Java 后端开发实习生｜20XX.XX–20XX.XX**
-
-- **项目简介：** 面向贵金属量化交易场景，提供策略订单接入、自动报价、风控预占、撮合平盘、外部交易执行、成交回报、交易数据同步和日终对账能力，支撑策略系统与外部市场之间的完整交易闭环。
-- **数据与效果（取得真实数据后择 1–3 项填写）：**
-  - 覆盖[策略订单/成交回报/交易文件]日均 **[X]** 笔（峰值 **[X]** 笔/分钟），服务于 **[X]** 个策略、**[X]** 个交易品种或 **[X]** 家机构。
-  - 外部交易文件单文件最大 **[X] MB/GB**、单日 **[X]** 条明细；同步任务耗时 **[X] 分钟**，批量入库吞吐 **[X] 条/秒**。
-- **我的职责：** 负责贵金属自动报价，积存金日终对账，自动平盘的后端链路功能实现与一致性方案设计：
-  - **交易执行链路：** 负责策略订单从参数校验、风险检查、撮合决策、交易生成到外部执行和成交回报的链路整理；基于订单级锁、状态机和幂等校验，避免重复处理和状态错误推进。
-  - **自动报价与风控：** 设计自动报价责任链，拆分资格校验、行情读取、价格计算、机构额度/期限笔数预占、EAIP 发送和结果落库；异常时回退报价状态并释放已占用的风控资源。
-  - **交易数据基础设施：** 实现 GZIP 交易文件流式解析和 FLG 配置化字段映射，采用 20000 条聚合、1000 条分批、CompletableFuture 并发入库及 CountDownLatch 超时控制，保障日终交易数据完整入库。
-  - **缓存与并发控制：** 构建订单、交易和请求 ID 的内存—Redis—数据库三级缓存，使用 ConcurrentHashMap、队列串行化和版本号控制异步同步，并支持服务重启后的 Redis 数据恢复。
-  - **分布式一致性：** 针对风控数据库事务与外部状态推送时序不一致问题，设计 Transactional Outbox 方案，覆盖事务内事件落库、提交后分发、原子抢占、失败重试、消费幂等、消息乱序保护和卡死任务恢复。
+“我做的是一个只读的 SRE Multi-Agent 诊断后端。核心不是让多个模型自由聊天，而是由 Lead 拆解问题、隔离 Investigator 查证据、Critic 做因果和反证审查。模型只能调用九个只读工具，查询结果保存为可追溯证据后才能用于结论。我还记录每次诊断的模型、工具、证据和失败轨迹，并用无需真实模型密钥的验收 Harness 覆盖超时、取消、重试和恢复场景。”
