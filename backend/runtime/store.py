@@ -87,9 +87,16 @@ def ensure_v11_tool_budget_available(
     incoming: ToolCallRecord,
 ) -> None:
     """在 RUNNING durable commit 内原子保留一次 V11 tool attempt。"""
-    if not run.is_v11 or incoming.status != ToolCallStatus.RUNNING:
+    if not run.is_v11:
         return
-    if any(call.id == incoming.id for call in existing_calls):
+    existing = next((call for call in existing_calls if call.id == incoming.id), None)
+    if existing is not None and existing.budget_charged != incoming.budget_charged:
+        raise RuntimeIntegrityError("tool budget admission is immutable")
+    if incoming.status != ToolCallStatus.RUNNING:
+        return
+    if incoming.budget_charged is False:
+        raise RuntimeIntegrityError("running tool must reserve budget")
+    if existing is not None:
         return
     if run.tool_budget is None:
         raise RuntimeIntegrityError("V11 run lacks frozen tool budget")
@@ -97,13 +104,7 @@ def ensure_v11_tool_budget_available(
         call.logical_call_id or call.id
         for call in existing_calls
         if call.runtime_run_id == run.id
-        and call.status
-        in {
-            ToolCallStatus.RUNNING,
-            ToolCallStatus.SUCCESS,
-            ToolCallStatus.FAILED,
-            ToolCallStatus.INTERRUPTED,
-        }
+        and call.consumes_budget
     }
     if incoming.logical_call_id is not None and incoming.logical_call_id in consumed:
         # transport retry 复用同一逻辑动作的 durable reservation，不重复扣预算。
@@ -864,7 +865,10 @@ class InMemoryRuntimeStore:
                 for name in repository_attributes
             }
             try:
-                commit.business_mutation.apply_memory(self.investigation_repository)
+                current = self.investigation_repository.get(run.investigation_id)
+                commit.business_mutation.merge_tool_result(current).apply_memory(
+                    self.investigation_repository
+                )
                 event_type = {
                     ToolCallStatus.RUNNING: RuntimeEventType.TOOL_STARTED,
                     ToolCallStatus.SUCCESS: RuntimeEventType.TOOL_COMPLETED,

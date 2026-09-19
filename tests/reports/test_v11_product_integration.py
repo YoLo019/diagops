@@ -171,6 +171,31 @@ def test_v11_report_projects_candidate_led_diagnoses_without_hypotheses():
     assert "private chain of thought" not in report.model_dump_json()
 
 
+def test_tentative_diagnosis_remains_visible_with_redacted_uncertainty():
+    from backend.domain.agent_findings import FinalDiagnosisDecision
+
+    review = _review(_candidate())
+    review.final_decision = FinalDiagnosisDecision(
+        actor="critic", **review.lead_decision.model_dump(
+            include={"action", "candidate_ids", "evidence_ids", "summary", "stop_reason"}
+        ), uncertainty="Missing capacity evidence; token=private-secret",
+    )
+    review.diagnostic_status = DiagnosticStatus.PARTIAL
+    review.run_status = MultiAgentRunStatus.PARTIAL
+    run = _run_summary(DiagnosticStatus.PARTIAL).model_copy(
+        update={"status": MultiAgentRunStatus.PARTIAL},
+    )
+    report = ReportGenerator().generate(
+        "inv-v11-product", _event(), [_evidence()], [],
+        coordination_review=review, multi_agent_run=run,
+    )
+    assert report.diagnoses[0].id == review.candidates[0].id
+    assert report.diagnostic_status == DiagnosticStatus.PARTIAL
+    assert "最可能原因（暂定" in report.markdown
+    assert "Missing capacity evidence" in report.markdown
+    assert "private-secret" not in report.model_dump_json()
+
+
 def test_v11_report_projection_rejects_tampered_lead_candidate_reference():
     candidate = _candidate()
     review = _review(candidate)
@@ -264,6 +289,21 @@ def test_v11_action_planner_binds_read_only_recommendations_to_candidates():
     assert all(action.risk_level.value == "read_only" for action in actions)
     assert all(not suggestion.related_cause_types for suggestion in verifications)
     assert all(suggestion.related_candidate_ids == [candidate.id] for suggestion in verifications)
+
+
+def test_v11_generated_recommendations_are_safe_before_persistence():
+    from backend.safety.redaction import assert_safe_value
+
+    candidate = _candidate().model_copy(update={
+        "failure_mechanism": "Slow requests on the error path: internal-value",
+    })
+    actions, verifications = ActionPlanner().plan_v11(
+        _event(), [_evidence()], _review(candidate), _run_summary(DiagnosticStatus.COMPLETE),
+    )
+    for item in [*actions, *verifications]:
+        assert_safe_value(item.model_dump(mode="json"))
+    assert "internal-value" not in actions[0].description
+    assert actions[0].supporting_evidence_ids == candidate.supporting_evidence_ids
 
 
 def test_v11_inconclusive_report_does_not_activate_diagnosis_or_actions():

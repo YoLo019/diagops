@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Iterable
 from datetime import datetime
 from enum import StrEnum
@@ -102,6 +103,21 @@ CanonicalTraceId = Annotated[str, Field(pattern=r"^([0-9a-f]{16}|[0-9a-f]{32})$"
 CanonicalSpanId = Annotated[str, Field(pattern=r"^[0-9a-f]{16}$")]
 
 
+class TraceChildTiming(BaseModel):
+    """同服务直接子 span 的区间并集；未覆盖部分包含未埋点等待，不是 CPU 自耗时。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    observed_child_count: int = Field(ge=1)
+    covered_ms: float = Field(ge=0, allow_inf_nan=False)
+    uncovered_ms: float = Field(ge=0, allow_inf_nan=False)
+    longest_child_span_id: CanonicalSpanId
+    longest_child_operation: str = Field(max_length=128)
+    longest_child_duration_ms: float = Field(ge=0, allow_inf_nan=False)
+    longest_child_peer_service: str | None = Field(default=None, max_length=128)
+    longest_child_peer_duration_ms: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+
+
 class TraceSpanPayload(BaseModel):
     """进入 EvidenceItem.payload 前的唯一 span 投影；原始后端 JSON 不直接落库。"""
 
@@ -116,6 +132,16 @@ class TraceSpanPayload(BaseModel):
     duration_ms: float = Field(ge=0, le=3_600_000, allow_inf_nan=False)
     status: SpanStatus = SpanStatus.UNSET
     attributes: dict[AlertLabelKey, AlertLabelValue] = Field(default_factory=dict, max_length=20)
+    child_timing: TraceChildTiming | None = None
+
+    @model_validator(mode="after")
+    def normalize_grpc_method(self):
+        # gRPC 的全限定方法名不是文件路径；去掉协议允许的前导斜杠后再统一脱敏。
+        if self.attributes.get("rpc.system") == "grpc" and re.fullmatch(
+            r"/(?:[A-Za-z_]\w*\.)+[A-Za-z_]\w*/[A-Za-z_]\w*", self.operation,
+        ):
+            self.operation = self.operation[1:]
+        return self
 
 
 class RuntimeStatePayload(BaseModel):
@@ -161,7 +187,7 @@ class VerifiedIncidentPayload(BaseModel):
     service: str = Field(min_length=1, max_length=128)
     environment: str = Field(min_length=1, max_length=128)
     affected_entity: str | None = Field(default=None, max_length=128)
-    failure_mechanism: str | None = Field(default=None, max_length=256)
+    failure_mechanism: str | None = Field(default=None, max_length=512)
 
 
 class EvidenceProvenance(BaseModel):

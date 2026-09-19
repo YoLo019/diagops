@@ -14,6 +14,7 @@ from backend.domain.multi_agent import (
     MultiAgentRunSummary,
 )
 from backend.domain.v11_contracts import validate_v11_final_status
+from backend.safety.redaction import redact_model
 
 
 class ActionPlanner:
@@ -187,7 +188,10 @@ class ActionPlanner:
                     runtime_run_id=review.runtime_run_id,
                 )
             )
-        return actions, verifications
+        # 动态文字拼接后再次脱敏，避免安全片段组合成新的敏感赋值形态。
+        return [redact_model(item) for item in actions], [
+            redact_model(item) for item in verifications
+        ]
 
     def _manual_follow_up(
         self,

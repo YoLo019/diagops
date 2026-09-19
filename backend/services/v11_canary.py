@@ -172,7 +172,7 @@ class _CanaryObservation:
     tool_call_count: int = 0
     schema_requests: list[str] = field(default_factory=list)
     compact_critic_responses: int = 0
-    full_reconciliation_responses: int = 0
+    reconciliation_responses: int = 0
     critic_invalid_first: bool = False
     critic_correction_needs_evidence: bool = False
     fault_injector: Any = field(default_factory=NoFaultInjector)
@@ -247,14 +247,15 @@ class _CanaryCompatibleModel(OpenAICompatibleChatCompletionsModel):
             if is_lead:
                 observation.schema_requests.append("LeadPlanningCompactOutput")
             elif is_investigator:
-                observation.schema_requests.append("InvestigatorCandidateOutput")
+                observation.schema_requests.append(
+                    schema.get("title", "InvestigatorCandidateOutput")
+                )
             elif is_compact_critic:
                 observation.schema_requests.append("CriticCompactOutput")
             elif is_full_critic:
                 observation.schema_requests.append("CriticOutput")
             has_tool_result = any(
-                isinstance(message, dict) and message.get("role") == "tool"
-                for message in messages
+                isinstance(message, dict) and message.get("role") == "tool" for message in messages
             )
 
             if is_investigator and _round_number(messages) == 1 and not has_tool_result:
@@ -357,7 +358,7 @@ class _CanaryCompatibleModel(OpenAICompatibleChatCompletionsModel):
                             }
                         ]
                     }
-            elif is_compact_critic:
+            elif is_compact_critic and _round_number(messages) == 1:
                 self._critic_attempt += 1
                 observation.compact_critic_responses = self._critic_attempt
                 candidate = _candidate_ref(messages)
@@ -397,8 +398,8 @@ class _CanaryCompatibleModel(OpenAICompatibleChatCompletionsModel):
                         ],
                     }
                     observation.critic_correction_needs_evidence = True
-            elif is_full_critic:
-                observation.full_reconciliation_responses += 1
+            elif is_compact_critic or is_full_critic:
+                observation.reconciliation_responses += 1
                 candidate = _candidate_ref(messages)
                 output = {
                     "summary": "Reconciled bounded evidence.",
@@ -416,9 +417,31 @@ class _CanaryCompatibleModel(OpenAICompatibleChatCompletionsModel):
                     ],
                     "tasks": [],
                 }
+                if is_compact_critic:
+                    output.pop("summary")
+                    for assessment in output["assessments"]:
+                        for field_name in (
+                            "summary", "supporting_evidence_ids", "contradicting_evidence_ids"
+                        ):
+                            assessment.pop(field_name)
             else:
                 raise RuntimeError("canary received an unknown structured schema")
 
+            if is_compact_critic or is_full_critic:
+                needs_evidence = any(
+                    item["verdict"] == "needs_evidence" for item in output["assessments"]
+                )
+                output["final_decision"] = (
+                    None
+                    if needs_evidence
+                    else {
+                        "action": "inconclusive",
+                        "candidate_refs": [],
+                        "evidence_ids": [],
+                        "summary": "Evidence remains insufficient.",
+                        "stop_reason": "bounded-gap",
+                    }
+                )
             payload = {
                 "id": "canary-response",
                 "object": "chat.completion",
@@ -475,9 +498,7 @@ def _build_canary_contract(registry, settings: AppSettings) -> dict[str, Any]:
             token_budget=agent_settings.token_budget,
             max_tool_calls_per_specialist=agent_settings.max_tool_calls_per_specialist,
             tool_timeout_seconds=agent_settings.tool_timeout_seconds,
-            tool_budget=getattr(
-                agent_settings, "max_total_tool_calls", V11_DEFAULT_TOOL_BUDGET
-            ),
+            tool_budget=getattr(agent_settings, "max_total_tool_calls", V11_DEFAULT_TOOL_BUDGET),
             timeout_seconds=min(
                 float(agent_settings.timeout_seconds), V11_RUN_DEADLINE_MAX_SECONDS
             ),
@@ -492,9 +513,12 @@ async def run_v11_local_workflow_canary(
     fault_injector=None,
 ) -> bool:
     """运行真实 V11 phase/Store 边界并返回 label-blind capability observation。"""
-    # 与产品容器使用同一配置解析入口；测试可显式注入隔离 settings，避免
-    # canary 另持一套预算来源。
     effective_settings = settings if settings is not None else load_settings()
+    if settings is None:
+        # 离线 canary 验证完整链路，使用足够的合成 token 额度；真实评测预算另测。
+        effective_settings = effective_settings.model_copy(
+            update={"agents": effective_settings.agents.model_copy(update={"token_budget": 100000})}
+        )
     repository: SQLiteInvestigationRepository | None = None
     engine = None
     temporary_root = TemporaryDirectory(prefix="diagops-v11-canary-")
@@ -631,13 +655,12 @@ async def run_v11_local_workflow_canary(
             "LeadPlanningCompactOutput" not in observation.schema_requests
             or "InvestigatorCandidateOutput" not in observation.schema_requests
             or observation.compact_critic_responses < 2
-            or observation.full_reconciliation_responses < 1
+            or observation.reconciliation_responses < 1
+            or "CriticOutput" in observation.schema_requests
             or not observation.critic_invalid_first
             or not observation.critic_correction_needs_evidence
-            or any(
-                name in observation.schema_requests
-                for name in ("LeadPlanningOutput", "InvestigatorOutput")
-            )
+            or "InvestigatorOutput" not in observation.schema_requests
+            or "LeadPlanningOutput" in observation.schema_requests
         ):
             return False
         # reservation 只从 SQLite 已落盘的 MODEL_STARTED 事件读取，不能由
@@ -665,14 +688,10 @@ async def run_v11_local_workflow_canary(
         calls = repository.list_tool_calls(record.id)
         owned_calls = [item for item in calls if item.runtime_run_id == run.id]
         terminal_calls = [item for item in owned_calls if item.status.value != "pending"]
-        logical_calls = {
-            item.logical_call_id or item.id
-            for item in terminal_calls
-        }
+        logical_calls = {item.logical_call_id or item.id for item in terminal_calls}
         observation.tool_call_count = len(logical_calls)
         if observation.tool_call_count != 1 or not any(
-            item.status.value == "success"
-            and bool(item.output_evidence_ids)
+            item.status.value == "success" and bool(item.output_evidence_ids)
             for item in terminal_calls
         ):
             return False
@@ -704,19 +723,14 @@ async def run_v11_local_workflow_canary(
         ):
             return False
         round_two_tasks = [
-            item
-            for item in repository.list_tasks(record.id)
-            if item.analysis_round == 2
+            item for item in repository.list_tasks(record.id) if item.analysis_round == 2
         ]
         if (
             len(round_two_tasks) != 1
             or round_two_tasks[0].runtime_run_id != run.id
             or round_two_tasks[0].critic_assessment_id is None
             or not any(item.review_round == 2 for item in review.critic_assessments)
-            or not any(
-                item.verdict.value == "inconclusive"
-                for item in review.critic_assessments
-            )
+            or not any(item.verdict.value == "inconclusive" for item in review.critic_assessments)
         ):
             return False
         executions = repository.list_executions(record.id)
@@ -727,9 +741,13 @@ async def run_v11_local_workflow_canary(
             and getattr(item.step_kind, "value", None) == "critic_review"
             and item.analysis_round == 1
         ]
-        if len(critic_round_one) < 2 or any(
-            item.status.value != "completed" for item in critic_round_one
-        ):
+        critic_round_one.sort(key=lambda item: item.attempt)
+        if len(critic_round_one) != 2 or [item.status.value for item in critic_round_one] != [
+            "failed",
+            "completed",
+        ]:
+            return False
+        if critic_round_one[0].failure_category.value != "invalid_output":
             return False
         if not any(
             item.agent_name == "CriticAgent"

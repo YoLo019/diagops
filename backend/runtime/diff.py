@@ -69,9 +69,7 @@ class FrozenEvidence(_FrozenModel):
     timestamp: datetime
     confidence: float = Field(ge=0, le=1, allow_inf_nan=False)
     status: EvidenceStatus
-    root_cause_claims: list[FrozenRootCauseClaim] = Field(
-        default_factory=list, max_length=32
-    )
+    root_cause_claims: list[FrozenRootCauseClaim] = Field(default_factory=list, max_length=32)
 
     def to_domain(self) -> EvidenceItem:
         return EvidenceItem(
@@ -132,7 +130,7 @@ class FrozenFinding(_FrozenModel):
     runtime_run_id: SafeId | None = None
     critic_assessment_id: SafeId | None = None
     affected_entity: str | None = Field(default=None, max_length=128)
-    failure_mechanism: str | None = Field(default=None, max_length=256)
+    failure_mechanism: str | None = Field(default=None, max_length=512)
     contradicting_evidence_ids: list[SafeId] = Field(default_factory=list, max_length=512)
 
     def to_domain(self) -> AgentFinding:
@@ -172,7 +170,7 @@ class FrozenCandidate(_FrozenModel):
     contradicting_evidence_ids: list[SafeId] = Field(default_factory=list, max_length=512)
     affected_entity: str | None = Field(default=None, max_length=128)
     failure_class: str | None = Field(default=None, max_length=128)
-    failure_mechanism: str | None = Field(default=None, max_length=256)
+    failure_mechanism: str | None = Field(default=None, max_length=512)
     onset_window_start: datetime | None = None
     onset_window_end: datetime | None = None
 
@@ -228,6 +226,8 @@ class FrozenReview(_FrozenModel):
     )
     critic_assessments: list[dict[str, Any]] = Field(default_factory=list, max_length=3)
     lead_decision: dict[str, Any] | None = None
+    final_decision: dict[str, Any] | None = None
+    diagnosis_contract_revision: int = 1
     diagnostic_status: str | None = Field(default=None, max_length=32)
     authority_mode: str | None = Field(default=None, max_length=32)
     runtime_run_id: SafeId | None = None
@@ -248,9 +248,10 @@ class FrozenReview(_FrozenModel):
             primary_stabilization_category=self.primary_stabilization_category,
             secondary_stabilization_categories=self.secondary_stabilization_categories,
             critic_assessments=[
-                CriticAssessment.model_validate(item)
-                for item in self.critic_assessments
+                CriticAssessment.model_validate(item) for item in self.critic_assessments
             ],
+            final_decision=self.final_decision,
+            diagnosis_contract_revision=self.diagnosis_contract_revision,
             lead_decision=(
                 None
                 if self.lead_decision is None
@@ -267,9 +268,7 @@ class FrozenReport(_FrozenModel):
     investigation_id: SafeId
     hypotheses: list[FrozenHypothesis] = Field(default_factory=list, max_length=64)
     action_ids: list[SafeId] = Field(default_factory=list, max_length=512)
-    verification_suggestion_ids: list[SafeId] = Field(
-        default_factory=list, max_length=512
-    )
+    verification_suggestion_ids: list[SafeId] = Field(default_factory=list, max_length=512)
     diagnoses: list[FrozenCandidate] = Field(default_factory=list, max_length=256)
     alternatives: list[FrozenCandidate] = Field(default_factory=list, max_length=256)
     diagnostic_status: str | None = Field(default=None, max_length=32)
@@ -296,8 +295,7 @@ class FrozenReport(_FrozenModel):
             diagnostic_status=self.diagnostic_status,
             authority_mode=self.authority_mode,
             critic_assessments=[
-                CriticAssessment.model_validate(item)
-                for item in self.critic_assessments
+                CriticAssessment.model_validate(item) for item in self.critic_assessments
             ],
             critic_summary=self.critic_summary,
             evidence_gaps=self.evidence_gaps,
@@ -321,9 +319,7 @@ class FrozenBusinessProjection(_FrozenModel):
     review: FrozenReview | None = None
     report: FrozenReport | None = None
     action_ids: list[SafeId] = Field(default_factory=list, max_length=512)
-    verification_suggestion_ids: list[SafeId] = Field(
-        default_factory=list, max_length=512
-    )
+    verification_suggestion_ids: list[SafeId] = Field(default_factory=list, max_length=512)
     execution_contract_version: str | None = None
     projection_state: Literal["activated", "not_activated"] = "activated"
     runtime_run_id: SafeId | None = None
@@ -332,11 +328,11 @@ class FrozenBusinessProjection(_FrozenModel):
     diagnostic_status: str | None = Field(default=None, max_length=32)
     authority_mode: str | None = Field(default=None, max_length=32)
     lead_decision: dict[str, Any] | None = None
+    final_decision: dict[str, Any] | None = None
+    diagnosis_contract_revision: int = 1
     critic_assessments: list[dict[str, Any]] = Field(default_factory=list, max_length=3)
     usage: dict[str, int | float] = Field(default_factory=dict, max_length=8)
-    checkpoint_projections: dict[SafeId, Digest] = Field(
-        default_factory=dict, max_length=64
-    )
+    checkpoint_projections: dict[SafeId, Digest] = Field(default_factory=dict, max_length=64)
     integrity_sha256: Digest
 
     @field_validator("environment")
@@ -353,9 +349,7 @@ def _relationship_hash(value: str) -> str:
 
 
 def _validation_integrity(projection: dict[str, Any]) -> str:
-    payload = {
-        key: value for key, value in projection.items() if key != "integrity_sha256"
-    }
+    payload = {key: value for key, value in projection.items() if key != "integrity_sha256"}
     encoded = json.dumps(
         payload,
         ensure_ascii=False,
@@ -399,10 +393,7 @@ def validate_frozen_projection_source(
         return
     if projection.investigation_id != source_run.investigation_id:
         raise ValueError("frozen projection investigation mismatch")
-    if (
-        projection.execution_contract_version
-        != source_run.execution_contract_version.value
-    ):
+    if projection.execution_contract_version != source_run.execution_contract_version.value:
         raise ValueError("frozen projection contract version mismatch")
     if projection.runtime_run_id != source_run.id:
         raise ValueError("frozen projection runtime owner mismatch")
@@ -413,10 +404,7 @@ def validate_frozen_projection_source(
             raise ValueError("frozen projection active owner mismatch")
     elif projection.active_runtime_run_id is not None:
         raise ValueError("frozen projection inactive owner mismatch")
-    if any(
-        item.runtime_run_id not in {None, source_run.id}
-        for item in projection.findings
-    ):
+    if any(item.runtime_run_id not in {None, source_run.id} for item in projection.findings):
         raise ValueError("frozen projection finding owner mismatch")
     if projection.review is not None:
         if projection.review.runtime_run_id != source_run.id:
@@ -430,15 +418,11 @@ def validate_frozen_projection_source(
             raise ValueError("frozen projection report authority mismatch")
 
 
-def finalize_frozen_projection(
-    projection: dict[str, Any], checkpoints=()
-) -> dict[str, Any]:
+def finalize_frozen_projection(projection: dict[str, Any], checkpoints=()) -> dict[str, Any]:
     """把 checkpoint 投影纳入源 Run 的防篡改 Replay 清单。"""
     validated = parse_frozen_projection(projection)
     values = validated.model_dump(mode="json")
-    values["checkpoint_projections"] = {
-        item.id: item.projection_digest for item in checkpoints
-    }
+    values["checkpoint_projections"] = {item.id: item.projection_digest for item in checkpoints}
     return reseal_frozen_projection(values)
 
 
@@ -456,9 +440,7 @@ def freeze_business_projection(
     summary = record.multi_agent_run
     snapshot_is_v11 = runtime_run_id is not None
     execution_contract_version = "v11" if snapshot_is_v11 else None
-    projection_is_active = (
-        not snapshot_is_v11 or record.active_runtime_run_id == runtime_run_id
-    )
+    projection_is_active = not snapshot_is_v11 or record.active_runtime_run_id == runtime_run_id
     effective_authority = authority_mode or (
         review.authority_mode.value
         if review is not None
@@ -476,6 +458,12 @@ def freeze_business_projection(
         if review is None or review.lead_decision is None
         else review.lead_decision.model_dump(mode="json")
     )
+    final_decision = (
+        review.final_decision.model_dump(mode="json")
+        if review is not None and review.final_decision is not None
+        else None
+    )
+    diagnosis_contract_revision = review.diagnosis_contract_revision if review is not None else 1
     projection = {
         "schema_version": 1,
         "investigation_id": investigation_id,
@@ -483,9 +471,7 @@ def freeze_business_projection(
         "execution_contract_version": execution_contract_version,
         "projection_state": "activated" if projection_is_active else "not_activated",
         "runtime_run_id": runtime_run_id,
-        "active_runtime_run_id": (
-            record.active_runtime_run_id if projection_is_active else None
-        ),
+        "active_runtime_run_id": (record.active_runtime_run_id if projection_is_active else None),
         "source_investigation_id": record.source_investigation_id,
         "diagnostic_status": (
             review.diagnostic_status.value
@@ -496,6 +482,8 @@ def freeze_business_projection(
         ),
         "authority_mode": effective_authority,
         "lead_decision": lead_decision,
+        "final_decision": final_decision,
+        "diagnosis_contract_revision": diagnosis_contract_revision,
         "critic_assessments": critic_assessments,
         "usage": (
             {}
@@ -529,12 +517,8 @@ def freeze_business_projection(
             for item in record.hypotheses
         ],
         "task_ids": sorted(item.id for item in repository.list_tasks(investigation_id)),
-        "execution_ids": sorted(
-            item.id for item in repository.list_executions(investigation_id)
-        ),
-        "tool_call_ids": sorted(
-            item.id for item in repository.list_tool_calls(investigation_id)
-        ),
+        "execution_ids": sorted(item.id for item in repository.list_executions(investigation_id)),
+        "tool_call_ids": sorted(item.id for item in repository.list_tool_calls(investigation_id)),
         "findings": [
             {
                 "id": item.id,
@@ -587,9 +571,7 @@ def freeze_business_projection(
                 "root_causes": [
                     {
                         "occurred_at": item.root_cause_occurred_at,
-                        "component_sha256": _relationship_hash(
-                            item.root_cause_component
-                        ),
+                        "component_sha256": _relationship_hash(item.root_cause_component),
                         "reason_sha256": _relationship_hash(item.root_cause_reason),
                         "supporting_evidence_ids": item.supporting_evidence_ids,
                     }
@@ -602,18 +584,14 @@ def freeze_business_projection(
                 "selected_cause_type": review.selected_cause_type,
                 "model_provider": review.model_provider,
                 "model_name": review.model_name,
-                "primary_stabilization_category": (
-                    review.primary_stabilization_category
-                ),
-                "secondary_stabilization_categories": (
-                    review.secondary_stabilization_categories
-                ),
+                "primary_stabilization_category": (review.primary_stabilization_category),
+                "secondary_stabilization_categories": (review.secondary_stabilization_categories),
                 "critic_assessments": critic_assessments,
                 "lead_decision": lead_decision,
+                "final_decision": final_decision,
+                "diagnosis_contract_revision": diagnosis_contract_revision,
                 "diagnostic_status": (
-                    review.diagnostic_status.value
-                    if review.diagnostic_status is not None
-                    else None
+                    review.diagnostic_status.value if review.diagnostic_status is not None else None
                 ),
                 "authority_mode": review.authority_mode,
                 "runtime_run_id": review.runtime_run_id,
@@ -636,9 +614,7 @@ def freeze_business_projection(
                     for item in record.report.hypotheses
                 ],
                 "action_ids": record.report.action_ids,
-                "verification_suggestion_ids": (
-                    record.report.verification_suggestion_ids
-                ),
+                "verification_suggestion_ids": (record.report.verification_suggestion_ids),
                 "diagnoses": [
                     {
                         "id": item.id,
@@ -682,8 +658,7 @@ def freeze_business_projection(
                 ),
                 "authority_mode": record.report.authority_mode,
                 "critic_assessments": [
-                    item.model_dump(mode="json")
-                    for item in record.report.critic_assessments
+                    item.model_dump(mode="json") for item in record.report.critic_assessments
                 ],
                 "critic_summary": record.report.critic_summary,
                 "evidence_gaps": record.report.evidence_gaps,
@@ -694,9 +669,7 @@ def freeze_business_projection(
             }
         ),
         "action_ids": sorted(item.id for item in record.actions),
-        "verification_suggestion_ids": sorted(
-            item.id for item in record.verification_suggestions
-        ),
+        "verification_suggestion_ids": sorted(item.id for item in record.verification_suggestions),
         "checkpoint_projections": {},
         "integrity_sha256": "0" * 64,
     }
@@ -802,9 +775,7 @@ class RuntimeDiffService:
         ]
         business = None
         try:
-            business = parse_frozen_projection(
-                self.store.get_frozen_business_projection(run.id)
-            )
+            business = parse_frozen_projection(self.store.get_frozen_business_projection(run.id))
             validate_frozen_projection_source(business, run)
         except (TypeError, ValueError):
             # 终态 Run 缺失快照时只能报告不可用；回读当前 Investigation 会篡改历史。
@@ -841,11 +812,7 @@ class RuntimeDiffService:
             "agents": self._agents(semantic_events),
             "tools": self._tools(semantic_events),
             "evidence_references": sorted(
-                {
-                    item
-                    for event in semantic_events
-                    for item in event.evidence_ids
-                }
+                {item for event in semantic_events for item in event.evidence_ids}
                 | (
                     {item.id for item in business.evidence}
                     if run.is_v11 and business is not None
@@ -878,13 +845,9 @@ class RuntimeDiffService:
         if review is None:
             return None
         return {
-            "decision_status": (
-                review.decision_status.value if review.decision_status else None
-            ),
+            "decision_status": (review.decision_status.value if review.decision_status else None),
             "selected_cause_type": (
-                review.selected_cause_type.value
-                if review.selected_cause_type
-                else None
+                review.selected_cause_type.value if review.selected_cause_type else None
             ),
             "root_causes": [
                 {
@@ -916,18 +879,12 @@ class RuntimeDiffService:
                     else None
                 ),
                 "onset_window_end": (
-                    item.onset_window_end.isoformat()
-                    if item.onset_window_end is not None
-                    else None
+                    item.onset_window_end.isoformat() if item.onset_window_end is not None else None
                 ),
                 "supporting_finding_ids": sorted(item.supporting_finding_ids),
-                "contradicting_finding_ids": sorted(
-                    item.contradicting_finding_ids
-                ),
+                "contradicting_finding_ids": sorted(item.contradicting_finding_ids),
                 "supporting_evidence_ids": sorted(item.supporting_evidence_ids),
-                "contradicting_evidence_ids": sorted(
-                    item.contradicting_evidence_ids
-                ),
+                "contradicting_evidence_ids": sorted(item.contradicting_evidence_ids),
             }
             for item in projection.review.candidates
         ]
@@ -948,9 +905,12 @@ class RuntimeDiffService:
             "runtime_run_id": projection.runtime_run_id,
             "active_runtime_run_id": projection.active_runtime_run_id,
             "authoritative_candidate_ids": (
-                (projection.lead_decision or {}).get("candidate_ids", [])
+                (projection.final_decision or projection.lead_decision or {}).get(
+                    "candidate_ids", []
+                )
             ),
             "lead_decision": projection.lead_decision,
+            "final_decision": projection.final_decision,
             "critic_assessments": projection.critic_assessments,
         }
 

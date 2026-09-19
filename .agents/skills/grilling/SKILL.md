@@ -1,20 +1,23 @@
 ---
 name: grilling
-description: Resolve the decision tree for a high-risk DiagOps change. Use when diagops-release needs requirements, scope, risk, or acceptance decisions aligned with the user.
+description: Resolve user decisions blocking a DiagOps release's scope, risk, or acceptance criteria.
 ---
 
 # Grilling
 
-Build a decision tree and work it breadth-first. The frontier is every decision
-whose prerequisites are settled and can be answered now.
+Resolve the material decisions needed for the requested release or alignment
+session. The frontier contains unresolved decisions whose prerequisites are
+settled; exclude speculative choices and decisions already approved.
 
 For each round:
 
-1. Verify every discoverable fact from the repository, environment, or primary
-   source. Ask the user for decisions, not facts the agent can find.
-2. Ask the whole current frontier as numbered questions. Give a recommended
-   answer and concrete tradeoff for each.
-3. Wait for the user's answers, update the tree, and recompute the frontier.
+1. Check relevant repository facts before asking. Separate verified facts,
+   assumptions, and user choices; expand research only when it affects a decision.
+2. Ask related, answerable questions together, with a recommendation and concrete
+   tradeoff. Prioritize blocking choices; do not exhaust an entire hypothetical
+   decision tree or ask the user to rediscover repository facts.
+3. Incorporate answers and identify any remaining material blockers. Reuse
+   explicit decisions instead of asking for the same approval again.
 
 Add only applicable branches. For DiagOps releases, consider:
 
@@ -28,6 +31,8 @@ Add only applicable branches. For DiagOps releases, consider:
 - representative normal and failure cases with measurable release gates.
 
 When a term or decision needs durable domain context, use `domain-modeling`
-during the same round. The session finishes only when the frontier is empty,
-external blockers have owners, and the user confirms the shared understanding.
-Do not begin solution execution during grilling.
+only for that unresolved context. Finish with the agreed scope, acceptance
+criteria, remaining external blockers and their owners, and the user's
+confirmation of the shared understanding. Do not treat a recorded blocker as
+resolved. Alignment alone does not authorize implementation; return to the
+invoking workflow after its alignment gate is satisfied.

@@ -85,6 +85,8 @@ def test_environment_override_applies_canonicalization(monkeypatch, tmp_path):
 
 def test_default_settings_keep_openai_compatible_unconfigured(monkeypatch, tmp_path):
     monkeypatch.setenv("DIAGOPS_CONFIG", str(tmp_path / "missing.yaml"))
+    monkeypatch.delenv("DIAGOPS_AGENTS_OPENAI_COMPATIBLE_BASE_URL", raising=False)
+    monkeypatch.delenv("DIAGOPS_AGENTS_PROVIDER", raising=False)
 
     settings = load_settings()
 

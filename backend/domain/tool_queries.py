@@ -61,7 +61,11 @@ class QueryWindow(BaseModel):
 
 
 class LogQuery(QueryWindow):
-    keywords: list[LogKeyword] = Field(default_factory=list, max_length=8)
+    keywords: list[LogKeyword] = Field(
+        default_factory=list, max_length=8,
+        description="All keywords must match the same record (AND, case-insensitive). "
+        "Use one discriminating term or [] to inspect coverage; do not list alternatives.",
+    )
     levels: list[LogLevel] = Field(default_factory=list, max_length=5)
     instance: str | None = Field(default=None, max_length=160)
 
@@ -174,5 +178,5 @@ class MemoryQuery(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     affected_entity: str | None = Field(default=None, min_length=1, max_length=128)
-    failure_mechanism: str | None = Field(default=None, min_length=1, max_length=256)
+    failure_mechanism: str | None = Field(default=None, min_length=1, max_length=512)
     limit: int = Field(default=5, ge=1, le=10)

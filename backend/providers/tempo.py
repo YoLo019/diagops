@@ -133,7 +133,9 @@ class TempoTraceProvider:
                 status=ProviderStatus.FAILED,
                 error_message=safe_failure("provider_failure"),
             )
-        selected = select_trace_spans(spans, event, query)
+        from backend.providers.trace_timing import with_child_timing
+
+        selected = select_trace_spans(with_child_timing(spans), event, query)
         evidence = [self._to_evidence(span) for span in selected]
         status = ProviderStatus.PARTIAL if malformed else ProviderStatus.SUCCESS
         return ProviderResult(

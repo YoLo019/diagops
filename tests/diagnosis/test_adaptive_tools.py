@@ -86,7 +86,6 @@ async def test_scoped_telemetry_and_memory_tools_dispatch_without_window():
         ),
         start=1,
     ):
-        # 空证据成功会触发 no_new_evidence 停止该 agent；每个工具用独立身份。
         response = json.loads(
             await session.invoke(
                 f"investigator-{index}", tool_name, json.dumps({}), 1
@@ -346,15 +345,20 @@ async def test_session_allows_service_target_from_scoped_pod_evidence():
 
 
 @pytest.mark.anyio
-async def test_empty_result_stops_later_queries_for_specialist():
-    provider = QueryProvider("read_logs", EvidenceProvider.LOG, None)
-    session = _session([provider])
+@pytest.mark.parametrize("evidence_id", [None, "ev-known"])
+async def test_empty_or_known_result_does_not_stop_later_queries_for_specialist(evidence_id):
+    provider = QueryProvider("read_logs", EvidenceProvider.LOG, evidence_id)
+    seed = [_evidence("ev-known", EvidenceProvider.LOG, EvidenceKind.LOG_PATTERN)]
+    session = _session([provider], seed=seed, per_agent=4)
 
     first = json.loads(
         await session.invoke(
             AgentName.LOG, "read_logs", json.dumps(_query_payload()), 1
         )
     )
+    duplicate = json.loads(await session.invoke(
+        AgentName.LOG, "read_logs", json.dumps(_query_payload()), 1,
+    ))
     later = json.loads(
         await session.invoke(
             AgentName.LOG,
@@ -364,9 +368,17 @@ async def test_empty_result_stops_later_queries_for_specialist():
         )
     )
 
-    assert first["stop_reason"] == "no_new_evidence"
-    assert later["status"] == "skipped"
-    assert provider.calls == 1
+    assert first["stop_reason"] is None
+    assert "no new evidence" in first["warning"]
+    if evidence_id is None:
+        assert "coverage is unverified, not evidence of health" in first["warning"]
+        assert "keywords use AND" in first["warning"]
+    else:
+        assert "previously seen evidence" in first["warning"]
+    assert duplicate["status"] == "skipped"
+    assert duplicate["stop_reason"] is None
+    assert later["status"] == "success"
+    assert provider.calls == 2
 
 
 @pytest.mark.anyio
@@ -604,6 +616,7 @@ def test_projection_excludes_payload_and_secrets():
         "status",
         "timestamp",
         "summary",
+        "scope_entity_ids",
     }
     assert "secret-value" not in str(projected)
 
@@ -765,7 +778,12 @@ def _session(providers, *, seed=None, per_agent=3, total=8):
 
 
 def _manifest_session(providers):
-    registry = build_provider_tool_registry(ProviderRegistry(providers))
+    from types import SimpleNamespace
+
+    registry = build_provider_tool_registry(
+        ProviderRegistry(providers),
+        memory_lookup=SimpleNamespace(lookup=lambda _event, _query: []),
+    )
     return AdaptiveToolSession(
         event=_event(),
         seed_evidence=[],
@@ -963,3 +981,93 @@ async def test_retry_coordinator_backoff_cap_and_default_off(monkeypatch):
     with pytest.raises(ClassifiedRetryableError):
         await RetryCoordinator(max_retries=1).run(failing)
     assert sleeps == []
+
+
+
+def test_tool_pages_and_accumulated_history_preserve_omission_and_call_pairs():
+    from backend.diagnosis.adaptive_tools import _response, compact_tool_history
+
+    evidence = [{"id": f"ev-{i}", "summary": "signal " * 70} for i in range(100)]
+    response = _response(
+        status=ToolCallStatus.SUCCESS, evidence=evidence, warning="provider partial",
+        stop_reason=None, truncated=True,
+    )
+    page = json.loads(response)
+    assert len(response) <= 6000
+    assert len(evidence) == 100
+    assert page["truncated"] and page["returned_count"] + page["omitted_count"] == 100
+    assert page["total_count"] is None
+    history = []
+    for i in range(3):
+        history.extend([
+            {"type": "function_call", "name": "read_logs", "call_id": str(i), "arguments": "{}"},
+            {"type": "function_call_output", "call_id": str(i), "output": response},
+        ])
+    original = json.dumps(history)
+    projected = compact_tool_history(history)
+    results = [item for item in projected if item["type"] == "function_call_output"]
+    assert sum(len(item["output"]) for item in results) <= 6000
+    for before, after in zip(history, projected, strict=True):
+        assert before["call_id"] == after["call_id"]
+        if after["type"] == "function_call_output":
+            payload = json.loads(after["output"])
+            assert payload["warning"] == "provider partial"
+            assert payload["retrieval_hint"] and payload["truncated"]
+        else:
+            assert before == after
+    assert json.dumps(history) == original
+    small_history = [
+        {"type": "function_call_output", "call_id": "small", "output": json.dumps({
+            "status": "success", "evidence": evidence[:1], "returned_count": 1,
+            "truncated": False, "stop_reason": None,
+        })}
+    ]
+    assert compact_tool_history(small_history) is small_history
+
+
+def test_metric_page_compacts_details_before_dropping_mechanism_controls():
+    from backend.diagnosis.adaptive_tools import _bounded_tool_response
+
+    evidence = [{
+        "id": f"ev-{family}", "metric": f"service_{family}",
+        "scope_entity_ids": ["service"],
+        "baseline_mean": 1, "observation_mean": 2, "summary": "sample " * 150,
+        "time_profile": [{"start": "2026-01-01", "mean": 2}] * 8,
+        "related_metric_names": ["service_system_cpu"],
+        "related_observations": [{"metric": "service_system_cpu", "baseline_mean": 1,
+                                  "observation_mean": 12}],
+    } for family in ("cpu", "memory", "socket", "disk_io")]
+    payload = {"evidence": evidence, "returned_count": 4, "truncated": False}
+    original = json.dumps(payload)
+    first = _bounded_tool_response(payload, 2000)
+    result = json.loads(first)
+    assert len(first) <= 2000
+    assert [item["id"] for item in result["evidence"]] == [item["id"] for item in evidence]
+    for item in result["evidence"]:
+        assert item["related_observations"] == [["service_system_cpu", 1, 12, None]]
+        assert item["omitted_detail_fields"] == ["time_profile", "related_metric_names", "summary"]
+    # 累计历史会再次经过压缩；列式细项不能在第二次压缩时被当作无效对象清空。
+    second = json.loads(_bounded_tool_response(result, len(first) - 1))
+    assert second["evidence"][0]["related_observations"] == [["service_system_cpu", 1, 12, None]]
+    assert json.dumps(payload) == original
+
+
+@pytest.mark.anyio
+async def test_unavailable_tools_are_hidden_and_rejections_do_not_charge_budget():
+    provider = QueryProvider("read_logs", EvidenceProvider.LOG, "new-evidence")
+    session = _session([provider], per_agent=4)
+    assert [tool.name for tool in session.tools_for(AgentName.LOG, 1)] == ["read_logs"]
+    rejected = json.loads(await session.invoke(AgentName.LOG, "read_logs", "{}invalid", 1))
+    assert rejected["new_evidence_count"] == 0
+    assert session.tool_calls[-1].budget_charged is False
+    result = json.loads(await session.invoke(
+        AgentName.LOG, "read_logs", json.dumps(_query_payload()), 1,
+    ))
+    assert result["remaining_tool_calls"] == 2
+    assert result["new_evidence_count"] == 1
+    assert session.tool_calls[-1].budget_charged is True
+    duplicate = json.loads(await session.invoke(
+        AgentName.LOG, "read_logs", json.dumps(_query_payload()), 1,
+    ))
+    assert duplicate["new_evidence_count"] == 0
+    assert session.tool_calls[-1].budget_charged is False

@@ -27,7 +27,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from backend.config.settings import canonicalize_endpoint, endpoint_id
 from backend.diagnosis import v11_runtime as _v11_runtime
-from backend.diagnosis.openai_compatible_model import COMPATIBLE_ADAPTER_VERSION
+from backend.diagnosis.openai_compatible_model import (
+    COMPATIBLE_ADAPTER_VERSION,
+    compatible_extra_body,
+)
 from backend.diagnosis.v11_runtime import (
     V11SingleControlOutput,
     _strict_output_tool,
@@ -65,6 +68,10 @@ REQUIRED_CONTRACTS = (
 )
 STRUCTURED_OUTPUT_TRANSPORTS = ("native_json_schema", "strict_output_tool")
 _NATIVE_PROBE_RESULT = {
+    "action": "inconclusive",
+    "summary": "Synthetic schema probe",
+    "evidence_ids": [],
+    "stop_reason": "schema_probe",
     "candidates": [],
 }
 
@@ -163,18 +170,21 @@ def _role_probe_payload(output_type: type[BaseModel]) -> dict[str, object]:
         return payload
     if output_type.__name__ in {"CriticCompactOutput", "CriticOutput"}:
         payload = {"assessments": []}
-        # Newer V11 contracts make ranking fields explicit.  Read the fields
-        # from the shared type rather than maintaining a second versioned list.
-        fields = getattr(output_type, "model_fields", {})
-        if "ranked_candidate_refs" in fields:
-            payload["ranked_candidate_refs"] = []
-        if "ranking_basis" in fields:
-            payload["ranking_basis"] = None
+        payload["final_decision"] = _role_probe_payload(_v11_runtime.FinalDecisionDraft)
+        fields = output_type.model_fields
         if "tasks" in fields:
             payload["tasks"] = []
         if "summary" in fields:
             payload["summary"] = "Synthetic critic schema probe."
         return payload
+    if output_type.__name__ == "FinalDecisionDraft":
+        return {
+            "action": "inconclusive",
+            "candidate_refs": [],
+            "evidence_ids": [],
+            "summary": "Synthetic adjudication schema probe.",
+            "stop_reason": "schema_probe",
+        }
     if output_type.__name__ == "LeadAdjudicationOutput":
         return {
             "decision": {
@@ -288,9 +298,7 @@ class ModelCapabilityArtifact(BaseModel):
     provider: str = Field(min_length=1, max_length=64)
     model: str = Field(min_length=1, max_length=128)
     api_mode: Literal["chat_completions"] = CAPABILITY_API_MODE
-    structured_output_transport: Literal[
-        "native_json_schema", "strict_output_tool"
-    ]
+    structured_output_transport: Literal["native_json_schema", "strict_output_tool"]
     endpoint_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     adapter_version: str = Field(min_length=1, max_length=64)
     openai_sdk_version: str = Field(min_length=1, max_length=32)
@@ -312,27 +320,19 @@ def compute_artifact_hash(artifact: ModelCapabilityArtifact) -> str:
     """canonical JSON（sorted keys、紧凑分隔、无 NaN、省略 artifact_hash）。"""
     payload = artifact.model_dump(mode="json")
     payload.pop("artifact_hash", None)
-    canonical = json.dumps(
-        payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")
-    )
+    canonical = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _artifact_dir(directory: Path, artifact_identity: tuple[str, str]) -> Path:
     endpoint, model = artifact_identity
-    safe_model = "".join(
-        char if char.isalnum() or char in "-._" else "_" for char in model
-    )[:64]
+    safe_model = "".join(char if char.isalnum() or char in "-._" else "_" for char in model)[:64]
     return directory / f"{endpoint[:16]}-{safe_model}"
 
 
-def write_capability_artifact(
-    directory: Path, artifact: ModelCapabilityArtifact
-) -> Path:
+def write_capability_artifact(directory: Path, artifact: ModelCapabilityArtifact) -> Path:
     """计算并回填 artifact_hash 后原子写入；返回路径。"""
-    sealed = artifact.model_copy(
-        update={"artifact_hash": compute_artifact_hash(artifact)}
-    )
+    sealed = artifact.model_copy(update={"artifact_hash": compute_artifact_hash(artifact)})
     target_dir = _artifact_dir(directory, (sealed.endpoint_id, sealed.model))
     target_dir.mkdir(parents=True, exist_ok=True)
     path = target_dir / "result.json"
@@ -343,9 +343,7 @@ def write_capability_artifact(
 
 
 def read_capability_artifact(path: Path) -> ModelCapabilityArtifact:
-    artifact = ModelCapabilityArtifact.model_validate(
-        json.loads(path.read_text(encoding="utf-8"))
-    )
+    artifact = ModelCapabilityArtifact.model_validate(json.loads(path.read_text(encoding="utf-8")))
     if artifact.artifact_hash is None:
         raise ValueError("capability artifact is missing its hash")
     if compute_artifact_hash(artifact) != artifact.artifact_hash:
@@ -441,6 +439,7 @@ def validate_capability_for_prediction(
     endpoint_id_value: str,
     expected_parallelism: int,
     repository_root: Path,
+    require_clean_source: bool = True,
 ) -> None:
     """Admission gate for formal prediction; every identity is current-bound."""
     if artifact.result != "passed":
@@ -451,8 +450,8 @@ def validate_capability_for_prediction(
         raise ValueError("capability endpoint identity is stale")
     source_identity = resolve_source_identity(repository_root)
     if (
-        artifact.git_dirty
-        or source_identity.git_dirty
+        (require_clean_source and (artifact.git_dirty or source_identity.git_dirty))
+        or artifact.git_dirty != source_identity.git_dirty
         or artifact.code_revision != source_identity.revision
         or artifact.source_manifest_hash != source_identity.manifest_hash
     ):
@@ -484,9 +483,7 @@ def validate_capability_for_prediction(
         "native_json_schema": "native_json_schema_with_tools",
         "strict_output_tool": "strict_output_tool",
     }[artifact.structured_output_transport]
-    if not all(observations[name] for name in common) or not observations[
-        selected_observation
-    ]:
+    if not all(observations[name] for name in common) or not observations[selected_observation]:
         raise ValueError("capability observations are incomplete or failed")
 
 
@@ -496,12 +493,23 @@ async def _probe_capabilities(
     model: str,
     parallelism: int,
     deadline_seconds: float,
+    base_url: str = "",
 ) -> list[CapabilityObservation]:
     """只通过远端可观测行为探测能力；不记录 prompt 与响应正文。"""
     probe_results: dict[str, bool] = {}
+    probe_details: dict[str, str] = {}
+    timed_out: set[str] = set()
+
+    async def request(**kwargs):
+        # 截止时间约束每个远端请求，不包含角色探测等待并发槽位的时间。
+        if extra_body := compatible_extra_body(base_url):
+            kwargs["extra_body"] = extra_body
+        return await asyncio.wait_for(
+            client.chat.completions.create(**kwargs), timeout=deadline_seconds
+        )
 
     async def non_streaming() -> bool:
-        response = await client.chat.completions.create(
+        response = await request(
             model=model,
             messages=[{"role": "user", "content": "Reply with the word ok."}],
             max_tokens=8,
@@ -509,18 +517,14 @@ async def _probe_capabilities(
         return bool(response.choices and response.choices[0].message)
 
     async def native_json_schema_with_tools() -> bool:
-        response = await client.chat.completions.create(
+        response = await request(
             model=model,
             messages=[
                 {
                     "role": "user",
                     "content": (
                         "Do not call read_logs. Return exactly this JSON result: "
-                        "planning.decision with action=\"inconclusive\", "
-                        "summary=\"Capability probe completed.\", empty task_ids, "
-                        "candidate_ids, evidence_ids, selected_skills, and "
-                        "stop_reason=\"Capability probe only.\"; planning.tasks empty; "
-                        "investigator with summary=\"\" and empty findings and candidates."
+                        + json.dumps(_NATIVE_PROBE_RESULT, ensure_ascii=True, sort_keys=True)
                     ),
                 }
             ],
@@ -536,14 +540,14 @@ async def _probe_capabilities(
         return parsed.model_dump(mode="json") == _NATIVE_PROBE_RESULT
 
     async def strict_output_tool() -> bool:
-        first = await client.chat.completions.create(
+        first = await request(
             model=model,
             messages=[
                 {
                     "role": "user",
                     "content": (
                         "First call read_logs with payload_json containing "
-                        "{\"reason\": \"certify\"}. Do not submit the final result yet."
+                        '{"reason": "certify"}. Do not submit the final result yet.'
                     ),
                 }
             ],
@@ -568,7 +572,7 @@ async def _probe_capabilities(
                 "role": "user",
                 "content": (
                     "First call read_logs with payload_json containing "
-                    "{\"reason\": \"certify\"}. Do not submit the final result yet."
+                    '{"reason": "certify"}. Do not submit the final result yet.'
                 ),
             },
             {
@@ -588,11 +592,11 @@ async def _probe_capabilities(
                 "role": "user",
                 "content": (
                     "Now call submit_structured_output with payload_json containing "
-                    "the JSON object {\"ok\": true}."
+                    'the JSON object {"ok": true}.'
                 ),
             },
         ]
-        second = await client.chat.completions.create(
+        second = await request(
             model=model,
             messages=messages,
             tools=[_STRICT_EVIDENCE_TOOL, _STRICT_OUTPUT_TOOL],
@@ -605,8 +609,7 @@ async def _probe_capabilities(
         return any(
             call.function
             and call.function.name == "submit_structured_output"
-            and json.loads(json.loads(call.function.arguments)["payload_json"])
-            == {"ok": True}
+            and json.loads(json.loads(call.function.arguments)["payload_json"]) == {"ok": True}
             for call in final_calls
         )
 
@@ -624,8 +627,7 @@ async def _probe_capabilities(
         role_gate = asyncio.Semaphore(max(1, parallelism))
 
         async def probe_role(output_type: type[BaseModel]) -> bool:
-            # role probes share the configured endpoint parallelism ceiling;
-            # otherwise the eight schema checks could mask a lower provider cap.
+            # 所有角色共用端点并发上限；排队不占单次远端请求时限。
             async with role_gate:
                 return await _probe_role(output_type)
 
@@ -634,12 +636,12 @@ async def _probe_capabilities(
             # 先用同一 output type 验证 probe 自身，避免新增 required 字段后
             # 探测器仍发送一个看似成功但无法被正式 Runtime 解析的样本。
             try:
-                AgentOutputSchema(
-                    output_type, strict_json_schema=True
-                ).validate_json(json.dumps(payload, ensure_ascii=True))
+                AgentOutputSchema(output_type, strict_json_schema=True).validate_json(
+                    json.dumps(payload, ensure_ascii=True)
+                )
             except (TypeError, ValueError):
                 return False
-            request: dict[str, object] = {
+            request_args: dict[str, object] = {
                 "model": model,
                 "messages": [
                     {
@@ -653,11 +655,11 @@ async def _probe_capabilities(
                 "max_tokens": 768,
             }
             if transport == "native_json_schema":
-                request["response_format"] = _role_response_format(output_type)
+                request_args["response_format"] = _role_response_format(output_type)
             else:
-                request["tools"] = [_role_output_tool(output_type)]
-                request["tool_choice"] = "required"
-            response = await client.chat.completions.create(**request)
+                request_args["tools"] = [_role_output_tool(output_type)]
+                request_args["tool_choice"] = "required"
+            response = await request(**request_args)
             if not response.choices:
                 return False
             message = response.choices[0].message
@@ -668,8 +670,7 @@ async def _probe_capabilities(
                     (
                         item
                         for item in (message.tool_calls or [])
-                        if item.function
-                        and item.function.name == "submit_structured_output"
+                        if item.function and item.function.name == "submit_structured_output"
                     ),
                     None,
                 )
@@ -692,12 +693,21 @@ async def _probe_capabilities(
             return True
 
         results = await asyncio.gather(
-            *(
-                probe_role(output_type)
-                for output_type in _v11_runtime.V11_WORKFLOW_OUTPUT_TYPES
-            ),
+            *(probe_role(output_type) for output_type in _v11_runtime.V11_WORKFLOW_OUTPUT_TYPES),
             return_exceptions=True,
         )
+        failures = [
+            f"{output_type.__name__}: "
+            + (type(result).__name__ if isinstance(result, BaseException) else "invalid output")
+            for output_type, result in zip(
+                _v11_runtime.V11_WORKFLOW_OUTPUT_TYPES, results, strict=True
+            )
+            if result is not True
+        ]
+        if failures:
+            probe_details["v11_remote_role_schema_capability"] = "; ".join(failures)[:128]
+        if any(isinstance(result, (TimeoutError, openai.APITimeoutError)) for result in results):
+            timed_out.add("v11_remote_role_schema_capability")
         return all(result is True for result in results)
 
     async def local_workflow_correctness() -> bool:
@@ -705,7 +715,7 @@ async def _probe_capabilities(
         return await _synthetic_v11_workflow_canary()
 
     async def tool_calls() -> bool:
-        response = await client.chat.completions.create(
+        response = await request(
             model=model,
             messages=[{"role": "user", "content": "Read the logs for window now."}],
             tools=[_READ_LOGS_TOOL],
@@ -718,7 +728,7 @@ async def _probe_capabilities(
         return any(call.function and call.function.name == "read_logs" for call in calls)
 
     async def token_usage() -> bool:
-        response = await client.chat.completions.create(
+        response = await request(
             model=model,
             messages=[{"role": "user", "content": "Reply with the word ok."}],
             max_tokens=8,
@@ -735,6 +745,8 @@ async def _probe_capabilities(
             *(non_streaming() for _ in range(parallelism)),
             return_exceptions=True,
         )
+        if any(isinstance(result, (TimeoutError, openai.APITimeoutError)) for result in results):
+            timed_out.add("configured_parallelism")
         return all(result is True for result in results)
 
     probes = (
@@ -750,11 +762,18 @@ async def _probe_capabilities(
     observations: list[CapabilityObservation] = []
     for name, probe in probes:
         try:
-            passed = await asyncio.wait_for(probe(), timeout=deadline_seconds)
-            detail = None
-        except TimeoutError:
+            # 复合探测含多个有界请求；外层采用串行最坏时长，避免批次被误截断。
+            request_count = (
+                len(_v11_runtime.V11_WORKFLOW_OUTPUT_TYPES)
+                if name == "v11_remote_role_schema_capability"
+                else 2 if name == "strict_output_tool" else 1
+            )
+            passed = await asyncio.wait_for(probe(), timeout=deadline_seconds * request_count)
+            detail = probe_details.get(name)
+        except (TimeoutError, openai.APITimeoutError):
             passed = False
             detail = "probe exceeded certification deadline"
+            timed_out.add(name)
         except Exception as exc:
             passed = False
             detail = redact_text(type(exc).__name__)
@@ -762,14 +781,20 @@ async def _probe_capabilities(
             CapabilityObservation(capability=name, passed=bool(passed), detail=detail)
         )
         probe_results[name] = bool(passed)
+    selected = (
+        "native_json_schema_with_tools"
+        if probe_results["native_json_schema_with_tools"]
+        else "strict_output_tool"
+    )
+    required_timeouts = timed_out - (
+        {"native_json_schema_with_tools", "strict_output_tool"} - {selected}
+    )
     observations.append(
         CapabilityObservation(
             capability="bounded_response_deadline",
-            passed=all(
-                item.detail != "probe exceeded certification deadline"
-                for item in observations
-            ),
-            detail=None,
+            passed=not required_timeouts,
+            detail=("timed out: " + ", ".join(sorted(required_timeouts)))[:128]
+            if required_timeouts else None,
         )
     )
     return observations
@@ -803,6 +828,7 @@ async def certify_endpoint_async(
             model=model,
             parallelism=parallelism,
             deadline_seconds=deadline_seconds,
+            base_url=canonical,
         )
     finally:
         await client.close()
@@ -820,12 +846,15 @@ async def certify_endpoint_async(
         "native_json_schema_with_tools",
         "strict_output_tool",
     }
-    passed = all(observation_status[name] for name in common) and observation_status[
-        {
-            "native_json_schema": "native_json_schema_with_tools",
-            "strict_output_tool": "strict_output_tool",
-        }[transport]
-    ]
+    passed = (
+        all(observation_status[name] for name in common)
+        and observation_status[
+            {
+                "native_json_schema": "native_json_schema_with_tools",
+                "strict_output_tool": "strict_output_tool",
+            }[transport]
+        ]
+    )
     return ModelCapabilityArtifact(
         provider="openai_compatible",
         model=model,
@@ -857,11 +886,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", required=True)
     parser.add_argument("--parallelism", type=int, default=DEFAULT_CERTIFICATION_PARALLELISM)
     parser.add_argument(
-        "--deadline-seconds", type=float, default=DEFAULT_CERTIFICATION_DEADLINE_SECONDS
+        "--deadline-seconds", type=float, default=DEFAULT_CERTIFICATION_DEADLINE_SECONDS,
+        help="Deadline per remote request; compound probes have separate bounded batch deadlines",
     )
-    parser.add_argument(
-        "--output-dir", type=Path, default=Path("output/model_capability")
-    )
+    parser.add_argument("--output-dir", type=Path, default=Path("output/model_capability"))
     args = parser.parse_args(argv)
     api_key = os.environ.get("DIAGOPS_AGENTS_API_KEY", "").strip()
     if not api_key:
@@ -883,7 +911,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     for observation in artifact.observations:
         if not observation.passed:
-            print(f"FAILED {observation.capability}: {observation.detail}")
+            label = "UNAVAILABLE" if artifact.result == "passed" else "FAILED"
+            print(f"{label} {observation.capability}: {observation.detail}")
     return 0 if artifact.result == "passed" else 1
 
 

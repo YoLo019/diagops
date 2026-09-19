@@ -81,6 +81,8 @@ class AppContainer:
         self.settings = settings or load_settings()
         self._shutdown_lock = asyncio.Lock()
         self._shutdown = False
+        self._lease_audit_stop = asyncio.Event()
+        self._lease_audit_task: asyncio.Task[None] | None = None
         self.engine = None
         self.repository = self._build_repository()
         providers = build_provider_registry_from_settings(self.settings)
@@ -259,6 +261,28 @@ class AppContainer:
         await self.runtime_writer.start()
         self.runtime_store.audit_expired_leases(datetime.now(UTC))
         await self.runtime_manager.startup()
+        if self._lease_audit_task is None or self._lease_audit_task.done():
+            self._lease_audit_stop.clear()
+            self._lease_audit_task = asyncio.create_task(
+                self._audit_leases(), name="runtime-lease-audit"
+            )
+
+    async def _audit_leases(self) -> None:
+        """快速重启时旧租约可能尚未到期；持续审计，只标记中断，不重跑任务。"""
+        while not self._lease_audit_stop.is_set():
+            try:
+                await asyncio.wait_for(
+                    self._lease_audit_stop.wait(),
+                    timeout=self.settings.runtime.heartbeat_seconds,
+                )
+            except TimeoutError:
+                try:
+                    await asyncio.to_thread(
+                        self.runtime_store.audit_expired_leases, datetime.now(UTC)
+                    )
+                except Exception as exc:
+                    # 审计失败不能让后台循环消失，也不能把数据库异常正文暴露给日志。
+                    logger.warning("runtime lease audit failed error_type=%s", type(exc).__name__)
 
     async def shutdown(self) -> None:
         """在有界时间内停止新调度并清空已接受的 Runtime 写入。"""
@@ -266,6 +290,10 @@ class AppContainer:
             if self._shutdown:
                 return
             self._shutdown = True
+            self._lease_audit_stop.set()
+            if self._lease_audit_task is not None:
+                # 等待已开始的短事务完成，再关闭 writer 和数据库。
+                await self._lease_audit_task
             try:
                 await asyncio.wait_for(self.runtime_manager.shutdown(), timeout=15)
             except TimeoutError:
@@ -308,12 +336,19 @@ class AppContainer:
                     InvestigationRecord(event=event, strategy=effective_strategy)
                 )
                 self.repository.save(record)
-                run = self.create_runtime_run(
-                    record.id,
-                    strategy=effective_strategy,
-                    run_reason=RuntimeRunReason.INITIAL,
-                    execution_contract_version=version,
-                )
+                try:
+                    run = self.create_runtime_run(
+                        record.id,
+                        strategy=effective_strategy,
+                        run_reason=RuntimeRunReason.INITIAL,
+                        execution_contract_version=version,
+                    )
+                except Exception:
+                    self.repository.update_status(
+                        record.id, InvestigationStatus.FAILED,
+                        failure_reason="runtime run creation failed",
+                    )
+                    raise
             else:
                 run = self.runtime_store.get_run(runtime_run_id)
             if (
@@ -400,11 +435,6 @@ class AppContainer:
                     raise RuntimeConflict(
                         "V10 RuntimeRun is not allowed on an active V11 projection"
                     )
-        if version == ExecutionContractVersion.V11:
-            investigation_id = self._v11_investigation_id(
-                source_record,
-                strategy=strategy,
-            )
         effective_provider = model_provider or getattr(
             agents_runtime, "model_provider", None
         )
@@ -478,7 +508,19 @@ class AppContainer:
             authority_mode=authority,
             execution_contract=contract,
         )
-        return self.runtime_store.create_run(run)
+        if version == ExecutionContractVersion.V11:
+            # 模型准入和 Run 合同校验通过后才复制历史调查，避免遗留 pending 副本。
+            investigation_id = self._v11_investigation_id(source_record, strategy=strategy)
+            run = run.model_copy(update={"investigation_id": investigation_id})
+        try:
+            return self.runtime_store.create_run(run)
+        except Exception:
+            if investigation_id != source_record.id:
+                self.repository.update_status(
+                    investigation_id, InvestigationStatus.FAILED,
+                    failure_reason="runtime run creation failed",
+                )
+            raise
 
     def _api_mode_for(self, provider) -> str:
         return (

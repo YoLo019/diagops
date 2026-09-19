@@ -60,16 +60,29 @@ def normalize_label(value: str) -> str:
     return " ".join(re.sub(r"[-_/]+", " ", value.casefold()).split())
 
 
-# 这是 scorer 在标签揭示前冻结的 RCAEval 适配表：诊断侧使用 provider-neutral
-# canonical family，标签侧使用数据集的短 fault vocabulary。这里只接受固定、预先
-# 记录的别名，不根据某次模型最终文本做语义猜测。
+# 固定整词机制映射；症状不能映射为具体原因。此表受 scorer_dependency_hash
+# 约束，变更后旧冻结评分不可混用；禁止按案例真值猜测自由文本的含义。
 _RCA_EVAL_FAULT_ALIASES = {
-    "error": "loss",
+    "cpu saturation": "cpu",
+    "cpu exhaustion": "cpu",
+    "cpu stress": "cpu",
     "memory": "mem",
+    "memory pressure": "mem",
+    "memory exhaustion": "mem",
+    "memory leak": "mem",
+    "socket exhaustion": "socket",
+    "connection exhaustion": "socket",
+    "connection pool exhaustion": "socket",
     "disk io": "disk",
+    "disk io saturation": "disk",
+    "disk i o saturation": "disk",
+    "disk io contention": "disk",
+    "disk i o contention": "disk",
     "network corruption": "loss",
+    "network loss": "loss",
+    "packet loss": "loss",
     "network latency": "delay",
-    "latency": "delay",
+    "network delay": "delay",
 }
 
 

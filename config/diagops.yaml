@@ -26,8 +26,8 @@ agents:
   enabled: false
   provider: openai
   model: null
-  max_turns: 8
-  timeout_seconds: 60
+  max_turns: 16
+  timeout_seconds: 120
   token_budget: 12000
   strategy: fixed
   max_tool_calls_per_specialist: 3

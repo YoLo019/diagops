@@ -68,6 +68,18 @@ def test_plain_packet_count_is_traffic_not_corruption():
     assert classify_metric_signal("container_network_receive_packets_total") == "traffic"
 
 
+@pytest.mark.parametrize("metric, family", [
+    ("svc_container-fs-reads-bytes-total", "disk_io"),
+    ("svc_container-fs-writes-total", "disk_io"),
+    ("svc_container-blkio-device-usage-total", "disk_io"),
+    ("svc_istio-request-total", "traffic"),
+    ("svc_container-network-receive-packets-dropped-total", "network_corruption"),
+    ("svc_container-memory-usage-bytes", "memory"),
+])
+def test_raw_container_signal_names_preserve_metric_family(metric, family):
+    assert classify_metric_signal(metric) == family
+
+
 @pytest.mark.parametrize(
     "metric_name",
     [

@@ -36,6 +36,44 @@ from backend.runtime.writer import RuntimeWriter
 from backend.tools.registry import ToolInvocationResult, ToolRegistry
 
 
+def test_tool_admission_accounting_survives_storage_and_keeps_legacy_semantics(runtime_store):
+    from types import SimpleNamespace
+
+    from backend.runtime.phases import durable_tool_call_count
+    from backend.runtime.store import RuntimeIntegrityError, ensure_v11_tool_budget_available
+
+    repo = runtime_store.investigation_repository
+    admitted = ToolCallRecord(
+        id="admitted", task_id="task", agent_name="InvestigatorAgent", tool_name="read_logs",
+        status="running", runtime_run_id="run-budget", logical_call_id="logical-1",
+        budget_charged=True,
+    )
+    rejected = admitted.model_copy(update={
+        "id": "rejected", "logical_call_id": "logical-rejected",
+        "status": ToolCallStatus.SKIPPED, "budget_charged": False,
+    })
+    legacy_payload = {**rejected.model_dump(), "id": "legacy", "logical_call_id": "legacy"}
+    legacy_payload.pop("budget_charged")
+    legacy = ToolCallRecord.model_validate(legacy_payload)
+    assert legacy.model_dump() == legacy_payload
+    repo.save_tool_calls("inv-1", [admitted, rejected, legacy])
+    calls = repo.list_tool_calls("inv-1")
+    assert durable_tool_call_count(
+        repository=repo, investigation_id="inv-1", run_id="run-budget", mutation=None,
+    ) == 2
+    run = SimpleNamespace(id="run-budget", is_v11=True, tool_budget=2)
+    # 传输重试复用同一逻辑额度，新的请求不能穿透上限。
+    ensure_v11_tool_budget_available(run, calls, admitted.model_copy(update={"id": "retry"}))
+    with pytest.raises(RuntimeConflict, match="budget exhausted"):
+        ensure_v11_tool_budget_available(run, calls, admitted.model_copy(update={
+            "id": "new", "logical_call_id": "new",
+        }))
+    with pytest.raises(RuntimeIntegrityError, match="immutable"):
+        ensure_v11_tool_budget_available(run, calls, admitted.model_copy(update={
+            "status": ToolCallStatus.SUCCESS, "budget_charged": False,
+        }))
+
+
 def _event() -> IncidentEvent:
     return IncidentEvent(
         source=IncidentSource.MANUAL,
@@ -84,7 +122,8 @@ def _success(counter: list[str], **kwargs) -> ToolInvocationResult:
 
 
 @pytest.mark.anyio
-async def test_resume_reuses_committed_tool_result_without_invocation() -> None:
+@pytest.mark.parametrize("evidence_run_id", ["run-1", "other-run"])
+async def test_resume_reuses_committed_tool_result_without_invocation(evidence_run_id) -> None:
     invocations: list[str] = []
     query = {
         "start_time": "2026-07-15T07:50:00Z",
@@ -112,11 +151,20 @@ async def test_resume_reuses_committed_tool_result_without_invocation() -> None:
         logical_call_id="LogAgent:1:1",
         idempotency_key=key,
         execution_id="exec-old",
+        output_evidence_ids=["ev-cached"],
+        error_message="query_result_truncated: narrow query filters",
     )
     persisted: list[ToolInvocationResult] = []
     session = AdaptiveToolSession(
         event=_event(),
-        seed_evidence=[],
+        seed_evidence=[EvidenceItem(
+            id="ev-cached",
+            runtime_run_id=evidence_run_id,
+            provider=EvidenceProvider.LOG,
+            kind=EvidenceKind.LOG_PATTERN,
+            timestamp=_event().started_at,
+            summary="cached observation",
+        )],
         registry=_registry(invocations),
         task_ids={AgentName.LOG: "task-log"},
         runtime_run_id="run-1",
@@ -130,6 +178,12 @@ async def test_resume_reuses_committed_tool_result_without_invocation() -> None:
     )
 
     assert response["status"] == "success"
+    assert response["truncated"] is True
+    assert [item["id"] for item in response["evidence"]] == (
+        ["ev-cached"] if evidence_run_id == "run-1" else []
+    )
+    if evidence_run_id != "run-1":
+        assert "scope" in response["warning"]
     assert invocations == []
     assert persisted == []
     assert session.tool_calls == [committed]
@@ -947,3 +1001,67 @@ def test_late_tool_success_cannot_overwrite_durable_failure(runtime_store) -> No
     persisted = store.investigation_repository.list_tool_calls("inv-1")
     assert len(persisted) == 1
     assert persisted[0].status == ToolCallStatus.FAILED
+
+
+def test_queued_tool_snapshots_preserve_both_evidence_sets(runtime_store) -> None:
+    store = runtime_store
+    repository = store.investigation_repository
+    stale = repository.get("inv-1")
+    run = store.create_run(RuntimeRun(
+        investigation_id="inv-1", run_kind=RuntimeRunKind.LIVE,
+        strategy=InvestigationStrategy.ADAPTIVE, run_reason=RuntimeRunReason.INITIAL,
+    ))
+    leased, attempt = store.acquire_lease_and_create_attempt(
+        run.id, owner="worker", expected_status=RuntimeRunStatus.CREATED,
+        attempt=RuntimeAttempt(run_id=run.id, attempt_number=1,
+                               status=RuntimeAttemptStatus.RUNNING),
+    )
+    for index in range(2):
+        evidence = EvidenceItem(
+            id=f"ev-queued-{index}", runtime_run_id=run.id,
+            provider=EvidenceProvider.LOG, kind=EvidenceKind.LOG_PATTERN,
+            timestamp=datetime.now(UTC), summary="bounded tool result",
+        )
+        call = ToolCallRecord(
+            task_id=f"task-{index}", agent_name=AgentName.LOG.value,
+            tool_name="read_logs", status=ToolCallStatus.SUCCESS,
+            runtime_run_id=run.id, output_evidence_ids=[evidence.id],
+        )
+        store.commit_tool(ToolCommit(
+            run_id=run.id, attempt_id=attempt.id, lease_owner="worker",
+            lease_version=leased.lease_version, call=call,
+            business_mutation=BusinessMutation(
+                investigation_id="inv-1", tool_calls=(call,),
+                investigation=stale.model_copy(update={"evidence": [evidence]}),
+            ),
+        ))
+    available = {item.id for item in repository.get("inv-1").evidence}
+    assert {"ev-queued-0", "ev-queued-1"} <= available
+    assert all(set(call.output_evidence_ids) <= available
+               for call in repository.list_tool_calls("inv-1"))
+
+    from types import SimpleNamespace
+
+    from backend.runtime.coordinator import RuntimeCoordinator
+    from backend.runtime.phases import PhaseOutput
+    from backend.runtime.writer import RuntimeWriter
+
+    coordinator = RuntimeCoordinator(
+        store=store, writer=RuntimeWriter(store), phase_executor=SimpleNamespace(),
+    )
+    output = coordinator._merge_committed_tools(
+        SimpleNamespace(id=run.id, investigation_id="inv-1", is_v11=True, tool_budget=8),
+        PhaseOutput(
+            business_mutation=BusinessMutation(
+                investigation_id="inv-1",
+                investigation=stale.model_copy(update={"failure_reason": "phase result"}),
+                tool_calls=(),
+            ),
+            safe_payload={"evidence_count": 0},
+        ),
+    )
+    assert {"ev-queued-0", "ev-queued-1"} <= set(output.resume_state.completed_evidence_ids)
+    assert output.business_mutation.investigation.failure_reason == "phase result"
+    assert len(output.business_mutation.tool_calls) == 2
+    assert output.resume_state.remaining_tool_budget == 6
+    assert output.safe_payload["evidence_count"] == len(available)

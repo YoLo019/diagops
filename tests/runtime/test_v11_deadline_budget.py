@@ -46,9 +46,7 @@ class V11PhaseExecutor:
             record = self.repository.get("inv-1")
             mutation = BusinessMutation(
                 investigation_id="inv-1",
-                investigation=record.model_copy(
-                    update={"active_runtime_run_id": self.run_id}
-                ),
+                investigation=record.model_copy(update={"active_runtime_run_id": self.run_id}),
                 activate_projection=True,
             )
         elif phase_input.phase == RuntimePhase.FINALIZE and self.fail_investigation:
@@ -69,7 +67,10 @@ class V11PhaseExecutor:
             safe_payload={"status": "completed"},
             # fake 执行器不消耗工具/Token；V11 精确校验要求剩余预算与持久消耗一致。
             resume_state=phase_input.resume_state.model_copy(
-                update={"remaining_tool_budget": 8, "remaining_token_budget": 1000}
+                update={
+                    "remaining_tool_budget": 8,
+                    "remaining_token_budget": phase_input.resume_state.remaining_token_budget,
+                }
             ),
         )
 
@@ -109,7 +110,10 @@ class InvestigatorFailureV11PhaseExecutor(V11PhaseExecutor):
                 status="completed",
                 safe_payload={"status": "failed"},
                 resume_state=phase_input.resume_state.model_copy(
-                    update={"remaining_tool_budget": 8, "remaining_token_budget": 1000}
+                    update={
+                        "remaining_tool_budget": 8,
+                        "remaining_token_budget": phase_input.resume_state.remaining_token_budget,
+                    }
                 ),
             )
         return await super().execute_phase(phase_input)
@@ -188,9 +192,7 @@ async def test_v11_deadline_exceeded_fails_run_with_timeout_category() -> None:
 
 @pytest.mark.anyio
 async def test_v11_cancelling_run_with_expired_deadline_converges_terminal() -> None:
-    _repository, store, run, executor, coordinator = _v11_services(
-        run_id="run-v11-cancel-deadline"
-    )
+    _repository, store, run, executor, coordinator = _v11_services(run_id="run-v11-cancel-deadline")
     blocking = BlockingV11PhaseExecutor(
         executor.repository, run.id, block_phase=RuntimePhase.INTAKE
     )
@@ -267,9 +269,7 @@ async def test_v11_failed_investigation_after_phase_loop_fails_run_with_output_v
     repository, store, run, _executor, coordinator = _v11_services(
         run_id="run-v11-output-validation"
     )
-    coordinator.phase_executor = V11PhaseExecutor(
-        repository, run.id, fail_investigation=True
-    )
+    coordinator.phase_executor = V11PhaseExecutor(repository, run.id, fail_investigation=True)
 
     result = await coordinator.execute(run.id, owner="worker-a")
 
@@ -342,16 +342,16 @@ def test_v11_model_turn_budget_is_durable_across_invocations_and_exhaustion() ->
         expected_status=RuntimeRunStatus.CREATED,
     )
 
-    assert leased.remaining_model_turns == 8
-    assert store.reserve_model_turn(
-        run.id, owner="worker-a", lease_version=leased.lease_version
-    ) == 7
-    assert store.get_run(run.id).remaining_model_turns == 7
-    # A fresh invocation must consume the same persisted run budget, not reset to 8.
-    assert store.reserve_model_turn(
-        run.id, owner="worker-a", lease_version=leased.lease_version
-    ) == 6
-    assert store.get_run(run.id).remaining_model_turns == 6
+    assert leased.remaining_model_turns == 16
+    assert (
+        store.reserve_model_turn(run.id, owner="worker-a", lease_version=leased.lease_version) == 15
+    )
+    assert store.get_run(run.id).remaining_model_turns == 15
+    # A fresh invocation must consume the same persisted run budget, not reset to 16.
+    assert (
+        store.reserve_model_turn(run.id, owner="worker-a", lease_version=leased.lease_version) == 14
+    )
+    assert store.get_run(run.id).remaining_model_turns == 14
 
 
 def test_v11_started_model_reservation_is_durable_for_resume_reconciliation() -> None:
@@ -428,7 +428,7 @@ def test_v11_rejected_model_response_durably_exhausts_token_budget() -> None:
 
 
 @pytest.mark.anyio
-async def test_v11_resume_releases_crash_window_reservation_once() -> None:
+async def test_v12_resume_accounts_unknown_crash_window_reservation_once() -> None:
     repository, store, run, _executor, coordinator = _v11_services(
         run_id="run-token-reservation-resume"
     )
@@ -471,8 +471,10 @@ async def test_v11_resume_releases_crash_window_reservation_once() -> None:
         event
         for event in events
         if event.safe_payload.get("reservation_id") == "reservation-crash-window"
-        and event.safe_payload.get("reservation_status") == "released"
+        and event.safe_payload.get("reservation_status") == "unknown"
     ]
     assert len(releases) == 1
+    assert releases[0].safe_payload["usage_known"] is False
+    assert durable_token_usage(events, run.id) == 100
     assert durable_model_reservations(events, run.id) == {}
     await coordinator.shutdown()

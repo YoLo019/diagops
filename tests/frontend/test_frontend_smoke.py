@@ -277,6 +277,26 @@ def test_v11_review_visibility_is_run_owned_and_candidate_led() -> None:
     assert [item["id"] for item in results[9]] == ["candidate-accepted"]
     assert results[10] == []
 
+    current = {**review, "diagnosis_contract_revision": 2}
+    final_only = {
+        **current,
+        "lead_decision": None,
+        "final_decision": {
+            "actor": "critic",
+            "action": "conclude",
+            "candidate_ids": [rejected["id"], accepted["id"]],
+        },
+    }
+    results = _run_app_exports(
+        [
+            {"name": "isUsableV11Review", "args": [current, run, "run-v11"]},
+            {"name": "isUsableV11Review", "args": [final_only, run, "run-v11"]},
+            {"name": "selectVisibleCandidates", "args": [final_only, run, [], "run-v11"]},
+        ]
+    )
+    assert results[:2] == [False, True]
+    assert [item["id"] for item in results[2]] == [rejected["id"], accepted["id"]]
+
 
 def test_v7_review_guard_and_candidate_visibility_execute_against_payloads() -> None:
     agreement = {

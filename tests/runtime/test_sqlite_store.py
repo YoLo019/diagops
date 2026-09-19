@@ -46,9 +46,9 @@ def test_sqlite_v11_model_turn_budget_survives_store_reload(runtime_store) -> No
 
     assert runtime_store.reserve_model_turn(
         run.id, owner="worker-a", lease_version=leased.lease_version
-    ) == 7
-    assert runtime_store.get_run(run.id).remaining_model_turns == 7
-    for _ in range(6):
+    ) == 15
+    assert runtime_store.get_run(run.id).remaining_model_turns == 15
+    for _ in range(14):
         runtime_store.reserve_model_turn(
             run.id, owner="worker-a", lease_version=leased.lease_version
         )

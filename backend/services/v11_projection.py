@@ -78,9 +78,7 @@ def ensure_v11_projection_owner(repository, runtime_store, record: Investigation
         raise V11ProjectionIntegrityError("Agent projection RuntimeRun is not the owner")
 
     if active_runtime_id is None:
-        raise V11ProjectionIntegrityError(
-            "Agent projection lacks active runtime owner"
-        )
+        raise V11ProjectionIntegrityError("Agent projection lacks active runtime owner")
 
     latest_run = record.multi_agent_run
     if (
@@ -92,9 +90,7 @@ def ensure_v11_projection_owner(repository, runtime_store, record: Investigation
             "Agent projection latest run summary does not match active owner"
         )
     if review is None or review.authority_mode != AuthorityMode.AGENT:
-        raise V11ProjectionIntegrityError(
-            "Agent projection coordination review is unavailable"
-        )
+        raise V11ProjectionIntegrityError("Agent projection coordination review is unavailable")
     if review.investigation_id != record.id:
         raise V11ProjectionIntegrityError(
             "Agent projection coordination review investigation mismatch"
@@ -107,9 +103,7 @@ def ensure_v11_projection_owner(repository, runtime_store, record: Investigation
             investigation_status=record.status,
         )
     except ValueError as exc:
-        raise V11ProjectionIntegrityError(
-            "Agent projection final status contract failed"
-        ) from exc
+        raise V11ProjectionIntegrityError("Agent projection final status contract failed") from exc
 
     if record.report is not None:
         if record.report.authority_mode != AuthorityMode.AGENT:
@@ -128,3 +122,17 @@ def ensure_v11_projection_owner(repository, runtime_store, record: Investigation
         validate_v11_execution_contract(contract)
     except (AttributeError, TypeError, ValueError) as exc:
         raise V11ProjectionIntegrityError("Agent projection contract integrity failed") from exc
+
+    if contract.get("diagnosis_contract_revision", 1) == 2:
+        if review.diagnosis_contract_revision != 2 or review.final_decision is None:
+            raise V11ProjectionIntegrityError("Revision 2 final decision is missing")
+        actor = review.final_decision.actor
+        single = contract["topology"]["one_context"]
+        if (single and actor != "single") or (not single and actor == "single"):
+            raise V11ProjectionIntegrityError("Final decision actor does not match topology")
+        if (
+            not single
+            and actor == "lead"
+            and (review.final_decision.action != "inconclusive" or review.candidates)
+        ):
+            raise V11ProjectionIntegrityError("Lead may only stop during planning")

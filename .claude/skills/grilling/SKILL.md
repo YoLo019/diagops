@@ -1,6 +1,6 @@
 ---
 name: grilling
-description: Resolve the decision tree for a high-risk DiagOps change when requirements, scope, risk, or acceptance decisions need user alignment.
+description: Resolve user decisions blocking a DiagOps release's scope, risk, or acceptance criteria.
 ---
 
 # Grilling

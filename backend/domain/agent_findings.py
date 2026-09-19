@@ -75,7 +75,7 @@ class AgentFinding(BaseModel):
     runtime_run_id: str | None = None
     critic_assessment_id: str | None = None
     affected_entity: str | None = Field(default=None, max_length=128)
-    failure_mechanism: str | None = Field(default=None, max_length=256)
+    failure_mechanism: str | None = Field(default=None, max_length=512)
     contradicting_evidence_ids: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
@@ -105,9 +105,7 @@ class AgentFinding(BaseModel):
         self.agent_name = FindingActor(self.agent_name)
         if self.finding_type != AgentFindingType.GAP and not self.evidence_ids:
             raise ValueError("evidence_ids required unless finding_type is gap")
-        if self.blocking and (
-            self.finding_type != AgentFindingType.GAP or not self.gaps
-        ):
+        if self.blocking and (self.finding_type != AgentFindingType.GAP or not self.gaps):
             raise ValueError("blocking requires a gap finding with gaps")
         if self.analysis_round == 1 and self.revises_finding_id is not None:
             raise ValueError("round 1 cannot set revises_finding_id")
@@ -176,7 +174,7 @@ class RootCauseCandidate(BaseModel):
     affected_entity: str | None = Field(default=None, max_length=128)
     # 结构化分类与可读机制分开，避免评分/下游分类被一段解释性文本污染。
     failure_class: str | None = Field(default=None, max_length=128)
-    failure_mechanism: str | None = Field(default=None, max_length=256)
+    failure_mechanism: str | None = Field(default=None, max_length=512)
     summary: str = Field(min_length=1)
     rank: int = Field(ge=1)
     confidence: float = Field(ge=0, le=1, allow_inf_nan=False)
@@ -220,15 +218,41 @@ class RootCauseAttribution(BaseModel):
     root_cause_occurred_at: datetime
     root_cause_component: str = Field(min_length=1)
     root_cause_reason: str = Field(min_length=1)
-    supporting_evidence_ids: list[Annotated[str, Field(min_length=1)]] = Field(
-        min_length=1
-    )
+    supporting_evidence_ids: list[Annotated[str, Field(min_length=1)]] = Field(min_length=1)
 
     @model_validator(mode="after")
     def validate_timestamp(self) -> "RootCauseAttribution":
         if self.root_cause_occurred_at.tzinfo is None:
             raise ValueError("root_cause_occurred_at must be timezone-aware")
         return self
+
+
+class FinalDiagnosisDecision(BaseModel):
+    """Agent 给出的发布顺序；服务端只校验引用与归属。"""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    actor: Literal["critic", "lead", "single"]
+    action: Literal["conclude", "inconclusive"]
+    candidate_ids: list[str] = Field(default_factory=list, max_length=32)
+    evidence_ids: list[str] = Field(default_factory=list, max_length=32)
+    summary: str = Field(min_length=1, max_length=512)
+    stop_reason: str | None = Field(default=None, max_length=256)
+    uncertainty: str | None = Field(default=None, min_length=1, max_length=256)
+
+    @model_validator(mode="after")
+    def validate_decision(self) -> "FinalDiagnosisDecision":
+        if len(set(self.candidate_ids)) != len(self.candidate_ids):
+            raise ValueError("final decision candidate IDs must be unique")
+        if self.action == "conclude" and (not self.candidate_ids or not self.evidence_ids):
+            raise ValueError("final conclusion requires candidates and evidence")
+        if self.action == "inconclusive" and (self.candidate_ids or not self.stop_reason):
+            raise ValueError("inconclusive requires no candidates and a stop reason")
+        return self
+
+    def as_lead_decision(self) -> LeadDecision:
+        """仅为历史消费者投影相同内容，不产生第二次决策。"""
+        return LeadDecision(**self.model_dump(exclude={"actor", "uncertainty"}))
 
 
 class CoordinationReview(BaseModel):
@@ -240,6 +264,8 @@ class CoordinationReview(BaseModel):
     root_causes: list[RootCauseAttribution] = Field(default_factory=list)
     critic_assessments: list[CriticAssessment] = Field(default_factory=list)
     lead_decision: "LeadDecision | None" = None
+    final_decision: FinalDiagnosisDecision | None = None
+    diagnosis_contract_revision: Literal[1, 2] = 1
     diagnostic_status: DiagnosticStatus | None = None
     stop_reason: str | None = Field(default=None, max_length=256)
     runtime_run_id: str | None = None
@@ -252,9 +278,7 @@ class CoordinationReview(BaseModel):
     model_provider: ModelProvider | None = None
     model_name: str | None = None
     primary_stabilization_category: StabilizationCategory | None = None
-    secondary_stabilization_categories: list[StabilizationCategory] = Field(
-        default_factory=list
-    )
+    secondary_stabilization_categories: list[StabilizationCategory] = Field(default_factory=list)
     summary: str = ""
     uncertainty: str = ""
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
@@ -268,9 +292,19 @@ class CoordinationReview(BaseModel):
         # 排序，兼容乱序输入。
         self.candidates.sort(key=lambda candidate: candidate.rank)
         if self.authority_mode == AuthorityMode.AGENT:
+            if self.diagnosis_contract_revision == 2:
+                if self.diagnostic_status is not None and self.final_decision is None:
+                    raise ValueError("final decision is required for revision 2")
+                if self.final_decision is not None and self.lead_decision is not None:
+                    if self.final_decision.as_lead_decision() != self.lead_decision:
+                        raise ValueError("legacy decision does not match final decision")
             if self.runtime_run_id is None:
                 raise ValueError("V11 CoordinationReview requires runtime_run_id")
-            if self.lead_decision is None and self.diagnostic_status is not None:
+            if (
+                self.lead_decision is None
+                and self.final_decision is None
+                and self.diagnostic_status is not None
+            ):
                 raise ValueError("final V11 CoordinationReview requires lead_decision")
             if any(
                 assessment.runtime_run_id != self.runtime_run_id
@@ -283,30 +317,50 @@ class CoordinationReview(BaseModel):
             }
             if not assessment_candidates <= candidate_ids:
                 raise ValueError("Critic assessment references an unknown candidate")
-            if self.lead_decision is None:
+            decision = self.final_decision or self.lead_decision
+            if decision is None:
                 return self
-            if not set(self.lead_decision.candidate_ids) <= candidate_ids:
+            if not set(decision.candidate_ids) <= candidate_ids:
                 raise ValueError("Lead decision references an unknown candidate")
             accepted = {
                 assessment.candidate_id
                 for assessment in self.critic_assessments
                 if assessment.verdict == CriticVerdict.ACCEPT
             }
-            if self.lead_decision.action.value == "conclude" and not set(
-                self.lead_decision.candidate_ids
-            ) <= accepted:
+            if (
+                decision.action == "conclude"
+                and not set(decision.candidate_ids) <= accepted
+                and not (self.final_decision and self.final_decision.actor == "single")
+            ):
                 raise ValueError("Lead can conclude only with Critic-accepted candidates")
+            if self.final_decision and any(
+                check.status == CausalCheckStatus.FAIL
+                for assessment in self.critic_assessments
+                if assessment.candidate_id in decision.candidate_ids
+                for check in assessment.checks
+            ):
+                raise ValueError("published candidate has a failed causal check")
         return self
 
     @property
     def authoritative_candidate_ids(self) -> list[str]:
-        if self.authority_mode != AuthorityMode.AGENT or self.lead_decision is None:
+        decision = self.final_decision or self.lead_decision
+        if self.authority_mode != AuthorityMode.AGENT or decision is None:
             return []
-        return list(self.lead_decision.candidate_ids)
+        return list(decision.candidate_ids)
+
+    @property
+    def authoritative_candidates(self) -> list[RootCauseCandidate]:
+        """按最终发布顺序读取候选，不使用展示 rank。"""
+        by_id = {candidate.id: candidate for candidate in self.candidates}
+        return [by_id[candidate_id] for candidate_id in self.authoritative_candidate_ids]
 
     @model_serializer(mode="wrap")
     def serialize_legacy_payload(self, handler):
         data = handler(self)
+        for field_name in ("final_decision", "diagnosis_contract_revision"):
+            if field_name not in self.model_fields_set:
+                data.pop(field_name, None)
         if self.runtime_run_id is None:
             for field_name in (
                 "critic_assessments",

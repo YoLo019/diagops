@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from math import isfinite
 from typing import Any
@@ -39,9 +39,7 @@ class PhaseInput:
     investigation_id: str | None = None
     strategy: InvestigationStrategy | None = None
     run_reason: RuntimeRunReason = RuntimeRunReason.INITIAL
-    execution_contract_version: ExecutionContractVersion = (
-        ExecutionContractVersion.V10_LEGACY
-    )
+    execution_contract_version: ExecutionContractVersion = ExecutionContractVersion.V10_LEGACY
     execution_contract: dict[str, Any] | None = None
     model_provider: ModelProvider | None = None
     model_name: str | None = None
@@ -91,14 +89,33 @@ class BusinessMutation:
     replace_multi_agent_result: bool = False
     activate_projection: bool = False
 
+    def merge_tool_result(self, current: InvestigationRecord) -> BusinessMutation:
+        """在写事务内合并工具证据；排队前的快照不能覆盖其他已提交结果。"""
+        if self.investigation is None:
+            return self
+        self._validate_investigation_record()
+        evidence = {item.id: item for item in current.evidence}
+        for item in self.investigation.evidence:
+            previous = evidence.get(item.id)
+            if previous is not None and previous != item:
+                raise ValueError("duplicate evidence has different content")
+            evidence[item.id] = item
+        providers = {
+            item.model_dump_json(): item
+            for item in [*current.provider_results, *self.investigation.provider_results]
+        }
+        return replace(self, investigation=current.model_copy(update={
+            "evidence": list(evidence.values()),
+            "provider_results": list(providers.values()),
+            "updated_at": max(current.updated_at, self.investigation.updated_at),
+        }))
+
     def apply_memory(self, repository: InMemoryInvestigationRepository) -> None:
         self._validate_investigation_record()
         repository.get(self.investigation_id)
         if self.activate_projection:
             owner = (
-                self.investigation.active_runtime_run_id
-                if self.investigation is not None
-                else None
+                self.investigation.active_runtime_run_id if self.investigation is not None else None
             )
             if owner is None:
                 raise ValueError("projection activation requires a runtime owner")
@@ -110,9 +127,7 @@ class BusinessMutation:
         if self.tasks is not None:
             repository.save_tasks(self.investigation_id, list(self.tasks))
         if self.context_facts is not None:
-            repository.save_context_facts(
-                self.investigation_id, list(self.context_facts)
-            )
+            repository.save_context_facts(self.investigation_id, list(self.context_facts))
         if self.react_trace is not None:
             repository.save_v11_react_trace(self.react_trace)
         if self.tool_calls is not None:
@@ -132,39 +147,29 @@ class BusinessMutation:
     ) -> None:
         self._validate_investigation_record()
         exists = connection.execute(
-            select(investigations.c.id).where(
-                investigations.c.id == self.investigation_id
-            )
+            select(investigations.c.id).where(investigations.c.id == self.investigation_id)
         ).scalar_one_or_none()
         if exists is None:
             raise ValueError(f"Unknown investigation: {self.investigation_id}")
         if self.activate_projection:
             owner = (
-                self.investigation.active_runtime_run_id
-                if self.investigation is not None
-                else None
+                self.investigation.active_runtime_run_id if self.investigation is not None else None
             )
             if owner is None:
                 raise ValueError("projection activation requires a runtime owner")
-            repository.activate_projection_with_connection(
-                connection, self.investigation_id, owner
-            )
+            repository.activate_projection_with_connection(connection, self.investigation_id, owner)
         if self.investigation is not None:
             repository.save_with_connection(connection, self._projection_record())
         if self.plan is not None:
             repository.save_plan_with_connection(connection, self.plan)
         if self.tasks is not None:
-            repository.save_tasks_with_connection(
-                connection, self.investigation_id, self.tasks
-            )
+            repository.save_tasks_with_connection(connection, self.investigation_id, self.tasks)
         if self.context_facts is not None:
             repository.save_context_facts_with_connection(
                 connection, self.investigation_id, self.context_facts
             )
         if self.react_trace is not None:
-            repository.save_v11_react_trace_with_connection(
-                connection, self.react_trace
-            )
+            repository.save_v11_react_trace_with_connection(connection, self.react_trace)
         if self.tool_calls is not None:
             repository.save_tool_calls_with_connection(
                 connection, self.investigation_id, self.tool_calls
@@ -179,10 +184,7 @@ class BusinessMutation:
             )
 
     def _validate_investigation_record(self) -> None:
-        if (
-            self.investigation is not None
-            and self.investigation.id != self.investigation_id
-        ):
+        if self.investigation is not None and self.investigation.id != self.investigation_id:
             raise ValueError("business mutation investigation mismatch")
 
     def _projection_record(self) -> InvestigationRecord:
@@ -316,10 +318,7 @@ def ensure_phase_precondition(
     if commit.expected_previous_phase != current_phase:
         raise ValueError("phase predecessor changed")
     expected_index = 0 if current_phase is None else phase_order.index(current_phase) + 1
-    if (
-        expected_index >= len(phase_order)
-        or phase_order[expected_index] != commit.phase
-    ):
+    if expected_index >= len(phase_order) or phase_order[expected_index] != commit.phase:
         raise ValueError("phase commit is duplicate or out of order")
 
 
@@ -422,10 +421,7 @@ def durable_projection_digest(
         raise ValueError("checkpoint resume reference is missing from durable projection")
 
     def dumps(items_by_id, ids: set[str]) -> list[dict[str, Any]]:
-        return [
-            items_by_id[item_id].model_dump(mode="json")
-            for item_id in sorted(ids)
-        ]
+        return [items_by_id[item_id].model_dump(mode="json") for item_id in sorted(ids)]
 
     projection = {
         "evidence": dumps(evidence_by_id, expected["evidence"]),
@@ -460,16 +456,18 @@ def durable_tool_call_count(
         {
             call.logical_call_id or call.id
             for call in calls
-            if call.runtime_run_id == run_id and call.status != ToolCallStatus.PENDING
+            if call.runtime_run_id == run_id and call.consumes_budget
         }
     )
 
 
 def durable_token_usage(events, run_id: str) -> int:
-    """从模型终态事件计算真实计费 usage，供 checkpoint 校验预算投影。"""
+    """计算已知用量与未知请求的保守预算消耗，供 checkpoint 恢复。"""
     terminal = {"model.completed", "model.failed"}
     return sum(
-        int(event.safe_payload.get("input_tokens", 0))
+        int(event.safe_payload.get("accounted_tokens", 0))
+        if event.safe_payload.get("usage_known") is False
+        else int(event.safe_payload.get("input_tokens", 0))
         + int(event.safe_payload.get("output_tokens", 0))
         for event in events
         if event.run_id == run_id
@@ -483,8 +481,8 @@ def durable_token_usage(events, run_id: str) -> int:
 def durable_remaining_token_budget(events, run_id: str, token_budget: int) -> int:
     """从 durable 模型事件计算可恢复的剩余 token 预算。
 
-    rejected 表示 provider 报告的 usage 已越过冻结 reservation，无法证明任何
-    未用额度仍安全，因此恢复时必须保持耗尽。
+    rejected 表示结算已因预算拒绝；历史记录也可能因单次预留不足而拒绝。
+    恢复保留原拒绝结果，不能重新放出额度。
     """
     events = tuple(events)
     if any(

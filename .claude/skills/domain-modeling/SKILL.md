@@ -1,6 +1,6 @@
 ---
 name: domain-modeling
-description: Sharpen DiagOps domain language and durable design decisions when terminology, code, or architectural tradeoffs conflict.
+description: Resolve ambiguous DiagOps terms, code-language conflicts, or hard-to-reverse design tradeoffs.
 ---
 
 # Domain Modeling

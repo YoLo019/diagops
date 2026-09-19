@@ -10,13 +10,15 @@ from __future__ import annotations
 
 import copy
 import json
+from dataclasses import replace
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 import openai
-from agents import FunctionTool, ModelResponse
+from agents import FunctionTool, ModelBehaviorError, ModelResponse
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from openai import AsyncOpenAI
-from pydantic import SecretStr
+from pydantic import BaseModel, SecretStr
 
 from backend.domain.multi_agent import FailureCategory
 
@@ -28,6 +30,13 @@ STRICT_TOOL_ENVELOPE_SCHEMA = {
     "required": ["payload_json"],
     "additionalProperties": False,
 }
+
+
+def compatible_extra_body(base_url: str) -> dict[str, Any]:
+    """DeepSeek 官方接入固定关闭思考；其他端点不注入专用字段。"""
+    if urlsplit(base_url).hostname == "api.deepseek.com":
+        return {"thinking": {"type": "disabled"}}
+    return {}
 
 
 def _salvage_json_text(text: str) -> str:
@@ -113,6 +122,28 @@ def strict_transport_tools(tools: list[Any]) -> list[Any]:
     return projected
 
 
+def strict_transport_input(value: Any) -> Any:
+    """内部工具参数是已解包的 JSON；发送历史时恢复 wire envelope，不修改原记录。"""
+    if not isinstance(value, list):
+        return value
+    projected = []
+    for item in value:
+        fields = item.model_dump() if isinstance(item, BaseModel) else item
+        if (
+            isinstance(fields, dict)
+            and fields.get("type") == "function_call"
+            and fields.get("name") != "submit_structured_output"
+        ):
+            arguments = json.dumps({"payload_json": fields["arguments"]}, ensure_ascii=False)
+            item = (
+                item.model_copy(update={"arguments": arguments})
+                if isinstance(item, BaseModel)
+                else {**item, "arguments": arguments}
+            )
+        projected.append(item)
+    return projected
+
+
 def _restore_strict_tool_arguments(
     response: ModelResponse,
     *,
@@ -123,7 +154,14 @@ def _restore_strict_tool_arguments(
             getattr(item, "type", None) == "function_call"
             and getattr(item, "name", None) != output_tool_name
         ):
-            item.arguments = _unwrap_strict_tool_payload(item.arguments)
+            try:
+                item.arguments = _unwrap_strict_tool_payload(item.arguments)
+            except (ValueError, TypeError, KeyError):
+                error = ModelBehaviorError("strict tool envelope is invalid")
+                error.audit_code = "strict_tool_envelope_invalid"
+                # 回包已带 usage，格式失败不能把已知消耗改记为未知预留。
+                error.usage = response.usage
+                raise error from None
     return response
 
 
@@ -156,6 +194,7 @@ class OpenAICompatibleChatCompletionsModel(OpenAIChatCompletionsModel):
 
     async def get_response(self, *args: Any, **kwargs: Any) -> Any:
         """在当前 event loop 内完成一次非流式请求并释放 transport。"""
+        args, kwargs = self._request_args(args, kwargs)
         client = self._create_client()
         try:
             delegate = self._create_delegate(client)
@@ -163,6 +202,10 @@ class OpenAICompatibleChatCompletionsModel(OpenAIChatCompletionsModel):
             if self.structured_output_transport == "strict_output_tool":
                 args = list(args)
                 kwargs = dict(kwargs)
+                if len(args) >= 2:
+                    args[1] = strict_transport_input(args[1])
+                else:
+                    kwargs["input"] = strict_transport_input(kwargs.get("input"))
                 if len(args) >= 5:
                     args[3] = strict_transport_tools(args[3])
                     args[4] = None
@@ -187,6 +230,7 @@ class OpenAICompatibleChatCompletionsModel(OpenAIChatCompletionsModel):
         注意：本路径未做 JSON salvage；V11 当前全部走非流式 Runner.run，
         未来启用 run_streamed 前必须先在流式聚合处补齐等价清洗。
         """
+        args, kwargs = self._request_args(args, kwargs)
         client = self._create_client()
         try:
             delegate = self._create_delegate(client)
@@ -194,6 +238,16 @@ class OpenAICompatibleChatCompletionsModel(OpenAIChatCompletionsModel):
                 yield event
         finally:
             await client.close()
+
+    def _request_args(self, args, kwargs):
+        extra_body = compatible_extra_body(self._base_url)
+        if not extra_body:
+            return args, kwargs
+        settings = args[2] if len(args) >= 3 else kwargs["model_settings"]
+        settings = replace(settings, extra_body={**(settings.extra_body or {}), **extra_body})
+        if len(args) >= 3:
+            return (*args[:2], settings, *args[3:]), kwargs
+        return args, {**kwargs, "model_settings": settings}
 
     def _create_client(self) -> AsyncOpenAI:
         kwargs: dict[str, Any] = {

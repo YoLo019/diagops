@@ -147,7 +147,7 @@ class AgentsSettings(BaseModel):
     provider: ModelProvider = ModelProvider.OPENAI
     model: str | None = None
     max_turns: int = Field(default=V11_DEFAULT_MAX_TURNS, ge=1)
-    timeout_seconds: int = Field(default=60, ge=1)
+    timeout_seconds: int = Field(default=120, ge=1)
     token_budget: int = Field(default=12000, ge=1, le=1_000_000)
     strategy: InvestigationStrategy = InvestigationStrategy.FIXED
     max_tool_calls_per_specialist: int = Field(

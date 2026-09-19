@@ -49,10 +49,22 @@ class ToolCallRecord(BaseModel):
     idempotency_key: str | None = None
     execution_id: str | None = None
     attempt: int = Field(default=1, ge=1)
+    # None 沿用历史扣账口径；新调用在准入时记录，拒绝不占取证额度。
+    budget_charged: bool | None = None
+
+    @property
+    def consumes_budget(self) -> bool:
+        """返回逻辑工具调用是否占用额度，兼容没有准入标记的历史记录。"""
+        return (
+            self.budget_charged
+            if self.budget_charged is not None else self.status != ToolCallStatus.PENDING
+        )
 
     @model_serializer(mode="wrap")
     def serialize_legacy_payload(self, handler):
         data = handler(self)
+        if self.budget_charged is None:
+            data.pop("budget_charged", None)
         if self.runtime_run_id is None:
             for field_name in (
                 "runtime_run_id",

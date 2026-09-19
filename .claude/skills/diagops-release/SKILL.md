@@ -1,6 +1,6 @@
 ---
 name: diagops-release
-description: Guide a high-risk DiagOps change from alignment through verified release.
+description: Run the gated DiagOps release workflow only when the user explicitly requests it.
 disable-model-invocation: true
 ---
 

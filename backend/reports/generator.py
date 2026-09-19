@@ -86,18 +86,12 @@ class ReportGenerator:
         event = redact_model(event)
         hypotheses = [redact_model(item) for item in hypotheses]
         actions = [redact_model(item) for item in (actions or [])]
-        verification_suggestions = [
-            redact_model(item) for item in (verification_suggestions or [])
-        ]
+        verification_suggestions = [redact_model(item) for item in (verification_suggestions or [])]
         agent_findings = [redact_model(item) for item in (agent_findings or [])]
         coordination_review = (
-            redact_model(coordination_review)
-            if coordination_review is not None
-            else None
+            redact_model(coordination_review) if coordination_review is not None else None
         )
-        multi_agent_run = (
-            redact_model(multi_agent_run) if multi_agent_run is not None else None
-        )
+        multi_agent_run = redact_model(multi_agent_run) if multi_agent_run is not None else None
         sorted_evidence = sorted(
             (redact_model(item) for item in evidence), key=lambda item: item.timestamp
         )
@@ -125,8 +119,7 @@ class ReportGenerator:
 
         top = hypotheses[0]
         timeline = [
-            {"time": item.timestamp.isoformat(), "event": item.summary}
-            for item in sorted_evidence
+            {"time": item.timestamp.isoformat(), "event": item.summary} for item in sorted_evidence
         ]
 
         markdown = self._render_markdown(
@@ -147,9 +140,7 @@ class ReportGenerator:
             hypotheses=hypotheses,
             markdown=markdown,
             action_ids=[action.id for action in actions],
-            verification_suggestion_ids=[
-                suggestion.id for suggestion in verification_suggestions
-            ],
+            verification_suggestion_ids=[suggestion.id for suggestion in verification_suggestions],
         )
 
     def generate_v11(
@@ -167,18 +158,12 @@ class ReportGenerator:
         """按 V11 review/runtime 投影生成报告，不进入旧 hypotheses 分支。"""
         event = redact_model(event)
         actions = [redact_model(item) for item in (actions or [])]
-        verification_suggestions = [
-            redact_model(item) for item in (verification_suggestions or [])
-        ]
+        verification_suggestions = [redact_model(item) for item in (verification_suggestions or [])]
         agent_findings = [redact_model(item) for item in (agent_findings or [])]
         coordination_review = (
-            redact_model(coordination_review)
-            if coordination_review is not None
-            else None
+            redact_model(coordination_review) if coordination_review is not None else None
         )
-        multi_agent_run = (
-            redact_model(multi_agent_run) if multi_agent_run is not None else None
-        )
+        multi_agent_run = redact_model(multi_agent_run) if multi_agent_run is not None else None
         sorted_evidence = sorted(
             (redact_model(item) for item in evidence), key=lambda item: item.timestamp
         )
@@ -208,8 +193,10 @@ class ReportGenerator:
         run: MultiAgentRunSummary | None,
     ) -> bool:
         return bool(
-            review is not None and review.authority_mode == AuthorityMode.AGENT
-            or run is not None and run.authority_mode == AuthorityMode.AGENT
+            review is not None
+            and review.authority_mode == AuthorityMode.AGENT
+            or run is not None
+            and run.authority_mode == AuthorityMode.AGENT
         )
 
     def _generate_v11(
@@ -255,8 +242,7 @@ class ReportGenerator:
             _public_v11_verification(item) for item in verification_suggestions
         ]
         critic_assessments = [
-            _public_v11_assessment(item)
-            for item in coordination_review.critic_assessments
+            _public_v11_assessment(item) for item in coordination_review.critic_assessments
         ]
         public_findings = [_public_v11_finding(item) for item in agent_findings]
         safe_review_summary = _scrub_v11_text(coordination_review.summary)
@@ -264,6 +250,11 @@ class ReportGenerator:
         safe_review = coordination_review.model_copy(
             update={
                 "critic_assessments": critic_assessments,
+                "final_decision": (
+                    _public_v11_lead_decision(coordination_review.final_decision)
+                    if coordination_review.final_decision is not None
+                    else None
+                ),
                 "lead_decision": (
                     _public_v11_lead_decision(coordination_review.lead_decision)
                     if coordination_review.lead_decision is not None
@@ -292,25 +283,18 @@ class ReportGenerator:
             public_findings,
         )
         evidence_gaps = list(
-            dict.fromkeys(
-                assessment.gap
-                for assessment in critic_assessments
-                if assessment.gap
-            )
+            dict.fromkeys(assessment.gap for assessment in critic_assessments if assessment.gap)
         )[:32]
         report = IncidentReport(
             investigation_id=investigation_id,
             summary=summary,
             timeline=[
-                {"time": item.timestamp.isoformat(), "event": item.summary}
-                for item in evidence
+                {"time": item.timestamp.isoformat(), "event": item.summary} for item in evidence
             ],
             hypotheses=[],
             markdown=markdown,
             action_ids=[action.id for action in actions],
-            verification_suggestion_ids=[
-                suggestion.id for suggestion in verification_suggestions
-            ],
+            verification_suggestion_ids=[suggestion.id for suggestion in verification_suggestions],
             diagnoses=diagnoses,
             alternatives=alternatives,
             diagnostic_status=safe_review.diagnostic_status,
@@ -340,11 +324,7 @@ class ReportGenerator:
     ) -> str:
         evidence_by_id = {item.id: item for item in evidence}
         status = review.diagnostic_status.value if review.diagnostic_status else "pending"
-        conclusion = (
-            diagnoses[0].summary
-            if diagnoses
-            else review.summary or "无可接受诊断结论"
-        )
+        conclusion = diagnoses[0].summary if diagnoses else review.summary or "无可接受诊断结论"
         lines = [
             f"# {escape_markdown(event.service)} RCA 诊断报告",
             "",
@@ -384,10 +364,7 @@ class ReportGenerator:
                 if assessment.supplemental_task_ids:
                     lines.append(
                         "  - Task IDs："
-                        + ", ".join(
-                            _code(task_id)
-                            for task_id in assessment.supplemental_task_ids
-                        )
+                        + ", ".join(_code(task_id) for task_id in assessment.supplemental_task_ids)
                     )
                 for check in assessment.checks:
                     lines.append(
@@ -417,8 +394,7 @@ class ReportGenerator:
                     lines.append(f"  - 公开依据：{_safe_v11_text(finding.rationale)}")
                 if finding.evidence_ids:
                     lines.append(
-                        "  - 证据："
-                        + ", ".join(_code(item) for item in finding.evidence_ids)
+                        "  - 证据：" + ", ".join(_code(item) for item in finding.evidence_ids)
                     )
         else:
             lines.append("- 当前没有 Investigator finding。")
@@ -433,61 +409,49 @@ class ReportGenerator:
         lines.extend(_evidence_line(item) for item in evidence)
         self._append_v11_actions_section(lines, actions, verification_suggestions)
 
-        lines.extend(["", "## Lead 决策", ""])
+        lines.extend(["", "## 最终诊断" if review.final_decision else "## Lead 决策", ""])
+        if review.final_decision and review.final_decision.uncertainty:
+            lines.append("- 结论性质：最可能原因（暂定，尚未完全确认）")
+            lines.append(f"- 不确定性：{_safe_v11_text(review.final_decision.uncertainty)}")
         if review.lead_decision is not None:
             decision = review.lead_decision
             lines.append(f"- Action：{_code(decision.action)}")
             lines.append(f"- 摘要：{_safe_v11_text(decision.summary)}")
             lines.append(
-                "- Candidate IDs："
-                + ", ".join(_code(item) for item in decision.candidate_ids)
+                "- Candidate IDs：" + ", ".join(_code(item) for item in decision.candidate_ids)
                 if decision.candidate_ids
                 else "- Candidate IDs：无"
             )
             lines.append(
-                "- Evidence IDs："
-                + ", ".join(_code(item) for item in decision.evidence_ids)
+                "- Evidence IDs：" + ", ".join(_code(item) for item in decision.evidence_ids)
                 if decision.evidence_ids
                 else "- Evidence IDs：无"
             )
             lines.append(
-                "- Task IDs："
-                + ", ".join(_code(item) for item in decision.task_ids)
+                "- Task IDs：" + ", ".join(_code(item) for item in decision.task_ids)
                 if decision.task_ids
                 else "- Task IDs：无"
             )
             if decision.stop_reason:
                 lines.append(f"- Stop reason：{_safe_v11_text(decision.stop_reason)}")
         else:
-            lines.append("- 当前没有最终 Lead decision。")
+            lines.append("- 当前没有最终诊断决定。")
 
-        finding_task_ids = [
-            finding.task_id for finding in findings if finding.task_id is not None
-        ]
+        finding_task_ids = [finding.task_id for finding in findings if finding.task_id is not None]
         review_task_ids = [
             task_id
             for assessment in review.critic_assessments
             for task_id in assessment.supplemental_task_ids
         ]
-        lead_task_ids = (
-            review.lead_decision.task_ids if review.lead_decision is not None else []
-        )
+        lead_task_ids = review.lead_decision.task_ids if review.lead_decision is not None else []
         task_ids = list(dict.fromkeys(finding_task_ids + review_task_ids + lead_task_ids))
         actors = list(dict.fromkeys(str(finding.agent_name) for finding in findings))
         if review.critic_assessments:
             actors.append("CriticAgent")
         if review.lead_decision is not None:
             actors.append("LeadAgent")
-        actor_text = (
-            ", ".join(_code(actor) for actor in dict.fromkeys(actors))
-            if actors
-            else "无"
-        )
-        task_text = (
-            ", ".join(_code(task_id) for task_id in task_ids)
-            if task_ids
-            else "无"
-        )
+        actor_text = ", ".join(_code(actor) for actor in dict.fromkeys(actors)) if actors else "无"
+        task_text = ", ".join(_code(task_id) for task_id in task_ids) if task_ids else "无"
         lines.extend(
             [
                 "",
@@ -554,12 +518,10 @@ class ReportGenerator:
                     f"（{_code(action.risk_level)}，只读建议）"
                 )
                 lines.append(
-                    "  - 候选："
-                    + ", ".join(_code(item) for item in action.related_candidate_ids)
+                    "  - 候选：" + ", ".join(_code(item) for item in action.related_candidate_ids)
                 )
                 lines.append(
-                    "  - 证据："
-                    + ", ".join(_code(item) for item in action.supporting_evidence_ids)
+                    "  - 证据：" + ", ".join(_code(item) for item in action.supporting_evidence_ids)
                 )
                 lines.append(f"  - 说明：{_safe_v11_text(action.description)}")
         else:
@@ -567,14 +529,11 @@ class ReportGenerator:
         if verification_suggestions:
             lines.append("- 验证建议：")
             for suggestion in verification_suggestions:
-                candidate_refs = ", ".join(
-                    _code(item) for item in suggestion.related_candidate_ids
-                )
+                candidate_refs = ", ".join(_code(item) for item in suggestion.related_candidate_ids)
                 lines.append(
                     f"  - {_code(suggestion.id)} {_safe_v11_text(suggestion.title)} "
                     f"（候选：{candidate_refs}）"
                 )
-
 
     def _render_markdown(
         self,
@@ -676,8 +635,7 @@ class ReportGenerator:
             review is not None
             and review.execution_layer == AgentExecutionLayer.OPENAI_AGENTS_SDK
             and review.run_status == run.status
-            and run.status
-            in {MultiAgentRunStatus.COMPLETED, MultiAgentRunStatus.PARTIAL}
+            and run.status in {MultiAgentRunStatus.COMPLETED, MultiAgentRunStatus.PARTIAL}
         )
         decision = (
             review.decision_status.value
@@ -693,9 +651,7 @@ class ReportGenerator:
             ]
         )
         if run.failure_reason or not is_v7_review:
-            lines.append(
-                f"- 安全失败分类：{_code(safe_failure(run.status.value))}"
-            )
+            lines.append(f"- 安全失败分类：{_code(safe_failure(run.status.value))}")
 
         lines.extend(
             [
@@ -756,8 +712,7 @@ class ReportGenerator:
                     evidence_id
                     for candidate in review.candidates
                     for evidence_id in (
-                        candidate.supporting_evidence_ids
-                        + candidate.contradicting_evidence_ids
+                        candidate.supporting_evidence_ids + candidate.contradicting_evidence_ids
                     )
                 )
             )
@@ -791,8 +746,7 @@ class ReportGenerator:
                 lines.append(f"  - 状态：{_code(action.status)}")
                 lines.append(f"  - 说明：{escape_markdown(action.description)}")
                 lines.append(
-                    "  - 证据："
-                    + ", ".join(_code(item) for item in action.supporting_evidence_ids)
+                    "  - 证据：" + ", ".join(_code(item) for item in action.supporting_evidence_ids)
                 )
                 lines.append("  - 执行状态：V2 未执行该动作")
             return
@@ -833,9 +787,7 @@ class ReportGenerator:
                     f"{escape_markdown(suggestion.title)}"
                 )
                 lines.append(f"  - 说明：{escape_markdown(suggestion.description)}")
-                lines.append(
-                    f"  - 期望信号：{escape_markdown(suggestion.expected_signal)}"
-                )
+                lines.append(f"  - 期望信号：{escape_markdown(suggestion.expected_signal)}")
         else:
             lines.append("- 当前没有验证建议")
 
@@ -865,6 +817,15 @@ class ReportGenerator:
                 if finding.revises_finding_id is not None:
                     raise ValueError(f"invalid finding revision: {finding.id}")
                 continue
+            if (
+                coordination_review is not None
+                and coordination_review.authority_mode == AuthorityMode.AGENT
+            ):
+                # V11 补证归属于 Critic assessment，不能套用旧版 finding 修订链。
+                assessment_ids = {item.id for item in coordination_review.critic_assessments}
+                if finding.critic_assessment_id not in assessment_ids:
+                    raise ValueError(f"invalid supplemental finding assessment: {finding.id}")
+                continue
             revised = finding_by_id.get(finding.revises_finding_id)
             if (
                 revised is None
@@ -890,9 +851,7 @@ class ReportGenerator:
             if any(item.runtime_run_id != runtime_run_id for item in evidence):
                 raise ValueError("V11 report evidence owner mismatch")
             candidate_ids = {item.id for item in coordination_review.candidates}
-            accepted_candidate_ids = set(
-                coordination_review.authoritative_candidate_ids
-            )
+            accepted_candidate_ids = set(coordination_review.authoritative_candidate_ids)
             for action in actions:
                 if action.runtime_run_id != runtime_run_id:
                     raise ValueError("V11 action owner mismatch")
@@ -908,13 +867,9 @@ class ReportGenerator:
                 if not suggestion.related_candidate_ids:
                     raise ValueError("V11 verification lacks a candidate reference")
                 if not set(suggestion.related_candidate_ids) <= accepted_candidate_ids:
-                    raise ValueError(
-                        "V11 verification references a non-accepted candidate"
-                    )
+                    raise ValueError("V11 verification references a non-accepted candidate")
                 if not set(suggestion.related_candidate_ids) <= candidate_ids:
-                    raise ValueError(
-                        "V11 verification references an unknown candidate"
-                    )
+                    raise ValueError("V11 verification references an unknown candidate")
             for finding in agent_findings:
                 if finding.runtime_run_id != runtime_run_id:
                     raise ReportReferenceError("V11 finding owner mismatch")
@@ -940,11 +895,16 @@ class ReportGenerator:
             # 正是其正确出处（与准入层 _finding_from_draft、终态校验同一契约，
             # spec §7.2/§8.2）；非 GAP 仍限 usable。
             if finding.finding_type == AgentFindingType.GAP:
-                gap_referenced_ids.extend(finding.evidence_ids)
+                gap_referenced_ids.extend(
+                    [*finding.evidence_ids, *finding.contradicting_evidence_ids]
+                )
             else:
-                referenced_ids.extend(finding.evidence_ids)
+                referenced_ids.extend([*finding.evidence_ids, *finding.contradicting_evidence_ids])
 
         if coordination_review is not None:
+            decision = coordination_review.final_decision or coordination_review.lead_decision
+            if decision is not None:
+                referenced_ids.extend(decision.evidence_ids)
             for candidate in coordination_review.candidates:
                 referenced_ids.extend(candidate.supporting_evidence_ids)
                 referenced_ids.extend(candidate.contradicting_evidence_ids)
@@ -981,10 +941,12 @@ class ReportGenerator:
                     raise ValueError(f"missing evidence id: {evidence_id}")
 
         if coordination_review is not None:
+            decision = coordination_review.final_decision or coordination_review.lead_decision
+            if decision is not None:
+                referenced_ids.extend(decision.evidence_ids)
             for candidate in coordination_review.candidates:
                 for finding_id in (
-                    candidate.supporting_finding_ids
-                    + candidate.contradicting_finding_ids
+                    candidate.supporting_finding_ids + candidate.contradicting_finding_ids
                 ):
                     if finding_id not in finding_by_id:
                         raise ReportReferenceError(f"missing finding id: {finding_id}")

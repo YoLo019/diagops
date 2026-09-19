@@ -53,7 +53,7 @@ from backend.domain.runtime import (
     RuntimeRun,
     RuntimeRunKind,
     RuntimeRunReason,
-    seal_v11_execution_contract,
+    build_v11_execution_contract,
 )
 from backend.providers.registry import ProviderRegistry
 from backend.rca.analyzer import RcaAnalyzer
@@ -68,7 +68,6 @@ from backend.services.model_capability import (
 )
 from backend.services.v11_projection import ensure_v11_projection_owner
 from backend.tools.provider_tools import build_provider_tool_registry
-from backend.tools.registry import agent_manifest_hash
 
 
 @dataclass(frozen=True)
@@ -98,7 +97,9 @@ def _runtime_token_usage(runtime_store, run_id: str) -> tuple[int, int]:
     events = (
         item
         for item in runtime_store.list_events(run_id)
-        if item.event_type == RuntimeEventType.MODEL_COMPLETED
+        if item.event_type in {RuntimeEventType.MODEL_COMPLETED, RuntimeEventType.MODEL_FAILED}
+        and item.safe_payload.get("reservation_status") not in {"retrying", "deferred"}
+        and item.safe_payload.get("usage_known") is not False
     )
     payloads = [item.safe_payload for item in events]
     return (
@@ -133,14 +134,12 @@ class OpenRcaDiagnosisRunner:
         self.mode = mode or ("deterministic" if deterministic else "agent")
         self.turn = turn
 
-    def configure_runtime(
-        self, *, provider, model, prompt_version, timeout_seconds
-    ) -> None:
+    def configure_runtime(self, *, provider, model, prompt_version, timeout_seconds) -> None:
         self.provider = ModelProvider(provider)
-        if (
-            self.provider in {ModelProvider.DEEPSEEK, ModelProvider.OPENAI_COMPATIBLE}
-            and isinstance(self.model, OpenAICompatibleChatCompletionsModel)
-        ):
+        if self.provider in {
+            ModelProvider.DEEPSEEK,
+            ModelProvider.OPENAI_COMPATIBLE,
+        } and isinstance(self.model, OpenAICompatibleChatCompletionsModel):
             self.model = self.model.clone_for_model(model, max_retries=0)
         else:
             self.model = model
@@ -199,9 +198,7 @@ class OpenRcaDiagnosisRunner:
         )
         record = self.repository.save(record)
         execution_contract = (
-            self._v11_execution_contract(v11_runtime)
-            if v11_runtime is not None
-            else {}
+            self._v11_execution_contract(v11_runtime) if v11_runtime is not None else {}
         )
         runtime_run = self.runtime_store.create_run(
             RuntimeRun.create_new(
@@ -209,11 +206,7 @@ class OpenRcaDiagnosisRunner:
                 run_kind=RuntimeRunKind.LIVE,
                 strategy=strategy,
                 run_reason=RuntimeRunReason.INITIAL,
-                model_provider=(
-                    self.provider
-                    if not self.deterministic
-                    else None
-                ),
+                model_provider=(self.provider if not self.deterministic else None),
                 model_name="deterministic" if self.deterministic else model_name,
                 prompt_version=self.prompt_version,
                 tool_budget=8,
@@ -274,18 +267,8 @@ class OpenRcaDiagnosisRunner:
         projection_failed = False
         try:
             if self.mode == "v11-agent":
-                ensure_v11_projection_owner(
-                    self.repository, self.runtime_store, record
-                )
-                candidates = (
-                    [
-                        candidate
-                        for candidate in review.candidates
-                        if candidate.id in review.authoritative_candidate_ids
-                    ]
-                    if review is not None
-                    else []
-                )
+                ensure_v11_projection_owner(self.repository, self.runtime_store, record)
+                candidates = review.authoritative_candidates if review is not None else []
                 projection = project_v11_candidates(
                     task_index=case.task_index,
                     expected_count=case.expected_root_cause_count or 1,
@@ -342,8 +325,7 @@ class OpenRcaDiagnosisRunner:
         input_tokens, output_tokens = _runtime_token_usage(self.runtime_store, runtime_run.id)
         return BenchmarkCaseOutcome(
             root_causes=root_causes,
-            completed=record.status == InvestigationStatus.COMPLETED
-            and not projection_failed,
+            completed=record.status == InvestigationStatus.COMPLETED and not projection_failed,
             failure_category=failure_category,
             evidence_reference_count=len(references),
             invalid_evidence_reference_count=invalid_references,
@@ -366,83 +348,43 @@ class OpenRcaDiagnosisRunner:
     def _v11_execution_contract(self, runtime: V11Runtime) -> dict[str, object]:
         provider = self.provider.value
         model_name = self._model_name()
-        api_mode = (
-            "responses"
-            if self.provider == ModelProvider.OPENAI
-            else "chat_completions"
-        )
+        api_mode = "responses" if self.provider == ModelProvider.OPENAI else "chat_completions"
         endpoint, capability_hash = self._v11_model_identity(model_name)
         manifest = runtime.tool_registry.agent_manifest()
-        contract = {
-            "execution_contract_version": ExecutionContractVersion.V11.value,
-            "authority_mode": AuthorityMode.AGENT.value,
-            "model_provider": provider,
-            "model_name": model_name,
-            "prompt_version": self.prompt_version,
-            "api_mode": api_mode,
-            "endpoint_id": endpoint,
-            "capability_artifact_hash": capability_hash,
-            "tool_manifest": list(manifest),
-            "tool_manifest_hash": agent_manifest_hash(manifest),
-            "skill_catalog": skill_catalog_identity(
-                runtime.tool_registry.list_agent_specs()
+        return build_v11_execution_contract(
+            model_provider=provider,
+            model_name=model_name,
+            prompt_version=self.prompt_version,
+            api_mode=api_mode,
+            endpoint_id=endpoint,
+            capability_artifact_hash=capability_hash,
+            tool_manifest=manifest,
+            skill_catalog=skill_catalog_identity(runtime.tool_registry.list_agent_specs()),
+            structured_output_transport=(
+                self.model.structured_output_transport
+                if isinstance(self.model, OpenAICompatibleChatCompletionsModel)
+                else "native_json_schema"
             ),
-            "capability_identity": {
-                "provider": provider,
-                "model": model_name,
-                "api_mode": api_mode,
-                "structured_output_transport": (
-                    self.model.structured_output_transport
-                    if isinstance(
-                        self.model, OpenAICompatibleChatCompletionsModel
-                    )
-                    else "native_json_schema"
-                ),
-                "endpoint_id": endpoint,
-                "artifact_hash": capability_hash,
-            },
-            "limits": {
-                "max_turns": runtime.max_turns,
-                "model_turn_budget_scope": "run",
-                "max_investigators": runtime.max_investigators,
-                "max_rounds": runtime.max_rounds,
-                "token_budget": 10_000,
-                "max_tool_calls_per_specialist": runtime.max_tool_calls_per_specialist,
-                "tool_timeout_seconds": runtime.tool_timeout_seconds,
-            },
-            "topology": {
-                "mode": "multi_lead_investigators_critic",
-                "one_context": False,
-                "critic": True,
-                "subagent": False,
-                "hidden_model_calls": False,
-            },
-            "retry_policy": {
-                "max_retries": 1,
-                "retryable_categories": ["transport", "rate_limit"],
-                "provider_max_retries": 0,
-                "sdk_max_retries": 0,
-            },
-            "tool_budget": runtime.max_total_tool_calls,
-            "token_budget": 10_000,
-            "timeout_seconds": min(120.0, self.timeout_seconds),
-        }
-        return seal_v11_execution_contract(contract)
+            max_turns=runtime.max_turns,
+            max_investigators=runtime.max_investigators,
+            max_rounds=runtime.max_rounds,
+            token_budget=10000,
+            max_tool_calls_per_specialist=runtime.max_tool_calls_per_specialist,
+            tool_timeout_seconds=runtime.tool_timeout_seconds,
+            tool_budget=runtime.max_total_tool_calls,
+            timeout_seconds=min(120.0, self.timeout_seconds),
+        )
 
     def _v11_model_identity(self, model_name: str) -> tuple[str | None, str | None]:
         """冻结 OpenRCA V11 的端点身份；兼容端点必须先通过 capability gate。"""
         if self.provider == ModelProvider.OPENAI:
             return endpoint_id(OFFICIAL_OPENAI_BASE_URL), None
         if self.provider == ModelProvider.DEEPSEEK:
-            raise ValueError(
-                "OpenRCA V11 DeepSeek requires a certified openai_compatible endpoint"
-            )
+            raise ValueError("OpenRCA V11 DeepSeek requires a certified openai_compatible endpoint")
         if self.provider != ModelProvider.OPENAI_COMPATIBLE:
             return f"openrca-{self.provider.value}", None
         if not isinstance(self.model, OpenAICompatibleChatCompletionsModel):
-            raise ValueError(
-                "OpenRCA V11 openai_compatible requires the configured model adapter"
-            )
+            raise ValueError("OpenRCA V11 openai_compatible requires the configured model adapter")
         try:
             identity = endpoint_id(canonicalize_endpoint(self.model._base_url))
         except (AttributeError, TypeError, ValueError) as exc:
@@ -454,9 +396,7 @@ class OpenRcaDiagnosisRunner:
             endpoint_id_value=identity,
         )
         if artifact is None or artifact.result != "passed":
-            raise ValueError(
-                "OpenRCA V11 compatible endpoint lacks a passed capability artifact"
-            )
+            raise ValueError("OpenRCA V11 compatible endpoint lacks a passed capability artifact")
         validate_capability_for_prediction(
             artifact,
             provider=ModelProvider.OPENAI_COMPATIBLE.value,

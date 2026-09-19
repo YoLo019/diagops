@@ -1,5 +1,6 @@
 """model-capability-v1 工件与 live 认证（fake endpoint，不接触真实模型）。"""
 
+import asyncio
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,6 +33,10 @@ _ENDPOINT_ID = endpoint_id(_CANONICAL_URL)
 _TESTED_AT = datetime(2026, 8, 7, 12, 0, tzinfo=UTC)
 
 _PRODUCTION_RESULT = {
+    "action": "inconclusive",
+    "summary": "Synthetic schema probe",
+    "evidence_ids": [],
+    "stop_reason": "schema_probe",
     "candidates": [],
 }
 
@@ -214,10 +219,7 @@ class _FakeCompletions:
                 raise RuntimeError("native schema unsupported")
             schema = response_format.get("json_schema", {}).get("schema", {})
             schema_name = schema.get("title")
-            if (
-                schema_name == "CriticOutput"
-                and not self._supports_full_critic_schema
-            ):
+            if schema_name == "CriticOutput" and not self._supports_full_critic_schema:
                 raise RuntimeError("full critic schema unsupported")
             if schema_name == "V11SingleControlOutput":
                 payload = _PRODUCTION_RESULT
@@ -234,9 +236,7 @@ class _FakeCompletions:
         if response_format:
             return _FakeResponse(_FakeMessage(content='{"ok": true}'))
         if kwargs.get("tools"):
-            function_names = {
-                tool["function"]["name"] for tool in kwargs["tools"]
-            }
+            function_names = {tool["function"]["name"] for tool in kwargs["tools"]}
             if "submit_structured_output" in function_names:
                 if not self._supports_strict_output_tool:
                     return _FakeResponse(_FakeMessage(tool_calls=None))
@@ -245,11 +245,9 @@ class _FakeCompletions:
                     for tool in kwargs["tools"]
                     if tool["function"]["name"] == "submit_structured_output"
                 )
-                if (
-                    not self._supports_full_critic_schema
-                    and "CriticOutput"
-                    in output_tool["function"].get("description", "")
-                ):
+                if not self._supports_full_critic_schema and "CriticOutput" in output_tool[
+                    "function"
+                ].get("description", ""):
                     raise RuntimeError("full critic schema unsupported")
                 prompt = kwargs["messages"][0].get("content", "")
                 marker = "Return exactly this JSON for the requested workflow role: "
@@ -265,9 +263,7 @@ class _FakeCompletions:
                             ]
                         )
                     )
-                is_follow_up = any(
-                    message.get("role") == "tool" for message in kwargs["messages"]
-                )
+                is_follow_up = any(message.get("role") == "tool" for message in kwargs["messages"])
                 if not is_follow_up:
                     return _FakeResponse(
                         _FakeMessage(
@@ -289,9 +285,7 @@ class _FakeCompletions:
                         ]
                     )
                 )
-            tool_calls = (
-                [_FakeToolCall("read_logs")] if self._with_tool_calls else None
-            )
+            tool_calls = [_FakeToolCall("read_logs")] if self._with_tool_calls else None
             return _FakeResponse(_FakeMessage(tool_calls=tool_calls))
         usage = _FakeUsage() if self._with_usage else None
         return _FakeResponse(_FakeMessage(content="ok"), usage=usage)
@@ -304,6 +298,70 @@ class _FakeClient:
 
     async def close(self):
         self.closed = True
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["batched", "native_timeout", "strict_timeout", "role_timeout"])
+async def test_certification_deadlines_follow_requests_and_selected_transport(monkeypatch, mode):
+    import backend.services.model_capability as module
+
+    async def local_canary():
+        return True
+
+    monkeypatch.setattr(module, "_synthetic_v11_workflow_canary", local_canary)
+    deadline = 0.2
+
+    class DelayedCompletions(_FakeCompletions):
+        active = 0
+        peak = 0
+        roles = 0
+
+        async def create(self, **kwargs):
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+            try:
+                await asyncio.sleep(0)  # 模拟网络 I/O 让出执行权，观察实际并发峰值。
+                prompt = kwargs["messages"][0]["content"]
+                is_role = "requested workflow role" in prompt
+                is_native = bool(kwargs.get("response_format"))
+                is_strict = any(
+                    item["function"]["name"] == "submit_structured_output"
+                    for item in kwargs.get("tools", [])
+                )
+                if is_role:
+                    self.roles += 1
+                if (
+                    (mode == "native_timeout" and is_native)
+                    or (mode == "strict_timeout" and is_strict)
+                    or (mode == "role_timeout" and is_role)
+                ):
+                    await asyncio.sleep(deadline * 2)
+                elif mode == "batched" and (is_role or is_strict):
+                    # 每个请求及时返回，三批角色与两步工具探测均超过单次时限。
+                    await asyncio.sleep(deadline * 0.6)
+                return await super().create(**kwargs)
+            finally:
+                self.active -= 1
+
+    completions = DelayedCompletions(supports_native_schema=mode == "strict_timeout")
+    observations = await module._probe_capabilities(
+        _FakeClient(completions), model="fake", parallelism=3, deadline_seconds=deadline,
+    )
+    results = {item.capability: item for item in observations}
+    assert completions.roles == len(V11_WORKFLOW_OUTPUT_TYPES)
+    assert completions.peak == 3
+    assert completions.active == 0
+    expected = mode != "role_timeout"
+    assert results["v11_remote_role_schema_capability"].passed is expected
+    assert results["bounded_response_deadline"].passed is expected
+    if not expected:
+        assert "TimeoutError" in results["v11_remote_role_schema_capability"].detail
+        assert "v11_remote_role_schema_capability" in results["bounded_response_deadline"].detail
+    else:
+        selected = (
+            "native_json_schema_with_tools" if mode == "strict_timeout" else "strict_output_tool"
+        )
+        assert results[selected].passed
 
 
 @pytest.mark.anyio
@@ -321,9 +379,7 @@ async def test_certify_passes_against_fake_endpoint():
     assert artifact.result == "passed"
     assert artifact.endpoint_id == _ENDPOINT_ID
     assert artifact.api_mode == "chat_completions"
-    assert {item.capability for item in artifact.observations} == set(
-        CAPABILITY_MANIFEST
-    )
+    assert {item.capability for item in artifact.observations} == set(CAPABILITY_MANIFEST)
     assert client.closed is True
     assert artifact.artifact_hash is None  # hash 只在写盘时回填
     assert artifact.structured_output_transport == "native_json_schema"
@@ -338,6 +394,28 @@ async def test_certify_passes_against_fake_endpoint():
         "native_json_schema_with_tools",
         "strict_output_tool",
     } <= set(CAPABILITY_MANIFEST)
+
+
+@pytest.mark.anyio
+async def test_official_deepseek_probes_use_same_non_thinking_mode(monkeypatch):
+    import backend.services.model_capability as module
+
+    async def local_canary():
+        return True
+
+    monkeypatch.setattr(module, "_synthetic_v11_workflow_canary", local_canary)
+    completions = _FakeCompletions(supports_native_schema=False)
+    artifact = await certify_endpoint_async(
+        base_url="https://api.deepseek.com/beta", model="deepseek-flash",
+        api_key="local-secret", client_factory=lambda: _FakeClient(completions),
+    )
+    assert artifact.result == "passed"
+    assert artifact.structured_output_transport == "strict_output_tool"
+    assert completions.requests
+    assert all(
+        request.get("extra_body") == {"thinking": {"type": "disabled"}}
+        for request in completions.requests
+    )
 
 
 @pytest.mark.anyio
@@ -356,9 +434,7 @@ async def test_native_certification_uses_exact_single_production_schema():
         for item in completions.requests
         if item.get("response_format", {}).get("type") == "json_schema"
     )
-    expected = AgentOutputSchema(
-        V11SingleControlOutput, strict_json_schema=True
-    ).json_schema()
+    expected = AgentOutputSchema(V11SingleControlOutput, strict_json_schema=True).json_schema()
 
     assert artifact.structured_output_transport == "native_json_schema"
     assert request["response_format"]["json_schema"] == {
@@ -366,9 +442,10 @@ async def test_native_certification_uses_exact_single_production_schema():
         "strict": True,
         "schema": expected,
     }
-    AgentOutputSchema(V11SingleControlOutput).validate_json(
-        json.dumps(_PRODUCTION_RESULT)
-    )
+    AgentOutputSchema(V11SingleControlOutput).validate_json(json.dumps(_PRODUCTION_RESULT))
+    requested_json = request["messages"][0]["content"].split("JSON result: ", 1)[1]
+    assert json.loads(requested_json) == _PRODUCTION_RESULT
+    AgentOutputSchema(V11SingleControlOutput).validate_json(requested_json)
 
 
 @pytest.mark.anyio
@@ -401,9 +478,7 @@ def test_capability_manifest_hash_tracks_the_shared_production_schema(monkeypatc
     assert capability_manifest_hash() == baseline  # 确定性
 
     def mutated_schema() -> dict[str, object]:
-        schema = AgentOutputSchema(
-            V11SingleControlOutput, strict_json_schema=True
-        ).json_schema()
+        schema = AgentOutputSchema(V11SingleControlOutput, strict_json_schema=True).json_schema()
         schema["properties"]["candidates"]["maxItems"] = 1
         return schema
 
@@ -431,10 +506,7 @@ async def test_certify_selects_strict_output_tool_when_native_schema_is_unavaila
         request
         for request in completions.requests
         if request.get("tools")
-        and any(
-            tool["function"]["name"] == "submit_structured_output"
-            for tool in request["tools"]
-        )
+        and any(tool["function"]["name"] == "submit_structured_output" for tool in request["tools"])
     )
     function = next(
         tool["function"]
@@ -450,10 +522,7 @@ async def test_certify_selects_strict_output_tool_when_native_schema_is_unavaila
         any(message.get("role") == "tool" for message in request["messages"])
         for request in completions.requests
         if request.get("tools")
-        and any(
-            tool["function"]["name"] == "submit_structured_output"
-            for tool in request["tools"]
-        )
+        and any(tool["function"]["name"] == "submit_structured_output" for tool in request["tools"])
     )
     assert function["strict"] is True
     assert function["parameters"]["additionalProperties"] is False

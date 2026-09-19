@@ -170,7 +170,8 @@ V11_RUN_DEADLINE_MAX_SECONDS = 300.0
 
 # V11 的默认执行边界是产品、离线适配器和能力认证共用的输入来源。调用方
 # 可以通过显式配置收紧边界，但不应重新复制这些数字。
-V11_DEFAULT_MAX_TURNS = 8
+V11_DEFAULT_MAX_TURNS = 16
+V11_DEFAULT_MAX_MODEL_CORRECTIONS = 3
 V11_DEFAULT_TOOL_BUDGET = 8
 V11_DEFAULT_MAX_INVESTIGATORS = 3
 V11_DEFAULT_MAX_ROUNDS = 2
@@ -332,7 +333,11 @@ def build_v11_execution_contract(
 
     provider = getattr(inputs.model_provider, "value", inputs.model_provider)
     retry_policy = deepcopy(inputs.retry_policy)
+    retry_policy.update(
+        model_max_retries=3, model_max_corrections=V11_DEFAULT_MAX_MODEL_CORRECTIONS
+    )
     contract = {
+        "diagnosis_contract_revision": 2,
         "execution_contract_version": ExecutionContractVersion.V11.value,
         "authority_mode": AuthorityMode.AGENT.value,
         "model_provider": provider,
@@ -460,6 +465,12 @@ def validate_v11_execution_contract(contract: dict[str, Any]) -> None:
         raise ValueError("V11 execution contract skill catalog is incomplete")
     if not isinstance(retry_policy, dict):
         raise ValueError("V11 execution contract retry policy is incomplete")
+    if contract.get("diagnosis_contract_revision", 1) == 2 and (
+        retry_policy.get("model_max_retries") != 3
+        or type(retry_policy.get("model_max_corrections")) is not int
+        or not 1 <= retry_policy["model_max_corrections"] <= V11_DEFAULT_MAX_MODEL_CORRECTIONS
+    ):
+        raise ValueError("revision 2 requires bounded model retries and corrections")
     _validate_v11_topology(contract)
     if contract.get("token_budget") is None or limits.get("token_budget") is None:
         raise ValueError("V11 execution contract token ceiling is missing")
@@ -806,6 +817,8 @@ for _event_type in (
             "reservation_id",
             "reservation_status",
             "reserved_tokens",
+            "usage_known",
+            "accounted_tokens",
             "input_estimate",
             "actual_input_tokens",
             "budget_overrun_tokens",
@@ -1064,7 +1077,11 @@ def _validate_json_value(
     if value is None or isinstance(value, (bool, int)):
         return
     if isinstance(value, str):
-        limit = _MAX_STRUCTURED_STRING_LENGTH if structured else _MAX_SAFE_STRING_LENGTH
+        limit = (
+            _MAX_SAFE_STRING_LENGTH
+            if not structured or path.endswith(".failure_mechanism")
+            else _MAX_STRUCTURED_STRING_LENGTH
+        )
         if len(value) > limit:
             raise ValueError(f"{path} exceeds maximum string length")
         if structured and redact_value(value) != value:
@@ -1127,7 +1144,8 @@ def _validate_tool_scalar(value: Any, *, field_name: str, path: str) -> None:
             raise ValueError(f"{path} must be a boolean")
         return
     if field_name in _TOOL_TEXT_FIELDS:
-        if not isinstance(value, str) or not 1 <= len(value) <= _MAX_STRUCTURED_STRING_LENGTH:
+        limit = 512 if field_name == "failure_mechanism" else _MAX_STRUCTURED_STRING_LENGTH
+        if not isinstance(value, str) or not 1 <= len(value) <= limit:
             raise ValueError(f"{path} must be a bounded string")
         return
     if field_name in _TOOL_OPTIONAL_TEXT_FIELDS:

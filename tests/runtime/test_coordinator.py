@@ -2,6 +2,7 @@ import asyncio
 import json
 import threading
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -1134,3 +1135,40 @@ def test_escape_failure_category_maps_model_timeout_to_timeout():
         is RuntimeFailureCategory.UNKNOWN
     )
     assert _escape_failure_category(ValueError("x")) is RuntimeFailureCategory.UNKNOWN
+
+
+
+def test_structured_correction_exhaustion_is_output_validation():
+    from backend.diagnosis.v11_runtime import V11RuntimeContractError
+    from backend.domain.runtime import RuntimeFailureCategory
+    from backend.runtime.coordinator import _escape_failure_category
+
+    assert _escape_failure_category(
+        V11RuntimeContractError("structured correction exhausted")
+    ) == RuntimeFailureCategory.OUTPUT_VALIDATION
+    assert _escape_failure_category(
+        V11RuntimeContractError("structured correction exhausted [planning_unknown_skill]")
+    ) == RuntimeFailureCategory.OUTPUT_VALIDATION
+
+
+@pytest.mark.parametrize("resolved", [False, True])
+def test_runtime_failure_keeps_quota_unless_retry_resolved_it(resolved):
+    from backend.domain.agent_plan import AgentExecutionStatus
+    from backend.domain.multi_agent import ExecutionStepKind, FailureCategory
+    from backend.runtime.coordinator import _execution_failure_category
+
+    failed = SimpleNamespace(
+        id="failed", task_id="task", runtime_run_id="run", attempt=1, analysis_round=1,
+        step_kind=ExecutionStepKind.CRITIC_REVIEW, status=AgentExecutionStatus.FAILED,
+        failure_category=FailureCategory.QUOTA,
+    )
+    items = [failed]
+    if resolved:
+        items.append(SimpleNamespace(**{
+            **vars(failed), "id": "retry", "attempt": 2,
+            "status": AgentExecutionStatus.COMPLETED, "failure_category": FailureCategory.NONE,
+        }))
+    assert _execution_failure_category(items, "run") == (
+        RuntimeFailureCategory.OUTPUT_VALIDATION
+        if resolved else RuntimeFailureCategory.MODEL_FAILURE
+    )

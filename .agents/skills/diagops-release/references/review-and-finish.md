@@ -31,9 +31,15 @@ the affected review scope unless a shared contract changed.
 ## Final Verification
 
 Run every applicable focused check and release gate from the spec and
-`AGENTS.md` during the current work. A requirement is complete only with fresh
-evidence; otherwise record an external blocker or remove it through an approved
-spec change.
+`AGENTS.md` against the final reviewed state. A successful check already run on
+that same relevant state is current evidence; rerun after changes that could
+invalidate it, or when the approved gate requires a new run. Never substitute
+local checks for formal capability, SS15, or TT90 evidence. External runs still
+require their protocol, credential handling, and budget authorization.
+
+A requirement is complete only with current evidence; otherwise record an
+external blocker or remove it through an approved spec change. Do not claim
+release completion while required gates remain blocked.
 
 Update `docs/superpowers/current.md` with only:
 

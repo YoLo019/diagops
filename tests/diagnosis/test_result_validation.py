@@ -43,6 +43,7 @@ from backend.domain.multi_agent import (
     LeadAction,
     MultiAgentRunStatus,
 )
+from backend.domain.tool_calls import ToolCallRecord
 
 
 def test_root_cause_attribution_rejects_unknown_evidence():
@@ -283,6 +284,26 @@ def test_v11_validator_preserves_failed_run_task_audit_without_orphan_error():
     )
 
 
+@pytest.mark.parametrize("evidence_owner", [None, "other-run", "run-v11"])
+def test_tool_output_references_must_exist_in_the_same_run(evidence_owner):
+    evidence = [] if evidence_owner is None else [
+        _validation_metric_evidence(runtime_run_id=evidence_owner)
+    ]
+    kwargs = dict(
+        investigation_id="inv-1", runtime_run_id="run-v11", findings=[],
+        candidates=[], review=None, evidence=evidence,
+        tool_calls=[ToolCallRecord(
+            task_id="task", agent_name="InvestigatorAgent", tool_name="query_metrics",
+            runtime_run_id="run-v11", status="success", output_evidence_ids=["ev-metric"],
+        )],
+    )
+    if evidence_owner == "run-v11":
+        validate_v11_result(**kwargs)
+    else:
+        with pytest.raises(ValueError, match="tool_evidence_reference"):
+            validate_v11_result(**kwargs)
+
+
 def _validation_metric_evidence(
     *, runtime_run_id: str = "run-v11", evidence_id: str = "ev-metric"
 ):
@@ -383,24 +404,55 @@ def test_v11_partial_rejects_candidate_with_failed_causal_check():
         )
 
 
-def test_v11_partial_requires_two_provider_types_when_two_providers_succeeded():
-    """spec §9.2：两种 Provider 均成功时候选支撑证据必须覆盖两种类型。"""
-    with pytest.raises(Exception, match="partial_candidate_provider_types"):
-        validate_v11_result(
-            **_partial_validation_kwargs(
-                candidate_supporting=("ev-log", "ev-log-2"),
-                run_evidence=(
-                    _validation_evidence(),
-                    _validation_evidence(evidence_id="ev-log-2"),
-                    _validation_metric_evidence(),
-                ),
-            )
+def test_v11_partial_does_not_require_unrelated_provider_support():
+    """出现另一种遥测不应使已有有效证据的候选突然失去发布资格。"""
+    validate_v11_result(
+        **_partial_validation_kwargs(
+            candidate_supporting=("ev-log", "ev-log-2"),
+            run_evidence=(
+                _validation_evidence(),
+                _validation_evidence(evidence_id="ev-log-2"),
+                _validation_metric_evidence(),
+            ),
         )
+    )
 
 
 def test_v11_partial_without_round_two_task_is_valid():
     """spec §9.2：合法 partial 不要求 round-2 supplemental task linkage。"""
     validate_v11_result(**_partial_validation_kwargs())
+
+
+@pytest.mark.parametrize("uncertainty,status,expected", [
+    ("Capacity limit is unobserved", DiagnosticStatus.PARTIAL, None),
+    ("Capacity limit is unobserved", DiagnosticStatus.COMPLETE,
+     "tentative_conclusion_requires_partial"),
+    (None, DiagnosticStatus.PARTIAL, "final_candidate_unknown_mechanism"),
+])
+def test_tentative_conclusion_keeps_unknown_checks_explicit(uncertainty, status, expected):
+    from backend.domain.agent_findings import FinalDiagnosisDecision
+
+    kwargs = _partial_validation_kwargs()
+    review = kwargs["review"]
+    review.final_decision = FinalDiagnosisDecision(
+        actor="critic", action="conclude", candidate_ids=["candidate-1"],
+        evidence_ids=["ev-log", "ev-metric"], summary="Most likely resource fault",
+        uncertainty=uncertainty,
+    )
+    review.lead_decision = None
+    for check in review.critic_assessments[0].checks:
+        if check.name == CausalCheckName.MECHANISM:
+            check.status = CausalCheckStatus.UNKNOWN
+            check.evidence_ids = []
+            check.gap = "Capacity limit is unobserved"
+    kwargs["status"] = status
+    if expected:
+        with pytest.raises(ValueError, match=expected):
+            validate_v11_result(**kwargs)
+    else:
+        validate_v11_result(**kwargs)
+        restored = CoordinationReview.model_validate_json(review.model_dump_json())
+        assert restored.final_decision.uncertainty == uncertainty
 
 
 def test_v11_partial_allows_single_successful_provider_type():
@@ -717,3 +769,16 @@ def test_v11_candidate_scope_mismatch_still_rejected():
             review=None,
             evidence=[evidence],
         )
+
+
+def test_v11_candidate_can_link_observer_and_causal_entity_evidence():
+    caller = _scoped_evidence(["checkout-api"])
+    callee = _scoped_evidence(["redis-cart"]).model_copy(update={"id": "ev-callee"})
+    candidate = _validation_candidate(caller.id).model_copy(update={
+        "affected_entity": "redis-cart",
+        "supporting_evidence_ids": [caller.id, callee.id],
+    })
+    validate_v11_result(
+        investigation_id="inv-1", runtime_run_id="run-v11", findings=[],
+        candidates=[candidate], review=None, evidence=[caller, callee],
+    )

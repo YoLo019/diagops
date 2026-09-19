@@ -2,17 +2,21 @@
 
 Work one unblocked tracer-bullet slice at a time.
 
-1. Re-read the slice, its requirement sections, affected code, and existing
-   tests at the agreed seam. Do not preload unrelated plan or spec sections.
+1. Use the current slice, relevant requirement sections, affected code, and
+   existing tests at the agreed seam. Re-read when context is missing or changed;
+   do not preload unrelated plan or spec sections.
 2. Confirm the baseline still matches the plan. Stop if concurrent changes
    invalidate assumptions or ownership.
-3. For non-trivial behavior, run a red-green loop at the agreed public seam:
-   write one failing behavior test, observe the expected failure, implement the
-   minimum behavior, then observe it pass.
-4. Keep the slice vertical. Let each test teach the next small step instead of
-   writing all tests or all layers in advance.
+3. Validate observable behavior at the agreed public seam. Reuse existing tests;
+   add or adjust regression coverage when needed. For a reproducible bug, observe
+   the relevant failure before fixing it when practical. Follow any red-green
+   requirement in the approved plan, but do not invent a fixed test count or
+   mirror the implementation just to produce a test.
+4. Keep the slice vertical and use feedback to choose the next small step.
 5. Run the smallest relevant static, test, or build check while working. Run the
-   slice's focused check before marking it complete.
+   slice's focused check before marking it complete. Inspect test fixtures and
+   configuration when side effects are uncertain; this workflow does not imply
+   production isolation or authorize paid model calls.
 6. Update only the slice status and concise evidence pointer. Keep raw logs and
    repeated command output out of the plan and `current.md`.
 

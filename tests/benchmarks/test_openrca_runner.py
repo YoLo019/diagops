@@ -300,15 +300,17 @@ def v11_fixture_turn(**kwargs):
             "findings": [],
             "candidates": [],
         }
-    assert output_type == "LeadAdjudicationOutput"
+    assert output_type == "CriticOutput"
     return {
-        "decision": {
+        "assessments": [],
+        "tasks": [],
+        "final_decision": {
             "action": "inconclusive",
             "summary": "The bounded local fixture has no candidate.",
             "stop_reason": "local fixture boundary",
-            "task_ids": [],
-            "candidate_ids": [],
-        }
+            "candidate_refs": [],
+            "evidence_ids": [],
+        },
     }
 
 

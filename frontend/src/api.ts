@@ -232,6 +232,16 @@ export type InvestigationSummary = {
   diagnostic_status?: string | null;
   authority_mode?: string | null;
   lead_decision?: LeadDecision | null;
+  final_decision?: {
+    actor: "critic" | "lead" | "single";
+    action: "conclude" | "inconclusive";
+    candidate_ids: string[];
+    evidence_ids: string[];
+    summary: string;
+    stop_reason?: string | null;
+    uncertainty?: string | null;
+  } | null;
+  diagnosis_contract_revision?: 1 | 2;
   critic_assessments?: CriticAssessment[];
   active_runtime_run_id?: string | null;
   action_count: number;
@@ -519,6 +529,16 @@ export type CoordinationReview = {
   diagnostic_status?: DiagnosticStatus | null;
   stop_reason?: string | null;
   lead_decision?: LeadDecision | null;
+  final_decision?: {
+    actor: "critic" | "lead" | "single";
+    action: "conclude" | "inconclusive";
+    candidate_ids: string[];
+    evidence_ids: string[];
+    summary: string;
+    stop_reason?: string | null;
+    uncertainty?: string | null;
+  } | null;
+  diagnosis_contract_revision?: 1 | 2;
   critic_assessments?: CriticAssessment[];
   run_status?: MultiAgentRunStatus;
   decision_status?: CoordinationDecisionStatus | null;

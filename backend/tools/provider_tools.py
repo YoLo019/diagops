@@ -58,7 +58,9 @@ _INTERNAL_TOOLS = frozenset({"query_prometheus"})
 _DESCRIPTIONS: dict[str, str] = {
     "read_logs": (
         "Read log evidence. Requires start_time, end_time, and reason; the window "
-        "must be timezone-aware and no longer than two hours."
+        "must be timezone-aware and no longer than two hours. All keywords must match "
+        "the same record (AND); levels matches any listed level. Use instance to scope "
+        "the entity and one keyword or [] before adding restrictive filters."
     ),
     "query_metrics": (
         "Read metric evidence. Requires start_time, end_time, and reason; the window "
@@ -149,6 +151,7 @@ def build_provider_tool_registry(
                 ),
             ),
             provider_handler,
+            available=partial(provider_registry.supports_tool, name),
         )
     registry.register(
         ToolSpec(
@@ -159,6 +162,7 @@ def build_provider_tool_registry(
             provider=EvidenceProvider.VERIFIED_INCIDENT,
         ),
         partial(invoke_lookup_memory, memory_lookup),
+        available=lambda _event: memory_lookup is not None,
     )
     registry.verified_memory_lookup = memory_lookup
     return registry

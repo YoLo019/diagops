@@ -42,6 +42,7 @@ from backend.diagnosis.coordinator import DiagnosisCoordinator
 from backend.diagnosis.diagnostic_skills import skill_catalog_identity
 from backend.diagnosis.orchestrator import DiagnosisOrchestrator
 from backend.diagnosis.v11_runtime import (
+    _CAUSAL_EVIDENCE_RULES,
     LeadPlanningOutput,
     LeadPlanningTaskDraft,
     V11Runtime,
@@ -49,11 +50,12 @@ from backend.diagnosis.v11_runtime import (
     V11SingleControlOutput,
     _candidate_lifecycle_trace,
     _evidence_projection,
+    _investigator_failure_audit,
     _InvestigatorResult,
     _resolved_execution_ids,
     _select_evidence_digest,
 )
-from backend.domain.agent_findings import AgentFinding, CoordinationReview
+from backend.domain.agent_findings import AgentFinding, CoordinationReview, FinalDiagnosisDecision
 from backend.domain.agent_plan import (
     AgentExecution,
     AgentExecutionStatus,
@@ -65,7 +67,6 @@ from backend.domain.evidence import EvidenceStatus
 from backend.domain.multi_agent import (
     AgentExecutionLayer,
     AuthorityMode,
-    DiagnosticStatus,
     ExecutionActor,
     ExecutionContractVersion,
     ExecutionStepKind,
@@ -108,7 +109,7 @@ from backend.safety.redaction import (
 )
 from backend.services.source_identity import reject_reparse_path, resolve_source_identity
 from backend.services.v11_projection import ensure_v11_projection_owner
-from backend.tools.provider_tools import VerifiedMemoryLookup, build_provider_tool_registry
+from backend.tools.provider_tools import build_provider_tool_registry
 
 PROMPT_VERSION = "v11-rcaeval-v5"
 EMPTY_MEMORY_IDENTITY = {"schema_version": "empty-run-owned-memory-v1", "entries": []}
@@ -191,9 +192,10 @@ def _unresolved_case_failure_category(
         categories.add(category_map.get(category, category))
     if not categories:
         return None
-    # 先返回可重试类别，保证 transport 与其它审计失败同时存在时，案例级
-    # bounded retry 仍能吸收明确的运营噪声；非重试类别则 fail-closed。
+    # 预算耗尽优先于早期失败，不能因旧纠错/传输记录而重启整个案例。
+    # 其余运营噪声仍允许案例级 bounded retry。
     for category in (
+        FailureCategory.QUOTA.value,
         "transport",
         "rate_limit",
         RuntimeFailureCategory.TIMEOUT.value,
@@ -202,17 +204,6 @@ def _unresolved_case_failure_category(
         if category in categories:
             return category
     return sorted(categories)[0]
-
-
-class EmptyRunOwnedMemory(VerifiedMemoryLookup):
-    """正式对照两侧共享的显式空 memory，不接历史 incident repository。"""
-
-    def __init__(self) -> None:
-        pass
-
-    def lookup(self, event, query=None):
-        del event, query
-        return []
 
 
 def _single_control_evidence_digest(evidence: list[Any]) -> list[dict[str, Any]]:
@@ -252,7 +243,7 @@ class SingleInvestigatorAgent(V11Runtime):
         return None
 
     async def investigator_round_1(self, *, repository, investigation_id: str, event):
-        manifest = self._agent_manifest()
+        manifest = self._agent_manifest(event)
         base_evidence = list(repository.get(investigation_id).evidence)
         evidence_digest = _single_control_evidence_digest(base_evidence)
         evidence_ids = [item["id"] for item in evidence_digest]
@@ -270,9 +261,7 @@ class SingleInvestigatorAgent(V11Runtime):
             runtime_run_id=self.runtime_run_id,
         )
         instance_id = "single-investigator"
-        selected_skills = [
-            f"{skill.name}@{skill.version}" for skill in self.skills
-        ]
+        selected_skills = [f"{skill.name}@{skill.version}" for skill in self.skills]
         # 先写入唯一 owned planning action，确保 skill selection 与 task
         # identity 在首个 tool call 前已经进入 durable runtime projection；
         # 后续同一模型 context 的结构化 planning 会覆盖这份 provisional plan。
@@ -308,9 +297,7 @@ class SingleInvestigatorAgent(V11Runtime):
             registry=self.tool_registry,
             task_ids={instance_id: task.id},
             max_tool_calls_per_specialist=self.max_tool_calls_per_specialist,
-            max_total_tool_calls=self._remaining_tool_budget_for(
-                repository, investigation_id
-            ),
+            max_total_tool_calls=self._remaining_tool_budget_for(repository, investigation_id),
             tool_timeout_seconds=self.tool_timeout_seconds,
             runtime_run_id=self.runtime_run_id,
             resolve_tool_result=self._resolve_tool_result,
@@ -326,7 +313,9 @@ class SingleInvestigatorAgent(V11Runtime):
         self._active_sessions.add(session)
         try:
             prompt = (
-                "Return only diagnostic candidates. Use read-only evidence tools "
+                "Return action (conclude or inconclusive), ordered diagnostic candidates, "
+                "summary, evidence_ids and stop_reason. An inconclusive result requires "
+                "no candidates and a stop reason. Use read-only evidence tools "
                 "when needed. Use the committed evidence digest as a starting "
                 "point; it is not exhaustive. Every "
                 "candidate needs affected_entity, "
@@ -335,9 +324,8 @@ class SingleInvestigatorAgent(V11Runtime):
                 "classification phrase directly supported by the evidence; keep "
                 "explanation in failure_mechanism. "
                 "Use a focused query when the digest does not distinguish the "
-                "affected entity or mechanism. A directly scoped signal family is "
-                "an evidence-backed mechanism classification; do not suppress it "
-                "merely because a deeper causal chain is unavailable. When several "
+                "affected entity or mechanism. Entity-scoped signal families describe "
+                "observations and require a causal discriminator. When several "
                 "clusters are present, use entity scope and correlated signal families "
                 "to choose the candidate rather than an unscoped amplitude alone. "
                 "Use traces or dependency evidence when they provide a discriminating "
@@ -348,7 +336,8 @@ class SingleInvestigatorAgent(V11Runtime):
                 "Do not emit server-owned IDs, ranks, runtime fields, review "
                 "fields, or invented references. When cited evidence has "
                 "scope_entity_ids, affected_entity must exactly match an entity "
-                "in every cited evidence scope."
+                "in the union of cited evidence scopes. "
+                + _CAUSAL_EVIDENCE_RULES
             )
             turn = await self._call_model(
                 actor=ExecutionActor.INVESTIGATOR.value,
@@ -361,10 +350,9 @@ class SingleInvestigatorAgent(V11Runtime):
                     "tool_manifest": manifest,
                 },
                 tools=session.tools_for(instance_id, 1),
+                tool_session=session,
                 remaining_token_budget=self._remaining_token_budget,
-                remaining_tool_budget=self._remaining_tool_budget_for(
-                    repository, investigation_id
-                ),
+                remaining_tool_budget=self._remaining_tool_budget_for(repository, investigation_id),
                 repository=repository,
                 investigation_id=investigation_id,
                 task_id=task.id,
@@ -375,9 +363,7 @@ class SingleInvestigatorAgent(V11Runtime):
             output = self._parse_output(turn.output, V11SingleControlOutput)
             candidate_drafts = tuple(output.candidates)
             committed_evidence = repository.get(investigation_id).evidence
-            # 模型输出是不可信数据：单个 draft 违约只拒绝该 draft 并留持久化
-            # 审计（spec §7.4 校验器可拒绝输出），不让同批合法 finding 陪葬
-            # （与 Multi 路径 _run_investigator 同一语义）。
+            # 准入层逐项保存证据与拒绝记录；最终选择含无效候选时整次输出失败。
             findings: list[AgentFinding] = []
             audit_executions: list[AgentExecution] = []
             candidates = self._admit_candidates(
@@ -430,6 +416,31 @@ class SingleInvestigatorAgent(V11Runtime):
             )
             self._persist_investigator_result(repository, investigation_id, result)
             self._persist_candidate_projection(repository, investigation_id, candidates)
+            if repository.get_coordination_review(investigation_id) is None:
+                repository.save_coordination_review(
+                    self._empty_review(repository, investigation_id)
+                )
+            if len(candidates) != len(candidate_drafts):
+                raise V11RuntimeContractError("Single final selection contains rejected candidates")
+            decision = FinalDiagnosisDecision(
+                actor="single",
+                action=output.action,
+                candidate_ids=[candidate.id for candidate in candidates],
+                evidence_ids=output.evidence_ids,
+                summary=output.summary,
+                stop_reason=output.stop_reason,
+            )
+            review = repository.get_coordination_review(investigation_id) or self._empty_review(
+                repository, investigation_id
+            )
+            repository.save_coordination_review(
+                review.model_copy(
+                    update={
+                        "final_decision": decision,
+                        "diagnosis_contract_revision": 2,
+                    }
+                )
+            )
             self._completed_rounds = 1
             self._update_summary(repository, investigation_id)
             return findings
@@ -445,12 +456,14 @@ class SingleInvestigatorAgent(V11Runtime):
                 diagnostic["message"],
                 diagnostic["location"],
             )
+            failure_message, failure_category = _investigator_failure_audit(exc)
             failed = self._failed_execution(
                 task_id=task.id,
                 actor=instance_id,
                 step_kind=ExecutionStepKind.INVESTIGATOR_ANALYSIS,
-                message="single control failed",
+                message=failure_message,
                 analysis_round=1,
+                failure_category=failure_category,
             )
             self._persist_investigator_result(
                 repository,
@@ -491,6 +504,7 @@ class SingleInvestigatorAgent(V11Runtime):
             item.id: item
             for item in repository.get(investigation_id).evidence
             if item.status in {EvidenceStatus.SUCCESS, EvidenceStatus.PARTIAL}
+            and item.runtime_run_id == self.runtime_run_id
         }
         ranks = [candidate.rank for candidate in review.candidates]
         if len(review.candidates) > 3 or len(ranks) != len(set(ranks)):
@@ -506,23 +520,23 @@ class SingleInvestigatorAgent(V11Runtime):
                 raise V11RuntimeContractError(
                     "single control candidate references unusable evidence"
                 )
-        # 公共 CoordinationReview 的 conclude 语义要求 Critic accept；单 Agent
-        # 明确没有 Critic，因此 durable 产品投影以 inconclusive 收口，benchmark
-        # prediction 只读取上面机械校验过的同 run candidates。
-        decision = LeadDecision(
-            action=LeadAction.INCONCLUSIVE,
-            summary="Frozen single-investigator control validation completed.",
-            stop_reason="single_control_no_critic",
-        )
+        decision = review.final_decision
+        if decision is None or decision.actor != "single":
+            raise V11RuntimeContractError("Single final decision is missing")
+        if not set(decision.evidence_ids) <= set(evidence):
+            raise V11RuntimeContractError("Single final evidence is unavailable")
         review = review.model_copy(
             update={
-                "lead_decision": decision,
-                "diagnostic_status": DiagnosticStatus.INCONCLUSIVE,
-                "run_status": MultiAgentRunStatus.COMPLETED,
+                "lead_decision": decision.as_lead_decision(),
+                "diagnostic_status": self._diagnostic_status(decision),
+                "run_status": MultiAgentRunStatus.PARTIAL
+                if self._failures and decision.action == "conclude"
+                else MultiAgentRunStatus.COMPLETED,
                 "stop_reason": decision.stop_reason,
                 "summary": decision.summary,
             }
         )
+        CoordinationReview.model_validate(review.model_dump())
         repository.save_coordination_review(review)
         self._update_summary(repository, investigation_id)
         return review
@@ -547,15 +561,12 @@ def validate_configuration_set(
     if single_equal.token_budget != single.token_budget * 3:
         raise ValueError("equal-token budget must equal 3x intended single")
     common = {
-        (item.max_turns, item.tool_budget, item.timeout_seconds)
-        for item in configurations.values()
+        (item.max_turns, item.tool_budget, item.timeout_seconds) for item in configurations.values()
     }
     if len(common) != 1:
         raise ValueError("configuration tool/turn/deadline identity mismatch")
     for key, value in configurations.items():
-        if (value.max_investigators, value.max_rounds) != EXPECTED_CONFIGURATION_TOPOLOGY[
-            key
-        ]:
+        if (value.max_investigators, value.max_rounds) != EXPECTED_CONFIGURATION_TOPOLOGY[key]:
             raise ValueError("configuration topology limits are not frozen")
 
 
@@ -614,8 +625,8 @@ class RcaEvalCaseRunner:
                 evidence_namespace=run_id,
             )
         )
-        memory = EmptyRunOwnedMemory()
-        registry = build_provider_tool_registry(providers, memory)
+        # 对照不接历史记忆；未配置的查询不能消耗诊断工具额度。
+        registry = build_provider_tool_registry(providers)
         runtime_type = V11Runtime if budget.configuration.is_multi else SingleInvestigatorAgent
         runtime_kwargs = {
             "model": self.model,
@@ -627,7 +638,13 @@ class RcaEvalCaseRunner:
             "timeout_seconds": budget.timeout_seconds,
             "max_total_tool_calls": budget.tool_budget,
             "max_tool_calls_per_specialist": min(
-                V11_DEFAULT_MAX_TOOL_CALLS_PER_SPECIALIST, budget.tool_budget
+                max(
+                    V11_DEFAULT_MAX_TOOL_CALLS_PER_SPECIALIST,
+                    budget.tool_budget // budget.max_investigators,
+                )
+                if budget.configuration.is_multi
+                else budget.tool_budget,
+                budget.tool_budget,
             ),
             "token_budget": budget.token_budget,
         }
@@ -741,19 +758,24 @@ class RcaEvalCaseRunner:
             # 持久化的显式类别优先于逃逸异常类名；unknown 不携带信息，
             # 让位给异常类名，再以 failure_reason 兜底。
             persisted_category = (
-                persisted.failure_category.value
-                if persisted.failure_category is not None
-                else None
+                persisted.failure_category.value if persisted.failure_category is not None else None
             )
             if (
+                persisted_category in {
+                    RuntimeFailureCategory.OUTPUT_VALIDATION.value,
+                    RuntimeFailureCategory.MODEL_FAILURE.value,
+                }
+                and lifecycle_failure_category == FailureCategory.QUOTA.value
+            ):
+                # phase 的通用失败标记不能覆盖 execution 已明确记录的预算耗尽。
+                failure_category = lifecycle_failure_category
+            elif (
                 persisted_category is not None
                 and persisted_category != RuntimeFailureCategory.UNKNOWN.value
             ):
                 failure_category = persisted_category
             elif failure_category is None:
-                failure_category = (
-                    persisted_category or record.failure_reason or "failed"
-                )
+                failure_category = persisted_category or record.failure_reason or "failed"
         prediction = CasePrediction(
             case_id=case.case_id,
             configuration=budget.configuration,
@@ -778,7 +800,9 @@ class RcaEvalCaseRunner:
             duration_ms=round((perf_counter() - started) * 1000),
             input_tokens=input_tokens,
             output_tokens=output_tokens,
-            tool_calls=len(calls),
+            tool_calls=len({
+                call.logical_call_id or call.id for call in calls if call.consumes_budget
+            }),
             read_only_violations=read_only_violations,
             leakage_violations=0,
             failure_category=failure_category,
@@ -807,7 +831,7 @@ def run_case_with_bounded_retry(
 ) -> CasePrediction:
     """同一 epoch 内对运营噪声失败的案例做有界重试（best-of-2）。
 
-    每次 attempt 都是全新 investigation/run（benchmark 用 EmptyRunOwnedMemory，
+    每次 attempt 都是全新 investigation/run（benchmark 不配置历史记忆，
     无跨案例记忆污染）；bundle 记录最后一次 attempt 的预测与 attempts 计数，
     失败 attempt 留在侧库作为审计。30/30 全量 completed 语义不变。
     """
@@ -848,9 +872,7 @@ def build_execution_contract(
             max_investigators=budget.max_investigators,
             max_rounds=budget.max_rounds,
             token_budget=budget.token_budget,
-            max_tool_calls_per_specialist=min(
-                V11_DEFAULT_MAX_TOOL_CALLS_PER_SPECIALIST, budget.tool_budget
-            ),
+            max_tool_calls_per_specialist=runtime.max_tool_calls_per_specialist,
             tool_timeout_seconds=runtime.tool_timeout_seconds,
             tool_budget=budget.tool_budget,
             timeout_seconds=budget.timeout_seconds,
@@ -879,9 +901,7 @@ def freeze_prediction_bundle(bundle: PredictionBundle, output_dir: Path) -> str:
         encoding="utf-8",
     )
     checksum = hashlib.sha256(path.read_bytes()).hexdigest()
-    (output_dir / "SHA256SUMS").write_text(
-        f"{checksum}  predictions.json\n", encoding="utf-8"
-    )
+    (output_dir / "SHA256SUMS").write_text(f"{checksum}  predictions.json\n", encoding="utf-8")
     return hashlib.sha256((output_dir / "SHA256SUMS").read_bytes()).hexdigest()
 
 
@@ -911,9 +931,7 @@ def freeze_prediction_set(
     records = ledger.side_records()
     if set(records) != expected_sides:
         raise ValueError("prediction set side records are incomplete or extra")
-    actual_children = {
-        path.name for path in root.iterdir() if path.name != "SHA256SUMS"
-    }
+    actual_children = {path.name for path in root.iterdir() if path.name != "SHA256SUMS"}
     if actual_children != expected_sides:
         raise ValueError("prediction set contains extra or missing side directories")
     bundles: dict[RcaEvalConfiguration, PredictionBundle] = {}
@@ -926,10 +944,7 @@ def freeze_prediction_set(
         if side["status"] != "completed":
             raise ValueError("prediction set side is not completed in custodian ledger")
         expected_canonical = canonical_locator(expected_dir)
-        if (
-            not side["output_dir"]
-            or side["output_dir"] != expected_canonical
-        ):
+        if not side["output_dir"] or side["output_dir"] != expected_canonical:
             raise ValueError("prediction set side output path differs from ledger")
         locator = side.get("output_locator")
         if (
@@ -963,8 +978,7 @@ def freeze_prediction_set(
         for bundle in bundles.values()
     }
     case_sets = {
-        tuple(sorted(item.case_id for item in bundle.predictions))
-        for bundle in bundles.values()
+        tuple(sorted(item.case_id for item in bundle.predictions)) for bundle in bundles.values()
     }
     if len(identities) != 1 or len(case_sets) != 1:
         raise ValueError("prediction set contains mixed identity or case rows")
@@ -1101,9 +1115,7 @@ def frozen_run_identity(
         git_dirty=False,
         runtime_manifest_hash=runtime_manifest_hash,
         capability=capability,
-        prompt_hash=_hash_files(
-            [Path(__file__), backend_root / "diagnosis" / "v11_runtime.py"]
-        ),
+        prompt_hash=_hash_files([Path(__file__), backend_root / "diagnosis" / "v11_runtime.py"]),
         tool_manifest_hash=tool_manifest_hash_value,
         skill_catalog_hash=skill_catalog_hash_value,
         prediction_schema_hash=canonical_json_sha256(CasePrediction.model_json_schema()),
@@ -1129,13 +1141,9 @@ def _published_candidates(
 ):
     if not completed or review is None:
         return []
-    if single:
+    if single and review.final_decision is None:
         return sorted(review.candidates, key=lambda item: item.rank)
-    allowed = set(review.authoritative_candidate_ids)
-    return sorted(
-        (candidate for candidate in review.candidates if candidate.id in allowed),
-        key=lambda item: item.rank,
-    )
+    return review.authoritative_candidates
 
 
 def _candidate_lifecycle_audit(
@@ -1155,8 +1163,7 @@ def _candidate_lifecycle_audit(
     resolved_failure_ids = _resolved_execution_ids(executions)
     for execution in executions:
         if (
-            execution.status
-            in {AgentExecutionStatus.FAILED, AgentExecutionStatus.CANCELLED}
+            execution.status in {AgentExecutionStatus.FAILED, AgentExecutionStatus.CANCELLED}
             and execution.id in resolved_failure_ids
         ):
             continue
@@ -1242,7 +1249,9 @@ def _runtime_token_usage(runtime_store, run_id: str) -> tuple[int, int]:
     payloads = [
         item.safe_payload
         for item in runtime_store.list_events(run_id)
-        if item.event_type == RuntimeEventType.MODEL_COMPLETED
+        if item.event_type in {RuntimeEventType.MODEL_COMPLETED, RuntimeEventType.MODEL_FAILED}
+        and item.safe_payload.get("reservation_status") not in {"retrying", "deferred"}
+        and item.safe_payload.get("usage_known") is not False
     ]
     return (
         sum(int(item.get("input_tokens", 0)) for item in payloads),

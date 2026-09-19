@@ -972,7 +972,10 @@ class SQLiteRuntimeStore:
                 ensure_v11_tool_budget_available(
                     run_snapshot, existing_calls, commit.call
                 )
-                commit.business_mutation.apply_sqlite(
+                current = self.investigation_repository.get_with_connection(
+                    connection, run_snapshot.investigation_id
+                )
+                commit.business_mutation.merge_tool_result(current).apply_sqlite(
                     self.investigation_repository, connection
                 )
                 sequence = self._allocate_sequence(

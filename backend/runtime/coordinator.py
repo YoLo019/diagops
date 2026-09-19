@@ -5,6 +5,7 @@ import logging
 import sys
 import time
 from contextlib import suppress
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from backend.domain.multi_agent import FailureCategory
@@ -63,23 +64,48 @@ def _escape_failure_category(exc: BaseException) -> RuntimeFailureCategory:
     """
     from backend.diagnosis.adaptive_tools import ClassifiedRetryableError
     from backend.diagnosis.result_validation import V11ResultValidationError
-    from backend.diagnosis.v11_runtime import V11RuntimeContractError
+    from backend.diagnosis.v11_runtime import V11RuntimeContractError, _investigator_failure_audit
     from backend.reports.generator import ReportReferenceError
 
+    if isinstance(exc, V11RuntimeContractError) and str(exc).startswith(
+        "structured correction exhausted"
+    ):
+        return RuntimeFailureCategory.OUTPUT_VALIDATION
+    if (
+        isinstance(exc, V11RuntimeContractError)
+        and _investigator_failure_audit(exc)[1] == FailureCategory.QUOTA
+    ):
+        return RuntimeFailureCategory.MODEL_FAILURE
     if isinstance(
         exc,
         (V11ResultValidationError, V11RuntimeContractError, ReportReferenceError),
     ):
         return RuntimeFailureCategory.CONTRACT_INTEGRITY
-    if (
-        isinstance(exc, ClassifiedRetryableError)
-        and exc.category is FailureCategory.TIMEOUT
-    ):
+    if isinstance(exc, ClassifiedRetryableError) and exc.category is FailureCategory.TIMEOUT:
         # 模型调用重试耗尽后从无 turn 级 catch 的 phase 逃逸的超时：与 run
         # deadline 的 TIMEOUT 同属运营噪声，归一以保持案例级有界重试的
         # phase 中立性。
         return RuntimeFailureCategory.TIMEOUT
     return RuntimeFailureCategory.UNKNOWN
+
+
+def _execution_failure_category(executions, run_id: str) -> RuntimeFailureCategory:
+    """阶段正常返回 failed 时，保留尚未被成功重试解决的模型失败类别。"""
+    from backend.diagnosis.v11_runtime import _resolved_execution_ids
+
+    executions = [item for item in executions if item.runtime_run_id == run_id]
+    resolved = _resolved_execution_ids(executions)
+    categories = {
+        item.failure_category for item in executions
+        if item.status.value == "failed" and item.id not in resolved
+    }
+    if FailureCategory.TIMEOUT in categories:
+        return RuntimeFailureCategory.TIMEOUT
+    if categories & {FailureCategory.QUOTA, FailureCategory.TRANSPORT, FailureCategory.RATE_LIMIT}:
+        return RuntimeFailureCategory.MODEL_FAILURE
+    if FailureCategory.INVALID_REFERENCE in categories:
+        return RuntimeFailureCategory.CONTRACT_INTEGRITY
+    return RuntimeFailureCategory.OUTPUT_VALIDATION
 
 
 class RuntimeCoordinator:
@@ -186,11 +212,7 @@ class RuntimeCoordinator:
             if local is not None:
                 local.set()
             active = self._active.get(run_id)
-            if (
-                first_request
-                and active is not None
-                and run.status == RuntimeRunStatus.CANCELLING
-            ):
+            if first_request and active is not None and run.status == RuntimeRunStatus.CANCELLING:
                 self.fault_injector.hit("cancel_parallel_specialists")
                 owner, lease_version = active
                 with suppress(RuntimeConflict, RuntimeLeaseLost):
@@ -282,7 +304,7 @@ class RuntimeCoordinator:
                 # Trace context 是审计增强字段，写入失败不得改变 Run 生命周期。
                 logger.warning(
                     "attempt trace context persistence failed category=otel_context_persistence"
-        )
+                )
         try:
             if run.is_v11:
                 self._deadlines[run.id] = self._deadline_for(run)
@@ -296,11 +318,13 @@ class RuntimeCoordinator:
                     recovery_checkpoint_id,
                 )
                 await self._reconcile_model_reservations(run, attempt, owner)
-                if recovery_checkpoint_id is not None:
-                    recovery_state = self._effective_resume_state(
-                        run,
-                        self.store.get_checkpoint(recovery_checkpoint_id),
-                    )
+                # 首个 checkpoint 前也可能已产生远端费用，必须从事件恢复预算。
+                recovery_state = self._effective_resume_state(
+                    run,
+                    self.store.get_checkpoint(recovery_checkpoint_id)
+                    if recovery_checkpoint_id is not None
+                    else None,
+                )
             resume_state, start_index = self._resume_position(run)
             if recovery_state is not None:
                 resume_state = recovery_state
@@ -402,22 +426,21 @@ class RuntimeCoordinator:
                             )
                         ),
                         reserve_model_turn=(
-                            lambda run_id=run.id,
-                            owner=owner,
-                            lease_version=run.lease_version: self.store.reserve_model_turn(
-                                run_id,
-                                owner=owner,
-                                lease_version=lease_version,
+                            lambda run_id=run.id, owner=owner, lease_version=run.lease_version: (
+                                self.store.reserve_model_turn(
+                                    run_id,
+                                    owner=owner,
+                                    lease_version=lease_version,
+                                )
                             )
                         ),
-                        model_events=tuple(
-                            self.store.list_events(run.id, limit=10_000)
-                        ),
+                        model_events=tuple(self.store.list_events(run.id, limit=10_000)),
                         hit_fault=self.fault_injector.hit,
                     )
                 )
                 self.check_execution(run.id, owner, run.lease_version)
                 await self._close_open_phase_agents(run, attempt, owner, phase)
+                output = self._merge_committed_tools(run, output)
                 current = self.store.get_run(run.id)
                 checkpoint = await self.writer.submit(
                     PhaseCommit(
@@ -447,9 +470,7 @@ class RuntimeCoordinator:
                 active_phase = None
                 if (
                     run.is_v11
-                    and self.store.investigation_repository.get(
-                        run.investigation_id
-                    ).status.value
+                    and self.store.investigation_repository.get(run.investigation_id).status.value
                     == "failed"
                 ):
                     await self._fail_if_owned(
@@ -459,7 +480,10 @@ class RuntimeCoordinator:
                         run.lease_version,
                         # failed 的 PhaseCommit 已记录 phase.failed 事件，避免重复。
                         phase=phase if output.status != "failed" else None,
-                        failure_category=RuntimeFailureCategory.OUTPUT_VALIDATION,
+                        failure_category=_execution_failure_category(
+                            self.store.investigation_repository.list_executions(run.investigation_id),
+                            run.id,
+                        ),
                     )
                     return self.store.get_run(run.id)
             if (
@@ -472,7 +496,10 @@ class RuntimeCoordinator:
                     attempt,
                     owner,
                     run.lease_version,
-                    failure_category=RuntimeFailureCategory.OUTPUT_VALIDATION,
+                    failure_category=_execution_failure_category(
+                        self.store.investigation_repository.list_executions(run.investigation_id),
+                        run.id,
+                    ),
                 )
                 return self.store.get_run(run.id)
             await self._complete(run, attempt, owner)
@@ -630,6 +657,44 @@ class RuntimeCoordinator:
             self._tool_spans.pop((attempt.id, call.id), None)
             raise
 
+    def _merge_committed_tools(self, run, output):
+        """保留 SDK 取消等待前已完成的工具事务，避免阶段快照删除成功证据。"""
+        mutation = output.business_mutation
+        if not run.is_v11 or mutation.activate_projection or mutation.investigation is None:
+            return output
+        repository = self.store.investigation_repository
+        current = repository.get(run.investigation_id)
+        merged = mutation.merge_tool_result(current).investigation
+        record = mutation.investigation.model_copy(update={
+            "evidence": merged.evidence,
+            "provider_results": merged.provider_results,
+        })
+        calls = {item.id: item for item in mutation.tool_calls or ()}
+        calls.update({
+            item.id: item for item in repository.list_tool_calls(run.investigation_id)
+            if item.runtime_run_id == run.id
+        })
+        mutation = replace(mutation, investigation=record, tool_calls=tuple(calls.values()))
+        consumed = durable_tool_call_count(
+            repository=repository, investigation_id=run.investigation_id,
+            run_id=run.id, mutation=mutation,
+        )
+        resume_state = output.resume_state.model_copy(update={
+            "completed_evidence_ids": [item.id for item in record.evidence],
+            "successful_tool_keys": sorted({
+                item.idempotency_key for item in calls.values()
+                if item.status == ToolCallStatus.SUCCESS and item.idempotency_key is not None
+            }),
+            "remaining_tool_budget": max(0, run.tool_budget - consumed)
+            if run.tool_budget is not None else output.resume_state.remaining_tool_budget,
+        })
+        payload = dict(output.safe_payload)
+        if "evidence_count" in payload:
+            payload["evidence_count"] = len(record.evidence)
+        return replace(
+            output, business_mutation=mutation, resume_state=resume_state, safe_payload=payload,
+        )
+
     async def _persist_tool_result(
         self,
         run: RuntimeRun,
@@ -776,7 +841,9 @@ class RuntimeCoordinator:
                         "output_tokens": 0,
                         "logical_call_id": logical_call_id,
                         "reservation_id": reservation_id,
-                        "reservation_status": "released",
+                        "reservation_status": "unknown",
+                        "usage_known": False,
+                        "accounted_tokens": reserved_tokens,
                         "reserved_tokens": reserved_tokens,
                         "input_estimate": input_estimate,
                         "attempt": attempt.attempt_number,
@@ -824,16 +891,16 @@ class RuntimeCoordinator:
         try:
             await self.writer.submit_event(
                 RuntimeEventCommand(
-                run_id=run.id,
-                attempt_id=attempt.id,
-                lease_owner=owner,
-                lease_version=run.lease_version,
-                event_type=event_type,
-                actor_type=RuntimeActorType.AGENT,
-                phase=phase,
-                actor_name=actor_name,
-                safe_payload={"status": "running" if status == "started" else status},
-            )
+                    run_id=run.id,
+                    attempt_id=attempt.id,
+                    lease_owner=owner,
+                    lease_version=run.lease_version,
+                    event_type=event_type,
+                    actor_type=RuntimeActorType.AGENT,
+                    phase=phase,
+                    actor_name=actor_name,
+                    safe_payload={"status": "running" if status == "started" else status},
+                )
             )
         except Exception:
             if status == "started":
@@ -852,9 +919,7 @@ class RuntimeCoordinator:
         """Phase 终态前关闭未上报终态的 Agent 及其 Tool 子生命周期。"""
         for attempt_id, actor_name in list(self._agent_spans):
             if attempt_id == attempt.id:
-                await self._persist_agent_event(
-                    run, attempt, owner, phase, actor_name, "failed"
-                )
+                await self._persist_agent_event(run, attempt, owner, phase, actor_name, "failed")
 
     async def _close_running_agent_tools(
         self,
@@ -866,9 +931,7 @@ class RuntimeCoordinator:
         agent_status: str,
     ) -> None:
         """Agent 终态前收口 SDK 遗留 Tool，保证父生命周期不会越过仍在 running 的子调用。"""
-        calls = self.store.investigation_repository.list_tool_calls(
-            run.investigation_id
-        )
+        calls = self.store.investigation_repository.list_tool_calls(run.investigation_id)
         for call in calls:
             if (
                 call.runtime_run_id != run.id
@@ -967,26 +1030,26 @@ class RuntimeCoordinator:
     async def _complete(self, run: RuntimeRun, attempt: RuntimeAttempt, owner: str) -> None:
         await self._cancel_if_requested(run.id, attempt, owner, run.lease_version)
         commit = RuntimeTerminalCommit(
-                run_id=run.id,
-                attempt_id=attempt.id,
-                lease_owner=owner,
-                lease_version=run.lease_version,
-                expected_run_status=RuntimeRunStatus.RUNNING,
-                target_run_status=RuntimeRunStatus.COMPLETED,
-                expected_attempt_status=RuntimeAttemptStatus.RUNNING,
-                target_attempt_status=RuntimeAttemptStatus.COMPLETED,
-                events=tuple(
-                    RuntimeTerminalEvent(
-                        event_type=event_type,
-                        actor_type=RuntimeActorType.RUNTIME,
-                        safe_payload={"status": "completed"},
-                    )
-                    for event_type in (
-                        RuntimeEventType.ATTEMPT_COMPLETED,
-                        RuntimeEventType.RUN_COMPLETED,
-                    )
-                ),
-            )
+            run_id=run.id,
+            attempt_id=attempt.id,
+            lease_owner=owner,
+            lease_version=run.lease_version,
+            expected_run_status=RuntimeRunStatus.RUNNING,
+            target_run_status=RuntimeRunStatus.COMPLETED,
+            expected_attempt_status=RuntimeAttemptStatus.RUNNING,
+            target_attempt_status=RuntimeAttemptStatus.COMPLETED,
+            events=tuple(
+                RuntimeTerminalEvent(
+                    event_type=event_type,
+                    actor_type=RuntimeActorType.RUNTIME,
+                    safe_payload={"status": "completed"},
+                )
+                for event_type in (
+                    RuntimeEventType.ATTEMPT_COMPLETED,
+                    RuntimeEventType.RUN_COMPLETED,
+                )
+            ),
+        )
         try:
             await self.writer.submit_terminal(commit)
         except (RuntimeConflict, RuntimeLeaseLost):
@@ -1346,9 +1409,7 @@ class RuntimeCoordinator:
             or run.remaining_model_turns is None
             or state.remaining_model_turns < run.remaining_model_turns
         ):
-            raise RuntimeConflict(
-                "checkpoint model turn budget is below durable run state"
-            )
+            raise RuntimeConflict("checkpoint model turn budget is below durable run state")
 
     def _resume_position(self, run: RuntimeRun) -> tuple[RuntimeResumeState, int]:
         if run.latest_checkpoint_id is None:

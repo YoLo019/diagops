@@ -1,6 +1,6 @@
 ---
 name: diagops-release
-description: Guide a high-risk DiagOps change from alignment through verified release.
+description: Run the gated DiagOps release workflow only when the user explicitly requests it.
 ---
 
 # DiagOps Release
@@ -8,6 +8,10 @@ description: Guide a high-risk DiagOps change from alignment through verified re
 Run one gated release effort without loading its full history or every later
 phase. This skill orchestrates; `grilling` and `domain-modeling` provide the
 reusable alignment disciplines.
+
+This workflow is opt-in, not a requirement for every high-risk-looking edit.
+Preserve its explicit approvals, production read-only boundary, and budget and
+external gates. A request to review or edit this skill does not start a release.
 
 ## Start Or Resume
 
@@ -18,15 +22,20 @@ reusable alignment disciplines.
    current decision depends on historical evidence.
 4. Record the source commit or working-tree baseline used for later review.
 
+Resume from the earliest phase needing work; retain approvals whose assumptions
+still hold. Do not restart alignment merely because the context or model changed.
+
 ## Flow
 
 ### 1. Align
 
-Invoke the host skill mechanism separately for `grilling` and
-`domain-modeling`. Verify repository facts directly and resolve the decision
-frontier with the user. Finish only when the frontier is empty, terminology and
-hard-to-reverse decisions are recorded where needed, and the user confirms the
-shared understanding.
+Use `grilling` for unresolved scope, risk, or acceptance choices, and
+`domain-modeling` only for ambiguous terminology or qualifying design tradeoffs.
+If the host cannot invoke a skill directly, read its canonical `SKILL.md` from
+the sibling skill directory. Verify relevant repository facts and finish with
+material decisions resolved, external blockers identified, necessary records
+updated, and user-confirmed shared understanding. Existing valid confirmation
+satisfies this gate.
 
 ### 2. Specify
 
@@ -61,4 +70,10 @@ safety boundaries, migration behavior, or acceptance criteria. Return to the
 earliest affected phase and invalidate downstream approval.
 
 A correction that stays inside the approved contract and slice needs no new
-approval. Git finish actions still require explicit user instruction.
+approval. Continue authorized implementation, verification, and finding fixes
+until the approved release criteria are met or a real gate blocks progress; a
+first implementation is not completion. A blocked gate prevents dependent work
+and release claims, not independent work already authorized by the plan. State
+the blocking gate, evidence, and required user decision without retrying an
+unavailable external gate indefinitely. Git finish actions still require
+explicit user instruction.

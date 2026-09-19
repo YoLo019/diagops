@@ -8,21 +8,21 @@
 
 | 顺序 | 文档 | 读完能回答什么 |
 | --- | --- | --- |
-| 1 | [零基础认识项目](01-zero-to-project.md) | 这个项目究竟解决什么问题？Agent 是什么？ |
-| 2 | [系统架构总览](02-system-architecture.md) | 从告警进来到报告出去，经过哪些层？ |
-| 3 | [Agent 设计详解](03-agent-design.md) | Lead、Investigator、Critic 如何分工？为什么不投票？ |
-| 4 | [工具调用与证据系统](04-tool-calling-and-evidence.md) | 模型怎样“查数据”？为什么不能随便执行命令？ |
-| 5 | [持久化 Runtime](05-durable-runtime.md) | 超时、取消、宕机恢复、重放和并发怎样实现？ |
-| 6 | [数据、API 与前端概览](06-data-api-frontend.md) | 数据怎样落库和通过 API 暴露？前端只需了解什么？ |
-| 7 | [安全与可靠性](07-safety-reliability.md) | 如何防提示词注入、越权、幻觉和敏感信息泄漏？ |
-| 8 | [评测与测试](08-evaluation-and-testing.md) | 怎样证明系统有效，而不是只会演示？ |
-| 9 | [代码阅读与演示路线](09-code-reading-and-demo.md) | 面试前怎样读源码、启动项目、演示主链路？ |
-| 10 | [面试问答](10-interview-qa.md) | 高频追问如何作答？哪些话不能夸大？ |
-| 11 | [术语表与源码地图](11-glossary-and-source-map.md) | 陌生名词是什么意思？某个设计去哪看代码？ |
-| 12 | [Agent 逐阶段运行时](12-agent-runtime-deep-dive.md) | 一次真实 V11 Run 每一步具体发生什么？ |
-| 13 | [Agent 上下文与输出契约](13-agent-context-and-output-contracts.md) | 模型看见什么、交回什么，服务端又拥有什么？ |
-| 14 | [Agent 预算、重试与失败语义](14-agent-budget-retry-and-failure.md) | Token、turn、工具预算如何结算？失败为何不是一种状态？ |
-| 15 | [Agent 设计取舍与面试追问](15-agent-design-tradeoffs.md) | 为什么这样设计而不是投票、自由循环或编排框架？ |
+| 1 | [零基础认识项目](01-零基础认识项目.md) | 这个项目究竟解决什么问题？Agent 是什么？ |
+| 2 | [系统架构总览](02-系统架构总览.md) | 从告警进来到报告出去，经过哪些层？ |
+| 3 | [Agent 设计详解](03-智能体设计详解.md) | Lead、Investigator、Critic 如何分工？为什么不投票？ |
+| 4 | [工具调用与证据系统](04-工具调用与证据系统.md) | 模型怎样“查数据”？为什么不能随便执行命令？ |
+| 5 | [持久化 Runtime](05-持久化运行时.md) | 超时、取消、宕机恢复、重放和并发怎样实现？ |
+| 6 | [数据、API 与前端概览](06-数据接口与前端概览.md) | 数据怎样落库和通过 API 暴露？前端只需了解什么？ |
+| 7 | [安全与可靠性](07-安全与可靠性设计.md) | 如何防提示词注入、越权、幻觉和敏感信息泄漏？ |
+| 8 | [评测与测试](08-评测与测试.md) | 怎样证明系统有效，而不是只会演示？ |
+| 9 | [代码阅读与演示路线](09-代码阅读与演示路线.md) | 面试前怎样读源码、启动项目、演示主链路？ |
+| 10 | [面试问答](10-面试高频问答.md) | 高频追问如何作答？哪些话不能夸大？ |
+| 11 | [术语表与源码地图](11-术语表与源码地图.md) | 陌生名词是什么意思？某个设计去哪看代码？ |
+| 12 | [Agent 逐阶段运行时](12-智能体逐阶段运行时.md) | 一次真实 V11 Run 每一步具体发生什么？ |
+| 13 | [Agent 上下文与输出契约](13-智能体上下文与输出契约.md) | 模型看见什么、交回什么，服务端又拥有什么？ |
+| 14 | [Agent 预算、重试与失败语义](14-智能体预算重试与失败语义.md) | Token、turn、工具预算如何结算？失败为何不是一种状态？ |
+| 15 | [Agent 设计取舍与面试追问](15-智能体设计取舍与面试追问.md) | 为什么这样设计而不是投票、自由循环或编排框架？ |
 
 ## 进阶专题：把 Agent 做成可上线的软件
 
@@ -30,19 +30,20 @@
 
 | 顺序 | 专题 | 读完能回答什么 | 当前状态 |
 | --- | --- | --- | --- |
-| 16 | [上下文工程与压缩](16-agent-context-engineering.md) | 如何选证据、压缩长上下文而不丢引用？ | digest/投影已实现；通用 compaction 未接入 |
-| 17 | [Tool Calling 生产落地](17-agent-tool-calling-in-depth.md) | schema、并行、超时、重试、幂等和安全怎样闭环？ | 九个只读工具链已实现 |
-| 18 | [Memory 与 RAG](18-memory-and-rag.md) | verified memory 与向量 RAG 有什么区别？如何防投毒和陈旧？ | 关系型 verified lookup 已实现；向量 RAG 未实现 |
-| 19 | [MCP 与 Agent 互操作](19-mcp-and-agent-interoperability.md) | MCP 的协议、适用场景和安全边界是什么？ | 当前明确未实现 |
-| 20 | [模型路由与能力准入](20-model-routing-and-capability.md) | 任务路由和模型路由有何不同？如何证明 endpoint 可用？ | 静态身份/能力认证已实现；动态路由未实现 |
-| 21 | [Agent 可观测性](21-agent-observability.md) | 如何关联一次 Run 的模型、工具、证据和延迟？ | durable event + allowlisted OTel tracing 已实现 |
-| 22 | [Agent 安全攻防](22-agent-security-threat-model.md) | 如何系统防注入、越权、SSRF、投毒和成本攻击？ | 核心只读/校验边界已实现；企业治理部分未实现 |
-| 23 | [Agent 评测科学](23-agent-evaluation-science.md) | 怎样同时评测答案、轨迹、成本和安全？ | RCAEval/paired gate 已实现；正式 SS15/TT90 未完成 |
-| 24 | [成本、延迟与吞吐](24-agent-cost-performance.md) | 如何在预算内提高证据产出而不是盲目加 Token？ | reservation/并发/早停已实现 |
-| 25 | [部署、扩展与上线](25-agent-deployment-and-operations.md) | 单节点如何演进到可治理的生产部署？ | 本地优先；多节点/多租户未实现 |
-| 26 | [从零实现与调试实验](26-agent-hands-on-labs.md) | 如何亲手验证 Tool、Context、Runtime、Memory 和 Eval？ | 使用现有 key-free 测试和教学实验 |
-| 27 | [前沿 Agent 模式对比](27-agent-frontier-patterns.md) | ReAct、Manager、Handoff、Graph、Debate、Blackboard 如何选？ | V11 是受限 graph + evidence blackboard + Critic |
-| 28 | [Agent 岗位简历亮点素材](28-agent-resume-highlights.md) | 如何把当前项目真实能力写成 Agent 后端岗位简历？ | 仅使用可核验事实，指标待真实数据补齐 |
+| 16 | [上下文工程与压缩](16-上下文工程与压缩.md) | 如何选证据、压缩长上下文而不丢引用？ | digest/投影已实现；通用 compaction 未接入 |
+| 17 | [Tool Calling 生产落地](17-工具调用生产落地.md) | schema、并行、超时、重试、幂等和安全怎样闭环？ | 九个只读工具链已实现 |
+| 18 | [Memory 与 RAG](18-智能体记忆与检索增强生成.md) | verified memory 与向量 RAG 有什么区别？如何防投毒和陈旧？ | 关系型 verified lookup 已实现；向量 RAG 未实现 |
+| 19 | [MCP 与 Agent 互操作](19-模型上下文协议与智能体互操作.md) | MCP 的协议、适用场景和安全边界是什么？ | 当前明确未实现 |
+| 20 | [模型路由与能力准入](20-模型路由能力准入与安全降级.md) | 任务路由和模型路由有何不同？如何证明 endpoint 可用？ | 静态身份/能力认证已实现；动态路由未实现 |
+| 21 | [Agent 可观测性](21-智能体可观测性与调试.md) | 如何关联一次 Run 的模型、工具、证据和延迟？ | durable event + allowlisted OTel tracing 已实现 |
+| 22 | [Agent 安全攻防](22-智能体安全攻防与治理.md) | 如何系统防注入、越权、SSRF、投毒和成本攻击？ | 核心只读/校验边界已实现；企业治理部分未实现 |
+| 23 | [Agent 评测科学](23-智能体评测科学.md) | 怎样同时评测答案、轨迹、成本和安全？ | RCAEval/paired gate 已实现；正式 SS15/TT90 未完成 |
+| 24 | [成本、延迟与吞吐](24-智能体成本延迟与吞吐.md) | 如何在预算内提高证据产出而不是盲目加 Token？ | reservation/并发/早停已实现 |
+| 25 | [部署、扩展与上线](25-智能体部署扩展与上线运维.md) | 单节点如何演进到可治理的生产部署？ | 本地优先；多节点/多租户未实现 |
+| 26 | [从零实现与调试实验](26-智能体开发实战实验.md) | 如何亲手验证 Tool、Context、Runtime、Memory 和 Eval？ | 使用现有 key-free 测试和教学实验 |
+| 27 | [前沿 Agent 模式对比](27-前沿智能体设计模式对比.md) | ReAct、Manager、Handoff、Graph、Debate、Blackboard 如何选？ | V11 是受限 graph + evidence blackboard + Critic |
+| 28 | [Agent 岗位简历亮点素材](28-智能体岗位简历亮点素材.md) | 如何把当前项目真实能力写成 Agent 后端岗位简历？ | 仅使用可核验事实，指标待真实数据补齐 |
+| 29 | [OpenAI Agents SDK 与框架选型](29-智能体软件开发工具包与框架选型.md) | 项目用了 SDK 的哪些能力？为什么不用 LangGraph、AutoGen、CrewAI？ | SDK 负责模型执行，自研 Runtime 负责持久化编排 |
 
 ## Agent 生产生命周期速览
 

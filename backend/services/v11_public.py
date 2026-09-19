@@ -92,6 +92,9 @@ def public_v11_lead_decision(decision: LeadDecision) -> LeadDecision:
             "stop_reason": scrub_v11_text(decision.stop_reason)
             if decision.stop_reason is not None
             else None,
+            **({"uncertainty": scrub_v11_text(decision.uncertainty)
+                if decision.uncertainty is not None else None}
+               if hasattr(decision, "uncertainty") else {}),
         }
     )
 
@@ -103,6 +106,10 @@ def public_v11_review(review: CoordinationReview) -> CoordinationReview:
             "critic_assessments": [
                 public_v11_assessment(item) for item in review.critic_assessments
             ],
+            "final_decision": (
+                public_v11_lead_decision(review.final_decision)
+                if review.final_decision is not None else None
+            ),
             "lead_decision": (
                 public_v11_lead_decision(review.lead_decision)
                 if review.lead_decision is not None
@@ -245,16 +252,17 @@ def public_v11_graph_seed(
                     "relation": f"critic_{assessment.verdict}",
                 }
             )
-    if review.lead_decision is not None:
-        lead_id = f"lead-{review.id}"
+    decision = review.final_decision or review.lead_decision
+    if decision is not None:
+        lead_id = f"final-{review.id}" if review.final_decision else f"lead-{review.id}"
         nodes[lead_id] = {
             "id": lead_id,
-            "label": scrub_v11_text(review.lead_decision.summary),
-            "type": "lead_decision",
+            "label": scrub_v11_text(decision.summary),
+            "type": "final_decision" if review.final_decision else "lead_decision",
         }
         edges.extend(
             {"source": lead_id, "target": candidate_id, "relation": "accepted"}
-            for candidate_id in review.lead_decision.candidate_ids
+            for candidate_id in decision.candidate_ids
             if candidate_id in nodes
         )
 

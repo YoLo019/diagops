@@ -135,6 +135,17 @@ class DiagnosisPhaseExecutor:
                 executor = self._build_durable_session(phase_input)
                 self._durable_sessions[phase_input.run_id] = executor
                 self._durable_attempt_ids[phase_input.run_id] = phase_input.attempt_id
+            if phase_input.execution_contract_version == ExecutionContractVersion.V11:
+                # 前一阶段的提交才是事实源；工具回调及报告只写 durable 投影时，
+                # 不能让复用的内存快照在后续阶段把它们覆盖掉。
+                record = self._orchestrator.repository.get(phase_input.investigation_id)
+                executor._orchestrator.repository.save(record)
+                executor._orchestrator.repository.save_tool_calls(
+                    record.id, self._orchestrator.repository.list_tool_calls(record.id)
+                )
+                state = executor._runtime_states.get(phase_input.run_id)
+                if state is not None:
+                    state.record = record
             executor._bind_phase_callbacks(phase_input)
             executor._execution_contract_version = phase_input.execution_contract_version
             output = await executor.execute_phase(phase_input)
@@ -895,7 +906,7 @@ class DiagnosisPhaseExecutor:
         terminal_tool_ids = {
             call.logical_call_id or call.id
             for call in tool_calls
-            if call.status.value != "pending"
+            if call.consumes_budget
             and runtime_run_id is not None
             and call.runtime_run_id == runtime_run_id
         }
@@ -1010,7 +1021,7 @@ class DiagnosisPhaseExecutor:
         preexisting_terminal_tool_ids = frozenset(
             call.logical_call_id or call.id
             for call in self._orchestrator.repository.list_tool_calls(record.id)
-            if call.status.value != "pending"
+            if call.consumes_budget
             and call.runtime_run_id == phase_input.run_id
         )
         state = _DiagnosisState(

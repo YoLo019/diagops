@@ -10,7 +10,7 @@ The local platform includes:
   evidence providers.
 - Rule-based RCA, evidence-backed Markdown reports, recommended actions, and
   verification tracking.
-- An optional, default-off OpenAI Agents SDK integration. The current V11 path
+- An optional, default-off OpenAI Agents SDK integration. The current V12 path
   gives diagnostic authority to evidence-backed Lead/Investigator/Critic
   reasoning; deterministic code owns safety, validation and durable execution,
   while legacy deterministic RCA remains a separately labelled compatibility
@@ -125,8 +125,8 @@ agents:
   enabled: false
   provider: openai
   model: null
-  max_turns: 8
-  timeout_seconds: 60
+  max_turns: 16
+  timeout_seconds: 120
   strategy: fixed
   max_tool_calls_per_specialist: 3
   max_total_tool_calls: 8
@@ -226,25 +226,47 @@ curl http://127.0.0.1:8000/investigations
 
 ## Multi-Agent Workflow
 
-The current V11 design is a read-only, durable Agent workflow:
+The current V12 design is a read-only, durable Agent workflow:
 
 - Runtime first persists initial Provider evidence, then a Lead plans one to
   three information-gap tasks.
 - Up to three generic Investigators run with isolated round-one context and the
-  same frozen nine-tool read-only manifest.
+  same nine-tool read-only manifest. Each investigation round can contain
+  multiple bounded model/tool requests, including narrower queries after a
+  truncated result.
 - Tool calls are validated, budgeted, idempotent and persisted before their
   Evidence IDs can be cited.
 - A Critic reviews each candidate through fixed causal/counter-evidence checks;
   at most one owned supplemental round is allowed.
-- In the live path, the authority phase mechanically publishes only Critic
-  accepted candidate references; deterministic validation can reject invalid
-  structure but cannot invent a root cause.
+- The Critic explicitly selects and orders accepted candidates, or abstains.
+  Reports, API, frontend and evaluation follow that final decision. The publish
+  phase makes no extra Lead call; deterministic validation can reject invalid
+  references but cannot invent a root cause or a final decision.
 - The frontend exposes plan, tasks, evidence, executions, tool calls, runtime
   events and the resulting public projection.
 
-V11 engineering and its controlled evaluation protocol are present in the
-repository, but formal SS15/TT90 evaluation has not completed. Do not infer a
-release or accuracy-improvement claim from this architecture description.
+V12 implementation and offline tests are present; current validation results
+are recorded in the [V12 plan](docs/superpowers/plans/2026-09-12-diagops-v12-validation-plan.md).
+The OB30 development comparison and formal SS15/TT90 evaluation have not run
+to completion. The OB30 entry point is `backend.benchmarks.rcaeval.dev` and
+compares Single with Multi-Critic, then optionally measures one additional
+Lead decision on the saved Critic snapshot. It does not measure a full
+Multi-Lead workflow. No accuracy-improvement claim is available yet.
+
+Saved OB30 predictions can also be evaluated for semantic equivalence without
+rerunning diagnosis (including targeted subsets):
+
+```powershell
+uv run python -m backend.benchmarks.rcaeval.dev score-semantic --predictions <directory> --labels-ob30 <labels.json> --output <new-score.json> --base-url <judge-endpoint> --model <judge-model> --side multi
+```
+
+The judge uses `DIAGOPS_AGENTS_API_KEY`. This separate scoring process compares
+the entity and complete mechanism explanation, accepting equivalent wording.
+It distinguishes broader diagnoses from equivalent causes, retains exact scoring
+as a reference, and reports judge failures separately. Labels never enter the
+diagnosis process. Semantic agreement does not establish causal evidence support.
+Tentative diagnoses retain their uncertainty and are published as `partial`;
+invalid evidence references and explicitly contradicted candidates remain blocked.
 
 The historical task-type router and specialist names (LogAgent, MetricAgent,
 DeploymentAgent) remain legacy compatibility concepts; they are not the V11

@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from agents import AgentOutputSchema
@@ -20,13 +21,14 @@ from backend.benchmarks.rcaeval.runner import (
     RcaEvalCaseRunner,
     SingleInvestigatorAgent,
     _candidate_lifecycle_audit,
+    _runtime_token_usage,
     _safe_exception_diagnostic,
     _unresolved_case_failure_category,
     validate_configuration_set,
 )
 from backend.db.session import create_db_engine, initialize_database
 from backend.db.sqlite_repository import SQLiteInvestigationRepository
-from backend.diagnosis.v11_runtime import V11SingleControlOutput
+from backend.diagnosis.v11_runtime import V11RuntimeContractError, V11SingleControlOutput
 from backend.domain.agent_findings import CoordinationReview, RootCauseCandidate
 from backend.domain.agent_plan import AgentExecution, AgentExecutionStatus
 from backend.domain.multi_agent import (
@@ -42,6 +44,32 @@ from backend.domain.runtime import (
     RuntimeRunStatus,
 )
 from backend.runtime.sqlite_store import SQLiteRuntimeStore
+from tests.model_outputs import critic_response, single_response
+
+
+@pytest.mark.parametrize("benchmark", ["rcaeval", "openrca"])
+def test_runtime_usage_includes_known_failed_requests(benchmark):
+    from backend.benchmarks.openrca.runner import _runtime_token_usage as openrca_usage
+
+    events = [
+        SimpleNamespace(event_type=event_type, safe_payload=payload)
+        for event_type, payload in [
+            (RuntimeEventType.MODEL_COMPLETED, {"input_tokens": 7, "output_tokens": 2}),
+            (RuntimeEventType.MODEL_FAILED, {
+                "input_tokens": 80, "output_tokens": 30, "reservation_status": "rejected",
+            }),
+            (RuntimeEventType.MODEL_FAILED, {
+                "input_tokens": 999, "reservation_status": "retrying",
+            }),
+            (RuntimeEventType.MODEL_FAILED, {
+                "input_tokens": 999, "usage_known": False, "accounted_tokens": 999,
+            }),
+            (RuntimeEventType.PHASE_COMPLETED, {"input_tokens": 999}),
+        ]
+    ]
+    store = SimpleNamespace(list_events=lambda _: events)
+    usage = _runtime_token_usage if benchmark == "rcaeval" else openrca_usage
+    assert usage(store, "run") == (87, 32)
 
 
 def test_candidate_lifecycle_audit_ignores_resolved_retry_failures():
@@ -117,9 +145,9 @@ def test_unresolved_case_failure_category_uses_only_live_execution_failures():
             "failure_category": FailureCategory.NONE,
         }
     )
-    assert _unresolved_case_failure_category(
-        [failed_transport, other_investigator_completed]
-    ) is None
+    assert (
+        _unresolved_case_failure_category([failed_transport, other_investigator_completed]) is None
+    )
 
     recovered = failed_transport.model_copy(
         update={
@@ -147,9 +175,7 @@ def test_safe_exception_diagnostic_redacts_message_and_reports_relative_location
         raise ValueError(
             "api_key=sk-abcdefghijklmnopqrstuvwxyz "
             "base_url=https://user:pass@example.test/v1 "
-            "path=C:\\private\\case.json "
-            + "x" * 600
-            + " TAIL-MARKER"
+            "path=C:\\private\\case.json " + "x" * 600 + " TAIL-MARKER"
         )
     except ValueError as exc:
         diagnostic = _safe_exception_diagnostic(exc, Path.cwd())
@@ -181,9 +207,7 @@ def test_safe_exception_diagnostic_extracts_pydantic_detail_from_long_message():
 
 
 def test_single_control_output_is_a_valid_strict_json_schema():
-    schema = AgentOutputSchema(
-        V11SingleControlOutput, strict_json_schema=True
-    ).json_schema()
+    schema = AgentOutputSchema(V11SingleControlOutput, strict_json_schema=True).json_schema()
 
     def assert_strict(value):
         if isinstance(value, dict):
@@ -282,14 +306,13 @@ def _write_runtime_package(root: Path) -> RuntimeCaseEntry:
 def _single_turn(**kwargs):
     output_type = kwargs["output_type"].__name__
     if output_type == "V11SingleControlOutput":
-        return {"candidates": []}
+        return single_response({"candidates": []})
     raise AssertionError(f"unexpected single output type: {output_type}")
 
 
 def _failing_single_turn(**kwargs):
     raise ValueError(
-        "api_key=sk-abcdefghijklmnopqrstuvwxyz "
-        "base_url=https://user:pass@example.test/v1"
+        "api_key=sk-abcdefghijklmnopqrstuvwxyz base_url=https://user:pass@example.test/v1"
     )
 
 
@@ -316,15 +339,16 @@ def _invalid_multi_turn(**kwargs):
 def _inconclusive_single_turn(**kwargs):
     output_type = kwargs["output_type"].__name__
     if output_type == "V11SingleControlOutput":
-        return {"candidates": []}
+        return single_response({"candidates": []})
     raise AssertionError(f"unexpected single output type: {output_type}")
 
 
-def _single_turn_with_investigator(investigator):
+def _single_turn_with_investigator(investigator, *, usage=None):
     def _turn(**kwargs):
         output_type = kwargs["output_type"].__name__
         if output_type == "V11SingleControlOutput":
-            return {"candidates": investigator.get("candidates", [])}
+            output = single_response({"candidates": investigator.get("candidates", [])})
+            return (output, usage) if usage is not None else output
         raise AssertionError(f"unexpected single output type: {output_type}")
 
     return _turn
@@ -380,43 +404,72 @@ def test_single_control_empty_candidates_are_inconclusive(tmp_path: Path):
     assert repository.get_coordination_review(persisted.investigation_id).candidates == []
 
 
+@pytest.mark.parametrize(
+    "message", ["context_budget_exhausted", "model response exceeded token budget"]
+)
+def test_single_budget_failure_is_reported_as_quota(tmp_path: Path, message):
+    async def exhausted(**kwargs):
+        raise V11RuntimeContractError(message)
+
+    prediction, _, _ = _run_single_case(tmp_path, exhausted)
+    assert prediction.completed is False
+    assert prediction.failure_category == FailureCategory.QUOTA.value
+
+
+def test_single_correction_budget_exhaustion_preserves_quota(tmp_path: Path):
+    attempts = 0
+
+    def invalid_without_usage(**kwargs):
+        nonlocal attempts
+        attempts += 1
+        return {"unexpected_field": True}
+
+    prediction, repository, store = _run_single_case(tmp_path, invalid_without_usage)
+    assert 1 <= attempts < 4
+    assert not prediction.completed
+    assert prediction.failure_category == FailureCategory.QUOTA.value
+    run = store.get_run(prediction.runtime_run_id)
+    categories = {
+        item.failure_category for item in repository.list_executions(run.investigation_id)
+    }
+    assert {FailureCategory.INVALID_OUTPUT, FailureCategory.QUOTA} <= categories
+
+
 def test_single_control_drops_candidate_citing_unknown_references(tmp_path: Path):
     turn = _single_turn_with_investigator(
         {
             "summary": "Candidate references model-invented IDs.",
             "findings": [],
-                "candidates": [
-                    {
-                        "affected_entity": "carts",
-                        "failure_class": "thread pool exhaustion",
-                        "failure_mechanism": "thread pool exhaustion",
-                        "supporting_evidence_ids": ["ev-bogus"],
-                        "contradicting_evidence_ids": [],
-                    }
-                ],
+            "candidates": [
+                {
+                    "affected_entity": "carts",
+                    "failure_class": "thread pool exhaustion",
+                    "failure_mechanism": "thread pool exhaustion",
+                    "supporting_evidence_ids": ["ev-bogus"],
+                    "contradicting_evidence_ids": [],
+                }
+            ],
         }
     )
     prediction, repository, runtime_store = _run_single_case(tmp_path, turn)
 
-    # finding ID 由服务端生成，模型填的引用几乎必然无效：准入层丢弃候选并
-    # 审计（绝不改写），run 收敛 inconclusive 而不是终态校验杀 run。
-    assert prediction.completed is True
+    # 最终选择含未入库引用时必须失败，不能由代码替模型改成 inconclusive。
+    assert prediction.completed is False
     persisted = runtime_store.get_run(prediction.runtime_run_id)
-    assert persisted.status == RuntimeRunStatus.COMPLETED
+    assert persisted.status == RuntimeRunStatus.FAILED
     review = repository.get_coordination_review(persisted.investigation_id)
     assert review is not None
     assert review.candidates == []
-    assert review.diagnostic_status == DiagnosticStatus.INCONCLUSIVE
+    assert review.diagnostic_status is None
     audits = [
         item
         for item in repository.list_executions(persisted.investigation_id)
         if item.status == AgentExecutionStatus.FAILED
     ]
+    audits = [item for item in audits if item.failure_category == FailureCategory.INVALID_REFERENCE]
     assert len(audits) == 1
     assert audits[0].failure_category == FailureCategory.INVALID_REFERENCE
-    assert audits[0].error_message == (
-        "candidate draft rejected: candidate_evidence_reference"
-    )
+    assert audits[0].error_message == ("candidate draft rejected: candidate_evidence_reference")
 
 
 def test_single_control_rejects_incomplete_candidate_output(tmp_path: Path):
@@ -431,7 +484,9 @@ def test_single_control_rejects_incomplete_candidate_output(tmp_path: Path):
                     "confidence": 0.5,
                 }
             ],
-        }
+        },
+        # 本测试覆盖纠错耗尽；显式 usage 避免混入未知用量保守扣账分支。
+        usage={"input_tokens": 100, "output_tokens": 40},
     )
     prediction, repository, runtime_store = _run_single_case(tmp_path, turn)
 
@@ -468,10 +523,10 @@ def test_single_control_candidate_rejection_is_audited_without_terminal_failure(
     )
     prediction, repository, runtime_store = _run_single_case(tmp_path, turn)
 
-    assert prediction.completed is True
-    assert prediction.diagnostic_status == DiagnosticStatus.INCONCLUSIVE
+    assert prediction.completed is False
+    assert prediction.diagnostic_status is None
     persisted = runtime_store.get_run(prediction.runtime_run_id)
-    assert persisted.status == RuntimeRunStatus.COMPLETED
+    assert persisted.status == RuntimeRunStatus.FAILED
     audits = [
         item
         for item in repository.list_executions(persisted.investigation_id)
@@ -479,41 +534,47 @@ def test_single_control_candidate_rejection_is_audited_without_terminal_failure(
     ]
     messages = [item.error_message for item in audits]
     assert "candidate draft rejected: candidate_evidence_reference" in messages
-    assert all(item.failure_category == FailureCategory.INVALID_REFERENCE for item in audits)
+    assert any(item.failure_category == FailureCategory.INVALID_REFERENCE for item in audits)
 
 
 def _multi_turn(**kwargs):
     output_type = kwargs["output_type"].__name__
     if output_type == "LeadPlanningOutput":
-        return {
-            "decision": {
-                "action": "investigate",
-                "summary": "Inspect bounded offline evidence.",
-                "task_ids": ["multi-task"],
-                "candidate_ids": [],
-            },
-            "tasks": [
-                {
-                    "id": "multi-task",
-                    "title": "Inspect evidence",
-                    "description": "Use the frozen read-only tools.",
-                    "tool_names": ["read_logs"],
-                    "information_gap": "affected service and mechanism",
-                }
-            ],
-        }
-    if output_type == "LeadAdjudicationOutput":
-        return {
-            "decision": {
-                "action": "inconclusive",
-                "summary": "No supported candidate.",
-                "stop_reason": "insufficient_evidence",
+        return critic_response(
+            {
+                "decision": {
+                    "action": "investigate",
+                    "summary": "Inspect bounded offline evidence.",
+                    "task_ids": ["multi-task"],
+                    "candidate_ids": [],
+                },
+                "tasks": [
+                    {
+                        "id": "multi-task",
+                        "title": "Inspect evidence",
+                        "description": "Use the frozen read-only tools.",
+                        "tool_names": ["read_logs"],
+                        "information_gap": "affected service and mechanism",
+                    }
+                ],
             }
-        }
+        )
+    if output_type in {"CriticOutput", "CriticCompactOutput"}:
+        return critic_response({"assessments": [], "tasks": []})
+    if output_type == "LeadAdjudicationOutput":
+        return critic_response(
+            {
+                "decision": {
+                    "action": "inconclusive",
+                    "summary": "No supported candidate.",
+                    "stop_reason": "insufficient_evidence",
+                }
+            }
+        )
     assert output_type in {"InvestigatorOutput", "InvestigatorCandidateOutput"}
     if output_type == "InvestigatorCandidateOutput":
-        return {"candidates": []}
-    return {"summary": "No supported candidate.", "findings": [], "candidates": []}
+        return critic_response({"candidates": []})
+    return critic_response({"summary": "No supported candidate.", "findings": [], "candidates": []})
 
 
 def test_single_control_runs_through_persisted_sqlite_v11_runtime(tmp_path: Path):
@@ -947,7 +1008,8 @@ def test_single_control_rejects_server_owned_candidate_fields(tmp_path: Path):
                     "id": "candidate-model-owned",
                 }
             ],
-        }
+        },
+        usage={"input_tokens": 100, "output_tokens": 40},
     )
     prediction, repository, runtime_store = _run_single_case(tmp_path, turn)
 
@@ -1141,9 +1203,7 @@ def test_launch_preflight_catches_construction_rejection_before_token():
     _preflight_launch_construction(SimpleNamespace(**base))
 
     with pytest.raises((ValueError, ValidationError)):
-        _preflight_launch_construction(
-            SimpleNamespace(**{**base, "timeout_seconds": 301.0})
-        )
+        _preflight_launch_construction(SimpleNamespace(**{**base, "timeout_seconds": 301.0}))
 
 
 def test_launch_preflight_covers_multi_configuration():

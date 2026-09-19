@@ -1,6 +1,7 @@
 """generic compatible adapter 的 fake-endpoint 失败矩阵（不接触真实模型/网络）。"""
 
 import asyncio
+import json
 import time
 
 import httpx
@@ -133,6 +134,24 @@ def test_clone_preserves_structured_output_transport():
     clone = model.clone_for_model("other-model")
 
     assert clone.structured_output_transport == "strict_output_tool"
+
+
+@pytest.mark.parametrize("typed", [False, True])
+def test_strict_history_projection_preserves_internal_arguments(typed):
+    original = ResponseFunctionToolCall(
+        type="function_call", name="read_logs", call_id="previous-call",
+        arguments='{"reason":"inspect"}',
+    )
+    if not typed:
+        original = original.model_dump()
+    final_call = {"type": "function_call", "name": "submit_structured_output", "arguments": "{}"}
+    history = [original, final_call, {"type": "function_call_output", "output": "evidence"}]
+    projected = compatible_model.strict_transport_input(history)
+    argument = projected[0].arguments if typed else projected[0]["arguments"]
+    assert json.loads(argument) == {"payload_json": '{"reason":"inspect"}'}
+    assert (original.arguments if typed else original["arguments"]) == '{"reason":"inspect"}'
+    assert projected[1:] == history[1:]
+    assert compatible_model.strict_transport_input("initial prompt") == "initial prompt"
 
 
 @pytest.mark.anyio
@@ -336,6 +355,47 @@ def _real_client(handler) -> openai.AsyncOpenAI:
         http_client=httpx.AsyncClient(
             transport=httpx.MockTransport(handler), base_url=_BASE_URL
         ),
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("positional", [False, True])
+@pytest.mark.parametrize("base_url", [
+    "https://api.deepseek.com/beta", "https://api.deepseek.com/v1", _BASE_URL,
+    "https://api.deepseek.com.example/v1",
+])
+async def test_official_deepseek_wire_request_disables_thinking(monkeypatch, base_url, positional):
+    captured = []
+
+    def respond(request):
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, json={
+            "id": "chat-test", "object": "chat.completion", "created": 0,
+            "model": "deepseek-flash",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"},
+                         "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 1, "total_tokens": 11},
+        })
+
+    model = _create(model_name="deepseek-flash", base_url=base_url)
+    monkeypatch.setattr(model, "_create_client", lambda: _real_client(respond))
+    settings = ModelSettings(max_tokens=64, extra_body={"custom_flag": "kept"})
+    if positional:
+        await model.get_response(None, "input", settings, [], None, [], ModelTracing.DISABLED)
+    else:
+        await model.get_response(
+            system_instructions=None, input="input", model_settings=settings,
+            tools=[], output_schema=None, handoffs=[], tracing=ModelTracing.DISABLED,
+        )
+    assert len(captured) == 1
+    assert captured[0]["custom_flag"] == "kept"
+    official = base_url in {"https://api.deepseek.com/beta", "https://api.deepseek.com/v1"}
+    assert captured[0].get("thinking") == ({"type": "disabled"} if official else None)
+    assert settings.extra_body == {"custom_flag": "kept"}
+    clone = model.clone_for_model("deepseek-flash")
+    _, cloned_args = clone._request_args((), {"model_settings": settings})
+    assert cloned_args["model_settings"].extra_body.get("thinking") == (
+        {"type": "disabled"} if official else None
     )
 
 

@@ -35,8 +35,8 @@ def test_default_settings_use_d_drive_project_paths(monkeypatch):
     assert settings.agents.enabled is False
     assert settings.agents.provider == ModelProvider.OPENAI
     assert settings.agents.model is None
-    assert settings.agents.max_turns == 8
-    assert settings.agents.timeout_seconds == 60
+    assert settings.agents.max_turns == 16
+    assert settings.agents.timeout_seconds == 120
     assert settings.agents.strategy == InvestigationStrategy.FIXED
     assert settings.agents.max_tool_calls_per_specialist == 3
     assert settings.agents.max_total_tool_calls == 8

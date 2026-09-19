@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from collections.abc import Callable
 from time import perf_counter
@@ -68,8 +69,7 @@ class ProviderRegistry:
 
     def collect_results(self, event: IncidentEvent) -> list[ProviderResult]:
         results = [
-            self._collect_provider(provider, event)
-            for provider in self._providers_for(event)
+            self._collect_provider(provider, event) for provider in self._providers_for(event)
         ]
         return self._with_unconfigured(results)
 
@@ -95,16 +95,14 @@ class ProviderRegistry:
                 return result
 
         results = list(
-            await asyncio.gather(
-                *(collect(provider) for provider in self._providers_for(event))
-            )
+            await asyncio.gather(*(collect(provider) for provider in self._providers_for(event)))
         )
         return self._with_unconfigured(results)
 
     def _collect_provider(self, provider, event: IncidentEvent) -> ProviderResult:
         started = perf_counter()
         try:
-            result = redact_model(provider.collect(event))
+            result = _bounded_result(redact_model(provider.collect(event)), 100)
         except Exception as exc:
             provider_name = getattr(provider, "provider", EvidenceProvider.LOG)
             result = ProviderResult(
@@ -138,6 +136,13 @@ class ProviderRegistry:
         )
         return results
 
+    def supports_tool(self, tool_name: str, event: IncidentEvent) -> bool:
+        """仅声明当前事件可用的只读 Provider 能力。"""
+        return any(
+            tool_name in getattr(provider, "supported_tools", ())
+            for provider in self._providers_for(event)
+        )
+
     def query_results(self, event, tool_name, query) -> list[ProviderResult]:
         providers = [
             provider
@@ -154,10 +159,13 @@ class ProviderRegistry:
             ]
 
         results: list[ProviderResult] = []
+        remaining = query.limit
         for provider in providers:
             started = perf_counter()
             try:
                 result = redact_model(provider.collect(event, query))
+                result = _bounded_result(result, remaining)
+                remaining -= len(result.evidence_items)
             except Exception as exc:
                 result = ProviderResult(
                     provider=getattr(provider, "provider", _PROVIDER_BY_TOOL[tool_name]),
@@ -185,6 +193,37 @@ class ProviderRegistry:
         return self.evidence_from_results(self.collect_results(event))
 
 
+def _bounded_result(result: ProviderResult, limit: int) -> ProviderResult:
+    """限制入库结果；保留失败状态和截断提示，细节通过收窄查询获取。"""
+    bounded = [
+        item
+        for item in result.evidence_items[:limit]
+        if len(json.dumps(item.payload, ensure_ascii=False).encode("utf-8")) <= 16384
+    ]
+    truncated = (
+        result.truncated
+        or len(bounded) != len(result.evidence_items)
+        or any(len(item.summary) > 512 for item in bounded)
+    )
+    # 未截断且 Provider 未声明计数时保持旧序列化；工具响应单独给返回量。
+    if not truncated and result.returned_count is None:
+        return result
+    usable = result.status in {ProviderStatus.SUCCESS, ProviderStatus.PARTIAL}
+    return result.model_copy(
+        update={
+            "evidence_items": [
+                item.model_copy(update={"summary": item.summary[:512]}) for item in bounded
+            ],
+            "truncated": truncated,
+            "returned_count": len(bounded),
+            "status": ProviderStatus.PARTIAL if truncated and usable else result.status,
+            "error_message": "query_result_truncated: narrow query filters"
+            if truncated and usable
+            else result.error_message,
+        }
+    )
+
+
 def build_mock_provider_registry() -> ProviderRegistry:
     return ProviderRegistry(
         providers=[],
@@ -195,7 +234,7 @@ def build_mock_provider_registry() -> ProviderRegistry:
             MockDependencyProvider(),
             MockServiceCatalogProvider(),
             MockRelatedAlertProvider(),
-        ]
+        ],
     )
 
 

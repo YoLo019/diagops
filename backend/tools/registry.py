@@ -22,10 +22,23 @@ class ToolRegistry:
     def __init__(self) -> None:
         self._specs: dict[str, ToolSpec] = {}
         self._handlers: dict[str, ToolHandler] = {}
+        self._availability: dict[str, Callable[[IncidentEvent], bool]] = {}
 
-    def register(self, spec: ToolSpec, handler: ToolHandler) -> None:
+    def register(
+        self, spec: ToolSpec, handler: ToolHandler,
+        *, available: Callable[[IncidentEvent], bool] | None = None,
+    ) -> None:
         self._specs[spec.name] = spec
         self._handlers[spec.name] = handler
+        self._availability.pop(spec.name, None)
+        if available is not None:
+            self._availability[spec.name] = available
+
+    def is_available(self, name: str, event: IncidentEvent) -> bool:
+        """按当前事件的 Provider 配置筛选可执行工具，不放宽冻结 manifest。"""
+        return name in self._handlers and (
+            name not in self._availability or self._availability[name](event)
+        )
 
     def get(self, name: str) -> ToolSpec:
         try:

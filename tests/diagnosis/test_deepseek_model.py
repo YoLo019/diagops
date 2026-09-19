@@ -2,6 +2,7 @@ import asyncio
 from dataclasses import replace
 
 import pytest
+from agents import ModelSettings
 
 import backend.diagnosis.deepseek_model as deepseek_model
 
@@ -79,7 +80,7 @@ async def test_deepseek_model_closes_request_client(monkeypatch, raises):
         return await model.get_response(
             None,
             "input",
-            object(),
+            ModelSettings(),
             [],
             None,
             [],
@@ -131,7 +132,7 @@ def test_deepseek_model_supports_sequential_event_loops(monkeypatch):
         return await model.get_response(
             None,
             "input",
-            object(),
+            ModelSettings(),
             [],
             None,
             [],

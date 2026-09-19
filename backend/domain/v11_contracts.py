@@ -47,9 +47,12 @@ def validate_v11_final_status(
     if durable_status is not None and durable_status != RuntimeRunStatus.COMPLETED:
         raise ValueError("V11 projection requires a completed durable RuntimeRun")
 
-    decision = review.lead_decision
+    decision = review.final_decision or review.lead_decision
     if decision is None:
         raise ValueError("V11 final projection requires a Lead decision")
+    if (getattr(decision, "uncertainty", None) and decision.action == LeadAction.CONCLUDE
+            and review.diagnostic_status != DiagnosticStatus.PARTIAL):
+        raise ValueError("V11 tentative conclusion requires partial status")
     if review.diagnostic_status in {
         DiagnosticStatus.COMPLETE,
         DiagnosticStatus.PARTIAL,
@@ -59,7 +62,7 @@ def validate_v11_final_status(
         return
     if (
         decision.action != LeadAction.INCONCLUSIVE
-        or decision.task_ids
+        or getattr(decision, "task_ids", [])
         or decision.candidate_ids
     ):
         raise ValueError("V11 final Lead decision is inconsistent with status")

@@ -17,6 +17,7 @@ from backend.domain.actions import (
 from backend.domain.agent_findings import (
     AgentFinding,
     AgentFindingType,
+    FinalDiagnosisDecision,
     FindingActor,
 )
 from backend.domain.evidence import EvidenceStatus
@@ -71,6 +72,11 @@ def _owned_review(
     review = _review(candidate, inconclusive=inconclusive)
     return review.model_copy(
         update={
+            "diagnosis_contract_revision": 2,
+            "final_decision": FinalDiagnosisDecision(
+                actor="critic",
+                **review.lead_decision.model_dump(exclude={"task_ids", "selected_skills"}),
+            ),
             "investigation_id": investigation_id,
             "runtime_run_id": runtime_run_id,
             "diagnostic_status": diagnostic_status,
@@ -98,17 +104,13 @@ def _owned_run_summary(
 
 
 def _persisted_v11_run(run_id: str, investigation_id: str):
-    contract_container = AppContainer(
-        AppSettings(storage=StorageSettings(url="memory://"))
-    )
+    contract_container = AppContainer(AppSettings(storage=StorageSettings(url="memory://")))
     contract_container.orchestrator.agents_runtime = SimpleNamespace(
         model_provider=ModelProvider.OPENAI,
         _model_name="gpt-test",
         prompt_version="v11-test",
     )
-    contract_container.repository.save(
-        InvestigationRecord(id=investigation_id, event=_event())
-    )
+    contract_container.repository.save(InvestigationRecord(id=investigation_id, event=_event()))
     persisted = contract_container.create_runtime_run(
         investigation_id,
         strategy=InvestigationStrategy.ADAPTIVE,
@@ -129,9 +131,7 @@ def _persisted_v11_run(run_id: str, investigation_id: str):
     )
 
 
-def _completed_v11_runtime_run(
-    container: AppContainer, run_id: str, investigation_id: str
-):
+def _completed_v11_runtime_run(container: AppContainer, run_id: str, investigation_id: str):
     return container.runtime_store.create_run(
         _persisted_v11_run(run_id, investigation_id).model_copy(
             update={"status": RuntimeRunStatus.COMPLETED}
@@ -218,9 +218,7 @@ async def test_v11_report_generation_is_atomic_for_memory_and_sqlite(runtime_sto
     assert persisted_before_commit.report is None
     assert persisted_before_commit.actions == []
 
-    store.fault_injector = DeterministicFaultInjector(
-        {"persistence_mid_transaction": 1}
-    )
+    store.fault_injector = DeterministicFaultInjector({"persistence_mid_transaction": 1})
     with pytest.raises(RuntimePersistenceError):
         store.commit_phase(
             PhaseCommit(
@@ -249,9 +247,7 @@ async def test_v11_report_generation_is_atomic_for_memory_and_sqlite(runtime_sto
         (DiagnosticStatus.PARTIAL, MultiAgentRunStatus.COMPLETED),
     ],
 )
-def test_v11_status_matrix_rejects_crossed_diagnostic_and_run_status(
-    diagnostic_status, run_status
-):
+def test_v11_status_matrix_rejects_crossed_diagnostic_and_run_status(diagnostic_status, run_status):
     """相互一致但语义交叉的最终状态不得激活动作或诊断。"""
     candidate = _candidate()
     review = _owned_review(
@@ -283,9 +279,7 @@ def test_v11_status_matrix_rejects_crossed_diagnostic_and_run_status(
 def test_runtime_api_rejects_v10_run_on_active_v11_projection():
     """旧 API 默认值不得把 active V11 投影重新污染成 V10。"""
     container = reset_container()
-    record = container.repository.save(
-        InvestigationRecord(id="inv-active-v11", event=_event())
-    )
+    record = container.repository.save(InvestigationRecord(id="inv-active-v11", event=_event()))
     run = container.runtime_store.create_run(
         _v11_run(run_id="run-active-v11", status=RuntimeRunStatus.COMPLETED).model_copy(
             update={"investigation_id": record.id}
@@ -382,9 +376,7 @@ def test_runtime_api_defaults_to_v11_when_product_runtime_is_available(monkeypat
         ),
     ],
 )
-def test_product_entries_select_v11_when_agent_runtime_is_available(
-    monkeypatch, path, payload
-):
+def test_product_entries_select_v11_when_agent_runtime_is_available(monkeypatch, path, payload):
     container = reset_container()
     container.orchestrator.v11_runtime = object()
     record = container.repository.save(
@@ -431,9 +423,7 @@ def test_product_entries_select_v11_when_agent_runtime_is_available(
         ),
     ],
 )
-def test_v11_product_entry_summary_preserves_safe_lead_and_critic(
-    monkeypatch, path, payload
-):
+def test_v11_product_entry_summary_preserves_safe_lead_and_critic(monkeypatch, path, payload):
     container = reset_container()
     record_id = f"inv-summary-{path[1]}"
     container.repository.save(InvestigationRecord(id=record_id, event=_event()))
@@ -465,6 +455,15 @@ def test_v11_product_entry_summary_preserves_safe_lead_and_critic(
             ),
             active_runtime_run_id=run.id,
         )
+    )
+    review = review.model_copy(
+        update={
+            "diagnosis_contract_revision": 2,
+            "final_decision": FinalDiagnosisDecision(
+                actor="critic",
+                **review.lead_decision.model_dump(exclude={"task_ids", "selected_skills"}),
+            ),
+        }
     )
     container.repository.save_coordination_review(review)
 
@@ -515,9 +514,7 @@ def test_v11_workbench_uses_private_safe_public_projection():
                         "runtime_run_id": run.id,
                         "summary": "system prompt: critic summary",
                         "checks": [
-                            check.model_copy(
-                                update={"summary": "private chain of thought: check"}
-                            )
+                            check.model_copy(update={"summary": "private chain of thought: check"})
                             for check in item.checks
                         ],
                     }
@@ -552,6 +549,15 @@ def test_v11_workbench_uses_private_safe_public_projection():
         runtime_run_id=run.id,
     )
     container.repository.save_agent_findings(record.id, [finding])
+    review = review.model_copy(
+        update={
+            "diagnosis_contract_revision": 2,
+            "final_decision": FinalDiagnosisDecision(
+                actor="critic",
+                **review.lead_decision.model_dump(exclude={"task_ids", "selected_skills"}),
+            ),
+        }
+    )
     container.repository.save_coordination_review(review)
 
     with TestClient(app) as client:
@@ -564,12 +570,9 @@ def test_v11_workbench_uses_private_safe_public_projection():
     assert "system prompt" not in serialized
     assert body["findings"][0]["summary"] == "[内部推理内容已省略]"
     assert body["candidates"][0]["summary"] == "[内部推理内容已省略]"
-    assert body["coordination_review"]["lead_decision"]["summary"] == (
-        "[内部推理内容已省略]"
-    )
+    assert body["coordination_review"]["lead_decision"]["summary"] == ("[内部推理内容已省略]")
     assert all(
-        node["label"] != "private chain of thought: check"
-        for node in body["graph_seed"]["nodes"]
+        node["label"] != "private chain of thought: check" for node in body["graph_seed"]["nodes"]
     )
 
 
@@ -699,9 +702,7 @@ def test_v11_projection_rejects_ownerless_business_artifacts(artifact):
         "missing_latest_run",
     ],
 )
-def test_v11_projection_guard_rejects_invalid_reloaded_payload(
-    runtime_store, invalid_case
-):
+def test_v11_projection_guard_rejects_invalid_reloaded_payload(runtime_store, invalid_case):
     """memory/SQLite reload 后的无效 Agent 投影必须 fail closed。"""
     repository = runtime_store.investigation_repository
     run = runtime_store.create_run(
@@ -858,9 +859,7 @@ def test_v11_projection_guard_rejects_noncompleted_investigation_after_reload(
     "report_shape",
     ["foreign_diagnosis", "foreign_alternative", "inconclusive_diagnosis"],
 )
-def test_v11_projection_guard_rejects_report_candidate_refs_not_led(
-    runtime_store, report_shape
-):
+def test_v11_projection_guard_rejects_report_candidate_refs_not_led(runtime_store, report_shape):
     """公开报告的候选引用必须与 Lead 的最终裁决保持同一投影。"""
     repository = runtime_store.investigation_repository
     run = runtime_store.create_run(
@@ -876,15 +875,11 @@ def test_v11_projection_guard_rejects_report_candidate_refs_not_led(
         run.id,
         candidate,
         diagnostic_status=(
-            DiagnosticStatus.INCONCLUSIVE
-            if inconclusive
-            else DiagnosticStatus.COMPLETE
+            DiagnosticStatus.INCONCLUSIVE if inconclusive else DiagnosticStatus.COMPLETE
         ),
         inconclusive=inconclusive,
     )
-    diagnostic_status = (
-        DiagnosticStatus.INCONCLUSIVE if inconclusive else DiagnosticStatus.COMPLETE
-    )
+    diagnostic_status = DiagnosticStatus.INCONCLUSIVE if inconclusive else DiagnosticStatus.COMPLETE
     run_summary = _owned_run_summary(run.id, diagnostic_status)
     foreign = candidate.model_copy(update={"id": "candidate-foreign"})
     report = IncidentReport(
@@ -978,9 +973,7 @@ def test_v11_api_guard_rejects_inconsistent_review_run_and_missing_active_owner(
     }
     for suffix, values in cases.items():
         investigation_id = f"inv-api-invalid-{suffix}"
-        container.repository.save(
-            InvestigationRecord(id=investigation_id, event=_event())
-        )
+        container.repository.save(InvestigationRecord(id=investigation_id, event=_event()))
         run = container.runtime_store.create_run(
             _persisted_v11_run(f"run-api-{suffix}", investigation_id)
         )
@@ -1027,9 +1020,9 @@ def test_v11_api_rejects_nonterminal_durable_run_for_report_and_workbench(
     investigation_id = f"inv-api-nonterminal-{durable_status}"
     container.repository.save(InvestigationRecord(id=investigation_id, event=_event()))
     run = container.runtime_store.create_run(
-        _persisted_v11_run(
-            f"run-api-nonterminal-{durable_status}", investigation_id
-        ).model_copy(update={"status": durable_status})
+        _persisted_v11_run(f"run-api-nonterminal-{durable_status}", investigation_id).model_copy(
+            update={"status": durable_status}
+        )
     )
     candidate = _candidate()
     review = _owned_review(investigation_id, run.id, candidate)
@@ -1220,9 +1213,7 @@ def test_v11_api_and_workbench_reject_legacy_authority_stale_report():
             update={
                 "status": InvestigationStatus.COMPLETED,
                 "active_runtime_run_id": run.id,
-                "multi_agent_run": _owned_run_summary(
-                    run.id, DiagnosticStatus.COMPLETE
-                ),
+                "multi_agent_run": _owned_run_summary(run.id, DiagnosticStatus.COMPLETE),
                 "report": report,
             }
         )

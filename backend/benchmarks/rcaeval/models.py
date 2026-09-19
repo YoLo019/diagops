@@ -326,7 +326,7 @@ class CandidatePrediction(BaseModel):
     affected_service: str = Field(min_length=1, max_length=128)
     # 评分使用结构化分类；failure_mechanism 保留可读、可审计的解释。
     failure_class: str | None = Field(default=None, max_length=128)
-    failure_mechanism: str = Field(min_length=1, max_length=256)
+    failure_mechanism: str = Field(min_length=1, max_length=512)
     evidence_ids: list[str] = Field(default_factory=list, max_length=32)
     onset_window_start: datetime | None = None
     onset_window_end: datetime | None = None
@@ -540,7 +540,7 @@ class EvidenceAuditPair(BaseModel):
     candidate_rank: int = Field(ge=1, le=3)
     evidence_id: str = Field(min_length=1, max_length=128)
     affected_service: str = Field(min_length=1, max_length=128)
-    failure_mechanism: str = Field(min_length=1, max_length=256)
+    failure_mechanism: str = Field(min_length=1, max_length=512)
     evidence_summary: str = Field(default="", max_length=512)
     onset_window_start: datetime | None = None
     onset_window_end: datetime | None = None

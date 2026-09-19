@@ -348,7 +348,9 @@ class FileTraceProvider(_PackageProviderBase):
                 status=ProviderStatus.FAILED,
                 error_message=safe_failure("provider_failure"),
             )
-        selected = select_trace_spans(spans, event, query)
+        from backend.providers.trace_timing import with_child_timing
+
+        selected = select_trace_spans(with_child_timing(spans), event, query)
         latency_highlight = query is not None and query.min_duration_ms is not None
         evidence = [
             _span_to_evidence(self, span, latency_highlight=latency_highlight)

@@ -21,12 +21,17 @@ class ProviderResult(BaseModel):
     error_message: str | None = None
     duration_ms: int = Field(default=0, ge=0)
     failure_category: FailureCategory | None = None
+    truncated: bool = False
+    returned_count: int | None = Field(default=None, ge=0)
 
     @model_serializer(mode="wrap")
     def serialize_legacy_payload(self, handler):
         data = handler(self)
         if self.failure_category is None and "failure_category" not in self.model_fields_set:
             data.pop("failure_category", None)
+        for field in ("truncated", "returned_count"):
+            if field not in self.model_fields_set:
+                data.pop(field, None)
         return data
 
     def to_error_evidence(self) -> EvidenceItem:

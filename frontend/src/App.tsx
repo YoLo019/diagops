@@ -148,18 +148,19 @@ export function isUsableV11Review(
     review.diagnostic_status !== run.diagnostic_status ||
     (review.diagnostic_status === "partial" && run.status !== "partial") ||
     (review.diagnostic_status !== "partial" && run.status !== "completed") ||
-    !review.lead_decision
+    (review.diagnosis_contract_revision === 2 && !review.final_decision) ||
+    !(review.final_decision ?? review.lead_decision)
   ) {
     return false;
   }
 
-  const decision = review.lead_decision;
+  const decision = review.final_decision ?? review.lead_decision!;
   if (["complete", "partial"].includes(review.diagnostic_status ?? "")) {
     return decision.action === "conclude" && decision.candidate_ids.length > 0;
   }
   return (
     decision.action === "inconclusive" &&
-    decision.task_ids.length === 0 &&
+    (!("task_ids" in decision) || decision.task_ids.length === 0) &&
     decision.candidate_ids.length === 0
   );
 }
@@ -173,8 +174,8 @@ export function selectVisibleCandidates(
   if (review?.authority_mode === "agent") {
     if (!isUsableV11Review(review, run, activeRuntimeRunId)) return [];
     if (review.diagnostic_status === "inconclusive") return [];
-    const accepted = new Set(review.lead_decision?.candidate_ids ?? []);
-    return review.candidates.filter((candidate) => accepted.has(candidate.id));
+    const orderedIds = (review.final_decision ?? review.lead_decision)?.candidate_ids ?? [];
+    return orderedIds.flatMap((id) => review.candidates.filter((candidate) => candidate.id === id));
   }
   if (review?.execution_layer !== "openai_agents_sdk") {
     return legacyCandidates;
@@ -600,6 +601,7 @@ function RcaWorkbenchPanel({ investigationId }: { investigationId: string }) {
     ? persistedReview
     : null;
   const isV11Projection = Boolean(v11Review || persistedReview?.authority_mode === "agent");
+  const v11Decision = v11Review?.final_decision ?? v11Review?.lead_decision;
   const review = isUsableV7Review(persistedReview, run) ? persistedReview : null;
   const candidates = selectVisibleCandidates(
     persistedReview,
@@ -791,10 +793,13 @@ function RcaWorkbenchPanel({ investigationId }: { investigationId: string }) {
                     <p>{v11Review?.critic_assessments?.map((item) => projectV11UiText(item.summary)).join("；") || "暂无 Critic 摘要"}</p>
                     <p>{workbenchQuery.data?.investigation.report?.evidence_gaps?.map((item) => projectV11UiText(item)).join("；") || "未记录证据缺口"}</p>
                   </article>
-                  {v11Review?.lead_decision ? (
+                  {v11Decision ? (
                     <article className="compact-row">
-                      <strong>Lead decision: {v11Review.lead_decision.action}</strong>
-                      <p>{projectV11UiText(v11Review.lead_decision.summary)}</p>
+                      <strong>{v11Review?.final_decision ? "最终诊断" : "Lead decision"}: {v11Decision.action}</strong>
+                      <p>{projectV11UiText(v11Decision.summary)}</p>
+                      {v11Review?.final_decision?.uncertainty ? (
+                        <p>最可能原因（暂定）：{projectV11UiText(v11Review.final_decision.uncertainty)}</p>
+                      ) : null}
                     </article>
                   ) : null}
                   <article className="compact-row">

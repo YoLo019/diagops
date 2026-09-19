@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import inspect
 import json
+import math
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -16,7 +17,7 @@ from pydantic import BaseModel, ValidationError
 
 from backend.domain.agent_findings import AgentName
 from backend.domain.events import IncidentEvent
-from backend.domain.evidence import EvidenceItem, JsonValue
+from backend.domain.evidence import EvidenceItem, EvidenceProvider, JsonValue
 from backend.domain.multi_agent import AdaptiveStopReason, FailureCategory
 from backend.domain.tool_calls import ToolCallRecord, ToolCallStatus
 from backend.domain.tool_queries import (
@@ -241,6 +242,7 @@ class AdaptiveToolSession:
         parallel_limit: RunStepGate | None = None,
         agent_manifest: tuple[str, ...] | None = None,
         remaining_deadline_seconds: Callable[[], float] | None = None,
+        remaining_tool_budget: Callable[[], int] | None = None,
     ) -> None:
         if max_parallel_steps_per_run < 1:
             raise ValueError("max_parallel_steps_per_run must be positive")
@@ -269,11 +271,27 @@ class AdaptiveToolSession:
         self.stop_reasons: dict[AgentIdentity, AdaptiveStopReason] = {}
         self._attempts: dict[AgentIdentity, int] = {}
         self._total_attempts = 0
+        self._remaining_tool_budget = remaining_tool_budget
         self._fingerprints: set[str] = set()
         self._known_evidence_ids = {item.id for item in seed_evidence}
+        self._evidence_by_id = {
+            item.id: item for item in seed_evidence
+            if item.runtime_run_id == self.runtime_run_id
+        }
         self._stopped_agents: set[AgentIdentity] = set()
         self._allowed_targets = {event.service, *(allowed_targets or set())}
         self._extend_allowed_targets(seed_evidence)
+
+    @property
+    def remaining_tool_calls(self) -> int:
+        """当前会话的剩余尝试数，同时受运行及阶段的取证额度约束。"""
+        remaining = min(
+            self.max_total_tool_calls - self._total_attempts,
+            self.max_tool_calls_per_specialist - max(self._attempts.values(), default=0),
+        )
+        if self._remaining_tool_budget is not None:
+            remaining = min(remaining, self._remaining_tool_budget())
+        return max(0, remaining)
 
     def tools_for(
         self, agent_name: AgentIdentity, round_number: int, attempt: int = 1
@@ -285,6 +303,8 @@ class AdaptiveToolSession:
             else tuple(sorted(TOOLS_BY_AGENT[agent_name]))
         )
         for tool_name in tool_names:
+            if not self.registry.is_available(tool_name, self.event):
+                continue
             spec = (
                 self.registry.assert_agent_callable(tool_name, self.agent_manifest)
                 if self.agent_manifest is not None
@@ -320,6 +340,20 @@ class AdaptiveToolSession:
         return tools
 
     async def invoke(
+        self, agent_name: AgentIdentity, tool_name: str, raw_input: str,
+        round_number: int, attempt: int = 1,
+    ) -> str:
+        known = set(self._known_evidence_ids)
+        response = json.loads(await self._invoke(
+            agent_name, tool_name, raw_input, round_number, attempt,
+        ))
+        response["remaining_tool_calls"] = self.remaining_tool_calls
+        response["new_evidence_count"] = sum(
+            item.get("id") not in known for item in response.get("evidence", [])
+        )
+        return _bounded_tool_response(response)
+
+    async def _invoke(
         self,
         agent_name: AgentIdentity,
         tool_name: str,
@@ -340,6 +374,12 @@ class AdaptiveToolSession:
         parsed = self._parse_input(raw_input)
         self._attempts[agent_name] = self._attempts.get(agent_name, 0) + 1
         self._total_attempts += 1
+
+        if not self.registry.is_available(tool_name, self.event):
+            return self._reject(
+                agent_name, tool_name, {}, ToolCallStatus.SKIPPED,
+                "tool provider not configured", task_id=task_id,
+            )
 
         if parsed is None:
             return self._reject(
@@ -439,11 +479,20 @@ class AdaptiveToolSession:
                 committed.model_dump(mode="python")
             )
             self.tool_calls.append(reused)
+            evidence = [
+                self._evidence_by_id[item_id]
+                for item_id in reused.output_evidence_ids
+                if item_id in self._evidence_by_id
+            ]
+            warning = reused.error_message
+            if len(evidence) != len(reused.output_evidence_ids):
+                warning = "reused result contains evidence outside current context scope"
             return _response(
                 status=ToolCallStatus.SUCCESS,
-                evidence=[],
-                warning=None,
+                evidence=project_tool_evidence(evidence),
+                warning=warning,
                 stop_reason=None,
+                truncated="query_result_truncated:" in (reused.error_message or ""),
             )
         if fingerprint in self._fingerprints:
             return self._reject(
@@ -451,8 +500,7 @@ class AdaptiveToolSession:
                 tool_name,
                 query.model_dump(mode="json"),
                 ToolCallStatus.SKIPPED,
-                "duplicate query",
-                AdaptiveStopReason.DUPLICATE_QUERY,
+                "duplicate query; choose different filters or another tool",
                 task_id=task_id,
             )
         if agent_name in self._stopped_agents:
@@ -511,6 +559,7 @@ class AdaptiveToolSession:
                 idempotency_key=attempt_key,
                 execution_id=f"tool-exec-{uuid4().hex}",
                 attempt=attempt_number,
+                budget_charged=True,
             )
             if self._persist_tool_start is not None:
                 await self._persist_tool_start(current_call)
@@ -585,12 +634,10 @@ class AdaptiveToolSession:
                 AdaptiveStopReason.TIMEOUT,
             )
         except RetryBudgetRejected:
-            self._stop(agent_name, AdaptiveStopReason.BUDGET_EXHAUSTED)
-            return _response(
-                status=ToolCallStatus.FAILED,
-                evidence=[],
-                warning="adaptive retry budget exhausted",
-                stop_reason=AdaptiveStopReason.BUDGET_EXHAUSTED,
+            return self._reject(
+                agent_name, tool_name, safe_normalized_input, ToolCallStatus.SKIPPED,
+                "adaptive tool budget exhausted", AdaptiveStopReason.BUDGET_EXHAUSTED,
+                task_id=task_id,
             )
         except Exception:
             return await self._finish_failed_invocation(
@@ -622,6 +669,7 @@ class AdaptiveToolSession:
                 "idempotency_key": idempotency_key,
                 "execution_id": execution_id,
                 "attempt": current_call.attempt,
+                "budget_charged": True,
                 }
             ),
             evidence=owned_evidence,
@@ -644,21 +692,37 @@ class AdaptiveToolSession:
         new_output_ids = output_ids - self._known_evidence_ids
         for item in result.evidence:
             self._extend_allowed_targets([item])
+            if item.runtime_run_id == self.runtime_run_id:
+                self._evidence_by_id[item.id] = item
             if item.id in self._known_evidence_ids:
                 continue
             self._known_evidence_ids.add(item.id)
             self.new_evidence.append(item)
 
-        stop_reason = None
-        if not new_output_ids and result.call.status != ToolCallStatus.FAILED:
-            stop_reason = AdaptiveStopReason.NO_NEW_EVIDENCE
-            self._stop(agent_name, stop_reason)
+        truncated = any(item.truncated for item in result.provider_results)
+        warning = _result_warning(result.provider_results)
+        # 空结果/已有证据只说明本次查询没有增量，不能终止其它工具的取证。
+        # 相同查询仍去重，后续查询仍受总预算、单路预算和截止时间约束。
+        if not new_output_ids and not truncated and result.call.status != ToolCallStatus.FAILED:
+            guidance = (
+                "no matching records; coverage is unverified, not evidence of health. "
+                "Check entity/time coverage once before interpreting absence; otherwise "
+                "record the gap instead of repeating keyword variants"
+                if not output_ids else "only previously seen evidence; query again only "
+                "with a discriminator that could change the assessment"
+            )
+            if not output_ids and tool_name == "read_logs":
+                guidance += "; keywords use AND within one record, not OR"
+            warning = "; ".join(filter(None, [
+                warning, f"no new evidence; {guidance}",
+            ]))
 
         return _response(
             status=result.call.status,
             evidence=project_tool_evidence(result.evidence),
-            warning=_result_warning(result.provider_results),
-            stop_reason=stop_reason,
+            warning=warning,
+            stop_reason=None,
+            truncated=truncated,
         )
 
     async def _finish_failed_invocation(
@@ -849,6 +913,7 @@ class AdaptiveToolSession:
             started_at=now,
             completed_at=now,
             runtime_run_id=self.runtime_run_id,
+            budget_charged=False,
         )
         self.tool_calls.append(call)
         if stop_reason is not None:
@@ -878,6 +943,10 @@ def project_tool_evidence(evidence: list[EvidenceItem]) -> list[dict[str, JsonVa
             "status": item.status.value,
             "timestamp": item.timestamp.isoformat(),
             "summary": item.summary,
+            "scope_entity_ids": sorted(item.scope.entity_ids) if item.scope else [],
+            **project_metric_details(item),
+            **project_trace_details(item),
+            **project_log_details(item),
         }
         for item in evidence
     ]
@@ -1006,16 +1075,210 @@ def _response(
     evidence: list[dict[str, JsonValue]],
     warning: str | None,
     stop_reason: AdaptiveStopReason | None,
+    truncated: bool = False,
 ) -> str:
-    return json.dumps(
+    return _bounded_tool_response(
         {
             "status": status.value,
             "evidence": evidence,
+            "returned_count": len(evidence),
+            "truncated": truncated,
+            "total_count": None,
             "warning": warning,
             "stop_reason": stop_reason.value if stop_reason else None,
-        },
-        ensure_ascii=False,
+        }
     )
+
+
+def _bounded_tool_response(payload: dict, max_chars: int = 6000) -> str:
+    """只缩小模型可见页；完整 Evidence 已入库，省略项需通过收窄查询获取。"""
+    payload = {**payload, "evidence": list(payload["evidence"])}
+    original_count = len(payload["evidence"])
+
+    def encode() -> str:
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    rendered = encode()
+    if len(rendered) > max_chars:
+        # 先压缩重复结构及可重取的时间桶，再省略整条证据；否则一次新增查询
+        # 就可能把前一次查询中用于区分机制的资源组成全部挤掉。
+        compacted = []
+        for original in payload["evidence"]:
+            item = dict(original)
+            if item.get("metric") and "baseline_mean" in item and "observation_mean" in item:
+                removable = ["time_profile", "related_metric_names"]
+                if item.get("scope_entity_ids"):
+                    removable.append("summary")
+                omitted = [key for key in removable
+                           if key in item]
+                for key in omitted:
+                    item.pop(key)
+                observations = item.get("related_observations")
+                if (isinstance(observations, list) and observations
+                        and "related_observation_columns" not in item):
+                    columns = ["metric", "baseline_mean", "observation_mean",
+                               "first_sustained_deviation"]
+                    item["related_observation_columns"] = columns
+                    item["related_observations"] = [
+                        [point.get(key) for key in columns] for point in observations
+                        if isinstance(point, dict)
+                    ]
+                if omitted:
+                    item["omitted_detail_fields"] = omitted
+            compacted.append(item)
+        payload["evidence"] = compacted
+        rendered = encode()
+    while len(rendered) > max_chars and payload["evidence"]:
+        payload["evidence"].pop()
+        payload.update(
+            returned_count=len(payload["evidence"]),
+            truncated=True,
+            omitted_count=payload.get("omitted_count", 0) + 1,
+            page_count=payload.get("page_count", original_count),
+            retrieval_hint="Narrow entity, time or signal filters to retrieve omitted evidence.",
+        )
+        rendered = encode()
+    return rendered
+
+
+def compact_tool_history(value):
+    """限制累计工具结果；保留调用/返回配对、状态和省略提示，不改 SDK 原历史。"""
+    if not isinstance(value, list):
+        return value
+    results = {}
+    for index, item in enumerate(value):
+        if not isinstance(item, dict) or item.get("type") != "function_call_output":
+            continue
+        try:
+            payload = json.loads(item.get("output", ""))
+        except (ValueError, TypeError):
+            continue
+        if (
+            isinstance(payload, dict)
+            and isinstance(payload.get("evidence"), list)
+            and {"status", "returned_count", "truncated", "stop_reason"} <= payload.keys()
+        ):
+            results[index] = payload
+    if not results or sum(len(value[index]["output"]) for index in results) <= 6000:
+        return value
+    per_result = 6000 // len(results)
+    return [
+        {**item, "output": _bounded_tool_response(results[index], per_result)}
+        if index in results else item
+        for index, item in enumerate(value)
+    ]
+
+
+def project_trace_details(item: EvidenceItem) -> dict[str, JsonValue]:
+    """保留调用链关联和配对事实，避免仅凭服务端耗时宣称调用链健康。"""
+    if item.provider != EvidenceProvider.TRACE:
+        return {}
+    projected = {key: value[:128] if isinstance(value, str) else value
+                 for key in ("trace_id", "span_id", "parent_span_id", "service", "operation")
+                 if isinstance(value := item.payload.get(key), str) or value is None}
+    attributes = item.payload.get("attributes")
+    timing = item.payload.get("child_timing")
+    if isinstance(timing, dict):
+        projected["child_timing"] = {
+            key: value for key in ("observed_child_count", "covered_ms", "uncovered_ms",
+                                   "longest_child_duration_ms", "longest_child_peer_duration_ms")
+            if type(value := timing.get(key)) in {int, float}
+            and math.isfinite(value) and value >= 0
+        }
+        projected["child_timing"].update({
+            key: value[:128] for key in ("longest_child_span_id", "longest_child_operation",
+                                        "longest_child_peer_service")
+            if isinstance(value := timing.get(key), str)
+        })
+        projected["child_timing"]["semantics"] = (
+            "observed same-service direct children, including outbound RPC waits; "
+            "uncovered time is NOT CPU self-time; instrumentation may be incomplete"
+        )
+    if isinstance(attributes, dict):
+        projected["trace_details"] = {
+            key: value[:256] for key in (
+                "rpc.system", "rpc.status_code", "rpc.peer_span_id", "rpc.peer_service",
+                "rpc.peer_role", "rpc.peer_duration_ms", "rpc.duration_difference_ms",
+                "source_service",
+            ) if isinstance(value := attributes.get(key), str)
+        }
+    return redact_value(projected)
+
+
+def project_log_details(item: EvidenceItem) -> dict[str, JsonValue]:
+    """错误说明与消息分离呈现；统一脱敏后限长，避免截断破坏脱敏模式。"""
+    if item.provider != EvidenceProvider.LOG:
+        return {}
+    projected = {key: redact_text(value)[:500] for key in ("error", "level")
+                 if isinstance(value := item.payload.get(key), str) and value}
+    sampling = item.payload.get("sampling")
+    if isinstance(sampling, dict):
+        projected["sampling"] = {
+            key: redact_text(value)[:128] if isinstance(value, str) else value
+            for key in ("selection", "matched_start", "matched_end", "matching_count",
+                        "scan_complete")
+            if type(value := sampling.get(key)) in {str, bool, int}
+        }
+    return projected
+
+
+def project_metric_details(item: EvidenceItem, *, compact: bool = False) -> dict[str, JsonValue]:
+    """保留有界判别观测；角色摘要省略时间桶细项，完整数据仍可审计和查询。"""
+    projected = {}
+    for key in ("window_start", "window_end", "split_at", "timestamp_semantics"):
+        value = item.payload.get(key)
+        if isinstance(value, str):
+            projected[key] = value[:128]
+    deviation = item.payload.get("first_sustained_deviation")
+    if isinstance(deviation, dict) and isinstance(deviation.get("timestamp"), str):
+        projected["first_sustained_deviation"] = {
+            "timestamp": deviation["timestamp"][:40],
+            "rule": "3 consecutive samples beyond max(3 MAD, 10% baseline median); "
+                    "descriptive threshold, not causal onset",
+        }
+    numeric_keys = ("baseline_mean", "observation_mean", "baseline_min", "baseline_max",
+                    "observation_min", "observation_max", "sample_count",
+                    "sampling_interval_seconds", "max_sample_gap_seconds")
+    for key in numeric_keys:
+        value = item.payload.get(key)
+        if type(value) in {int, float} and math.isfinite(value):
+            projected[key] = value
+    for key in ("aggregation", "unit", "value_semantics") + (() if compact else ("metric",)):
+        value = item.payload.get(key)
+        if isinstance(value, str):
+            projected[key] = value[:256]
+    names = item.payload.get("related_metric_names")
+    if isinstance(names, list) and names:
+        projected["related_metric_names"] = [name[:256] for name in names[:8]
+                                            if isinstance(name, str)]
+    observations = item.payload.get("related_observations")
+    if isinstance(observations, list):
+        valid = [point for point in observations[:8] if isinstance(point, dict)
+                 and isinstance(point.get("metric"), str)
+                 and all(type(point.get(k)) in {int, float} and math.isfinite(point[k])
+                         for k in ("baseline_mean", "observation_mean"))]
+        if valid:
+            projected["related_observations"] = [
+                {"metric": point["metric"][:256],
+                 "baseline_mean": float(f"{point['baseline_mean']:.6g}"),
+                 "observation_mean": float(f"{point['observation_mean']:.6g}"),
+                 **({"first_sustained_deviation": point["first_sustained_deviation"][:40]}
+                    if isinstance(point.get("first_sustained_deviation"), str) else {})}
+                for point in valid
+            ]
+            # 名称已包含在观测表里，避免重复长指标名。
+            projected.pop("related_metric_names", None)
+    profile = item.payload.get("time_profile")
+    if isinstance(profile, list):
+        projected["time_profile"] = [
+            {"start": point["start"][:40], "end": point["end"][:40],
+             "mean": float(f"{point['mean']:.6g}")}
+            for point in profile[:8]
+            if isinstance(point, dict)
+            and isinstance(point.get("start"), str) and isinstance(point.get("end"), str)
+            and type(point.get("mean")) in {int, float} and math.isfinite(point["mean"])
+        ]
+    return redact_value(projected)
 
 
 async def _maybe_await(value: Any) -> Any:

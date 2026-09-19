@@ -228,7 +228,7 @@ def test_runtime_event_accepts_allowlisted_structured_tool_payload() -> None:
             "lookup_memory",
             {
                 "affected_entity": "checkout-service",
-                "failure_mechanism": "database connection pool exhausted",
+                "failure_mechanism": "x" * 512,
                 "limit": 5,
             },
         ),
@@ -314,7 +314,7 @@ def test_runtime_event_accepts_scoped_tool_payloads(
         ("query_traces", {"min_duration_ms": -1}),
         ("query_traces", {"min_duration_ms": "fast"}),
         ("query_traces", {"direction": "sideways"}),
-        ("lookup_memory", {"failure_mechanism": "x" * 257}),
+        ("lookup_memory", {"failure_mechanism": "x" * 513}),
         ("read_logs", {"keywords": ["x" * 257]}),
         ("read_logs", {"keywords": [""]}),
         ("read_logs", {"instance": "x" * 257}),
@@ -555,3 +555,22 @@ def test_v11_contract_builder_is_the_shared_budget_source() -> None:
     validate_v11_execution_contract(contract)
     assert contract["limits"]["max_turns"] == V11_DEFAULT_MAX_TURNS
     assert contract["tool_budget"] == V11_DEFAULT_TOOL_BUDGET
+    assert contract["retry_policy"]["model_max_corrections"] == 3
+
+
+@pytest.mark.parametrize("corrections", [1, 2, 3, 0, 4, True, 1.0, None])
+def test_v11_contract_preserves_bounded_historical_corrections(corrections):
+    from backend.domain.runtime import seal_v11_execution_contract
+
+    contract = build_v11_execution_contract(V11ExecutionContractInput(
+        model_provider="openai", model_name="test", prompt_version="v11-test",
+        api_mode="responses", tool_manifest=("read_logs",), skill_catalog={}, token_budget=100,
+    ))
+    contract["retry_policy"]["model_max_corrections"] = corrections
+    contract = seal_v11_execution_contract(contract)
+    if type(corrections) is int and 1 <= corrections <= 3:
+        validate_v11_execution_contract(contract)
+        assert contract["retry_policy"]["model_max_corrections"] == corrections
+    else:
+        with pytest.raises(ValueError, match="bounded model retries and corrections"):
+            validate_v11_execution_contract(contract)

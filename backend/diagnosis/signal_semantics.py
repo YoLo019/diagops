@@ -25,8 +25,8 @@ _NETWORK_SCOPE_TOKENS = ("network", "tcp", "udp", "socket", "packet")
 _CORRUPTION_TOKENS = ("drop", "dropped", "error", "loss", "corrupt", "retransmit")
 _NETWORK_LATENCY_TOKENS = ("latency", "delay", "rtt", "wait")
 _NETWORK_TRAFFIC_TOKENS = ("bytes", "packets", "bandwidth", "throughput")
-_TRAFFIC_TOKENS = ("qps", "request_count", "traffic", "workload")
-_DISK_TOKENS = ("disk", "iops", "io_wait", "iowait")
+_TRAFFIC_TOKENS = ("qps", "request_count", "request_total", "requests_total", "traffic", "workload")
+_DISK_TOKENS = ("disk", "iops", "io_wait", "iowait", "blkio", "fs_reads", "fs_writes")
 _SOCKET_TOKENS = ("socket", "sockets")
 _PROCESS_TOKENS = ("restart", "process")
 _ERROR_TOKENS = ("error", "fail", "5xx")
@@ -75,7 +75,7 @@ class AnomalySegment:
 
 def classify_metric_signal(metric_name: str) -> str:
     """按固定优先级把 metric 名称映射到 canonical signal family。"""
-    name = metric_name.casefold()
+    name = metric_name.casefold().replace("-", "_")
     if any(token in name for token in _NETWORK_SCOPE_TOKENS):
         # 只有 dropped/error/loss/corrupt/retransmit 才是 corruption；
         # 普通 packet/byte 计数是 traffic。
@@ -177,7 +177,7 @@ def select_balanced_evidence(
         by_family.setdefault(_family(item), []).append(item)
     for family_items in by_family.values():
         family_items[:] = _sort_family(family_items)
-    families = sorted(by_family, key=_family_rank)
+    families = sorted(by_family, key=signal_family_priority)
 
     selected: list[EvidenceItem] = []
     round_index = 0
@@ -231,7 +231,8 @@ def _family(item: EvidenceItem) -> str:
     return str(item.payload.get("signal_type", ""))
 
 
-def _family_rank(family: str) -> tuple[int, str]:
+def signal_family_priority(family: str) -> tuple[int, str]:
+    """证据覆盖顺序：先保留可区分机制的家族，不代表根因排序。"""
     if family in _FAMILY_ORDER:
         return (_FAMILY_ORDER.index(family), family)
     return (len(_FAMILY_ORDER), family)
