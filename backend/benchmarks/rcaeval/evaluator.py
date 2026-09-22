@@ -71,6 +71,7 @@ _RCA_EVAL_FAULT_ALIASES = {
     "memory exhaustion": "mem",
     "memory leak": "mem",
     "socket exhaustion": "socket",
+    "socket accumulation": "socket",
     "connection exhaustion": "socket",
     "connection pool exhaustion": "socket",
     "disk io": "disk",

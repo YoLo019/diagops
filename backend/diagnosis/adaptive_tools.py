@@ -15,6 +15,7 @@ from agents.exceptions import ModelBehaviorError
 from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
 from pydantic import BaseModel, ValidationError
 
+from backend.diagnosis.evidence_comparison import share_trace_semantics
 from backend.domain.agent_findings import AgentName
 from backend.domain.events import IncidentEvent
 from backend.domain.evidence import EvidenceItem, EvidenceProvider, JsonValue
@@ -333,7 +334,9 @@ class AdaptiveToolSession:
                     ),
                     on_invoke_tool=invoke,
                     strict_json_schema=True,
-                    timeout_seconds=self.tool_timeout_seconds + 1,
+                    # Provider 自身有超时；SDK 外层计时会把排队与持久化也算进去，
+                    # 导致已提交的证据无法返回。整轮 deadline 和外部取消仍然生效。
+                    timeout_seconds=None,
                     timeout_behavior="error_as_result",
                 )
             )
@@ -713,6 +716,13 @@ class AdaptiveToolSession:
             )
             if not output_ids and tool_name == "read_logs":
                 guidance += "; keywords use AND within one record, not OR"
+            if not output_ids and tool_name == "query_traces":
+                guidance += (
+                    "; service/entity_ids select span owners. Duration and error filters "
+                    "can exclude fast successful server spans on a slow or failing RPC. "
+                    "Query the caller and operation for peer timing, or remove these "
+                    "filters once to check server coverage; do not infer absent traces"
+                )
             warning = "; ".join(filter(None, [
                 warning, f"no new evidence; {guidance}",
             ]))
@@ -796,6 +806,14 @@ class AdaptiveToolSession:
         if default_task is None:
             raise KeyError(f"missing task for agent {agent_name}")
         return default_task
+
+    def retrieved_evidence(self) -> list[EvidenceItem]:
+        """返回本会话实际读到的证据，包括摘要省略但查询命中的已有证据。"""
+        ids = dict.fromkeys(
+            item_id for call in self.tool_calls for item_id in call.output_evidence_ids
+        )
+        return [self._evidence_by_id[item_id] for item_id in ids
+                if item_id in self._evidence_by_id]
 
     def evidence_ids_for(
         self, agent_name: AgentIdentity, round_number: int, attempt: int = 1
@@ -1090,9 +1108,68 @@ def _response(
     )
 
 
+def order_trace_evidence(evidence: list[dict]) -> list[dict]:
+    """优先保留错误、配对及子调用事实，并轮转操作类型；不推断故障原因。"""
+    groups: dict[tuple, list[dict]] = {}
+
+    def priority(item):
+        details = item.get("trace_details")
+        details = details if isinstance(details, dict) else {}
+        timing = item.get("child_timing")
+        timing = timing if isinstance(timing, dict) else {}
+        duration = item.get("duration_ms", 0)
+        duration = duration if type(duration) in {int, float} and math.isfinite(duration) else 0
+        return ("query_population" in item, item.get("span_status") == "error",
+                "longest_child_peer_duration_ms" in timing,
+                details.get("rpc.peer_role") == "callee",
+                bool(timing), bool(details.get("rpc.peer_span_id")),
+                duration, str(item.get("timestamp", item.get("observed_at", ""))),
+                str(item.get("id", "")))
+
+    for item in evidence:
+        if item.get("provider") != "trace":
+            continue
+        details = item.get("trace_details")
+        details = details if isinstance(details, dict) else {}
+        key = tuple(value if isinstance(value, str) else None for value in (
+            item.get("service"), item.get("operation"), item.get("span_status"),
+            details.get("rpc.peer_role"),
+        ))
+        groups.setdefault(key, []).append(item)
+    queues = [sorted(items, key=priority, reverse=True) for items in groups.values()]
+    queues.sort(key=lambda items: priority(items[0]), reverse=True)
+    # 同一操作及状态保留耗时两端，不能让一串最慢样本遮蔽成功调用的差异。
+    for index, items in enumerate(queues):
+        contrasted = []
+        left, right = 0, len(items) - 1
+        while left <= right:
+            contrasted.append(items[left])
+            if left != right:
+                contrasted.append(items[right])
+            left, right = left + 1, right - 1
+        queues[index] = contrasted
+    error_operations = {(key[0], key[1]) for key in groups if key[2] == "error"}
+    for items in queues:
+        head = items[0]
+        operation_key = tuple(value if isinstance(value, str) else None
+                              for value in (head.get("service"), head.get("operation")))
+        if (head.get("span_status") == "ok"
+                and operation_key in error_operations):
+            valid = [item for item in items if type(item.get("duration_ms")) in {int, float}
+                     and math.isfinite(item["duration_ms"]) and item["duration_ms"] >= 0]
+            if valid:
+                fastest = min(valid, key=lambda item: (item["duration_ms"], str(item.get("id"))))
+                items.remove(fastest)
+                items.insert(0, fastest)
+    ordered = [items[offset] for offset in range(max(map(len, queues), default=0))
+               for items in queues if offset < len(items)]
+    iterator = iter(ordered)
+    return [next(iterator) if item.get("provider") == "trace" else item for item in evidence]
+
+
 def _bounded_tool_response(payload: dict, max_chars: int = 6000) -> str:
     """只缩小模型可见页；完整 Evidence 已入库，省略项需通过收窄查询获取。"""
-    payload = {**payload, "evidence": list(payload["evidence"])}
+    payload = {**payload, **share_trace_semantics(payload["evidence"])}
     original_count = len(payload["evidence"])
 
     def encode() -> str:
@@ -1103,8 +1180,22 @@ def _bounded_tool_response(payload: dict, max_chars: int = 6000) -> str:
         # 先压缩重复结构及可重取的时间桶，再省略整条证据；否则一次新增查询
         # 就可能把前一次查询中用于区分机制的资源组成全部挤掉。
         compacted = []
-        for original in payload["evidence"]:
+        for original in order_trace_evidence(payload["evidence"]):
             item = dict(original)
+            if (item.get("provider") == "trace" and "duration_ms" in item
+                    and "span_status" in item):
+                # 数值与错误状态已有独立字段，删去重复文本以保住子 RPC 和配对关系。
+                item.pop("summary", None)
+                if isinstance(item.get("rpc_pair"), dict):
+                    details = item.get("trace_details")
+                    if isinstance(details, dict):
+                        item["trace_details"] = {key: value for key, value in details.items()
+                                                 if key in {"rpc.system", "rpc.status_code",
+                                                            "rpc.peer_span_id"}}
+                timing = item.get("child_timing")
+                if isinstance(timing, dict):
+                    item["child_timing"] = {key: value for key, value in timing.items()
+                                            if key != "semantics"}
             if item.get("metric") and "baseline_mean" in item and "observation_mean" in item:
                 removable = ["time_profile", "related_metric_names"]
                 if item.get("scope_entity_ids"):
@@ -1161,9 +1252,16 @@ def compact_tool_history(value):
             results[index] = payload
     if not results or sum(len(value[index]["output"]) for index in results) <= 6000:
         return value
-    per_result = 6000 // len(results)
+    # 空查询不能占据和满页相同的份额；先满足短结果，再均分剩余空间。
+    remaining = 6000
+    allocations = {}
+    indices = sorted(results, key=lambda index: (len(value[index]["output"]), index))
+    for offset, index in enumerate(indices):
+        allowance = min(len(value[index]["output"]), remaining // (len(indices) - offset))
+        allocations[index] = allowance
+        remaining -= allowance
     return [
-        {**item, "output": _bounded_tool_response(results[index], per_result)}
+        {**item, "output": _bounded_tool_response(results[index], allocations[index])}
         if index in results else item
         for index, item in enumerate(value)
     ]
@@ -1176,7 +1274,27 @@ def project_trace_details(item: EvidenceItem) -> dict[str, JsonValue]:
     projected = {key: value[:128] if isinstance(value, str) else value
                  for key in ("trace_id", "span_id", "parent_span_id", "service", "operation")
                  if isinstance(value := item.payload.get(key), str) or value is None}
+    population = item.payload.get("query_population")
+    if isinstance(population, dict):
+        # 原始记录已过 JSON/脱敏校验；仍限制模型可见字段和行数。
+        projected["query_population"] = {
+            key: value[:512] if isinstance(value, str) else value
+            for key in ("service", "operation", "scan_complete", "matching_count",
+                        "matched_start", "matched_end", "filters", "columns", "semantics")
+            if (value := population.get(key)) is not None
+        }
+        rows = population.get("rows")
+        if isinstance(rows, list):
+            projected["query_population"]["rows"] = [
+                row for row in rows[:6] if isinstance(row, list) and len(row) == 8
+            ]
     attributes = item.payload.get("attributes")
+    duration = item.payload.get("duration_ms")
+    if type(duration) in {int, float} and math.isfinite(duration) and duration >= 0:
+        projected["duration_ms"] = duration
+    span_status = item.payload.get("status")
+    if isinstance(span_status, str) and span_status in {"ok", "error", "unset"}:
+        projected["span_status"] = span_status
     timing = item.payload.get("child_timing")
     if isinstance(timing, dict):
         projected["child_timing"] = {
@@ -1192,9 +1310,30 @@ def project_trace_details(item: EvidenceItem) -> dict[str, JsonValue]:
         })
         projected["child_timing"]["semantics"] = (
             "observed same-service direct children, including outbound RPC waits; "
-            "uncovered time is NOT CPU self-time; instrumentation may be incomplete"
+            "uncovered time is NOT CPU self-time; instrumentation may be incomplete. "
+            "Child wait does not exclude caller scheduling, reclaim or IO stalls"
         )
     if isinstance(attributes, dict):
+        role = attributes.get("rpc.peer_role")
+        try:
+            peer_ms = float(attributes.get("rpc.peer_duration_ms", "nan"))
+        except (TypeError, ValueError, OverflowError):
+            peer_ms = float("nan")
+        if (isinstance(role, str) and role in {"caller", "callee"}
+                and "duration_ms" in projected
+                and math.isfinite(peer_ms) and peer_ms >= 0):
+            local_client = role == "callee"
+            projected["rpc_pair"] = {
+                "client_service": item.payload.get("service") if local_client
+                                  else attributes.get("rpc.peer_service"),
+                "server_service": attributes.get("rpc.peer_service") if local_client
+                                  else item.payload.get("service"),
+                "client_duration_ms": duration if local_client else peer_ms,
+                "server_duration_ms": peer_ms if local_client else duration,
+                "semantics": "Client-server difference includes transport, proxy, queueing "
+                "and uninstrumented caller work. It does not distinguish network faults "
+                "from caller resource stalls; compare same-window caller resource evidence.",
+            }
         projected["trace_details"] = {
             key: value[:256] for key in (
                 "rpc.system", "rpc.status_code", "rpc.peer_span_id", "rpc.peer_service",

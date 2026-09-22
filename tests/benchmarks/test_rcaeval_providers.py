@@ -560,7 +560,8 @@ def test_trace_sampling_includes_late_slow_span(tmp_path):
     assert len(result.evidence_items) == 4
     assert any(e.timestamp.minute == 19 for e in result.evidence_items)
     assert any(e.timestamp.minute < 10 for e in result.evidence_items)
-    assert "not a distribution" in result.error_message
+    assert "duration/time samples" in result.error_message
+    assert "query_population" in result.error_message
 
 
 def test_resource_components_share_query_window_and_preserve_controls(tmp_path):

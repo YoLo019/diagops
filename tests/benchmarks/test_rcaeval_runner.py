@@ -354,7 +354,7 @@ def _single_turn_with_investigator(investigator, *, usage=None):
     return _turn
 
 
-def _run_single_case(tmp_path: Path, turn):
+def _run_single_case(tmp_path: Path, turn, *, model="bounded-test-model"):
     runtime_package = tmp_path / "runtime"
     case = _write_runtime_package(runtime_package)
     engine = create_db_engine(f"sqlite:///{tmp_path / 'runtime.db'}")
@@ -363,11 +363,14 @@ def _run_single_case(tmp_path: Path, turn):
     runtime_store = SQLiteRuntimeStore(engine, repository)
     runner = RcaEvalCaseRunner(
         runtime_package=runtime_package,
-        model="bounded-test-model",
+        model=model,
         capability=EndpointCapabilityIdentity(
             provider="deepseek",
             model="bounded-test-model",
             api_mode="chat_completions",
+            structured_output_transport=getattr(
+                model, "structured_output_transport", "native_json_schema",
+            ),
             endpoint_id="bounded-test-endpoint",
             artifact_hash="d" * 64,
         ),
@@ -402,6 +405,111 @@ def test_single_control_empty_candidates_are_inconclusive(tmp_path: Path):
     persisted = runtime_store.get_run(prediction.runtime_run_id)
     assert persisted.status == RuntimeRunStatus.COMPLETED
     assert repository.get_coordination_review(persisted.investigation_id).candidates == []
+
+
+@pytest.mark.parametrize("transport", ["native_json_schema", "strict_output_tool"])
+def test_single_format_correction_keeps_queried_evidence(tmp_path, monkeypatch, transport):
+    from datetime import datetime, timedelta
+
+    from backend.diagnosis import v11_runtime as runtime_module
+    from backend.diagnosis.openai_compatible_model import OpenAICompatibleChatCompletionsModel
+
+    calls = []
+    observed = []
+
+    async def no_sleep(_seconds):
+        pass
+
+    async def fake_run(agent, context, **_kwargs):
+        payload = json.loads(context)
+        calls.append(payload)
+        if len(calls) == 1:
+            tool = next(tool for tool in agent.tools if tool.name == "read_logs")
+            incident = payload["incident"]
+            result = json.loads(await tool.on_invoke_tool(None, json.dumps({
+                "start_time": (datetime.fromisoformat(incident["started_at"])
+                               - timedelta(minutes=12)).isoformat(),
+                "end_time": (datetime.fromisoformat(incident["started_at"])
+                             + timedelta(minutes=1)).isoformat(),
+                "reason": "Inspect the failure", "keywords": [],
+            })))
+            assert result["evidence"], result
+            observed.extend(item["id"] for item in result["evidence"])
+            output = {"action": "inconclusive", "candidates": [], "summary": "Need more data",
+                      "evidence_ids": observed, "stop_reason": "x" * 257}
+        else:
+            assert not [tool for tool in agent.tools if tool.name != "submit_structured_output"]
+            assert observed[0] in {item["id"] for item in payload["own_tool_evidence"]}
+            assert payload["own_tool_evidence_coverage"]["omitted"] == 0
+            assert "timeout" in payload["own_tool_evidence"][0]["summary"]
+            assert payload["previous_structured_output"]["evidence_ids"] == observed
+            output = {"action": "inconclusive", "candidates": [], "summary": "Failure observed",
+                      "evidence_ids": observed, "stop_reason": "Mechanism remains unresolved"}
+        if transport == "strict_output_tool":
+            submit = next(tool for tool in agent.tools if tool.name == "submit_structured_output")
+            output = await submit.on_invoke_tool(None, json.dumps({
+                "payload_json": json.dumps(output),
+            }))
+        return SimpleNamespace(final_output=output, raw_responses=[])
+
+    monkeypatch.setattr(runtime_module.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(runtime_module, "_run_with_model_lifecycle", fake_run)
+    prediction, repository, store = _run_single_case(tmp_path, None, model=(
+        OpenAICompatibleChatCompletionsModel(
+            model="bounded-test-model", api_key="offline-test-key",
+            base_url="http://127.0.0.1:8000/v1",
+            structured_output_transport=transport,
+        )
+    ))
+    assert len(calls) == 2
+    assert prediction.completed
+    run = store.get_run(prediction.runtime_run_id)
+    assert len(repository.list_tool_calls(run.investigation_id)) == 1
+    assert repository.get_coordination_review(run.investigation_id).final_decision.evidence_ids == (
+        observed
+    )
+
+
+@pytest.mark.parametrize("expired", [True, False])
+def test_case_exit_audits_expired_lease_without_overwriting_live_owner(
+    tmp_path, monkeypatch, expired,
+):
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import update
+
+    from backend.db.schema import runtime_runs
+    from backend.domain.runtime import RuntimeAttempt, RuntimeAttemptStatus
+    from backend.runtime.coordinator import RuntimeCoordinator
+
+    async def abandon(coordinator, run_id, owner):
+        coordinator.store.acquire_lease_and_create_attempt(
+            run_id, owner=owner,
+            attempt=RuntimeAttempt(run_id=run_id, attempt_number=1,
+                                   status=RuntimeAttemptStatus.RUNNING),
+            expected_status=RuntimeRunStatus.CREATED,
+        )
+        if expired:
+            with coordinator.store.engine.begin() as connection:
+                connection.execute(update(runtime_runs).where(runtime_runs.c.id == run_id).values(
+                    lease_expires_at=(datetime.now(UTC) - timedelta(seconds=1)).isoformat(),
+                ))
+        return coordinator.store.get_run(run_id)
+
+    monkeypatch.setattr(RuntimeCoordinator, "execute", abandon)
+    prediction, _, store = _run_single_case(tmp_path, _single_turn)
+    run = store.get_run(prediction.runtime_run_id)
+    assert not prediction.completed
+    if expired:
+        assert run.status == RuntimeRunStatus.INTERRUPTED
+        assert run.failure_category == RuntimeFailureCategory.LEASE_LOST
+        assert prediction.failure_category == "lease_lost"
+        assert any(event.event_type == RuntimeEventType.RUN_INTERRUPTED
+                   for event in store.list_events(run.id))
+    else:
+        assert run.status == RuntimeRunStatus.RUNNING
+        assert run.failure_category is None
+        assert prediction.failure_category == "runtime_incomplete"
 
 
 @pytest.mark.parametrize(

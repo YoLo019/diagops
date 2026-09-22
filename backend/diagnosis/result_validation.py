@@ -409,8 +409,71 @@ def _validate_scope_consistency(
             else []
         )
     }
-    if scoped_entities and entity not in scoped_entities:
+    if scoped_entities and _normalize_entity(entity) not in {
+        _normalize_entity(item) for item in scoped_entities
+    } and not _validate_evidence_path_entity(entity, evidence_ids, evidence_by_id):
         raise V11ResultValidationError("scope_entity_mismatch")
+
+
+_ENTITY_PATH_SPLIT = re.compile(r"\s*(?:->|=>|→)\s*")
+
+
+def _normalize_entity(value: str) -> str:
+    return " ".join(value.strip().casefold().split())
+
+
+def _validate_evidence_path_entity(
+    entity: str,
+    evidence_ids: Iterable[str],
+    evidence_by_id: dict[str, EvidenceItem],
+) -> bool:
+    """验证候选实体是否是引用证据明确表达的有向调用/依赖路径。
+
+    scope.entity_ids 只描述证据覆盖范围，不能单独证明任意两个实体存在调用关系。
+    因此路径的每一条相邻边必须由同一批引用证据的结构化 payload 明确给出。
+    """
+    parts = [_normalize_entity(item) for item in _ENTITY_PATH_SPLIT.split(entity)]
+    if len(parts) < 2 or any(not item for item in parts):
+        return False
+    relationships: set[tuple[str, str]] = set()
+
+    def add_pair(source, target) -> None:
+        if isinstance(source, str) and isinstance(target, str):
+            left, right = _normalize_entity(source), _normalize_entity(target)
+            if left and right and left != right:
+                relationships.add((left, right))
+
+    for evidence_id in evidence_ids:
+        item = evidence_by_id.get(evidence_id)
+        if item is None:
+            continue
+        payload = item.payload if isinstance(item.payload, dict) else {}
+        # 依赖证据可能直接给出一条边，也可能给出 edges 列表。
+        add_pair(payload.get("source"), payload.get("target"))
+        for edge in payload.get("edges", ()):
+            if isinstance(edge, dict):
+                add_pair(
+                    edge.get("parent", edge.get("source")),
+                    edge.get("child", edge.get("target")),
+                )
+
+        # Trace 证据给出本地服务及远端 peer，统一保留客户端/源端到被调用端的方向。
+        # 服务端 span 的 service 是被调用端，不能把它反向当作 source。
+        service = payload.get("service")
+        attributes = payload.get("attributes")
+        if isinstance(attributes, dict):
+            peer_service = attributes.get("rpc.peer_service")
+            peer_role = attributes.get("rpc.peer_role", payload.get("rpc.peer_role"))
+            if isinstance(peer_role, str) and peer_role.casefold() == "callee":
+                add_pair(peer_service, service)
+            else:
+                add_pair(service, peer_service)
+        child_timing = payload.get("child_timing")
+        if isinstance(child_timing, dict):
+            add_pair(service, child_timing.get("longest_child_peer_service"))
+        add_pair(payload.get("source_service"), service)
+
+    return all(pair in relationships for pair in zip(parts, parts[1:], strict=False))
 
 
 def _validate_safe_texts(

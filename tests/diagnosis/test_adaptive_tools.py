@@ -375,10 +375,49 @@ async def test_empty_or_known_result_does_not_stop_later_queries_for_specialist(
         assert "keywords use AND" in first["warning"]
     else:
         assert "previously seen evidence" in first["warning"]
+        assert [item.id for item in session.retrieved_evidence()] == ["ev-known"]
+        assert session.new_evidence == []
     assert duplicate["status"] == "skipped"
     assert duplicate["stop_reason"] is None
     assert later["status"] == "success"
     assert provider.calls == 2
+
+
+@pytest.mark.anyio
+async def test_empty_filtered_trace_query_preserves_filters_and_allows_coverage_query():
+    class TraceProvider:
+        provider = EvidenceProvider.TRACE
+        supported_tools = frozenset({"query_traces"})
+
+        def __init__(self):
+            self.queries = []
+
+        def collect(self, event, query):
+            self.queries.append(query)
+            evidence = [] if query.error_only or query.min_duration_ms else [
+                _evidence("fast-server", self.provider, EvidenceKind.TRACE_LATENCY,
+                          payload={"service": event.service, "duration_ms": 0.1,
+                                   "status": "ok"}),
+            ]
+            return ProviderResult(provider=self.provider, evidence_items=evidence)
+
+    provider = TraceProvider()
+    session = _manifest_session([provider])
+    filtered = json.loads(await session.invoke(
+        "investigator-1", "query_traces",
+        json.dumps({"service": "checkout-service", "error_only": True, "min_duration_ms": 400}),
+        1,
+    ))
+    assert filtered["evidence"] == []
+    assert "fast successful server spans" in filtered["warning"]
+    assert filtered["stop_reason"] is None
+    assert provider.queries[0].min_duration_ms == 400
+    assert provider.queries[0].error_only
+    coverage = json.loads(await session.invoke(
+        "investigator-1", "query_traces", '{"service":"checkout-service"}', 1,
+    ))
+    assert coverage["evidence"][0]["id"] == "fast-server"
+    assert len(provider.queries) == 2
 
 
 @pytest.mark.anyio
@@ -1071,3 +1110,186 @@ async def test_unavailable_tools_are_hidden_and_rejections_do_not_charge_budget(
     ))
     assert duplicate["new_evidence_count"] == 0
     assert session.tool_calls[-1].budget_charged is False
+
+
+def test_compacted_trace_keeps_rpc_error_instead_of_only_parent_wait():
+    from backend.diagnosis.adaptive_tools import _bounded_tool_response, project_trace_details
+
+    spans = [EvidenceItem(
+        id=f"parent-{i}", provider=EvidenceProvider.TRACE, kind=EvidenceKind.TRACE_LATENCY,
+        timestamp=datetime(2026, 1, 1, tzinfo=UTC), summary="long parent request " * 100,
+        payload={"trace_id": f"trace-{i}", "span_id": f"root-{i}", "service": "gateway",
+                 "operation": "request", "duration_ms": 17000, "status": "unset"},
+    ) for i in range(8)]
+    failed = spans[0].model_copy(update={
+        "id": "failed-rpc", "kind": EvidenceKind.TRACE_ERROR,
+        "payload": {"trace_id": "trace-0", "span_id": "rpc-0", "parent_span_id": "root-0",
+                    "service": "gateway", "operation": "GetItems", "duration_ms": 16900,
+                    "status": "error", "attributes": {"rpc.status_code": "14"}},
+    })
+    projection = project_trace_details(failed)
+    assert projection["span_status"] == "error"
+    assert projection["duration_ms"] == 16900
+    original = {"status": "success", "evidence": project_tool_evidence([*spans, failed]),
+                "returned_count": 9, "truncated": False, "stop_reason": None}
+    response = _bounded_tool_response(original, max_chars=1000)
+    assert len(response) <= 1000
+    result = json.loads(response)
+    assert result["evidence"][0]["id"] == failed.id
+    assert result["evidence"][0]["status"] == "success"
+    assert result["evidence"][0]["span_status"] == "error"
+    assert result["evidence"][0]["trace_details"]["rpc.status_code"] == "14"
+    assert result["truncated"]
+    assert original["evidence"][-1]["id"] == failed.id
+
+
+@pytest.mark.anyio
+async def test_sdk_tool_deadline_does_not_cancel_successful_provider_commit():
+    provider = QueryProvider("read_logs", EvidenceProvider.LOG, "ev-log")
+    persisted = []
+
+    async def persist_start(call):
+        await asyncio.sleep(0.6)
+        persisted.append(call)
+        return call
+
+    async def persist_result(result):
+        await asyncio.sleep(0.6)
+        persisted.append(result.call)
+        return result.call
+
+    session = AdaptiveToolSession(
+        event=_event(), seed_evidence=[],
+        registry=build_provider_tool_registry(ProviderRegistry([provider])),
+        task_ids=_task_ids(), tool_timeout_seconds=0.05,
+        persist_tool_start=persist_start, persist_tool_result=persist_result,
+    )
+    tool = next(t for t in session.tools_for(AgentName.LOG, 1) if t.name == "read_logs")
+    response = json.loads(await asyncio.wait_for(
+        tool.on_invoke_tool(None, json.dumps(_query_payload())), timeout=tool.timeout_seconds,
+    ))
+    assert provider.calls == 1
+    assert response["status"] == "success"
+    assert response["evidence"][0]["id"] == "ev-log"
+    assert [call.status for call in persisted] == [ToolCallStatus.RUNNING, ToolCallStatus.SUCCESS]
+    assert session.tool_timeout_seconds == 0.05
+
+
+def test_trace_projection_omits_invalid_status_and_nonfinite_duration():
+    from backend.diagnosis.adaptive_tools import project_trace_details
+
+    evidence = EvidenceItem(
+        id="malformed-trace", provider=EvidenceProvider.TRACE, kind=EvidenceKind.TRACE_LATENCY,
+        timestamp=datetime(2026, 1, 1, tzinfo=UTC), summary="untrusted trace",
+        payload={"status": [], "duration_ms": -1, "child_timing": "invalid",
+                 "attributes": "invalid"},
+    )
+    projection = project_trace_details(evidence)
+    assert "span_status" not in projection
+    assert "duration_ms" not in projection
+    assert "child_timing" not in projection
+
+
+@pytest.mark.parametrize("role", ["caller", "callee"])
+def test_trace_pair_projection_names_client_and_server_separately(role):
+    from backend.diagnosis.adaptive_tools import project_trace_details
+
+    local_client = role == "callee"
+    evidence = EvidenceItem(
+        id="paired-trace", provider=EvidenceProvider.TRACE, kind=EvidenceKind.TRACE_LATENCY,
+        timestamp=datetime(2026, 1, 1, tzinfo=UTC), summary="paired observation",
+        payload={"service": "worker" if local_client else "storage",
+                 "duration_ms": 400 if local_client else 0.02, "status": "ok",
+                 "attributes": {"rpc.peer_role": role,
+                                "rpc.peer_service": "storage" if local_client else "worker",
+                                "rpc.peer_duration_ms": "0.02" if local_client else "400"}},
+    )
+    pair = project_trace_details(evidence)["rpc_pair"]
+    assert "caller resource stalls" in pair.pop("semantics")
+    assert pair == {
+        "client_service": "worker", "server_service": "storage",
+        "client_duration_ms": 400, "server_duration_ms": 0.02,
+    }
+
+
+def test_trace_page_shares_explanations_without_dropping_paired_observations():
+    from backend.diagnosis.adaptive_tools import _bounded_tool_response, project_trace_details
+
+    evidence = [EvidenceItem(
+        id=f"paired-{i}", provider=EvidenceProvider.TRACE, kind=EvidenceKind.TRACE_LATENCY,
+        timestamp=datetime(2026, 1, 1, tzinfo=UTC), summary="paired observation",
+        payload={"service": "worker", "operation": "Read", "duration_ms": 400 + i,
+                 "status": "ok", "attributes": {"rpc.peer_role": "callee",
+                 "rpc.peer_service": "storage", "rpc.peer_duration_ms": "0.02"}},
+    ) for i in range(12)]
+    payload = {"status": "success", "evidence": project_tool_evidence(evidence),
+               "returned_count": 12, "truncated": False, "stop_reason": None}
+    original = json.dumps(payload)
+    rendered = _bounded_tool_response(payload)
+    page = json.loads(rendered)
+    assert len(rendered) <= 6000
+    assert {item["id"] for item in page["evidence"]} == {item.id for item in evidence}
+    assert page["trace_semantics"]["rpc_pair"] == (
+        project_trace_details(evidence[0])["rpc_pair"]["semantics"]
+    )
+    assert rendered.count("caller resource stalls") == 1
+    assert all(item["rpc_pair"]["server_duration_ms"] == 0.02 for item in page["evidence"])
+    assert json.dumps(payload) == original
+    assert json.loads(_bounded_tool_response(page)) == page
+
+
+def test_trace_page_keeps_population_and_both_rpc_outcomes_when_bounded():
+    from backend.diagnosis.adaptive_tools import _bounded_tool_response
+
+    stats = {"service": "caller", "operation": "shop.API/Read", "matching_count": 100,
+             "scan_complete": True, "filters": {"error_only": False},
+             "rows": [["start", "end", "ok", 90, 10, 10, 10, 10],
+                      ["start", "end", "error", 10, 2000, 2000, 2000, 2000]]}
+    spans = [{"id": f"span-{i}", "provider": "trace", "service": "caller",
+              "operation": "shop.API/Read", "span_status": "error" if i < 10 else "ok",
+              "duration_ms": 2000 if i < 10 else 10, "summary": "repeat " * 100,
+              **({"query_population": stats} if i == 0 else {})} for i in range(20)]
+    page = json.loads(_bounded_tool_response({"evidence": spans}, max_chars=2400))
+    assert page["evidence"][0]["query_population"] == stats
+    assert {item["span_status"] for item in page["evidence"]} == {"ok", "error"}
+
+
+def test_trace_order_retains_duration_contrasts_and_is_stable():
+    from backend.diagnosis.adaptive_tools import order_trace_evidence
+
+    spans = [{"id": f"trace-{i}", "provider": "trace", "service": "worker",
+              "operation": "rpc/Read", "span_status": "ok", "duration_ms": duration}
+             for i, duration in enumerate([9000, 8000, 7000, 10, 5])]
+    metric = {"id": "metric-1", "provider": "metric"}
+    ordered = order_trace_evidence([metric, *spans])
+    assert ordered[0] == metric
+    assert [item["duration_ms"] for item in ordered[1:3]] == [9000, 5]
+    assert {item["id"] for item in ordered} == {item["id"] for item in [metric, *spans]}
+    assert order_trace_evidence([metric, *reversed(spans)]) == ordered
+    failed = {**spans[0], "id": "error-1", "span_status": "error", "duration_ms": 17000}
+    contrasted = order_trace_evidence([*spans, failed])
+    assert [(item["span_status"], item["duration_ms"]) for item in contrasted[:2]] == [
+        ("error", 17000), ("ok", 5),
+    ]
+
+
+def test_tool_history_reuses_empty_page_space_for_success_failure_contrast():
+    from backend.diagnosis.adaptive_tools import compact_tool_history
+
+    spans = [{"id": f"span-{i}", "provider": "trace", "service": "worker",
+              "operation": "rpc/Read", "span_status": status, "duration_ms": duration,
+              "trace_id": f"{i:032x}", "summary": "repeated details " * 100}
+             for i, (status, duration) in enumerate([("error", 17000), ("ok", 5)] * 10)]
+    history = [{"type": "function_call_output", "call_id": f"call-{i}",
+                "output": json.dumps({"status": "success", "evidence": spans if i == 2 else [],
+                                      "returned_count": len(spans) if i == 2 else 0,
+                                      "truncated": i == 2, "stop_reason": None})}
+               for i in range(8)]
+    original = json.dumps(history)
+    result = compact_tool_history(history)
+    assert sum(len(item["output"]) for item in result) <= 6000
+    assert [item["call_id"] for item in result] == [item["call_id"] for item in history]
+    visible = json.loads(result[2]["output"])["evidence"]
+    assert {item["span_status"] for item in visible} == {"ok", "error"}
+    assert len(visible) >= 10
+    assert json.dumps(history) == original

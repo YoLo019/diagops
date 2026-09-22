@@ -104,6 +104,91 @@ def test_paired_rpc_distinguishes_caller_wait_from_slow_server(tmp_path):
     assert "baseline and incident may be mixed" in dep.payload["aggregation_semantics"]
 
 
+def test_expansion_preserves_independent_time_samples_before_child_context(tmp_path):
+    rows = []
+    for index in range(20):
+        duration = 9_000_000 if index == 19 else 10_000
+        rows.append([f"2026-01-01T00:{index:02d}:00Z", f"{index + 1:032x}",
+                     f"{1:016x}", "", "caller", "shop.API/Read", duration, "0"])
+        for child in range(2, 12):
+            rows.append([f"2026-01-01T00:{index:02d}:00Z", f"{index + 1:032x}",
+                         f"{child:016x}", f"{1:016x}", "remote", "shop.API/Read", 1, "0"])
+    event = traces(tmp_path, rows)
+    result = provider(tmp_path, module.RcaEvalTraceProvider).collect(
+        event, TraceQuery(service="caller", operation="shop.API/Read", limit=6),
+    )
+    callers = [item for item in result.evidence_items if item.payload["service"] == "caller"]
+    assert len(callers) == 4
+    assert any(item.payload["duration_ms"] == 9000 for item in callers)
+    assert any(item.payload["duration_ms"] == 10 for item in callers)
+    assert len({item.payload["trace_id"] for item in callers}) == 4
+    assert len(result.evidence_items) == 6 and result.truncated
+
+
+@pytest.mark.parametrize("error_only", [False, True])
+def test_trace_population_is_computed_before_sampling_with_explicit_filters(tmp_path, error_only):
+    rows = []
+    for i in range(100):
+        error = i >= 90
+        rows.append([f"2026-01-01T00:{i // 50:02d}:00Z", f"{i + 1:032x}",
+                     f"{i + 1:016x}", "", "caller", "shop.API/Read",
+                     2_000_000 if error else 10_000, "14" if error else "0"])
+    event = traces(tmp_path, rows)
+    result = provider(tmp_path, module.RcaEvalTraceProvider).collect(event, TraceQuery(
+        service="caller", operation="shop.API/Read", error_only=error_only, limit=3,
+        window_start="2026-01-01T00:00:00Z", window_end="2026-01-01T00:02:00Z",
+    ))
+    stats = [item["query_population"] for item in project_tool_evidence(result.evidence_items)
+             if "query_population" in item]
+    assert len(stats) == 1
+    stats = stats[0]
+    assert stats["matching_count"] == (10 if error_only else 100)
+    assert stats["scan_complete"] is True
+    assert stats["filters"]["error_only"] is error_only
+    assert stats["rows"][0][3:] == ([0, None, None, None, None] if error_only
+                                    else [50, 10, 10, 10, 10])
+    assert stats["rows"][4][3:] == [10, 2000, 2000, 2000, 2000]
+    assert sum(row[3] for row in stats["rows"]) == stats["matching_count"]
+    # limit=3 中有一位预留给配对上下文；本 fixture 没有配对，返回两个独立样本。
+    assert len(result.evidence_items) == 2
+
+
+def test_trace_population_never_claims_complete_coverage_after_scan_limit(tmp_path, monkeypatch):
+    event = traces(tmp_path, [[f"2026-01-01T00:0{i}:00Z", f"{i+1:032x}", f"{i+1:016x}",
+                              "", "api", "shop.API/Read", 1000, "0"] for i in range(4)])
+    monkeypatch.setattr(module, "_MAX_TRACE_SCAN_ROWS", 2)
+    result = provider(tmp_path, module.RcaEvalTraceProvider).collect(
+        event, TraceQuery(service="api"),
+    )
+    stats = result.evidence_items[0].payload["query_population"]
+    assert stats["matching_count"] == 2 and stats["scan_complete"] is False
+    assert "source_scan_incomplete" in result.error_message
+
+
+def test_limited_context_preserves_longest_child_and_its_remote_pair(tmp_path):
+    rows = []
+    for index in range(8):
+        trace = f"{index + 1:032x}"
+        timestamp = f"2026-01-01T00:{index:02d}:00Z"
+        for span, parent, service, operation, duration in [
+            (1, "", "gateway", "request", 1_000_000),
+            (2, f"{1:016x}", "worker", "shop.Worker/Read", 900_000),
+            (3, f"{2:016x}", "worker", "shop.Storage/Read", 890_000),
+            (4, f"{3:016x}", "storage", "shop.Storage/Read", 1000),
+        ]:
+            rows.append([timestamp, trace, f"{span:016x}", parent, service, operation,
+                         duration, "0"])
+    event = traces(tmp_path, rows)
+    result = provider(tmp_path, module.RcaEvalTraceProvider).collect(
+        event, TraceQuery(service="worker", operation="shop.Worker/Read", limit=3),
+    )
+    assert len(result.evidence_items) == 3
+    child = next(item for item in result.evidence_items
+                 if item.payload["operation"] == "shop.Storage/Read")
+    assert child.payload["attributes"]["rpc.peer_duration_ms"] == "1.000"
+    assert child.payload["duration_ms"] == 890
+
+
 def test_metric_comparison_split_is_not_deviation_time(tmp_path):
     (tmp_path / "telemetry-00.csv").write_text(
         "time,worker_mem\n" + "\n".join(

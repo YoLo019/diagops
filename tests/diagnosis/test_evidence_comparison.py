@@ -17,6 +17,25 @@ def metric(identity="ev-1", **overrides):
     }
 
 
+def test_trace_comparison_shares_only_identical_explanations_and_keeps_timing():
+    evidence = [{"id": f"trace-{i}", "provider": "trace", "rpc_pair": {
+        "client_duration_ms": 400 + i, "server_duration_ms": 0.02,
+        "semantics": "Compare caller resource evidence.",
+    }, "child_timing": {"semantics": f"Different observation boundary {i}"}}
+        for i in range(3)]
+    original = copy.deepcopy(evidence)
+    result = comparison_evidence(evidence)
+    assert result["trace_semantics"] == {"rpc_pair": "Compare caller resource evidence."}
+    assert [item["rpc_pair"]["client_duration_ms"] for item in result["evidence"]] == (
+        [400, 401, 402]
+    )
+    assert all("semantics" not in item["rpc_pair"] for item in result["evidence"])
+    assert [item["child_timing"] for item in result["evidence"]] == (
+        [item["child_timing"] for item in evidence]
+    )
+    assert evidence == original
+
+
 def test_table_keeps_normal_controls_deltas_and_citation_identity_without_mutation():
     evidence = [metric(related_observations=[
         {"metric": "worker_cpu_system", "baseline_mean": 0, "observation_mean": 7},

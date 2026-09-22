@@ -164,9 +164,9 @@ def _role_probe_payload(output_type: type[BaseModel]) -> dict[str, object]:
             ],
         }
     if output_type.__name__ in {"InvestigatorCandidateOutput", "InvestigatorOutput"}:
-        payload: dict[str, object] = {"candidates": []}
+        payload: dict[str, object] = {"findings": [], "candidates": []}
         if output_type.__name__ == "InvestigatorOutput":
-            payload.update({"summary": "", "findings": []})
+            payload.update({"summary": ""})
         return payload
     if output_type.__name__ in {"CriticCompactOutput", "CriticOutput"}:
         payload = {"assessments": []}

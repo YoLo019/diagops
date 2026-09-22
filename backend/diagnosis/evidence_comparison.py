@@ -22,9 +22,29 @@ def _number(value: Any) -> bool:
     return type(value) in {int, float} and math.isfinite(value)
 
 
+def share_trace_semantics(evidence: list[dict[str, Any]]) -> dict[str, Any]:
+    """相同的链路解释每页只传一次，避免重复说明挤掉观测；不修改原始证据。"""
+    projected = [dict(item) for item in evidence]
+    shared = {}
+    for field in ("rpc_pair", "child_timing"):
+        values = {
+            detail["semantics"] for item in projected
+            if isinstance(detail := item.get(field), dict)
+            and isinstance(detail.get("semantics"), str)
+        }
+        if len(values) != 1:
+            continue
+        shared[field] = values.pop()
+        for item in projected:
+            if isinstance(detail := item.get(field), dict) and "semantics" in detail:
+                item[field] = {key: value for key, value in detail.items() if key != "semantics"}
+    return {"evidence": projected, **({"trace_semantics": shared} if shared else {})}
+
+
 def comparison_evidence(evidence: list[dict[str, Any]]) -> dict[str, Any]:
     """移动有界数值到对照表；不完整范围、超限项及原始细节保留在证据索引。"""
-    projected = copy.deepcopy(evidence)
+    trace_context = share_trace_semantics(copy.deepcopy(evidence))
+    projected = trace_context["evidence"]
     sources = {item["id"]: item for item in projected}
     groups: dict[tuple, dict] = {}
     omitted = 0
@@ -106,7 +126,7 @@ def comparison_evidence(evidence: list[dict[str, Any]]) -> dict[str, Any]:
                     for row in related
                 ]
     return {
-        "evidence": projected,
+        **trace_context,
         "metric_comparisons": {
             "columns": ["metric", "baseline_mean", "observation_mean", "absolute_delta",
                         "evidence_ids", "time_profile_means"],
@@ -121,6 +141,11 @@ def comparison_evidence(evidence: list[dict[str, Any]]) -> dict[str, Any]:
                     "primary metric's unit. Never compare unlike units as equal "
                     "quantities. Threshold crossings across different metrics are not causal "
                     "onsets: small time offsets do not prove cause/effect order. Unmoved values "
-                    "remain in evidence. Repeated citations are not independent observations.",
+                    "remain in evidence. Repeated citations are not independent observations."
+                    + (" RSS growth identifies process memory, not pressure or causality; "
+                    "queued requests can also grow RSS. Zero interface drops/errors do not "
+                    "exclude added delay or loss outside that interface. These observations "
+                    "alone cannot choose between local resource work and an RPC path fault."
+                    if any(group["rows"] for group in groups.values()) else ""),
         },
     }

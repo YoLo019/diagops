@@ -782,3 +782,75 @@ def test_v11_candidate_can_link_observer_and_causal_entity_evidence():
         investigation_id="inv-1", runtime_run_id="run-v11", findings=[],
         candidates=[candidate], review=None, evidence=[caller, callee],
     )
+
+
+def test_v11_candidate_accepts_evidence_backed_dependency_path():
+    evidence = _scoped_evidence(["frontend"]).model_copy(update={
+        "payload": {
+            "source": "frontend",
+            "target": "currencyservice",
+        },
+    })
+    candidate = _validation_candidate(evidence.id).model_copy(update={
+        "affected_entity": "frontend -> currencyservice",
+    })
+
+    validate_v11_result(
+        investigation_id="inv-1", runtime_run_id="run-v11", findings=[],
+        candidates=[candidate], review=None, evidence=[evidence],
+    )
+
+
+def test_v11_candidate_accepts_evidence_backed_trace_peer_path():
+    evidence = _scoped_evidence(["frontend"]).model_copy(update={
+        "payload": {
+            "service": "frontend",
+            "attributes": {"rpc.peer_service": "currencyservice"},
+        },
+    })
+    candidate = _validation_candidate(evidence.id).model_copy(update={
+        "affected_entity": "frontend -> currencyservice",
+    })
+
+    validate_v11_result(
+        investigation_id="inv-1", runtime_run_id="run-v11", findings=[],
+        candidates=[candidate], review=None, evidence=[evidence],
+    )
+
+
+def test_v11_candidate_accepts_trace_peer_path_from_callee_span():
+    evidence = _scoped_evidence(["currencyservice"]).model_copy(update={
+        "payload": {
+            "service": "currencyservice",
+            "attributes": {
+                "rpc.peer_service": "frontend",
+                "rpc.peer_role": "callee",
+            },
+        },
+    })
+    candidate = _validation_candidate(evidence.id).model_copy(update={
+        "affected_entity": "frontend -> currencyservice",
+    })
+
+    validate_v11_result(
+        investigation_id="inv-1", runtime_run_id="run-v11", findings=[],
+        candidates=[candidate], review=None, evidence=[evidence],
+    )
+
+
+def test_v11_candidate_rejects_unbacked_dependency_path_endpoint():
+    evidence = _scoped_evidence(["frontend"]).model_copy(update={
+        "payload": {
+            "source": "frontend",
+            "target": "currencyservice",
+        },
+    })
+    candidate = _validation_candidate(evidence.id).model_copy(update={
+        "affected_entity": "frontend -> checkoutservice",
+    })
+
+    with pytest.raises(Exception, match="scope_entity_mismatch"):
+        validate_v11_result(
+            investigation_id="inv-1", runtime_run_id="run-v11", findings=[],
+            candidates=[candidate], review=None, evidence=[evidence],
+        )

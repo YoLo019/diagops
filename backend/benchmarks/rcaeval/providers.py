@@ -42,7 +42,7 @@ from backend.providers.results import ProviderResult, ProviderStatus
 from backend.providers.trace_timing import with_child_timing
 from backend.safety.redaction import assert_safe_value, redact_text, redact_value
 
-ADAPTER_VERSION = "rcaeval-re2-v8"
+ADAPTER_VERSION = "rcaeval-re2-v9"
 _MAX_SCAN_ROWS = 250_000
 _MAX_TRACE_SCAN_ROWS = 1_000_000
 _METRIC_QUERY_ALIASES = {
@@ -491,6 +491,9 @@ class RcaEvalTraceProvider(_RcaEvalProvider):
 
     def collect(self, event: IncidentEvent, query: TraceQuery | None = None) -> ProviderResult:
         limit = query.limit if query else 50
+        expand_context = bool(query and (query.service or query.operation or query.entity_ids))
+        # 独立样本先占有固定位置，避免第一个慢调用的整条链吞掉其他时段的对照。
+        anchor_limit = max(1, (limit * 2 + 2) // 3) if expand_context else limit
         anchors = []
         for identity, row in self._rows():
             service = (row.get("serviceName") or "unknown").strip()
@@ -517,10 +520,10 @@ class RcaEvalTraceProvider(_RcaEvalProvider):
             # 只为最终样本校验完整对象；宽查询不再构造数十万个 Pydantic 对象。
             anchors.append((identity, row, timestamp, duration))
         ordered = sorted(anchors, key=lambda item: (item[2], item[0]))
-        slow = sorted(ordered, key=lambda item: -item[3])[:max(1, limit // 2)]
+        slow = sorted(ordered, key=lambda item: -item[3])[:max(1, anchor_limit // 2)]
         seen = {item[0] for item in slow}
         rest = [item for item in ordered if item[0] not in seen]
-        count = min(limit - len(slow), len(rest))
+        count = min(anchor_limit - len(slow), len(rest))
         raw_sample = slow + [rest[index * len(rest) // count] for index in range(count)]
         sampled = []
         checked = set()
@@ -531,7 +534,7 @@ class RcaEvalTraceProvider(_RcaEvalProvider):
             span = _parse_trace_span(row, event.started_at)
             if span is not None:
                 sampled.append((identity, span))
-            if len(sampled) == limit:
+            if len(sampled) == anchor_limit:
                 break
         selected = list(sampled)
         grouped = defaultdict(list)
@@ -546,13 +549,21 @@ class RcaEvalTraceProvider(_RcaEvalProvider):
                 if span is not None and _trace_in_window(span, query):
                     grouped[span.trace_id].append(span)
                     identities[(span.trace_id, span.span_id)] = identity
-            selected = []
-            seen_spans = set()
+            selected = list(sampled)
+            seen_spans = {(span.trace_id, span.span_id) for _, span in sampled}
+            enriched = {(span.trace_id, span.span_id): span
+                        for trace in grouped.values() for span in with_child_timing(trace)}
             for identity, anchor in sampled:
                 # 必须按 trace 分组，span ID 不保证跨 trace 唯一。
                 expanded = expand_span_selection(
                     grouped[anchor.trace_id], [anchor], query.direction
-                ) if query and (query.service or query.operation or query.entity_ids) else []
+                ) if expand_context else []
+                timing = enriched[(anchor.trace_id, anchor.span_id)].child_timing
+                # 优先补用于解释等待的最长直接子调用；它的远端配对事实会随投影保留。
+                expanded.sort(key=lambda span: (
+                    span.span_id != (timing.longest_child_span_id if timing else None),
+                    span.started_at, span.span_id,
+                ))
                 for span in [anchor] + expanded:
                     key = (span.trace_id, span.span_id)
                     if key not in seen_spans:
@@ -565,6 +576,18 @@ class RcaEvalTraceProvider(_RcaEvalProvider):
         selected = [(identity, _with_rpc_peer(
             enriched.get((span.trace_id, span.span_id), span), grouped[span.trace_id],
         )) for identity, span in selected]
+        populations = _trace_populations(
+            anchors, {(span.service, span.operation) for _, span in selected[:limit]},
+            query, scan_complete=not self.telemetry.trace_scan_truncated,
+        ) if expand_context else {}
+        projected_spans = []
+        for identity, span in selected[:limit]:
+            payload = span.model_dump(mode="json")
+            # 每组只在一条可引用证据里保存总体，避免重复统计挤掉配对 span。
+            population = populations.pop((span.service, span.operation), None)
+            if population is not None:
+                payload["query_population"] = population
+            projected_spans.append((identity, span, payload))
         evidence = [self._evidence(
             provider=self.provider,
             kind=EvidenceKind.TRACE_ERROR if span.status == SpanStatus.ERROR
@@ -578,9 +601,9 @@ class RcaEvalTraceProvider(_RcaEvalProvider):
                        f"{span.attributes['rpc.peer_service']} "
                        f"{span.attributes['rpc.peer_duration_ms']}ms"
                        if "rpc.peer_service" in span.attributes else ""),
-            payload=span.model_dump(mode="json"),
+            payload=payload,
             entity_ids=[span.service], identity=identity,
-        ) for identity, span in selected[:limit]]
+        ) for identity, span, payload in projected_spans]
         return ProviderResult(
             provider=self.provider,
             status=ProviderStatus.PARTIAL if truncated else ProviderStatus.SUCCESS,
@@ -588,8 +611,9 @@ class RcaEvalTraceProvider(_RcaEvalProvider):
             error_message=("source_scan_incomplete: source row limit reached; empty results "
                            "do not establish absence in the requested window")
             if self.telemetry.trace_scan_truncated else (
-                "query_result_truncated: duration/time sample, not a distribution; "
-                "narrow query filters" if truncated else None),
+                "query_result_truncated: spans are duration/time samples; query_population "
+                "describes all matching scanned rows per service/operation, not just samples; "
+                "narrow time filters for incident-only comparisons" if truncated else None),
         )
 
     def _rows(self):
@@ -598,6 +622,48 @@ class RcaEvalTraceProvider(_RcaEvalProvider):
             canonical = self.telemetry.service_aliases.get(original)
             yield identity, ({**row, "serviceName": canonical, "source_service": original}
                              if canonical else row)
+
+
+def _trace_populations(anchors, selected_groups, query, *, scan_complete):
+    """先于抽样统计同服务、同操作的查询总体；不从极值样本估计分布或诊断原因。"""
+    groups = defaultdict(list)
+    for _, row, timestamp, duration in anchors:
+        key = ((row.get("serviceName") or "unknown").strip(),
+               (row.get("operationName") or row.get("methodName") or "unknown").strip())
+        if key in selected_groups:
+            groups[key].append((timestamp, duration, _row_span_status(row).value))
+    result = {}
+    for key, rows in groups.items():
+        first, last = min(row[0] for row in rows), max(row[0] for row in rows)
+        start = query.window_start if query and query.window_start else first
+        end = query.window_end if query and query.window_end else last + timedelta(microseconds=1)
+        split = start + (end - start) / 2
+        summaries = []
+        for lower, upper in ((start, split), (split, end)):
+            for status in ("ok", "error", "unset"):
+                values = sorted(ms for at, ms, state in rows
+                                if lower <= at < upper and state == status)
+                summaries.append([
+                    lower.isoformat(), upper.isoformat(), status, len(values),
+                    *([values[max(0, math.ceil(len(values) * q) - 1)]
+                       for q in (0.5, 0.9, 0.99, 1)] if values else [None] * 4),
+                ])
+        result[key] = {
+            "service": key[0], "operation": key[1], "scan_complete": scan_complete,
+            "matching_count": len(rows), "matched_start": first.isoformat(),
+            "matched_end": last.isoformat(),
+            "filters": {"error_only": bool(query and query.error_only),
+                        "min_duration_ms": query.min_duration_ms if query else None,
+                        "trace_id": query.trace_id if query else None},
+            "columns": ["start", "end", "status", "count", "p50_ms", "p90_ms",
+                        "p99_ms", "max_ms"],
+            "rows": summaries,
+            "semantics": "Two equal time partitions, NOT inferred fault onset. Nearest-rank "
+            "quantiles over matching scanned rows before span sampling; filters may exclude "
+            "successes or fast calls. Counts describe instrumented spans, not all traffic. "
+            "Missing coverage is unknown; zero observed errors does not prove path health.",
+        }
+    return result
 
 
 class RcaEvalDependencyProvider(RcaEvalTraceProvider):

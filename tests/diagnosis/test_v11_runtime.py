@@ -350,6 +350,32 @@ def test_structured_generation_compares_evidence_before_selection():
     assert fields.index("failure_mechanism") < fields.index("failure_class")
 
 
+def test_full_critic_can_review_first_round_and_supplemental_candidates():
+    schema = CriticOutput.model_json_schema()
+    assert schema["properties"]["assessments"]["maxItems"] == 12
+    runtime = V11Runtime(model="fake")
+    drafts = [v11_runtime_module.CriticAssessmentDraft(
+        candidate_ref=f"candidate-{index}", verdict="inconclusive", summary="unresolved",
+        checks=[{"name": name.value, "status": "unknown", "summary": "missing comparison",
+                 "gap": "missing comparison"} for name in CausalCheckName],
+    ) for index in range(12)]
+    previous = runtime._normalize_assessments(
+        drafts[:9], candidate_ids={f"candidate-{index}" for index in range(9)},
+        runtime_run_id="run-expanded", review_round=1,
+    )
+    final = runtime._normalize_assessments(
+        drafts, candidate_ids={f"candidate-{index}" for index in range(12)},
+        runtime_run_id="run-expanded", review_round=2, existing_assessments=previous,
+    )
+    assert [item.id for item in final[:9]] == [item.id for item in previous]
+    assert len({item.id for item in final}) == 12
+    with pytest.raises(V11RuntimeContractError, match="every candidate"):
+        runtime._normalize_assessments(
+            drafts[:9], candidate_ids={f"candidate-{index}" for index in range(12)},
+            runtime_run_id="run-expanded", review_round=2, existing_assessments=previous,
+        )
+
+
 def test_critic_comparison_is_persisted_and_its_citations_are_validated():
     from backend.diagnosis.v11_runtime import CriticCompactAssessmentDraft
 
@@ -424,6 +450,30 @@ async def test_rejected_tool_draft_is_repaired_without_bypassing_reference_valid
     assert len(calls) == 3
     assert result.output.evidence_ids == ["ev-observed"]
     assert len(result.output.summary) <= 40
+
+
+def test_tool_correction_prioritizes_real_references_and_reports_omissions():
+    evidence = [EvidenceItem(
+        id=f"ev-{i}", provider=EvidenceProvider.TRACE, kind=EvidenceKind.TRACE_LATENCY,
+        timestamp=datetime(2026, 1, 1, tzinfo=UTC), summary=f"observation {i}",
+        runtime_run_id="run-current", payload={"duration_ms": i},
+    ) for i in range(50)]
+    evidence.extend([
+        evidence[0].model_copy(update={"id": "ev-foreign", "runtime_run_id": "run-other"}),
+        evidence[0].model_copy(update={"id": "ev-failed", "status": EvidenceStatus.FAILED}),
+    ])
+    session = SimpleNamespace(runtime_run_id="run-current", retrieved_evidence=lambda: evidence)
+    context = v11_runtime_module._tool_correction_context(session, {
+        "evidence_ids": ["ev-49", "ev-invented", "ev-foreign", "ev-failed"],
+    })
+    ids = [item["id"] for item in context["own_tool_evidence"]]
+    assert ids[0] == "ev-49"
+    assert not {"ev-invented", "ev-foreign", "ev-failed"} & set(ids)
+    assert len(ids) <= 32
+    coverage = context["own_tool_evidence_coverage"]
+    assert coverage["available"] == 50
+    assert coverage["omitted"] == 50 - len(ids)
+    assert coverage["omitted_id_list_truncated"]
 
 
 def test_repair_draft_is_bounded_and_redacted():
@@ -508,6 +558,8 @@ def test_live_lead_prompt_omits_redundant_static_catalogs():
     prompt = json.loads(V11Runtime(model=None)._lead_prompt(_event(), ("read_logs",), 8))
 
     assert set(prompt) == {
+        "planning_rule",
+        "entity_signal_overview",
         "incident",
         "skills",
         "rule",
@@ -584,10 +636,10 @@ async def test_lead_planning_receives_committed_digest_and_source_status(monkeyp
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("unexpected_candidate", [False, True])
+@pytest.mark.parametrize("revised_candidate", [False, True, "too_many", "invalid_reference"])
 async def test_live_supplemental_tool_evidence_reaches_critic_as_owned_findings(
     monkeypatch,
-    unexpected_candidate,
+    revised_candidate,
 ):
     repository, record = _seed_repository()
     candidate = RootCauseCandidate(
@@ -622,6 +674,8 @@ async def test_live_supplemental_tool_evidence_reaches_critic_as_owned_findings(
         agent_name="investigator",
         analysis_round=2,
         information_gap="missing log signal",
+        evidence_scope={"start_time": "2026-01-01T00:01:00Z",
+                        "end_time": "2026-01-01T00:02:00Z"},
         runtime_run_id="run-v11",
         critic_assessment_id=assessment.id,
     )
@@ -650,6 +704,7 @@ async def test_live_supplemental_tool_evidence_reaches_critic_as_owned_findings(
                         kind=EvidenceKind.LOG_PATTERN,
                         timestamp=event.started_at,
                         summary="independent log signal",
+                        scope={"entity_ids": [event.service]},
                     )
                 ],
             )
@@ -661,6 +716,7 @@ async def test_live_supplemental_tool_evidence_reaches_critic_as_owned_findings(
         if agent.name == ExecutionActor.INVESTIGATOR.value:
             assert agent.output_type is InvestigatorOutput
             assert prompt["critic_assessment"]["id"] == assessment.id
+            assert prompt["task"]["evidence_scope"] == task.evidence_scope
             assert "Return findings" in prompt["rule"]
             tool = next(tool for tool in agent.tools if tool.name == "read_logs")
             response = json.loads(await tool.on_invoke_tool(None, "{}"))
@@ -683,9 +739,13 @@ async def test_live_supplemental_tool_evidence_reaches_critic_as_owned_findings(
                         "supporting_evidence_ids": evidence_ids,
                     }
                 ]
-                if unexpected_candidate
+                if revised_candidate
                 else [],
             )
+            if revised_candidate == "too_many":
+                output.candidates.append(output.candidates[0].model_copy())
+            elif revised_candidate == "invalid_reference":
+                output.candidates[0].supporting_evidence_ids = ["ev-unowned"]
         else:
             assert agent.name == ExecutionActor.CRITIC.value
             model_evidence_ids = prompt["findings"][0]["evidence_ids"]
@@ -694,29 +754,31 @@ async def test_live_supplemental_tool_evidence_reaches_critic_as_owned_findings(
             assert prompt["prior_assessments"][0]["candidate_ref"] == candidate.id
             assert prompt["supplemental_task_capacity"] == 0
             assert agent.output_type is CriticCompactOutput
+            candidate_refs = [item["candidate_ref"] for item in prompt["candidates"]]
+            selected = candidate_refs[-1] if revised_candidate else candidate.id
             output = CriticCompactOutput.model_validate(
                 {
                     "final_decision": {
                         "action": "conclude",
-                        "candidate_refs": [candidate.id],
+                        "candidate_refs": [selected],
                         "evidence_ids": model_evidence_ids,
                         "summary": "supplemental evidence supports candidate",
                         "stop_reason": None,
                     },
                     "assessments": [
                         {
-                            "candidate_ref": candidate.id,
-                            "verdict": "accept",
+                            "candidate_ref": candidate_ref,
+                            "verdict": "accept" if candidate_ref == selected else "reject",
                             "checks": [
                                 {
                                     "name": name.value,
-                                    "status": "pass",
-                                    "summary": "supported",
+                                    "status": "pass" if candidate_ref == selected else "fail",
+                                    "summary": "new evidence discriminates the revised mechanism",
                                     "evidence_ids": model_evidence_ids,
                                 }
                                 for name in CausalCheckName
                             ],
-                        }
+                        } for candidate_ref in candidate_refs
                     ],
                 }
             )
@@ -737,7 +799,7 @@ async def test_live_supplemental_tool_evidence_reaches_critic_as_owned_findings(
         investigation_id=record.id,
         event=record.event,
     )
-    if unexpected_candidate:
+    if revised_candidate in ("too_many", "invalid_reference"):
         assert findings == ()
         assert repository.get(record.id).status == InvestigationStatus.FAILED
         assert set(evidence_ids) <= {item.id for item in repository.get(record.id).evidence}
@@ -747,13 +809,27 @@ async def test_live_supplemental_tool_evidence_reaches_critic_as_owned_findings(
     assert findings[0].task_id == task.id
     assert findings[0].critic_assessment_id == assessment.id
     assert set(evidence_ids) <= {item.id for item in repository.get(record.id).evidence}
+    # 恢复同一补证任务必须保留已提交的新候选，不重复调用模型或生成另一个 ID。
+    before = repository.get_coordination_review(record.id).model_dump(mode="json")
+    await runtime.investigator_round_2(
+        repository=repository, investigation_id=record.id, event=record.event,
+    )
+    assert repository.get_coordination_review(record.id).model_dump(mode="json") == before
     reconciled = await runtime.critic_reconciliation(
         repository=repository,
         investigation_id=record.id,
         event=record.event,
     )
     assert reconciled.critic_assessments[0].id == assessment.id
-    assert reconciled.critic_assessments[0].verdict == CriticVerdict.ACCEPT
+    if revised_candidate:
+        assert len(reconciled.candidates) == 2
+        assert reconciled.critic_assessments[0].verdict == CriticVerdict.REJECT
+        assert reconciled.critic_assessments[1].verdict == CriticVerdict.ACCEPT
+        assert reconciled.final_decision.candidate_ids == [reconciled.candidates[1].id]
+        assert reconciled.candidates[0] == candidate
+        assert all(item.review_round == 2 for item in reconciled.critic_assessments)
+    else:
+        assert reconciled.critic_assessments[0].verdict == CriticVerdict.ACCEPT
     assert all(
         check.evidence_ids == evidence_ids for check in reconciled.critic_assessments[0].checks
     )
@@ -1512,7 +1588,10 @@ def test_critic_prompt_and_correction_distinguish_exclusion_from_support(compact
     repository, record = _repository()
     runtime = V11Runtime(model="fake", turn=None if compact else lambda: None)
     runtime.runtime_run_id = "run-consistency"
-    review = CoordinationReview(investigation_id=record.id, runtime_run_id=runtime.runtime_run_id)
+    review = CoordinationReview(
+        investigation_id=record.id, runtime_run_id=runtime.runtime_run_id,
+        candidates=[RootCauseCandidate(summary="Hypothesis to check", rank=1, confidence=0.5)],
+    )
     prompt = json.loads(runtime._critic_prompt(
         repository, record.id, record.event, review, round_number=round_number,
     ))
@@ -1531,6 +1610,60 @@ def test_critic_prompt_and_correction_distinguish_exclusion_from_support(compact
         assert "Empty filtered queries do not" in rules
         assert "which observed fact distinguishes" in rules
         assert "do not force a second round" in rules
+        assert "system CPU is usually accompanying work rather than the failure class" in rules
+        assert "do not infer a network cause from the gap alone" in rules
+        assert "converging support for loss/retransmission" in rules
+        assert "do not contradict socket exhaustion" in rules
+        assert "kernel CPU increase and generic latency/resource accumulation" in rules
+        assert "A candidate must explain the strongest sustained same-entity signal" in rules
+
+
+@pytest.mark.parametrize("compact", [True, False])
+def test_critic_sees_entity_resource_overview_even_when_candidate_omits_it(compact):
+    repository, record = _repository()
+    runtime = V11Runtime(model="fake", turn=None if compact else lambda: None)
+    runtime.runtime_run_id = "run-resource-overview"
+    evidence = [
+        EvidenceItem(
+            id=f"ev-{entity}-{family}", provider=EvidenceProvider.METRIC,
+            kind=EvidenceKind.METRIC_TREND, timestamp=record.event.started_at,
+            summary="observed entity signal", runtime_run_id=runtime.runtime_run_id,
+            scope=EvidenceScope(entity_ids=[entity]),
+            payload={"entity": entity, "signal_type": family,
+                     "baseline_mean": baseline, "observation_mean": observation},
+        )
+        for entity, family, baseline, observation in [
+            ("worker", "memory", 47, 317),
+            ("worker", "cpu", 2.7, 18.6),
+            ("worker", "latency", 0.01, 1.53),
+            ("gateway", "memory", 120, 118),
+            ("gateway", "cpu", 4.2, 4.0),
+        ]
+    ]
+    repository.save(record.model_copy(update={"evidence": evidence}))
+    review = CoordinationReview(
+        investigation_id=record.id, runtime_run_id=runtime.runtime_run_id,
+        candidates=[RootCauseCandidate(
+            summary="Gateway call wait", rank=1, confidence=0.6,
+            affected_entity="gateway", failure_class="network_delay",
+            failure_mechanism="Long client call with a fast peer",
+            supporting_evidence_ids=["ev-gateway-cpu"],
+        )],
+    )
+
+    prompt = json.loads(runtime._critic_prompt(
+        repository, record.id, record.event, review, round_number=1,
+    ))
+    overview = prompt["entity_signal_overview"]
+    rows = {
+        (row[0], row[1]): (row[2], row[3], row[4])
+        for row in overview["rows"]
+    }
+    assert rows[("worker", "memory")] == ("ev-worker-memory", 47, 317)
+    assert rows[("worker", "cpu")] == ("ev-worker-cpu", 2.7, 18.6)
+    assert rows[("worker", "latency")] == ("ev-worker-latency", 0.01, 1.53)
+    assert rows[("gateway", "memory")] == ("ev-gateway-memory", 120, 118)
+    assert set(entity for entity, _family in rows) == {"worker", "gateway"}
 
 
 @pytest.mark.parametrize("compact", [True, False])
@@ -1560,6 +1693,7 @@ def test_critic_sees_bounded_run_owned_query_outcomes(compact):
     assert len(history["queries"]) == 12
     assert history["queries"][-1]["filters"] == {"keywords": ["query-13"]}
     assert history["queries"][-1]["evidence_count"] == 0
+    assert history["queries"][-1]["task_id"] == "task-history"
     assert "other-run-only" not in json.dumps(prompt)
 
 
@@ -2106,8 +2240,12 @@ def test_candidate_projection_assigns_stable_global_ranks():
         audit_executions=audit_executions,
     )
 
-    runtime._persist_candidate_projection(repository, record.id, first)
-    runtime._persist_candidate_projection(repository, record.id, second)
+    repository.save_coordination_review(
+        runtime._candidate_review_projection(repository, record.id, first)
+    )
+    repository.save_coordination_review(
+        runtime._candidate_review_projection(repository, record.id, second)
+    )
 
     review = repository.get_coordination_review(record.id)
     assert review is not None
@@ -7408,6 +7546,30 @@ async def test_high_budget_reserve_allows_correction_and_retains_critic_room(mon
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("round_number,request_index,closed", [(1, 0, False), (1, 1, False),
+                                                              (1, 2, True), (2, 2, False)])
+async def test_first_round_followup_leaves_room_for_supplemental_query_and_review(
+    monkeypatch, round_number, request_index, closed,
+):
+    runtime = V11Runtime(model="unused", token_budget=200000, max_investigators=3)
+    runtime._remaining_token_budget = 100000
+    runtime._active_sessions = {object(), object(), object()}
+    runtime._model_analysis_rounds["investigation"] = round_number
+    monkeypatch.setattr(v11_runtime_module, "_estimate_model_input", lambda *_: (8000, {}))
+    query = SimpleNamespace(name="query_traces")
+    request = {"tools": [query], "model_settings": ModelSettings()}
+    cap, _, reserved = await runtime._reserve_model_budget_once(
+        None, "inspect evidence", {"tools": [{"name": "query_traces"}]},
+        logical_call_id="investigation", reservation_id="investigation:request-1",
+        actor=ExecutionActor.INVESTIGATOR.value, request_args=request,
+        request_index=request_index,
+    )
+    assert (request["tools"] == []) is closed
+    assert cap >= 2048
+    assert runtime.remaining_token_budget + reserved == 100000
+
+
+@pytest.mark.anyio
 async def test_required_closing_takes_priority_over_optional_second_critic(monkeypatch):
     runtime = V11Runtime(model="unused", token_budget=200000, max_investigators=3)
     runtime._remaining_token_budget = 75381
@@ -7509,6 +7671,37 @@ def test_critic_preserves_candidate_resource_controls_alongside_global_signals()
     assert len(selected) <= 11
 
 
+@pytest.mark.parametrize("entity_count", [4, 6, 12])
+def test_critic_shares_control_budget_with_supplemental_candidate_entities(entity_count):
+    entities = [f"worker-{i:02}" for i in range(entity_count)]
+    review = CoordinationReview(investigation_id="inv-controls", candidates=[
+        RootCauseCandidate(
+            id=f"candidate-{entity}", summary="hypothesis", rank=i + 1, confidence=0.5,
+            affected_entity=entity, supporting_evidence_ids=[f"ev-{entity}-latency"],
+        ) for i, entity in enumerate(entities)
+    ])
+    evidence = [EvidenceItem(
+        id=f"ev-{entity}-{family}", provider=EvidenceProvider.METRIC,
+        kind=EvidenceKind.METRIC_TREND, timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+        summary="resource observation", runtime_run_id="run-controls",
+        payload={"entity": entity, "signal_type": family,
+                 "change_score": 1000 if entity == "unrelated" else 1,
+                 "baseline_mean": 1, "observation_mean": 2, "unit": "bytes"},
+    ) for entity in [*entities, "unrelated"]
+      for family in ["latency", "memory", "cpu", "disk_io", "traffic"]]
+    selected = v11_runtime_module._usable_critic_evidence(
+        review, (), evidence, runtime_run_id="run-controls",
+    )
+    ids = {item.id for item in selected}
+    for entity in entities:
+        assert f"ev-{entity}-latency" in ids
+        controls = [item for item in selected if item.payload["entity"] == entity
+                    and item.payload["signal_type"] != "latency"]
+        assert len(controls) >= min(4, 18 // entity_count)
+        assert all(item.payload["unit"] == "bytes" for item in controls)
+    assert len(ids) == len(selected) <= entity_count + 18 + 4
+
+
 def test_small_digest_keeps_multi_resource_profiles_when_many_entities_compete():
     evidence = []
     for entity in range(5):
@@ -7527,3 +7720,398 @@ def test_small_digest_keeps_multi_resource_profiles_when_many_entities_compete()
         assert {e.payload["signal_type"] for e in selected
                 if e.payload["entity"] == entity} >= {"cpu", "memory", "disk_io"}
     assert len({e.payload["entity"] for e in selected}) == 2
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("with_candidate", [False, True])
+async def test_lead_premise_challenge_survives_investigation_replay_and_critic(
+    monkeypatch, with_candidate,
+):
+    repository, record = _seed_repository()
+    runtime = V11Runtime(
+        model="unused", max_investigators=1,
+        tool_registry=build_provider_tool_registry(build_mock_provider_registry()),
+    )
+    premise = "Slow callee proves local processing"
+    challenge = "Callee duration includes child RPC waits; self time is unmeasured"
+    gap = "Missing matched child spans"
+    stages = []
+
+    async def model_call(**kwargs):
+        prompt = json.loads(kwargs["prompt"])
+        stages.append(kwargs["actor"])
+        if kwargs["actor"] == ExecutionActor.LEAD.value:
+            assert "falsifiable" in prompt["planning_rule"]
+            output = LeadPlanningCompactOutput.model_validate({
+                "decision": {"action": "investigate", "summary": "Locate slow execution"},
+                "tasks": [{"title": "Inspect slow callee", "description": "Compare spans",
+                           "information_gap": "Local work versus dependency wait",
+                           "expected_discriminator": premise}],
+            })
+        elif kwargs["actor"] == ExecutionActor.INVESTIGATOR.value:
+            assert prompt["task"]["expected_discriminator"] == premise
+            assert kwargs["output_type"] is InvestigatorCandidateOutput
+            output = InvestigatorCandidateOutput.model_validate({
+                "findings": [
+                    {"finding_type": "contradiction", "summary": challenge,
+                     "confidence": 0.8, "evidence_ids": ["ev-metric"]},
+                    {"finding_type": "gap", "summary": gap, "gaps": [gap],
+                     "confidence": 0.5, "evidence_ids": []},
+                ],
+                "candidates": [{"affected_entity": record.event.service,
+                                "failure_class": "local_execution_slowdown",
+                                "failure_mechanism": "Slow callee suggests local processing",
+                                "supporting_evidence_ids": ["ev-metric"]}]
+                if with_candidate else [],
+            })
+        else:
+            assert kwargs["actor"] == ExecutionActor.CRITIC.value
+            tasks = prompt["investigation_tasks"]
+            assert len(tasks) == 1
+            assert tasks[0]["expected_discriminator"] == premise
+            assert {f["summary"] for f in prompt["findings"]} == {challenge, gap}
+            assert set(tasks[0]["finding_ids"]) == {f["id"] for f in prompt["findings"]}
+            assert {f["task_id"] for f in prompt["findings"]} == {tasks[0]["task_id"]}
+            assert "ev-metric" in prompt["allowed_evidence_ids"]
+            assert "foreign-run" not in json.dumps(prompt)
+            output = CriticCompactOutput.model_validate({
+                "assessments": [
+                    {"candidate_ref": candidate["candidate_ref"], "verdict": "reject",
+                     "checks": [
+                         {"name": name.value, "status": "fail", "summary": challenge,
+                          "evidence_ids": ["ev-metric"]}
+                         if name == CausalCheckName.MECHANISM else
+                         {"name": name.value, "status": "unknown", "summary": gap, "gap": gap}
+                         for name in CausalCheckName
+                     ]}
+                    for candidate in prompt["candidates"]
+                ],
+                "final_decision": {"action": "inconclusive", "candidate_refs": [],
+                                   "evidence_ids": ["ev-metric"], "summary": challenge,
+                                   "stop_reason": gap},
+            })
+        if kwargs.get("output_validator"):
+            kwargs["output_validator"](output)
+        return SimpleNamespace(output=output, execution_id="exec-joint-" + kwargs["actor"])
+
+    monkeypatch.setattr(runtime, "_call_model", model_call)
+    plan = await runtime.plan_lead(
+        repository=repository, investigation_id=record.id, event=record.event,
+        runtime_run_id="run-v11", remaining_tool_budget=8, remaining_token_budget=12000,
+    )
+    result = await runtime._run_investigator(
+        repository=repository, investigation_id=record.id, event=record.event,
+        task=plan.tasks[0], round_number=1, seed_evidence=record.evidence, own_findings=[],
+    )
+    runtime._persist_investigator_result(repository, record.id, result)
+    findings = result.findings
+    if with_candidate:
+        assert len(repository.get_coordination_review(record.id).candidates) == 1
+    assert len(findings) == 2
+    assert all(f.task_id == plan.tasks[0].id and f.runtime_run_id == "run-v11" for f in findings)
+    restored = await runtime.investigator_round_1(
+        repository=repository, investigation_id=record.id, event=record.event,
+    )
+    assert restored == findings
+    assert stages == [ExecutionActor.LEAD.value, ExecutionActor.INVESTIGATOR.value]
+    reviewed = await runtime.critic_review(
+        repository=repository, investigation_id=record.id, event=record.event,
+    )
+    assert stages[-1] == ExecutionActor.CRITIC.value
+    assert len(reviewed.candidates) == int(with_candidate)
+    assert reviewed.final_decision.action == LeadAction.INCONCLUSIVE
+    assert not reviewed.final_decision.candidate_ids
+
+
+def test_compact_investigator_old_output_and_finding_bound():
+    assert InvestigatorCandidateOutput.model_validate({"candidates": []}).findings == []
+    draft = {"finding_type": "gap", "summary": "Missing spans", "confidence": 0.5}
+    with pytest.raises(ValidationError):
+        InvestigatorCandidateOutput.model_validate({"findings": [draft] * 3})
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("invalid_reference", ["unknown", "failed"])
+async def test_compact_investigator_rejects_invalid_challenge_without_losing_gap(
+    monkeypatch, invalid_reference,
+):
+    repository, record = _investigator_round_harness("run-v11")
+    evidence = EvidenceItem(
+        id="valid", provider=EvidenceProvider.METRIC, kind=EvidenceKind.METRIC_TREND,
+        timestamp=record.event.started_at, summary="Observed latency",
+        runtime_run_id="run-v11", scope=EvidenceScope(entity_ids=[record.event.service]),
+    )
+    repository.save(record.model_copy(update={"evidence": [
+        evidence,
+        evidence.model_copy(update={"id": "failed", "status": EvidenceStatus.FAILED}),
+    ]}))
+    runtime = V11Runtime(
+        model="unused", max_investigators=1,
+        tool_registry=build_provider_tool_registry(build_mock_provider_registry()),
+    )
+    runtime.runtime_run_id = "run-v11"
+
+    async def model_call(**kwargs):
+        assert kwargs["output_type"] is InvestigatorCandidateOutput
+        return SimpleNamespace(execution_id="exec-invalid-finding", output={"findings": [
+            {"finding_type": "contradiction", "summary": "Unsupported challenge",
+             "confidence": 0.7, "evidence_ids": [invalid_reference]},
+            {"finding_type": "gap", "summary": "Missing child spans", "confidence": 0.5,
+             "evidence_ids": ["failed"], "gaps": ["Missing child spans"]},
+        ]})
+
+    monkeypatch.setattr(runtime, "_call_model", model_call)
+    findings = await runtime.investigator_round_1(
+        repository=repository, investigation_id=record.id, event=record.event,
+    )
+    assert len(findings) == 1
+    assert findings[0].finding_type == AgentFindingType.GAP
+    assert findings[0].evidence_ids == ["failed"]
+    assert any(e.failure_category == FailureCategory.INVALID_REFERENCE
+               for e in repository.list_executions(record.id))
+
+
+@pytest.mark.anyio
+async def test_three_investigator_results_resume_after_second_atomic_commit(monkeypatch):
+    repository, record = _investigator_round_harness("run-v11")
+    plan = repository.get_plan(record.id)
+    tasks = [plan.tasks[0].model_copy(update={"id": f"task-{i}"}) for i in range(3)]
+    repository.save_plan(plan.model_copy(update={
+        "tasks": tasks, "lead_decision": plan.lead_decision.model_copy(update={
+            "task_ids": [task.id for task in tasks],
+        }),
+    }))
+    evidence = EvidenceItem(
+        id="ev-owned", provider=EvidenceProvider.METRIC, kind=EvidenceKind.METRIC_TREND,
+        timestamp=record.event.started_at, summary="Observed scoped signal",
+        runtime_run_id="run-v11", scope=EvidenceScope(entity_ids=[record.event.service]),
+    )
+    repository.save(record.model_copy(update={"evidence": [evidence]}))
+    runtime = V11Runtime(
+        model="unused", max_investigators=3,
+        tool_registry=build_provider_tool_registry(build_mock_provider_registry()),
+    )
+    runtime.runtime_run_id = "run-v11"
+    calls = []
+
+    async def model_call(**kwargs):
+        calls.append(kwargs["task_id"])
+        return SimpleNamespace(execution_id="exec-" + kwargs["task_id"], output={
+            "findings": [{"finding_type": "gap", "summary": "Unresolved alternative",
+                          "confidence": 0.5, "gaps": ["Missing discriminator"]}],
+            "candidates": [{"affected_entity": record.event.service,
+                            "failure_class": "resource_work",
+                            "failure_mechanism": kwargs["task_id"] + " observed resource work",
+                            "supporting_evidence_ids": [evidence.id]}],
+        })
+
+    monkeypatch.setattr(runtime, "_call_model", model_call)
+    save = repository.save_multi_agent_result
+    committed = 0
+
+    def interrupt_after_save(*args, **kwargs):
+        nonlocal committed
+        save(*args, **kwargs)
+        committed += 1
+        if committed == 2:
+            raise RuntimeError("simulated interruption after commit")
+
+    monkeypatch.setattr(repository, "save_multi_agent_result", interrupt_after_save)
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        await runtime.investigator_round_1(
+            repository=repository, investigation_id=record.id, event=record.event,
+        )
+    persisted = repository.get_coordination_review(record.id).candidates
+    assert len(persisted) == len(repository.list_agent_findings(record.id)) == 2
+    monkeypatch.setattr(repository, "save_multi_agent_result", save)
+    await runtime.investigator_round_1(
+        repository=repository, investigation_id=record.id, event=record.event,
+    )
+    candidates = repository.get_coordination_review(record.id).candidates
+    assert candidates[:2] == persisted
+    assert [candidate.rank for candidate in candidates] == [1, 2, 3]
+    assert len({candidate.id for candidate in candidates}) == 3
+    assert len(repository.list_agent_findings(record.id)) == 3
+    assert calls == ["task-0", "task-1", "task-2", "task-2"]
+
+
+def _linked_trace(evidence_id, span_id, *, trace_id="trace-a", service="gateway", **payload):
+    return EvidenceItem(
+        id=evidence_id, provider=EvidenceProvider.TRACE, kind=EvidenceKind.TRACE_LATENCY,
+        timestamp=datetime(2026, 1, 1, tzinfo=UTC), summary="observed trace",
+        runtime_run_id="run-chain", scope=EvidenceScope(entity_ids=[service]),
+        payload={"trace_id": trace_id, "span_id": span_id, "service": service,
+                 "operation": "Read", "duration_ms": 400, "status": "ok", **payload},
+    )
+
+
+def test_critic_keeps_four_hop_rpc_context_with_explicit_status_and_scoped_ids():
+    root = _linked_trace("root", "root", child_timing={"longest_child_span_id": "client"})
+    client = _linked_trace("client", "client", attributes={"rpc.peer_span_id": "server"})
+    server = _linked_trace("server", "server", service="worker",
+                           child_timing={"longest_child_span_id": "outbound"})
+    outbound = _linked_trace("outbound", "outbound", service="worker",
+                             attributes={"rpc.peer_span_id": "remote"})
+    remote = _linked_trace("remote", "remote", service="storage", duration_ms=0.02)
+    collision = _linked_trace("unrelated", "outbound", trace_id="trace-b", status="error")
+    foreign = remote.model_copy(update={"id": "foreign", "runtime_run_id": "run-other"})
+    review = CoordinationReview(investigation_id="inv-chain", candidates=[RootCauseCandidate(
+        id="candidate-chain", summary="candidate", rank=1, confidence=0.6,
+        affected_entity="worker", supporting_evidence_ids=[root.id],
+    )])
+    evidence = [root, client, server, outbound, remote, collision, foreign]
+    selected = v11_runtime_module._usable_critic_evidence(
+        review, [], evidence, runtime_run_id="run-chain",
+    )
+    by_id = {item.id: _evidence_projection(item) for item in selected}
+    assert {"root", "client", "server", "outbound", "remote"} <= by_id.keys()
+    assert "foreign" not in by_id
+    assert by_id["remote"]["duration_ms"] == 0.02
+    assert by_id["outbound"]["span_status"] == "ok"
+    assert by_id["outbound"]["trace_id"] == "trace-a"
+
+
+def test_critic_does_not_drop_error_child_when_candidate_only_cites_parent():
+    root = _linked_trace("root", "root", status="unset",
+                         child_timing={"longest_child_span_id": "failed"})
+    failed = _linked_trace("failed", "failed", status="error", parent_span_id="root")
+    review = CoordinationReview(investigation_id="inv-chain", candidates=[RootCauseCandidate(
+        id="candidate-chain", summary="slow service", rank=1, confidence=0.6,
+        affected_entity="worker", supporting_evidence_ids=[root.id],
+    )])
+    selected = v11_runtime_module._usable_critic_evidence(
+        review, [], [root, failed], runtime_run_id="run-chain",
+    )
+    child = next(item for item in selected if item.id == failed.id)
+    assert _evidence_projection(child)["span_status"] == "error"
+    assert "rpc.peer_duration_ms" not in _evidence_projection(child).get("trace_details", {})
+
+
+def test_trace_digest_prefers_distinct_rpc_observations_to_repeated_parent_spans():
+    roots = [_linked_trace(f"root-{i}", f"root-{i}", operation="request", status="unset")
+             for i in range(10)]
+    outbound = _linked_trace("paired-rpc", "rpc", service="worker", attributes={
+        "rpc.peer_role": "callee", "rpc.peer_span_id": "remote", "rpc.peer_duration_ms": "0.02",
+    })
+    selected = _select_evidence_digest([*roots, outbound], max_per_kind=2, max_total=2)
+    assert selected[0].id == outbound.id
+    assert len(selected) == 2
+    assert _select_evidence_digest(list(reversed([*roots, outbound])),
+                                   max_per_kind=2, max_total=2) == selected
+
+
+def test_critic_shared_context_is_lossless_and_keeps_conflicting_metadata():
+    from backend.diagnosis.evidence_comparison import comparison_evidence
+
+    rows = [{"id": f"ev-{i}", "kind": "trace_latency", "provider": "trace",
+             "status": "partial", "scope_entity_ids": ["caller", "peer"],
+             "duration_ms": i * 100, "span_status": "error" if i else "ok",
+             "child_timing": {"covered_ms": i * 90},
+             "rpc_pair": {"client_service": "caller", "server_service": "peer",
+                          "client_duration_ms": i * 100, "server_duration_ms": 1}}
+            for i in range(8)]
+    rows.append({**rows[0], "id": "foreign", "scope_entity_ids": ["other"]})
+    result = v11_runtime_module._compact_comparison_evidence(rows)
+    restored = []
+    for row in result["evidence"]:
+        row = dict(row)
+        ref = row.pop("shared_context_ref", None)
+        restored.append({**(result["shared_evidence_contexts"][ref] if ref is not None else {}),
+                         **row})
+    assert restored == comparison_evidence(rows)["evidence"]
+    assert "shared_context_ref" not in rows[0]
+
+
+def test_planning_overview_includes_entity_hidden_by_larger_observer_signals():
+    evidence = [EvidenceItem(
+        id=f"ev-overview-{i}", provider=EvidenceProvider.METRIC,
+        kind=EvidenceKind.METRIC_TREND, timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+        summary="observed signal", runtime_run_id="run-overview",
+        payload={"entity": f"service-{i}", "signal_type": "socket", "change_score": 100-i,
+                 "baseline_mean": 3, "observation_mean": 3+i},
+    ) for i in range(8)]
+    runtime = V11Runtime(model="unused")
+    runtime.runtime_run_id = "run-overview"
+    prompt = json.loads(runtime._lead_prompt(_event(), (), 8, evidence=evidence))
+    rows = prompt["entity_signal_overview"]["rows"]
+    assert {row[0] for row in rows} == {f"service-{i}" for i in range(8)}
+    assert {row[2] for row in rows} == {item.id for item in evidence}
+    assert all(row[3:5] == [3, 3+int(row[0].split("-")[-1])] for row in rows)
+
+
+def test_critic_supplemental_capacity_reserves_actual_context_before_first_request():
+    runtime = V11Runtime(model="unused", token_budget=80000, max_turns=48)
+    assert runtime._supplemental_capacity(8, current_critic=True) > 0
+    assert runtime._supplemental_capacity(
+        8, current_critic=True, critic_input_hint=30000,
+    ) == 0
+    runtime._request_cost_samples["request"] = ("CriticAgent", 4000, 1000)
+    assert runtime._supplemental_capacity(
+        8, current_critic=True, critic_input_hint=30000,
+    ) == 0
+
+
+def test_critic_repair_feedback_does_not_repeat_existing_causal_instructions():
+    feedback = v11_runtime_module._structured_output_retry_feedback(
+        CriticCompactOutput, "final_decision_required", include_evidence_rules=False,
+    )
+    assert "final_decision as an object" in feedback
+    assert v11_runtime_module._CAUSAL_EVIDENCE_RULES not in feedback
+    assert "seven named" in feedback
+
+
+def test_assigned_evidence_only_adds_unprojected_details_without_losing_raw_values():
+    item = EvidenceItem(
+        id="ev-details", provider=EvidenceProvider.METRIC, kind=EvidenceKind.METRIC_TREND,
+        timestamp=datetime(2026, 1, 1, tzinfo=UTC), summary="measured", runtime_run_id="run",
+        payload={"metric": "worker_cpu", "signal_type": "cpu", "baseline_mean": 1,
+                 "observation_mean": 9, "baseline_value": 1, "observation_value": 9,
+                 "raw_distribution": [1, 2, 9], "custom": {"x": 3}},
+    )
+    details = v11_runtime_module._unprojected_evidence_details(item)
+    assert details == {"raw_distribution": [1, 2, 9], "custom": {"x": 3}}
+    assert item.payload["observation_mean"] == 9
+
+
+def test_assigned_details_do_not_repeat_rounded_profiles_but_keep_unshown_observations():
+    item = EvidenceItem(
+        provider=EvidenceProvider.METRIC, kind=EvidenceKind.METRIC_TREND,
+        timestamp=datetime(2026, 1, 1, tzinfo=UTC), summary="observed",
+        payload={"metric": "worker_cpu", "time_profile": [{
+            "start": "2026-01-01T00:00:00Z", "end": "2026-01-01T00:01:00Z",
+            "mean": 2.568733501345924,
+        }], "related_metric_names": ["worker_user_cpu"], "related_observations": [{
+            "metric": "worker_user_cpu", "baseline_mean": 2.1877490985740313,
+            "observation_mean": 2.197742544122472, "unit": "seconds",
+        }]},
+    )
+    details = v11_runtime_module._unprojected_evidence_details(item)
+    assert "time_profile" not in details
+    assert "related_metric_names" not in details
+    assert details["related_observations"] == [{"metric": "worker_user_cpu", "unit": "seconds"}]
+    assert item.payload["time_profile"][0]["mean"] == 2.568733501345924
+    # 摘要只展示前八个桶，明确要求的第九个桶仍须完整传入。
+    item.payload["time_profile"] *= 8
+    extra = {"start": "2026-01-01T00:08:00Z", "end": "2026-01-01T00:09:00Z", "mean": 99.9}
+    item.payload["time_profile"].append(extra)
+    # 重复时间身份不能可靠匹配，回退保留完整原始列表。
+    assert v11_runtime_module._unprojected_evidence_details(item)["time_profile"][-1] == extra
+
+
+@pytest.mark.anyio
+async def test_tool_free_correction_closes_before_reserving_optional_critic(monkeypatch):
+    runtime = V11Runtime(model="unused", token_budget=200000, max_investigators=3)
+    runtime._remaining_token_budget = 65000
+    monkeypatch.setattr(v11_runtime_module, "_estimate_model_input", lambda *_: (24000, {}))
+    request = {"tools": [], "model_settings": ModelSettings()}
+    cap, _, reserved = await runtime._reserve_model_budget_once(
+        None, "Correct the draft using committed evidence", {"tools": []},
+        logical_call_id="correction", reservation_id="correction:request-1",
+        actor=ExecutionActor.INVESTIGATOR.value, request_args=request, attempt=2,
+    )
+    assert cap >= 2048
+    assert "Query tools are now closed" in request["system_instructions"]
+    assert runtime.remaining_token_budget == 65000 - reserved
+    assert runtime.remaining_token_budget >= runtime._expected_request_tokens(
+        ExecutionActor.CRITIC.value, input_hint=24000,
+    )

@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import math
+from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -335,8 +336,9 @@ class SingleInvestigatorAgent(V11Runtime):
                 "remains unresolved after bounded queries, return no candidate. "
                 "Do not emit server-owned IDs, ranks, runtime fields, review "
                 "fields, or invented references. When cited evidence has "
-                "scope_entity_ids, affected_entity must exactly match an entity "
-                "in the union of cited evidence scopes. "
+                "scope_entity_ids, affected_entity must match a cited scope entity "
+                "or an evidence-backed directed call/dependency path whose endpoints "
+                "are present in the cited evidence. "
                 + _CAUSAL_EVIDENCE_RULES
             )
             turn = await self._call_model(
@@ -415,7 +417,6 @@ class SingleInvestigatorAgent(V11Runtime):
                 tuple(findings), candidates, execution, tuple(audit_executions)
             )
             self._persist_investigator_result(repository, investigation_id, result)
-            self._persist_candidate_projection(repository, investigation_id, candidates)
             if repository.get_coordination_review(investigation_id) is None:
                 repository.save_coordination_review(
                     self._empty_review(repository, investigation_id)
@@ -712,6 +713,9 @@ class RcaEvalCaseRunner:
                 if isinstance(exc, RuntimePersistenceError)
                 else type(exc).__name__
             )
+        # 独立评测没有服务端恢复巡检；退出后用现有 CAS 审计收敛过期租约，
+        # 不使用失效 owner 强写终态，也不覆盖其它仍持有有效租约的执行。
+        self.runtime_store.audit_expired_leases(datetime.now(UTC))
         persisted = self.runtime_store.get_run(run.id)
         _assert_persisted_contract(persisted, contract)
         record = self.repository.get(record.id)
@@ -775,7 +779,12 @@ class RcaEvalCaseRunner:
             ):
                 failure_category = persisted_category
             elif failure_category is None:
-                failure_category = persisted_category or record.failure_reason or "failed"
+                failure_category = persisted_category or record.failure_reason or (
+                    "runtime_incomplete"
+                    if persisted.status in {RuntimeRunStatus.CREATED, RuntimeRunStatus.RUNNING,
+                                            RuntimeRunStatus.CANCELLING}
+                    else "failed"
+                )
         prediction = CasePrediction(
             case_id=case.case_id,
             configuration=budget.configuration,

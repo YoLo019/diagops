@@ -150,6 +150,7 @@ def test_evaluator_scores_frozen_canonical_family_aliases():
         ("re2-dddddddddddddddd", "delay", "network_latency"),
         ("re2-eeeeeeeeeeeeeeee", "cpu", "cpu saturation"),
         ("re2-ffffffffffffffff", "disk", "disk_io_saturation"),
+        ("re2-1111111111111111", "socket", "socket_accumulation"),
     ]
     labels = [_label(case_id, "checkout", label_fault) for case_id, label_fault, _ in cases]
     predictions = []
@@ -177,6 +178,7 @@ def test_evaluator_scores_frozen_canonical_family_aliases():
     ("delay", "latency"), ("delay", "trace_latency"),
     ("delay", "latency degradation"), ("loss", "error"),
     ("cpu", "possible cpu saturation"), ("disk", "disk_io anomaly"),
+    ("socket", "socket count increase"), ("socket", "possible socket accumulation"),
 ])
 def test_evaluator_does_not_promote_symptoms_or_uncertain_text_to_mechanisms(label, symptom):
     case_id = "re2-aaaaaaaaaaaaaaaa"

@@ -41,7 +41,7 @@ Investigator 只看到事件、自己的任务、允许的工具、预算及自�
 
 一次调查轮次可以包含多次“模型选择查询→工具结果入库→模型读取并调整查询”。复用现有 SDK tool continuation，在证据足够、没有有效下一步或剩余预算只够收尾时输出 findings；不能把“最多 2 轮调查”实现成每路只允许一次模型请求。工具次数、模型请求、tokens 和截止时间分别约束这个循环。
 
-Critic 需要补证时，任务必须指定同 run 的 assessment、信息缺口和 expected discriminator，由服务端调度，不再调用 Lead 规划。最多一次补证批次、同时最多 3 路。第二轮只增加 findings、证据和缺口，不新增或改写候选实体／机制，也不强制修订旧 finding。新根因线索未经完整审查不能直接发布；关键替代解释无法排除时 inconclusive。
+Critic 需要补证时，任务必须指定同 run 的 assessment、信息缺口和 expected discriminator，由服务端调度，不再调用 Lead 规划。最多一次补证批次、同时最多 3 路。第二轮增加 findings、证据和缺口；若新观察支持不同或更具体的机制，每个任务最多另提一个候选，引用限定在该任务已分配或新取回的证据，并附说明观察的 finding。旧候选实体／机制和旧 finding 不被改写。复审保留旧 assessment ID，对全部新旧候选逐一完成七项检查；新根因未经完整审查不能直接发布，仍禁止第三轮。关键替代解释无法区分时保留不确定性或 inconclusive。
 
 ### Critic
 
